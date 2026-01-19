@@ -59,10 +59,8 @@ async def openai_answer(user_text: str) -> str:
     return (data["choices"][0]["message"]["content"] or "").strip() or "Пустой ответ от модели."
 
 
-@app.post("/webhook")
-async def webhook(request: Request):
-    # Секрет проверяем через заголовок (просто и удобно)
-    secret = request.headers.get("x-webhook-secret", "")
+@app.post("/webhook/{secret}")
+async def webhook(secret: str, request: Request):
     if secret != WEBHOOK_SECRET:
         return Response(status_code=403)
 
