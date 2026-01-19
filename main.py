@@ -211,6 +211,11 @@ def _extract_img_prompt(text: str) -> Optional[str]:
 
 
 def _infer_intent_from_text(text: str) -> Intent:
+    """
+    АККУРАТНАЯ ПРАВКА:
+    - если в тексте есть слова про афишу/баннер/картинку, это приоритетнее "identify".
+    - так фото+текст "сделай афишу..." всегда пойдёт в подтверждение генерации.
+    """
     t = (text or "").strip().lower()
     if not t:
         return "identify"
@@ -232,12 +237,16 @@ def _infer_intent_from_text(text: str) -> Intent:
         "что за товар", "что за устройство", "что на фото", "что изображено",
     ]
 
-    if any(m in t for m in math_markers):
-        return "math"
-    if any(m in t for m in identify_markers):
-        return "identify"
+    # ✅ ПРИОРИТЕТ: генерация изображения
     if any(m in t for m in image_markers):
         return "maybe_image_request"
+
+    if any(m in t for m in math_markers):
+        return "math"
+
+    if any(m in t for m in identify_markers):
+        return "identify"
+
     return "general"
 
 
