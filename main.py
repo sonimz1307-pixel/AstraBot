@@ -236,6 +236,23 @@ async def openai_chat_answer(
     return (data["choices"][0]["message"]["content"] or "").strip() or "Пустой ответ от модели."
 
 
+def _detect_image_type(b: bytes) -> Tuple[str, str]:
+    """
+    Возвращает (ext, mime).
+    Telegram чаще всего присылает JPEG, но бывает PNG/WEBP.
+    Чтобы /v1/images/edits не падал, отправляем корректные mime/filename.
+    """
+    if not b:
+        return ("jpg", "image/jpeg")
+    if b.startswith(b"\xFF\xD8\xFF"):
+        return ("jpg", "image/jpeg")
+    if b.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ("png", "image/png")
+    if b.startswith(b"RIFF") and len(b) >= 12 and b[8:12] == b"WEBP":
+        return ("webp", "image/webp")
+    return ("jpg", "image/jpeg")
+
+
 async def openai_edit_image_make_poster(
     source_image_bytes: bytes,
     prompt: str,
@@ -250,9 +267,11 @@ async def openai_edit_image_make_poster(
 
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
 
-    # Важное: endpoint ожидает multipart/form-data
+    ext, mime = _detect_image_type(source_image_bytes)
+
+    # endpoint ожидает multipart/form-data
     files = {
-        "image": ("source.png", source_image_bytes, "image/png"),
+        "image": (f"source.{ext}", source_image_bytes, mime),
     }
     data = {
         "model": "gpt-image-1",
@@ -520,7 +539,7 @@ async def webhook(secret: str, request: Request):
         )
         return {"ok": True}
 
-    # Фото
+    # Фото (как photo)
     photos = message.get("photo") or []
     if photos:
         largest = photos[-1]
@@ -588,6 +607,71 @@ async def webhook(secret: str, request: Request):
 
         await tg_send_message(chat_id, answer, reply_markup=_main_menu_keyboard())
         return {"ok": True}
+
+    # Фото (как document, если прислали файлом)
+    doc = message.get("document") or {}
+    if doc:
+        mime = (doc.get("mime_type") or "").lower()
+        file_id = doc.get("file_id")
+        if file_id and mime.startswith("image/"):
+            # Режим POSTER: фото = старт афиши
+            if st.get("mode") == "poster":
+                try:
+                    file_path = await tg_get_file_path(file_id)
+                    img_bytes = await tg_download_file_bytes(file_path)
+                except Exception as e:
+                    await tg_send_message(chat_id, f"Ошибка при загрузке фото: {e}", reply_markup=_main_menu_keyboard())
+                    return {"ok": True}
+
+                poster = st.get("poster") or {}
+                poster["photo_bytes"] = img_bytes
+                poster["step"] = "need_text_price"
+                st["poster"] = poster
+                st["ts"] = _now()
+
+                await tg_send_message(
+                    chat_id,
+                    "Фото (файлом) получил.\n"
+                    "Теперь отправь текст для афиши и цену.\n"
+                    "Примеры:\n"
+                    "• NAN ExpertPro; 1500₽\n"
+                    "• Акция на смесь / 1490₽\n"
+                    "• Скидка 20%, цена 999\n",
+                    reply_markup=_main_menu_keyboard(),
+                )
+                return {"ok": True}
+
+            # Режим CHAT: анализ фото
+            await tg_send_message(chat_id, "Фото получил. Анализирую...", reply_markup=_main_menu_keyboard())
+            try:
+                file_path = await tg_get_file_path(file_id)
+                img_bytes = await tg_download_file_bytes(file_path)
+
+                intent = _infer_intent_from_text(text)
+                if intent == "math":
+                    prompt = text if text else "Реши задачу с картинки. Дай решение по шагам и строку 'Ответ: ...'."
+                    answer = await openai_chat_answer(
+                        user_text=prompt,
+                        system_prompt=UNICODE_MATH_SYSTEM_PROMPT,
+                        image_bytes=img_bytes,
+                        temperature=0.3,
+                        max_tokens=900,
+                    )
+                else:
+                    prompt = text if text else VISION_DEFAULT_USER_PROMPT
+                    answer = await openai_chat_answer(
+                        user_text=prompt,
+                        system_prompt=VISION_GENERAL_SYSTEM_PROMPT,
+                        image_bytes=img_bytes,
+                        temperature=0.4,
+                        max_tokens=700,
+                    )
+            except Exception as e:
+                await tg_send_message(chat_id, f"Ошибка при обработке фото: {e}", reply_markup=_main_menu_keyboard())
+                return {"ok": True}
+
+            await tg_send_message(chat_id, answer, reply_markup=_main_menu_keyboard())
+            return {"ok": True}
 
     # Текст без фото
     if text:
