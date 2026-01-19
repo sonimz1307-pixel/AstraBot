@@ -1,5 +1,4 @@
 import os
-import json
 import base64
 from typing import Optional
 
@@ -48,6 +47,24 @@ async def tg_download_file_bytes(file_path: str) -> bytes:
     return r.content
 
 
+# Вариант 2: Unicode-математика для Telegram (без LaTeX)
+UNICODE_MATH_SYSTEM_PROMPT = (
+    "Ты решаешь математические задачи для Telegram.\n"
+    "НЕ используй LaTeX/TeX и команды вида \\frac, \\pi, \\[ \\], \\], \\( \\), \\mathbb и т.п.\n"
+    "Пиши только обычным текстом и Unicode-символами.\n\n"
+    "Используй символы: π, ℤ, ⇒, −, ×, ÷, ≤, ≥, ∈.\n"
+    "Формулы пиши в одну строку, чтобы в Telegram всё читалось.\n"
+    "Примеры:\n"
+    "x = −2π/3 + 4πk, k ∈ ℤ\n"
+    "cos(x/2 + π/3) = 1 ⇒ x/2 + π/3 = 2πk\n\n"
+    "Оформление ответа:\n"
+    "1) Коротко: что делаем\n"
+    "2) Решение по шагам\n"
+    "3) В конце отдельной строкой: 'Ответ: ...'\n\n"
+    "Если текст на фото плохо читается — попроси прислать фото ближе и ровнее."
+)
+
+
 async def openai_answer(user_text: str, image_bytes: Optional[bytes] = None) -> str:
     # Без истории: один prompt -> один ответ
     if not OPENAI_API_KEY:
@@ -58,8 +75,7 @@ async def openai_answer(user_text: str, image_bytes: Optional[bytes] = None) -> 
         "Content-Type": "application/json",
     }
 
-    # Формируем content для user-сообщения.
-    # Если есть картинка — отправляем multimodal content (text + image_url data:...base64)
+    # Если есть картинка — multimodal content (text + image_url data:...base64)
     if image_bytes is not None:
         b64 = base64.b64encode(image_bytes).decode("utf-8")
         user_content = []
@@ -72,10 +88,7 @@ async def openai_answer(user_text: str, image_bytes: Optional[bytes] = None) -> 
         payload = {
             "model": "gpt-4o-mini",
             "messages": [
-                {
-                    "role": "system",
-                    "content": "Ты решаешь задачи по фото. Дай ответ и объясни пошагово. Если текст плохо читается — попроси прислать фото ближе и ровнее.",
-                },
+                {"role": "system", "content": UNICODE_MATH_SYSTEM_PROMPT},
                 {"role": "user", "content": user_content},
             ],
             "temperature": 0.3,
@@ -85,11 +98,11 @@ async def openai_answer(user_text: str, image_bytes: Optional[bytes] = None) -> 
         payload = {
             "model": "gpt-4o-mini",
             "messages": [
-                {"role": "system", "content": "Ты полезный ассистент. Отвечай по делу."},
+                {"role": "system", "content": UNICODE_MATH_SYSTEM_PROMPT},
                 {"role": "user", "content": user_text},
             ],
-            "temperature": 0.7,
-            "max_tokens": 500,
+            "temperature": 0.5,
+            "max_tokens": 700,
         }
 
     async with httpx.AsyncClient(timeout=60) as client:
@@ -119,21 +132,23 @@ async def webhook(secret: str, request: Request):
 
     chat = message.get("chat", {})
     chat_id = chat.get("id")
-    text = message.get("text", "") or ""
+    text = (message.get("text") or "").strip()
 
     if not chat_id:
         return {"ok": True}
 
     # Команды
     if text.startswith("/start"):
-        await tg_send_message(chat_id, "Привет! Можешь написать текст или прислать фото с задачей — отвечу через GPT.")
+        await tg_send_message(
+            chat_id,
+            "Привет! Можешь написать текст или прислать фото с задачей. Я отвечу и оформлю математику так, чтобы было читабельно в Telegram.",
+        )
         return {"ok": True}
 
-    # Если пришло фото — решаем по картинке
+    # Фото
     photos = message.get("photo") or []
     if photos:
-        # Telegram присылает массив размеров; последний обычно самый большой
-        largest = photos[-1]
+        largest = photos[-1]  # обычно самый большой
         file_id = largest.get("file_id")
 
         if not file_id:
@@ -145,7 +160,7 @@ async def webhook(secret: str, request: Request):
         try:
             file_path = await tg_get_file_path(file_id)
             img_bytes = await tg_download_file_bytes(file_path)
-            prompt = "Реши задачу с картинки. Дай решение пошагово и итоговый ответ."
+            prompt = "Реши задачу с картинки. Пиши без LaTeX, используй Unicode-математику. Дай решение по шагам и строку 'Ответ: ...'."
             answer = await openai_answer(prompt, image_bytes=img_bytes)
         except Exception as e:
             await tg_send_message(chat_id, f"Ошибка при обработке фото: {e}")
@@ -154,12 +169,12 @@ async def webhook(secret: str, request: Request):
         await tg_send_message(chat_id, answer)
         return {"ok": True}
 
-    # Если пришёл обычный текст — отвечаем текстом
+    # Текст
     if text:
         answer = await openai_answer(text)
         await tg_send_message(chat_id, answer)
         return {"ok": True}
 
-    # Если пришло что-то другое (стикер/голос и т.п.)
+    # Прочее
     await tg_send_message(chat_id, "Я понимаю текст и фото. Пришли задачу текстом или фото.")
     return {"ok": True}
