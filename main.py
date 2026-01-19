@@ -24,7 +24,8 @@ STATE_TTL_SECONDS = int(os.getenv("STATE_TTL_SECONDS", "1800"))  # 30 минут
 
 STATE: Dict[Tuple[int, int], Dict[str, Any]] = {}
 
-PosterStep = Literal["need_photo", "need_text_price", "need_style", "ready"]
+# Упростили постер-режим: один шаг после фото — ждём ОДИН текст (в нём и заголовок, и цена, и стиль).
+PosterStep = Literal["need_photo", "need_prompt"]
 
 
 def _now() -> float:
@@ -60,10 +61,10 @@ def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster"]):
     st["ts"] = _now()
     if mode == "poster":
         # сбрасываем черновик афиши
-        st["poster"] = {"step": "need_photo", "photo_bytes": None, "title": "", "price": "", "style": "Зима"}
+        st["poster"] = {"step": "need_photo", "photo_bytes": None}
 
 
-# ---------------- Reply/Inline keyboards ----------------
+# ---------------- Reply keyboard ----------------
 
 def _main_menu_keyboard() -> dict:
     # ReplyKeyboardMarkup (нижнее меню)
@@ -75,19 +76,6 @@ def _main_menu_keyboard() -> dict:
         "resize_keyboard": True,
         "one_time_keyboard": False,
         "selective": False,
-    }
-
-
-def _style_inline_keyboard() -> dict:
-    # InlineKeyboardMarkup (кнопки стиля)
-    return {
-        "inline_keyboard": [
-            [{"text": "Зима", "callback_data": "poster_style:winter"},
-             {"text": "Новый год", "callback_data": "poster_style:newyear"}],
-            [{"text": "Минимализм", "callback_data": "poster_style:min"},
-             {"text": "Неон", "callback_data": "poster_style:neon"}],
-            [{"text": "Отмена", "callback_data": "poster_cancel"}],
-        ]
     }
 
 
@@ -114,17 +102,6 @@ async def tg_send_photo_bytes(chat_id: int, image_bytes: bytes, caption: Optiona
 
     async with httpx.AsyncClient(timeout=180) as client:
         await client.post(f"{TELEGRAM_API_BASE}/sendPhoto", data=data, files=files)
-
-
-async def tg_answer_callback_query(callback_query_id: str, text: Optional[str] = None, show_alert: bool = False):
-    if not TELEGRAM_BOT_TOKEN:
-        return
-    payload = {"callback_query_id": callback_query_id, "show_alert": show_alert}
-    if text:
-        payload["text"] = text
-
-    async with httpx.AsyncClient(timeout=20) as client:
-        await client.post(f"{TELEGRAM_API_BASE}/answerCallbackQuery", json=payload)
 
 
 async def tg_get_file_path(file_id: str) -> str:
@@ -204,6 +181,7 @@ async def openai_chat_answer(
         user_content = []
         if user_text:
             user_content.append({"type": "text", "text": user_text})
+        # Даже если исходник PNG/WEBP — data URL jpeg обычно принимается, но лучше не усложнять.
         user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
 
         payload = {
@@ -269,7 +247,6 @@ async def openai_edit_image_make_poster(
 
     ext, mime = _detect_image_type(source_image_bytes)
 
-    # endpoint ожидает multipart/form-data
     files = {
         "image": (f"source.{ext}", source_image_bytes, mime),
     }
@@ -323,66 +300,29 @@ def _infer_intent_from_text(text: str) -> Intent:
 
 # ---------------- Poster helpers ----------------
 
-def _parse_title_price(text: str) -> Tuple[str, str]:
+def _poster_prompt_from_user_text(user_text: str) -> str:
     """
-    Простой парсер: ожидаем строку формата:
-    Заголовок; Цена
-    или
-    Заголовок / Цена
-    или
-    Заголовок, цена 1500
+    Всё в одном: пользователь присылает одну строку/сообщение, где есть:
+    - заголовок/текст
+    - цена (если нужна)
+    - стиль/пожелания (любые: вода/земля/киберпанк/премиум и т.д.)
+
+    Мы НИЧЕГО не парсим, просто аккуратно прокидываем в промпт как требования.
     """
-    t = (text or "").strip()
-    if not t:
-        return "", ""
+    ut = (user_text or "").strip()
 
-    # Попытка разделителя ; или /
-    for sep in (";", "/"):
-        if sep in t:
-            left, right = t.split(sep, 1)
-            return left.strip(), right.strip()
+    # Если пользователь вдруг отправил пустое — подстрахуемся.
+    if not ut:
+        ut = "Сделай красивую рекламную афишу. Добавь понятный заголовок и стиль на твой вкус."
 
-    # Ищем цену по паттерну 1000, 1000р, 1000₽, цена 1000
-    m = re.search(r"(цена\s*)?(\d[\d\s]{1,8})(\s*(р|₽))?", t.lower())
-    if m:
-        price = m.group(2).replace(" ", "").strip()
-        # Заголовок = текст без найденного куска
-        title = re.sub(r"(цена\s*)?(\d[\d\s]{1,8})(\s*(р|₽))?", "", t, flags=re.IGNORECASE).strip(" ,.-")
-        if price:
-            price = f"{price}₽"
-        return title.strip(), price.strip()
-
-    # Если не нашли цену — считаем всё заголовком
-    return t, ""
-
-
-def _poster_prompt(title: str, price: str, style: str) -> str:
-    # Важно: просим сохранить товар максимально реалистично, а фон/декор/типографику — улучшить.
-    # Это best-practice для рекламной афиши.
-    title = (title or "").strip()
-    price = (price or "").strip()
-    style = (style or "Зима").strip()
-
-    # Если нет цены, не заставляем рисовать пустое поле.
-    price_line = f"Цена: {price}" if price else ""
-
-    style_directive = {
-        "Зима": "Зимний стиль: снег, морозные узоры, прохладные оттенки, но товар остаётся главным.",
-        "Новый год": "Новогодний стиль: лёгкие гирлянды/блики, праздничные элементы, снег, ощущение праздника.",
-        "Минимализм": "Минимализм: чистый фон, аккуратные акценты, максимум читабельности и воздуха.",
-        "Неон": "Неон: яркие неоновые подсветки, современный стиль, контраст, динамика.",
-    }.get(style, style)
-
-    # Рекомендуем вертикаль под сторис
     return (
         "Сделай рекламную афишу на основе предоставленного фото товара.\n"
         "Сохрани товар максимально реалистично и узнаваемо (не меняй бренд/упаковку/форму товара).\n"
         "Улучши композицию, свет и фон так, чтобы это выглядело как профессиональная рекламная афиша.\n"
-        f"{style_directive}\n"
         "Добавь читаемую типографику и аккуратные декоративные элементы, не перекрывая товар.\n"
-        f"Крупный заголовок (сверху или слева): {title if title else 'АКЦИЯ'}\n"
-        f"{price_line}\n"
-        "Формат: вертикальный, под сторис. Высокое качество.\n"
+        "Формат: вертикальный, под сторис. Высокое качество.\n\n"
+        "Текст и требования пользователя (используй как ТЗ, интерпретируй профессионально):\n"
+        f"{ut}\n"
     )
 
 
@@ -401,85 +341,7 @@ async def webhook(secret: str, request: Request):
     _cleanup_state()
     update = await request.json()
 
-    # 1) callback_query (inline кнопки стиля / отмена)
-    callback = update.get("callback_query")
-    if callback:
-        cb_id = callback.get("id")
-        from_user = callback.get("from") or {}
-        user_id = int(from_user.get("id") or 0)
-
-        msg = callback.get("message") or {}
-        chat = msg.get("chat") or {}
-        chat_id = int(chat.get("id") or 0)
-
-        data = (callback.get("data") or "").strip()
-
-        if cb_id:
-            await tg_answer_callback_query(cb_id)
-
-        if not chat_id or not user_id:
-            return {"ok": True}
-
-        st = _ensure_state(chat_id, user_id)
-
-        if data == "poster_cancel":
-            _set_mode(chat_id, user_id, "chat")
-            await tg_send_message(chat_id, "Ок, отменил. Возвращаюсь в режим «ИИ (чат)».", reply_markup=_main_menu_keyboard())
-            return {"ok": True}
-
-        if data.startswith("poster_style:"):
-            if st.get("mode") != "poster":
-                await tg_send_message(chat_id, "Сначала нажми «Фото/Афиши» и пришли фото товара.", reply_markup=_main_menu_keyboard())
-                return {"ok": True}
-
-            poster = st.get("poster") or {}
-            if poster.get("step") != "need_style":
-                await tg_send_message(chat_id, "Стиль сейчас не требуется. Нажми «Фото/Афиши» и следуй шагам.", reply_markup=_main_menu_keyboard())
-                return {"ok": True}
-
-            style_code = data.split(":", 1)[1].strip()
-            style = {
-                "winter": "Зима",
-                "newyear": "Новый год",
-                "min": "Минимализм",
-                "neon": "Неон",
-            }.get(style_code, "Зима")
-
-            poster["style"] = style
-
-            # Проверяем, что всё есть
-            photo_bytes = poster.get("photo_bytes")
-            title = (poster.get("title") or "").strip()
-            price = (poster.get("price") or "").strip()
-
-            if not photo_bytes:
-                poster["step"] = "need_photo"
-                await tg_send_message(chat_id, "Не вижу фото. Пришли фото товара ещё раз.", reply_markup=_main_menu_keyboard())
-                return {"ok": True}
-
-            # Генерация афиши
-            await tg_send_message(chat_id, "Делаю афишу на основе твоего фото...")
-
-            prompt = _poster_prompt(title=title, price=price, style=style)
-            try:
-                out_bytes = await openai_edit_image_make_poster(
-                    source_image_bytes=photo_bytes,
-                    prompt=prompt,
-                    size=IMG_SIZE_DEFAULT,
-                )
-                await tg_send_photo_bytes(chat_id, out_bytes, caption="Готово. Если нужно — напиши новый текст/цену или пришли другое фото.")
-            except Exception as e:
-                await tg_send_message(chat_id, f"Не получилось сгенерировать афишу: {e}")
-
-            # Остаёмся в режиме poster и ждём следующее фото/запрос
-            st["poster"] = {"step": "need_photo", "photo_bytes": None, "title": "", "price": "", "style": "Зима"}
-            st["ts"] = _now()
-            return {"ok": True}
-
-        await tg_send_message(chat_id, "Неизвестная кнопка.")
-        return {"ok": True}
-
-    # 2) message / edited_message
+    # 1) message / edited_message
     message = update.get("message") or update.get("edited_message")
     if not message:
         return {"ok": True}
@@ -523,8 +385,11 @@ async def webhook(secret: str, request: Request):
             chat_id,
             "Режим «Фото/Афиши».\n"
             "1) Пришли фото товара.\n"
-            "2) Потом я попрошу текст и цену.\n"
-            "3) Выберешь стиль — и я сделаю афишу.",
+            "2) Потом одним сообщением напиши ТЕКСТ для афиши + цену (если надо) + любые пожелания к стилю.\n"
+            "Примеры:\n"
+            "• Одноразка 1000₽, стиль неон, ярко, зима\n"
+            "• Pasito III в наличии, 1500₽, премиум, черный фон, золото\n"
+            "• Акция 600₽, стиль вода, свежесть, голубые оттенки\n",
             reply_markup=_main_menu_keyboard(),
         )
         return {"ok": True}
@@ -534,12 +399,12 @@ async def webhook(secret: str, request: Request):
             chat_id,
             "Как пользоваться:\n"
             "• ИИ (чат): пиши текст — отвечу; пришли фото + вопрос — опишу/попробую определить.\n"
-            "• Фото/Афиши: нажми «Фото/Афиши» и пришли фото товара — сделаю рекламную афишу.\n",
+            "• Фото/Афиши: нажми «Фото/Афиши», пришли фото товара, затем одним сообщением напиши текст/цену/стиль.\n",
             reply_markup=_main_menu_keyboard(),
         )
         return {"ok": True}
 
-    # Фото (как photo)
+    # ---------------- Фото (как photo) ----------------
     photos = message.get("photo") or []
     if photos:
         largest = photos[-1]
@@ -548,7 +413,7 @@ async def webhook(secret: str, request: Request):
             await tg_send_message(chat_id, "Фото получил, но не смог прочитать file_id. Попробуй отправить ещё раз.", reply_markup=_main_menu_keyboard())
             return {"ok": True}
 
-        # Режим POSTER: фото = старт афиши
+        # POSTER: приняли фото, ждём один текст (ТЗ)
         if st.get("mode") == "poster":
             try:
                 file_path = await tg_get_file_path(file_id)
@@ -559,25 +424,23 @@ async def webhook(secret: str, request: Request):
 
             poster = st.get("poster") or {}
             poster["photo_bytes"] = img_bytes
-            poster["step"] = "need_text_price"
+            poster["step"] = "need_prompt"
             st["poster"] = poster
             st["ts"] = _now()
 
             await tg_send_message(
                 chat_id,
                 "Фото получил.\n"
-                "Теперь отправь текст для афиши и цену.\n"
-                "Примеры:\n"
-                "• NAN ExpertPro; 1500₽\n"
-                "• Акция на смесь / 1490₽\n"
-                "• Скидка 20%, цена 999\n",
+                "Теперь ОДНИМ сообщением напиши:\n"
+                "• текст для афиши\n"
+                "• цену (если нужна)\n"
+                "• любые пожелания к стилю (вода/земля/неон/минимализм/премиум и т.д.)\n",
                 reply_markup=_main_menu_keyboard(),
             )
             return {"ok": True}
 
-        # Режим CHAT: анализ фото (как раньше)
+        # CHAT: анализ фото
         await tg_send_message(chat_id, "Фото получил. Анализирую...", reply_markup=_main_menu_keyboard())
-
         try:
             file_path = await tg_get_file_path(file_id)
             img_bytes = await tg_download_file_bytes(file_path)
@@ -608,13 +471,13 @@ async def webhook(secret: str, request: Request):
         await tg_send_message(chat_id, answer, reply_markup=_main_menu_keyboard())
         return {"ok": True}
 
-    # Фото (как document, если прислали файлом)
+    # ---------------- Фото (как document: если прислали файлом) ----------------
     doc = message.get("document") or {}
     if doc:
         mime = (doc.get("mime_type") or "").lower()
         file_id = doc.get("file_id")
         if file_id and mime.startswith("image/"):
-            # Режим POSTER: фото = старт афиши
+            # POSTER: приняли фото, ждём один текст (ТЗ)
             if st.get("mode") == "poster":
                 try:
                     file_path = await tg_get_file_path(file_id)
@@ -625,23 +488,22 @@ async def webhook(secret: str, request: Request):
 
                 poster = st.get("poster") or {}
                 poster["photo_bytes"] = img_bytes
-                poster["step"] = "need_text_price"
+                poster["step"] = "need_prompt"
                 st["poster"] = poster
                 st["ts"] = _now()
 
                 await tg_send_message(
                     chat_id,
                     "Фото (файлом) получил.\n"
-                    "Теперь отправь текст для афиши и цену.\n"
-                    "Примеры:\n"
-                    "• NAN ExpertPro; 1500₽\n"
-                    "• Акция на смесь / 1490₽\n"
-                    "• Скидка 20%, цена 999\n",
+                    "Теперь ОДНИМ сообщением напиши:\n"
+                    "• текст для афиши\n"
+                    "• цену (если нужна)\n"
+                    "• любые пожелания к стилю (вода/земля/неон/минимализм/премиум и т.д.)\n",
                     reply_markup=_main_menu_keyboard(),
                 )
                 return {"ok": True}
 
-            # Режим CHAT: анализ фото
+            # CHAT: анализ фото
             await tg_send_message(chat_id, "Фото получил. Анализирую...", reply_markup=_main_menu_keyboard())
             try:
                 file_path = await tg_get_file_path(file_id)
@@ -673,43 +535,46 @@ async def webhook(secret: str, request: Request):
             await tg_send_message(chat_id, answer, reply_markup=_main_menu_keyboard())
             return {"ok": True}
 
-    # Текст без фото
+    # ---------------- Текст без фото ----------------
     if text:
-        # Режим POSTER: ожидаем текст/цену, затем стиль
+        # POSTER: ждём один текст (ТЗ) после фото -> сразу генерим
         if st.get("mode") == "poster":
             poster = st.get("poster") or {}
             step: PosterStep = poster.get("step") or "need_photo"
+            photo_bytes = poster.get("photo_bytes")
 
-            if step == "need_photo":
+            if step == "need_photo" or not photo_bytes:
                 await tg_send_message(chat_id, "Сначала пришли фото товара.", reply_markup=_main_menu_keyboard())
                 return {"ok": True}
 
-            if step == "need_text_price":
-                title, price = _parse_title_price(text)
-                poster["title"] = title or "АКЦИЯ"
-                poster["price"] = price
-                poster["step"] = "need_style"
-                st["poster"] = poster
+            if step == "need_prompt":
+                await tg_send_message(chat_id, "Делаю афишу на основе твоего фото...")
+
+                prompt = _poster_prompt_from_user_text(text)
+                try:
+                    out_bytes = await openai_edit_image_make_poster(
+                        source_image_bytes=photo_bytes,
+                        prompt=prompt,
+                        size=IMG_SIZE_DEFAULT,
+                    )
+                    await tg_send_photo_bytes(
+                        chat_id,
+                        out_bytes,
+                        caption="Готово. Если нужно — пришли новое фото или снова напиши текст/стиль.",
+                    )
+                except Exception as e:
+                    await tg_send_message(chat_id, f"Не получилось сгенерировать афишу: {e}")
+
+                # Сбрасываем и ждём следующее фото
+                st["poster"] = {"step": "need_photo", "photo_bytes": None}
                 st["ts"] = _now()
-
-                await tg_send_message(
-                    chat_id,
-                    f"Принял.\nЗаголовок: {poster['title']}\nЦена: {poster['price'] or '(без цены)'}\n"
-                    "Выбери стиль афиши:",
-                    reply_markup=_style_inline_keyboard(),
-                )
-                return {"ok": True}
-
-            if step == "need_style":
-                await tg_send_message(chat_id, "Выбери стиль кнопкой ниже.", reply_markup=_style_inline_keyboard())
                 return {"ok": True}
 
             # fallback
-            await tg_send_message(chat_id, "Нажми «Фото/Афиши» и следуй шагам.", reply_markup=_main_menu_keyboard())
+            await tg_send_message(chat_id, "Пришли фото товара, затем одним сообщением текст/цену/стиль.", reply_markup=_main_menu_keyboard())
             return {"ok": True}
 
-        # Режим CHAT: обычный ответ
-        # Если пользователь просит “сделай афишу”, направляем в меню
+        # CHAT: обычный ответ
         low = text.lower()
         if any(w in low for w in ["афиш", "баннер", "постер", "сделай красиво", "сделай дизайн", "реклам"]):
             await tg_send_message(
