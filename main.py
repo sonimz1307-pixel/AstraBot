@@ -2,6 +2,7 @@ import os
 import base64
 import time
 import re
+import json
 from typing import Optional, Literal, Dict, Any, Tuple
 
 import httpx
@@ -22,12 +23,13 @@ TELEGRAM_API_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 STATE_TTL_SECONDS = int(os.getenv("STATE_TTL_SECONDS", "1800"))  # 30 минут
 STATE: Dict[Tuple[int, int], Dict[str, Any]] = {}
 
-# Anti-duplicate updates (idempotency)
-PROCESSED_TTL_SECONDS = int(os.getenv("PROCESSED_TTL_SECONDS", "1800"))  # 30 минут
-# key: (chat_id, message_id) -> ts
-PROCESSED: Dict[Tuple[int, int], float] = {}
-
 PosterStep = Literal["need_photo", "need_prompt"]
+
+# Anti-duplicate (idempotency)
+PROCESSED_TTL_SECONDS = int(os.getenv("PROCESSED_TTL_SECONDS", "1800"))  # 30 минут
+# key -> ts
+PROCESSED_UPDATES: Dict[int, float] = {}                 # update_id -> ts
+PROCESSED_MESSAGES: Dict[Tuple[int, int], float] = {}    # (chat_id, message_id) -> ts
 
 
 def _now() -> float:
@@ -37,22 +39,21 @@ def _now() -> float:
 def _cleanup_state():
     now = _now()
 
-    # state cleanup
-    expired = []
+    expired_state = []
     for k, v in STATE.items():
         ts = float(v.get("ts", 0))
         if now - ts > STATE_TTL_SECONDS:
-            expired.append(k)
-    for k in expired:
+            expired_state.append(k)
+    for k in expired_state:
         STATE.pop(k, None)
 
-    # processed cleanup
-    expired_p = []
-    for k, ts in PROCESSED.items():
-        if now - float(ts) > PROCESSED_TTL_SECONDS:
-            expired_p.append(k)
-    for k in expired_p:
-        PROCESSED.pop(k, None)
+    expired_updates = [k for k, ts in PROCESSED_UPDATES.items() if now - float(ts) > PROCESSED_TTL_SECONDS]
+    for k in expired_updates:
+        PROCESSED_UPDATES.pop(k, None)
+
+    expired_msgs = [k for k, ts in PROCESSED_MESSAGES.items() if now - float(ts) > PROCESSED_TTL_SECONDS]
+    for k in expired_msgs:
+        PROCESSED_MESSAGES.pop(k, None)
 
 
 def _get_user_key(chat_id: int, user_id: int) -> Tuple[int, int]:
@@ -97,7 +98,6 @@ async def tg_send_message(chat_id: int, text: str, reply_markup: Optional[dict] 
     payload = {"chat_id": chat_id, "text": text}
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
-
     async with httpx.AsyncClient(timeout=30) as client:
         await client.post(f"{TELEGRAM_API_BASE}/sendMessage", json=payload)
 
@@ -109,7 +109,6 @@ async def tg_send_photo_bytes(chat_id: int, image_bytes: bytes, caption: Optiona
     data = {"chat_id": str(chat_id)}
     if caption:
         data["caption"] = caption
-
     async with httpx.AsyncClient(timeout=180) as client:
         await client.post(f"{TELEGRAM_API_BASE}/sendPhoto", data=data, files=files)
 
@@ -160,7 +159,7 @@ VISION_GENERAL_SYSTEM_PROMPT = (
 
 DEFAULT_TEXT_SYSTEM_PROMPT = (
     "Ты полезный ассистент для Telegram. Не используй LaTeX/TeX. "
-    "Если нужна математика — пиши формулы обычным текстом, можно с символом π."
+    "Если нужна математика — пиши формулы обычным текстом."
 )
 
 VISION_DEFAULT_USER_PROMPT = (
@@ -244,9 +243,7 @@ async def openai_edit_image_make_poster(
 
     ext, mime = _detect_image_type(source_image_bytes)
 
-    files = {
-        "image": (f"source.{ext}", source_image_bytes, mime),
-    }
+    files = {"image": (f"source.{ext}", source_image_bytes, mime)}
     data = {
         "model": "gpt-image-1",
         "prompt": prompt,
@@ -267,7 +264,7 @@ async def openai_edit_image_make_poster(
     return base64.b64decode(b64_img)
 
 
-# ---------------- Intent (для режима ИИ) ----------------
+# ---------------- Intent (chat mode) ----------------
 
 Intent = Literal["math", "identify", "general"]
 
@@ -307,7 +304,7 @@ def _is_math_request(text: str) -> bool:
     return any(m in t for m in hard_markers)
 
 
-# ---------------- Poster helpers ----------------
+# ---------------- Poster: parsing helpers ----------------
 
 def _extract_price_any(text: str) -> str:
     t = (text or "").lower()
@@ -320,33 +317,88 @@ def _extract_price_any(text: str) -> str:
     return f"{price_num}₽"
 
 
-def _clean_text_without_price(text: str) -> str:
-    if not text:
-        return ""
-    return re.sub(r"(цена\s*)?(\d[\d\s]{1,8})(\s*(р|₽))?", "", text, flags=re.IGNORECASE).strip(" \n,.-")
-
-
-def _poster_prompt_from_user_text(user_text: str) -> str:
+async def openai_extract_poster_spec(user_text: str) -> Dict[str, str]:
     """
-    ВАЖНО: больше никаких "АКЦИЯ" и выдуманных цен.
-    Используем только то, что дал пользователь.
+    1) Разбираем одно сообщение пользователя на:
+       headline (что печатать), style (как оформить), price (если есть).
+    2) Возвращаем dict: {"headline": "...", "style": "...", "price": "..."}.
     """
-    ut = (user_text or "").strip()
-    if not ut:
-        ut = "Сделай красивую рекламную афишу. Текст должен быть читабельным."
+    # Быстрый эвристический fallback:
+    # если есть "надпись:" — берём всё после него как headline.
+    raw = (user_text or "").strip()
+    if not raw:
+        return {"headline": "", "style": "", "price": ""}
 
-    price = _extract_price_any(ut)
-    cleaned = _clean_text_without_price(ut)
+    price = _extract_price_any(raw)
 
-    # Текст, который разрешено наносить
-    allowed_text = ut.strip()
+    low = raw.lower()
+    if "надпись" in low:
+        # надпись: ....
+        m = re.search(r"надпись\s*[:\-]\s*(.+)$", raw, flags=re.IGNORECASE | re.DOTALL)
+        if m:
+            headline = m.group(1).strip().strip('"“”')
+            # стиль — всё до "надпись"
+            style_part = re.split(r"надпись\s*[:\-]", raw, flags=re.IGNORECASE)[0].strip()
+            return {"headline": headline, "style": style_part, "price": price}
 
-    # Явные правила, чтобы модель не придумывала "АКЦИЯ" и не рисовала цену из головы
-    price_rule = (
-        f"Цена указана пользователем: {price}. Добавь её один раз, крупно.\n"
-        if price
-        else "Пользователь НЕ указал цену. Запрещено добавлять любые цены, цифры и валюту.\n"
+    # GPT-разбор (надежнее семантически)
+    sys = (
+        "Ты парсер для рекламных афиш.\n"
+        "Нужно отделить: (1) текст, который надо НАПЕЧАТАТЬ на афише (headline), "
+        "(2) пожелания к стилю/оформлению (style), (3) цену (price).\n\n"
+        "Правила:\n"
+        "• headline — это короткая надпись/слоган/название товара. "
+        "Не включай в headline фразы-инструкции: 'сделай', 'оформи', 'красиво', 'в стиле', 'хочу', 'нужно'.\n"
+        "• style — это всё про настроение, стиль, цвета, сезон, фон, 'в стиле эко/неон/премиум' и т.п.\n"
+        "• price — только если пользователь явно указал цифры/валюту. Иначе пусто.\n"
+        "• Верни СТРОГО JSON без пояснений.\n"
+        "Формат: {\"headline\":\"...\",\"style\":\"...\",\"price\":\"...\"}\n"
     )
+    user = f"Текст пользователя:\n{raw}"
+
+    out = await openai_chat_answer(
+        user_text=user,
+        system_prompt=sys,
+        image_bytes=None,
+        temperature=0.0,
+        max_tokens=250,
+    )
+
+    try:
+        data = json.loads(out)
+        headline = str(data.get("headline", "")).strip()
+        style = str(data.get("style", "")).strip()
+        price2 = str(data.get("price", "")).strip()
+        # если GPT не выдал price, оставляем эвристику
+        if not price2 and price:
+            price2 = price
+        return {"headline": headline, "style": style, "price": price2}
+    except Exception:
+        # fallback: считаем, что весь текст — это стиль, а headline пустой
+        return {"headline": "", "style": raw, "price": price}
+
+
+def _poster_prompt_from_spec(spec: Dict[str, str]) -> str:
+    """
+    Собираем промпт для gpt-image-1.
+    ВАЖНО: печатаем только headline и (опционально) price.
+    """
+    headline = (spec.get("headline") or "").strip()
+    style = (spec.get("style") or "").strip()
+    price = (spec.get("price") or "").strip()
+
+    # если headline пустой — используем минимальный безопасный вариант:
+    # печатать только слово из товара (если юзер вообще ничего не дал)
+    if not headline:
+        headline = " "
+
+    # Правила по цене/цифрам
+    if price:
+        price_rule = f"Цена разрешена пользователем: {price}. Добавь цену ОДИН раз, крупно, без изменения цифр."
+        digits_rule = "Цифры разрешены ТОЛЬКО в цене и только как указано пользователем."
+    else:
+        price_rule = "Пользователь НЕ указал цену. Запрещено добавлять любые цены, валюту и любые цифры."
+        digits_rule = "Запрещено добавлять любые цифры."
 
     return (
         "Сделай профессиональную рекламную афишу / промо-баннер на основе предоставленного фото.\n\n"
@@ -359,30 +411,38 @@ def _poster_prompt_from_user_text(user_text: str) -> str:
         "• Только фотореализм, как исходная фотография.\n"
         "• Разрешено менять ТОЛЬКО: фон, атмосферу, свет, декор, цветокор и добавить текст.\n\n"
 
-        "ТОВАР (если есть) должен остаться максимально реалистичным и узнаваемым: "
-        "НЕ менять бренд, упаковку, форму, цвета товара, логотипы.\n\n"
+        "ТОВАР (если есть) должен остаться максимально реалистичным и узнаваемым:\n"
+        "• НЕ менять бренд, упаковку, форму, цвета товара, логотипы.\n\n"
 
         "ТЕКСТ НА АФИШЕ (СТРОГОЕ ПРАВИЛО):\n"
-        "• Используй ТОЛЬКО текст, который дал пользователь.\n"
-        "• Запрещено добавлять слова от себя (например: 'АКЦИЯ', 'СКИДКА', 'ХИТ', 'НОВИНКА'), "
-        "если пользователь это не написал.\n"
-        "• Запрещено добавлять любые цифры, если пользователь их не написал.\n"
-        "• Запрещено выдумывать цену.\n"
-        + price_rule +
-        "• Не дублируй один и тот же текст много раз.\n\n"
+        "• На афише печатай ТОЛЬКО разрешённый headline (и цену, если разрешена).\n"
+        "• Запрещено добавлять слова от себя: 'АКЦИЯ', 'СКИДКА', 'ХИТ', 'НОВИНКА' и любые другие.\n"
+        f"• {digits_rule}\n"
+        f"• {price_rule}\n"
+        "• НЕ печатай фразы-инструкции и стиль (например: 'сделай красиво', 'в стиле эко').\n"
+        "• НЕ меняй написание букв в headline: без подмены слов, без добавления слов.\n\n"
 
-        "ТИПОГРАФИКА:\n"
-        "• Сделай текст дорогим и читабельным на смартфоне.\n"
-        "• Чёткая иерархия: главный текст → второстепенный.\n"
-        "• Можно использовать плашки/ленты/тени/обводку, но без перегруза.\n"
-        "• Текст не перекрывает ключевые элементы товара.\n\n"
+        "ТИПОГРАФИКА (КАК В ДОРОГИХ ПРОМО-АФИШАХ):\n"
+        "• Заголовок сделай максимально выразительным: крупный, жирный, рекламный.\n"
+        "• Псевдо-3D/эмбосс (легкий), аккуратно, без искажений букв.\n"
+        "• Контрастная обводка + мягкая тень.\n"
+        "• Лёгкое свечение допустимо, но аккуратно.\n"
+        "• Можно использовать ленту/плашку под заголовок.\n"
+        "• Текст должен читаться мгновенно на смартфоне.\n"
+        "• НЕ делай плоский 'обычный' шрифт.\n\n"
 
-        "ТЕКСТ ПОЛЬЗОВАТЕЛЯ (ИСПОЛЬЗУЙ ЕГО ДОСЛОВНО):\n"
-        f"{allowed_text}\n\n"
+        "РАЗМЕСТИ ТЕКСТ:\n"
+        f"HEADLINE (печатать): {headline}\n"
+        + (f"PRICE (печатать): {price}\n" if price else "PRICE: (не печатать)\n") +
+        "\n"
+
+        "СТИЛЬ/АТМОСФЕРА (НЕ ПЕЧАТАТЬ КАК ТЕКСТ, ТОЛЬКО ДЛЯ ОФОРМЛЕНИЯ):\n"
+        f"{style if style else 'Сделай визуально красиво, современно, чисто, без перегруза.'}\n\n"
 
         "КОМПОЗИЦИЯ:\n"
         "• Главный объект (товар/люди) — в центре внимания.\n"
-        "• Стиль и атмосфера соответствуют запросу пользователя (эко/неон/премиум и т.д.).\n\n"
+        "• Текст не перекрывает ключевые элементы.\n"
+        "• Свет и цвет как в рекламной или студийной съёмке.\n\n"
 
         "ФОРМАТ:\n"
         "• Вертикальный, под сторис.\n"
@@ -405,6 +465,13 @@ async def webhook(secret: str, request: Request):
     _cleanup_state()
     update = await request.json()
 
+    # idempotency by update_id
+    update_id = update.get("update_id")
+    if isinstance(update_id, int):
+        if update_id in PROCESSED_UPDATES:
+            return {"ok": True}
+        PROCESSED_UPDATES[update_id] = _now()
+
     message = update.get("message") or update.get("edited_message")
     if not message:
         return {"ok": True}
@@ -418,16 +485,15 @@ async def webhook(secret: str, request: Request):
     if not chat_id or not user_id:
         return {"ok": True}
 
-    # Idempotency: ignore duplicates by message_id per chat
+    # idempotency by message_id (per chat)
     message_id = int(message.get("message_id") or 0)
     if message_id:
         key = (chat_id, message_id)
-        if key in PROCESSED:
+        if key in PROCESSED_MESSAGES:
             return {"ok": True}
-        PROCESSED[key] = _now()
+        PROCESSED_MESSAGES[key] = _now()
 
     st = _ensure_state(chat_id, user_id)
-
     text = (message.get("text") or "").strip()
 
     # /start
@@ -437,8 +503,8 @@ async def webhook(secret: str, request: Request):
             chat_id,
             "Привет!\n"
             "У меня есть два режима:\n"
-            "1) «ИИ (чат)» — отвечаю на вопросы, могу анализировать фото (машина/цветок/товар) и решать задачи.\n"
-            "2) «Фото/Афиши» — делаю рекламную афишу НА ОСНОВЕ твоего фото товара.\n\n"
+            "1) «ИИ (чат)» — отвечаю на вопросы, могу анализировать фото и решать задачи.\n"
+            "2) «Фото/Афиши» — делаю рекламную афишу НА ОСНОВЕ твоего фото.\n\n"
             "Нажми кнопку внизу, чтобы выбрать режим.",
             reply_markup=_main_menu_keyboard(),
         )
@@ -446,7 +512,11 @@ async def webhook(secret: str, request: Request):
 
     if text == "ИИ (чат)":
         _set_mode(chat_id, user_id, "chat")
-        await tg_send_message(chat_id, "Ок. Режим «ИИ (чат)». Пиши вопрос или пришли фото для анализа.", reply_markup=_main_menu_keyboard())
+        await tg_send_message(
+            chat_id,
+            "Ок. Режим «ИИ (чат)». Пиши вопрос или пришли фото + запрос.",
+            reply_markup=_main_menu_keyboard(),
+        )
         return {"ok": True}
 
     if text == "Фото/Афиши":
@@ -455,10 +525,9 @@ async def webhook(secret: str, request: Request):
             chat_id,
             "Режим «Фото/Афиши».\n"
             "1) Пришли фото товара.\n"
-            "2) Потом одним сообщением напиши ТЕКСТ для афиши + цену (если надо) + любые пожелания к стилю.\n"
-            "Примеры:\n"
-            "• Каперсы, 299₽, стиль эко, красиво\n"
-            "• Pasito III в наличии, 1500₽, премиум, черный фон, золото\n",
+            "2) Потом одним сообщением напиши: надпись/слоган + (цена, если нужна) + стиль.\n"
+            "Пример:\n"
+            "Сделай красиво в стиле эко. Надпись: КАПЕРСЫ — БОМБА, ЧЕСТНО ГОВОРЯ. Цена 299₽\n",
             reply_markup=_main_menu_keyboard(),
         )
         return {"ok": True}
@@ -467,8 +536,8 @@ async def webhook(secret: str, request: Request):
         await tg_send_message(
             chat_id,
             "Как пользоваться:\n"
-            "• ИИ (чат): пиши текст — отвечу; пришли фото + вопрос — опишу/попробую определить или решу задачу.\n"
-            "• Фото/Афиши: нажми «Фото/Афиши», пришли фото товара, затем одним сообщением напиши текст/цену/стиль.\n",
+            "• ИИ (чат): пиши текст — отвечу; пришли фото + вопрос — опишу/определю или решу задачу.\n"
+            "• Фото/Афиши: нажми «Фото/Афиши», пришли фото, затем одним сообщением надпись/цену/стиль.\n",
             reply_markup=_main_menu_keyboard(),
         )
         return {"ok": True}
@@ -479,10 +548,10 @@ async def webhook(secret: str, request: Request):
         largest = photos[-1]
         file_id = largest.get("file_id")
         if not file_id:
-            await tg_send_message(chat_id, "Фото получил, но не смог прочитать file_id. Попробуй отправить ещё раз.", reply_markup=_main_menu_keyboard())
+            await tg_send_message(chat_id, "Не смог прочитать file_id. Отправь фото ещё раз.", reply_markup=_main_menu_keyboard())
             return {"ok": True}
 
-        # POSTER
+        # POSTER mode: сохраняем фото и ждём один текст
         if st.get("mode") == "poster":
             try:
                 file_path = await tg_get_file_path(file_id)
@@ -496,13 +565,12 @@ async def webhook(secret: str, request: Request):
 
             await tg_send_message(
                 chat_id,
-                "Фото получил.\n"
-                "Теперь одним сообщением напиши текст для афиши + цену (если нужна) + стиль.",
+                "Фото получил. Теперь одним сообщением напиши надпись/цену/стиль.",
                 reply_markup=_main_menu_keyboard(),
             )
             return {"ok": True}
 
-        # CHAT
+        # CHAT mode: решаем математику без "анализирую" (если это запрос на математику)
         try:
             file_path = await tg_get_file_path(file_id)
             img_bytes = await tg_download_file_bytes(file_path)
@@ -534,13 +602,12 @@ async def webhook(secret: str, request: Request):
         await tg_send_message(chat_id, answer, reply_markup=_main_menu_keyboard())
         return {"ok": True}
 
-    # ---------------- Фото (document) ----------------
+    # ---------------- Фото (document image/*) ----------------
     doc = message.get("document") or {}
     if doc:
         mime = (doc.get("mime_type") or "").lower()
         file_id = doc.get("file_id")
         if file_id and mime.startswith("image/"):
-            # POSTER
             if st.get("mode") == "poster":
                 try:
                     file_path = await tg_get_file_path(file_id)
@@ -554,13 +621,12 @@ async def webhook(secret: str, request: Request):
 
                 await tg_send_message(
                     chat_id,
-                    "Фото получил.\n"
-                    "Теперь одним сообщением напиши текст для афиши + цену (если нужна) + стиль.",
+                    "Фото получил. Теперь одним сообщением напиши надпись/цену/стиль.",
                     reply_markup=_main_menu_keyboard(),
                 )
                 return {"ok": True}
 
-            # CHAT
+            # CHAT mode
             try:
                 file_path = await tg_get_file_path(file_id)
                 img_bytes = await tg_download_file_bytes(file_path)
@@ -594,7 +660,7 @@ async def webhook(secret: str, request: Request):
 
     # ---------------- Текст без фото ----------------
     if text:
-        # POSTER: ждём ТЗ после фото
+        # POSTER: ждём текст после фото -> сначала извлекаем spec -> потом генерим
         if st.get("mode") == "poster":
             poster = st.get("poster") or {}
             step: PosterStep = poster.get("step") or "need_photo"
@@ -607,8 +673,10 @@ async def webhook(secret: str, request: Request):
             if step == "need_prompt":
                 await tg_send_message(chat_id, "Делаю афишу на основе твоего фото...")
 
-                prompt = _poster_prompt_from_user_text(text)
                 try:
+                    spec = await openai_extract_poster_spec(text)
+                    prompt = _poster_prompt_from_spec(spec)
+
                     out_bytes = await openai_edit_image_make_poster(
                         source_image_bytes=photo_bytes,
                         prompt=prompt,
@@ -617,16 +685,17 @@ async def webhook(secret: str, request: Request):
                     await tg_send_photo_bytes(
                         chat_id,
                         out_bytes,
-                        caption="Готово. Если нужно — пришли новое фото или снова напиши текст/стиль.",
+                        caption="Готово. Если нужно — пришли новое фото или снова напиши надпись/цену/стиль.",
                     )
                 except Exception as e:
                     await tg_send_message(chat_id, f"Не получилось сгенерировать афишу: {e}")
 
+                # Сброс — ждём следующее фото
                 st["poster"] = {"step": "need_photo", "photo_bytes": None}
                 st["ts"] = _now()
                 return {"ok": True}
 
-            await tg_send_message(chat_id, "Пришли фото товара, затем одним сообщением текст/цену/стиль.", reply_markup=_main_menu_keyboard())
+            await tg_send_message(chat_id, "Пришли фото товара, затем одним сообщением надпись/цену/стиль.", reply_markup=_main_menu_keyboard())
             return {"ok": True}
 
         # CHAT: обычный ответ
