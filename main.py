@@ -298,6 +298,22 @@ def _infer_intent_from_text(text: str) -> Intent:
     return "general"
 
 
+def _is_math_request(text: str) -> bool:
+    """
+    Жёсткая проверка: если пользователь прямо просит решить/посчитать и т.п.,
+    то в режиме "ИИ (чат)" мы не пишем "анализирую", а сразу решаем.
+    """
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    hard_markers = [
+        "реши", "решить", "реши задачу", "задачу реши",
+        "посчитай", "вычисли", "найди ответ", "найди значение", "найди x",
+        "уравнение", "неравенство", "докажи", "доказать",
+    ]
+    return any(m in t for m in hard_markers)
+
+
 # ---------------- Poster helpers ----------------
 
 def _extract_price_any(text: str) -> str:
@@ -456,11 +472,13 @@ async def webhook(secret: str, request: Request):
         await tg_send_message(
             chat_id,
             "Как пользоваться:\n"
-            "• ИИ (чат): пиши текст — отвечу; пришли фото + вопрос — опишу/попробую определить.\n"
+            "• ИИ (чат): пиши текст — отвечу; пришли фото + вопрос — опишу/попробую определить или решу задачу.\n"
             "• Фото/Афиши: нажми «Фото/Афиши», пришли фото товара, затем одним сообщением напиши текст/цену/стиль.\n",
             reply_markup=_main_menu_keyboard(),
         )
-        return {"ok": True}
+        return {"ok": True
+
+        }
 
     # ---------------- Фото (как photo) ----------------
     photos = message.get("photo") or []
@@ -497,15 +515,17 @@ async def webhook(secret: str, request: Request):
             )
             return {"ok": True}
 
-        # CHAT: анализ фото
-        await tg_send_message(chat_id, "Фото получил. Анализирую...", reply_markup=_main_menu_keyboard())
+        # CHAT: если это явный запрос на математику — решаем сразу, без "анализирую"
         try:
             file_path = await tg_get_file_path(file_id)
             img_bytes = await tg_download_file_bytes(file_path)
+        except Exception as e:
+            await tg_send_message(chat_id, f"Ошибка при загрузке фото: {e}", reply_markup=_main_menu_keyboard())
+            return {"ok": True}
 
-            intent = _infer_intent_from_text(text)
-            if intent == "math":
-                prompt = text if text else "Реши задачу с картинки. Дай решение по шагам и строку 'Ответ: ...'."
+        if _is_math_request(text) or _infer_intent_from_text(text) == "math":
+            prompt = text if text else "Реши задачу с картинки. Дай решение по шагам и строку 'Ответ: ...'."
+            try:
                 answer = await openai_chat_answer(
                     user_text=prompt,
                     system_prompt=UNICODE_MATH_SYSTEM_PROMPT,
@@ -513,15 +533,24 @@ async def webhook(secret: str, request: Request):
                     temperature=0.3,
                     max_tokens=900,
                 )
-            else:
-                prompt = text if text else VISION_DEFAULT_USER_PROMPT
-                answer = await openai_chat_answer(
-                    user_text=prompt,
-                    system_prompt=VISION_GENERAL_SYSTEM_PROMPT,
-                    image_bytes=img_bytes,
-                    temperature=0.4,
-                    max_tokens=700,
-                )
+            except Exception as e:
+                await tg_send_message(chat_id, f"Ошибка при обработке фото: {e}", reply_markup=_main_menu_keyboard())
+                return {"ok": True}
+
+            await tg_send_message(chat_id, answer, reply_markup=_main_menu_keyboard())
+            return {"ok": True}
+
+        # Иначе — обычный анализ/идентификация
+        await tg_send_message(chat_id, "Фото получил. Анализирую...", reply_markup=_main_menu_keyboard())
+        try:
+            prompt = text if text else VISION_DEFAULT_USER_PROMPT
+            answer = await openai_chat_answer(
+                user_text=prompt,
+                system_prompt=VISION_GENERAL_SYSTEM_PROMPT,
+                image_bytes=img_bytes,
+                temperature=0.4,
+                max_tokens=700,
+            )
         except Exception as e:
             await tg_send_message(chat_id, f"Ошибка при обработке фото: {e}", reply_markup=_main_menu_keyboard())
             return {"ok": True}
@@ -561,15 +590,17 @@ async def webhook(secret: str, request: Request):
                 )
                 return {"ok": True}
 
-            # CHAT: анализ фото
-            await tg_send_message(chat_id, "Фото получил. Анализирую...", reply_markup=_main_menu_keyboard())
+            # CHAT
             try:
                 file_path = await tg_get_file_path(file_id)
                 img_bytes = await tg_download_file_bytes(file_path)
+            except Exception as e:
+                await tg_send_message(chat_id, f"Ошибка при загрузке фото: {e}", reply_markup=_main_menu_keyboard())
+                return {"ok": True}
 
-                intent = _infer_intent_from_text(text)
-                if intent == "math":
-                    prompt = text if text else "Реши задачу с картинки. Дай решение по шагам и строку 'Ответ: ...'."
+            if _is_math_request(text) or _infer_intent_from_text(text) == "math":
+                prompt = text if text else "Реши задачу с картинки. Дай решение по шагам и строку 'Ответ: ...'."
+                try:
                     answer = await openai_chat_answer(
                         user_text=prompt,
                         system_prompt=UNICODE_MATH_SYSTEM_PROMPT,
@@ -577,15 +608,23 @@ async def webhook(secret: str, request: Request):
                         temperature=0.3,
                         max_tokens=900,
                     )
-                else:
-                    prompt = text if text else VISION_DEFAULT_USER_PROMPT
-                    answer = await openai_chat_answer(
-                        user_text=prompt,
-                        system_prompt=VISION_GENERAL_SYSTEM_PROMPT,
-                        image_bytes=img_bytes,
-                        temperature=0.4,
-                        max_tokens=700,
-                    )
+                except Exception as e:
+                    await tg_send_message(chat_id, f"Ошибка при обработке фото: {e}", reply_markup=_main_menu_keyboard())
+                    return {"ok": True}
+
+                await tg_send_message(chat_id, answer, reply_markup=_main_menu_keyboard())
+                return {"ok": True}
+
+            await tg_send_message(chat_id, "Фото получил. Анализирую...", reply_markup=_main_menu_keyboard())
+            try:
+                prompt = text if text else VISION_DEFAULT_USER_PROMPT
+                answer = await openai_chat_answer(
+                    user_text=prompt,
+                    system_prompt=VISION_GENERAL_SYSTEM_PROMPT,
+                    image_bytes=img_bytes,
+                    temperature=0.4,
+                    max_tokens=700,
+                )
             except Exception as e:
                 await tg_send_message(chat_id, f"Ошибка при обработке фото: {e}", reply_markup=_main_menu_keyboard())
                 return {"ok": True}
