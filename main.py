@@ -3,6 +3,7 @@ import base64
 import time
 import re
 import json
+from io import BytesIO
 from typing import Optional, Literal, Dict, Any, Tuple
 
 import httpx
@@ -70,7 +71,7 @@ def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster"]):
     st["mode"] = mode
     st["ts"] = _now()
     if mode == "poster":
-        # poster-mode теперь "универсальный визуальный режим": афиша ИЛИ просто фото-эдит
+        # Визуальный режим: афиша ИЛИ обычный фото-эдит (после фото)
         st["poster"] = {"step": "need_photo", "photo_bytes": None}
 
 
@@ -165,7 +166,7 @@ VISION_DEFAULT_USER_PROMPT = (
     "Если по фото нельзя уверенно определить — скажи, что нужно для уточнения."
 )
 
-# Новый промпт: выбор режима в «Фото/Афиши» (афиша vs обычная картинка)
+# Роутер: POSTER (афиша) vs PHOTO (обычная картинка без текста)
 VISUAL_ROUTER_SYSTEM_PROMPT = (
     "Ты классификатор. Определи, что хочет пользователь после отправки фото:\n"
     "A) POSTER — рекламная афиша/баннер, нужен текст на изображении (надпись, цена, поступление, акция и т.п.)\n"
@@ -173,29 +174,10 @@ VISUAL_ROUTER_SYSTEM_PROMPT = (
     "Верни строго JSON без текста вокруг:\n"
     "{\"mode\":\"POSTER\"|\"PHOTO\",\"reason\":\"коротко\"}\n\n"
     "Правила:\n"
-    "• Если есть явные слова: 'афиша', 'баннер', 'реклама', 'постер', 'прайс', 'цена', 'надпись', 'поступление', 'акция', 'скидка' → POSTER.\n"
+    "• Если есть явные слова: 'афиша', 'баннер', 'реклама', 'постер', 'цена', 'надпись', 'поступление', 'акция', 'скидка' → POSTER.\n"
     "• Если описывается сцена/сюжет/люди/атмосфера без просьбы текста/цены → PHOTO.\n"
     "• Если пользователь пишет 'без текста', 'без надписей' → PHOTO."
 )
-
-# Новый промпт: фотореалистичный эдит без текста
-def _photo_edit_prompt(user_text: str) -> str:
-    # Здесь делаем максимально явный запрет на любые надписи, чтобы не получался "Успешный мужчина"
-    return (
-        "Сделай фотореалистичный качественный эдит изображения по описанию пользователя.\n\n"
-        "КРИТИЧЕСКОЕ ПРАВИЛО:\n"
-        "• Запрещено добавлять любой текст, буквы, цифры, слоганы, водяные знаки, логотипы, подписи.\n"
-        "• Никаких постерных элементов, никаких плашек, лент, заголовков.\n\n"
-        "СОХРАНЕНИЕ ЛЮДЕЙ/ЛИЦ (если на фото есть люди):\n"
-        "• Не менять личность человека. Максимально сохранить лицо, черты, возраст, кожу.\n"
-        "• Не превращать человека в другого.\n\n"
-        "ОПИСАНИЕ ПОЛЬЗОВАТЕЛЯ:\n"
-        f"{(user_text or '').strip()}\n\n"
-        "СТИЛЬ:\n"
-        "• Реалистично, дорого, киношный свет, естественная анатомия, без артефактов.\n"
-        "• Если нужно 'богато' — показывай богатство через детали окружения (интерьер, одежда, аксессуары), а не через текст.\n"
-        "ФОРМАТ: вертикальный, под сторис, высокое качество.\n"
-    )
 
 
 # ---------------- OpenAI calls ----------------
@@ -265,9 +247,12 @@ async def openai_edit_image(
     source_image_bytes: bytes,
     prompt: str,
     size: str,
+    mask_png_bytes: Optional[bytes] = None,
 ) -> bytes:
     """
-    Универсальный image edit (gpt-image-1). Используем и для афиши, и для обычного фото-эдита.
+    Универсальный image edit (gpt-image-1).
+    IMPORTANT: mask используется ТОЛЬКО для PHOTO-эдита, чтобы фон не перерисовывался.
+    Для афиш mask не передаём.
     """
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY не задан в переменных окружения.")
@@ -275,7 +260,11 @@ async def openai_edit_image(
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
 
     ext, mime = _detect_image_type(source_image_bytes)
+
     files = {"image": (f"source.{ext}", source_image_bytes, mime)}
+    if mask_png_bytes:
+        files["mask"] = ("mask.png", mask_png_bytes, "image/png")
+
     data = {"model": "gpt-image-1", "prompt": prompt, "size": size, "n": "1"}
 
     async with httpx.AsyncClient(timeout=300) as client:
@@ -427,6 +416,126 @@ def _poster_prompt_from_spec(spec: Dict[str, str]) -> str:
     )
 
 
+# ---------------- Visual routing + PHOTO edit prompt + Auto-mask ----------------
+
+def _wants_strict_preserve(text: str) -> bool:
+    t = (text or "").lower()
+    markers = [
+        "остальное без изменения", "остальное без изменений",
+        "ничего не меняй", "ничего не менять",
+        "фон не меняй", "фон не менять",
+        "всё оставь как есть", "оставь как есть",
+        "только добавь", "только добавить",
+        "без изменений",
+    ]
+    return any(m in t for m in markers)
+
+
+def _infer_zone_from_text(text: str) -> str:
+    """
+    Простая эвристика: без участия пользователя.
+    Возвращает: right/left/top/bottom/center
+    """
+    t = (text or "").lower()
+
+    # Русские + частые варианты
+    right_markers = ["справа", "правый", "правее", "вправо", "справа у", "справа возле", "справа около"]
+    left_markers = ["слева", "левый", "левее", "влево", "слева у", "слева возле", "слева около"]
+    top_markers = ["сверху", "вверху", "наверху", "верх", "под потолком"]
+    bottom_markers = ["снизу", "внизу", "низ", "на полу", "внизу кадра"]
+
+    if any(m in t for m in right_markers):
+        return "right"
+    if any(m in t for m in left_markers):
+        return "left"
+    if any(m in t for m in top_markers):
+        return "top"
+    if any(m in t for m in bottom_markers):
+        return "bottom"
+    return "center"
+
+
+def _photo_edit_prompt(user_text: str, strict: bool) -> str:
+    raw = (user_text or "").strip()
+
+    strict_block = ""
+    if strict:
+        strict_block = (
+            "\nСВЕРХ-СТРОГОЕ СОХРАНЕНИЕ ИСХОДНОГО КАДРА:\n"
+            "• Сохрани фон и все детали максимально близко к исходнику.\n"
+            "• НЕЛЬЗЯ менять: стены, пол, мебель, двери, свет, тени, цвета, текстуры, предметы, перспективу.\n"
+            "• НЕЛЬЗЯ делать ретушь/улучшайзинг/шарп/размытие/шумодав/перекраску.\n"
+            "• НЕЛЬЗЯ кадрировать, менять угол камеры, менять экспозицию/баланс белого.\n"
+            "• Единственное изменение — ДОБАВИТЬ новый объект (как указано) и его естественную тень/контакт.\n"
+        )
+
+    return (
+        "Сделай фотореалистичный эдит изображения по описанию пользователя.\n\n"
+        "КРИТИЧЕСКИЕ ПРАВИЛА:\n"
+        "• Запрещено добавлять любой текст, буквы, цифры, слоганы, водяные знаки, логотипы.\n"
+        "• Никаких постерных элементов, плашек, лент, заголовков.\n"
+        f"{strict_block}\n"
+        "Если добавляешь персонажа/предмет:\n"
+        "• Реалистичный масштаб.\n"
+        "• Освещение и тени должны соответствовать сцене.\n"
+        "• Не менять остальную сцену.\n\n"
+        "ОПИСАНИЕ ПОЛЬЗОВАТЕЛЯ:\n"
+        f"{raw}\n\n"
+        "ФОРМАТ: вертикальный, под сторис, высокое качество.\n"
+    )
+
+
+def _build_zone_mask_png(source_image_bytes: bytes, zone: str) -> Optional[bytes]:
+    """
+    Создаёт PNG-маску: белая зона = можно рисовать, чёрное = нельзя трогать.
+    Пользователь ничего не выделяет. Зона выбирается эвристикой.
+    Если Pillow недоступен/ошибка — возвращает None (тогда будет обычный эдит без маски).
+    """
+    try:
+        from PIL import Image, ImageDraw  # type: ignore
+    except Exception:
+        return None
+
+    try:
+        im = Image.open(BytesIO(source_image_bytes)).convert("RGBA")
+        w, h = im.size
+
+        # Маска: по умолчанию всё чёрное (нельзя менять)
+        mask = Image.new("RGBA", (w, h), (0, 0, 0, 255))
+        draw = ImageDraw.Draw(mask)
+
+        # Размеры зон (подобраны как компромисс)
+        # Чем меньше белая область, тем меньше шанс, что фон поплывёт.
+        if zone == "right":
+            x0 = int(w * 0.65)
+            rect = (x0, 0, w, h)
+        elif zone == "left":
+            x1 = int(w * 0.35)
+            rect = (0, 0, x1, h)
+        elif zone == "top":
+            y1 = int(h * 0.35)
+            rect = (0, 0, w, y1)
+        elif zone == "bottom":
+            y0 = int(h * 0.65)
+            rect = (0, y0, w, h)
+        else:
+            # center: центральная “вставочная” область
+            x0 = int(w * 0.30)
+            x1 = int(w * 0.70)
+            y0 = int(h * 0.25)
+            y1 = int(h * 0.85)
+            rect = (x0, y0, x1, y1)
+
+        # Белая зона = разрешено редактировать
+        draw.rectangle(rect, fill=(255, 255, 255, 255))
+
+        buf = BytesIO()
+        mask.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
 async def openai_route_visual_mode(user_text: str) -> Tuple[str, str]:
     """
     Возвращает ("POSTER"|"PHOTO", reason)
@@ -470,7 +579,6 @@ async def openai_route_visual_mode(user_text: str) -> Tuple[str, str]:
             mode = "PHOTO"  # безопаснее: не навязывать афишу
         return (mode, reason or "model_router")
     except Exception:
-        # если модель вернула не JSON — лучше не делать афишу по умолчанию
         return ("PHOTO", "router_parse_fail")
 
 
@@ -557,7 +665,8 @@ async def webhook(secret: str, request: Request):
             "• ИИ (чат): фото + подпись 'реши задачу' — решу.\n"
             "• Фото/Афиши: фото → потом текст.\n"
             "  — если просишь надпись/цену/афишу → сделаю афишу\n"
-            "  — если описываешь сцену / пишешь 'без текста' → сделаю обычный фото-эдит\n",
+            "  — если описываешь сцену / пишешь 'без текста' → сделаю обычный фото-эдит\n"
+            "  — в обычном фото-эдите бот автоматически ограничивает правку маской, чтобы фон не менялся\n",
             reply_markup=_main_menu_keyboard(),
         )
         return {"ok": True}
@@ -591,7 +700,7 @@ async def webhook(secret: str, request: Request):
             )
             return {"ok": True}
 
-        # CHAT mode: ✅ берём подпись из incoming_text
+        # CHAT mode
         if _is_math_request(incoming_text) or _infer_intent_from_text(incoming_text) == "math":
             prompt = incoming_text if incoming_text else "Реши задачу с картинки. Дай решение по шагам и строку 'Ответ: ...'."
             answer = await openai_chat_answer(
@@ -667,7 +776,7 @@ async def webhook(secret: str, request: Request):
 
     # ---------------- Текст без фото ----------------
     if incoming_text:
-        # POSTER mode: после фото -> роутинг POSTER/PHOTO
+        # VISUAL mode (poster): после фото -> роутинг POSTER/PHOTO
         if st.get("mode") == "poster":
             poster = st.get("poster") or {}
             step: PosterStep = poster.get("step") or "need_photo"
@@ -678,23 +787,33 @@ async def webhook(secret: str, request: Request):
                 return {"ok": True}
 
             if step == "need_prompt":
-                mode, reason = await openai_route_visual_mode(incoming_text)
+                mode, _reason = await openai_route_visual_mode(incoming_text)
 
                 if mode == "POSTER":
+                    # ВАЖНО: афиши не трогаем маской вообще
                     await tg_send_message(chat_id, "Делаю афишу на основе твоего фото...")
                     try:
                         spec = await openai_extract_poster_spec(incoming_text)
                         prompt = _poster_prompt_from_spec(spec)
-                        out_bytes = await openai_edit_image(photo_bytes, prompt, IMG_SIZE_DEFAULT)
+                        out_bytes = await openai_edit_image(photo_bytes, prompt, IMG_SIZE_DEFAULT, mask_png_bytes=None)
                         await tg_send_photo_bytes(chat_id, out_bytes, caption="Готово (афиша).")
                     except Exception as e:
                         await tg_send_message(chat_id, f"Не получилось сгенерировать афишу: {e}")
 
                 else:
-                    await tg_send_message(chat_id, "Делаю обычный фото-эдит (без текста)...")
+                    # PHOTO: авто-маска по зоне, чтобы фон не перерисовывался
+                    strict = _wants_strict_preserve(incoming_text)
+                    zone = _infer_zone_from_text(incoming_text)
+                    mask_png = _build_zone_mask_png(photo_bytes, zone)  # может быть None (fallback)
+                    prompt = _photo_edit_prompt(incoming_text, strict=strict)
+
+                    await tg_send_message(
+                        chat_id,
+                        f"Делаю обычный фото-эдит (без текста). Зона: {zone}. "
+                        + ("Фон максимально сохраняю..." if strict else "...")
+                    )
                     try:
-                        prompt = _photo_edit_prompt(incoming_text)
-                        out_bytes = await openai_edit_image(photo_bytes, prompt, IMG_SIZE_DEFAULT)
+                        out_bytes = await openai_edit_image(photo_bytes, prompt, IMG_SIZE_DEFAULT, mask_png_bytes=mask_png)
                         await tg_send_photo_bytes(chat_id, out_bytes, caption="Готово (без текста).")
                     except Exception as e:
                         await tg_send_message(chat_id, f"Не получилось сгенерировать картинку: {e}")
