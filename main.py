@@ -166,17 +166,18 @@ VISION_DEFAULT_USER_PROMPT = (
     "Если по фото нельзя уверенно определить — скажи, что нужно для уточнения."
 )
 
-# Роутер: POSTER (афиша) vs PHOTO (обычная картинка без текста)
 VISUAL_ROUTER_SYSTEM_PROMPT = (
-    "Ты классификатор. Определи, что хочет пользователь после отправки фото:\n"
-    "A) POSTER — рекламная афиша/баннер, нужен текст на изображении (надпись, цена, поступление, акция и т.п.)\n"
-    "B) PHOTO — обычная картинка/сцена/фото-эдит без любых надписей и слоганов.\n\n"
-    "Верни строго JSON без текста вокруг:\n"
+    "Ты классификатор запросов для режима «Фото/Афиши». Твоя задача — определить, чего хочет пользователь после отправки фото:\n\n"
+    "POSTER — рекламная афиша/баннер: нужен текст на изображении (надпись, цена, поступление, акция, скидка и т.п.)\n"
+    "PHOTO — обычная картинка/сцена/фото-эдит: НИКАКИХ надписей, никаких цен, никаких слоганов.\n\n"
+    "Верни СТРОГО JSON без текста вокруг:\n"
     "{\"mode\":\"POSTER\"|\"PHOTO\",\"reason\":\"коротко\"}\n\n"
     "Правила:\n"
-    "• Если есть явные слова: 'афиша', 'баннер', 'реклама', 'постер', 'цена', 'надпись', 'поступление', 'акция', 'скидка' → POSTER.\n"
-    "• Если описывается сцена/сюжет/люди/атмосфера без просьбы текста/цены → PHOTO.\n"
-    "• Если пользователь пишет 'без текста', 'без надписей' → PHOTO."
+    "- Если есть слова/смысл: «афиша», «баннер», «реклама», «постер», «надпись», «напиши», «добавь текст», "
+    "«цена», «₽», «руб», «поступление», «акция», «скидка», «прайс», «для магазина», «промо» → POSTER.\n"
+    "- Если пользователь описывает сцену/сюжет/атмосферу/людей/добавить персонажа/предмет и НЕ просит текст/цену → PHOTO.\n"
+    "- Если пользователь явно пишет: «без текста», «без надписей», «без букв», «просто картинка», «обычная картинка» → PHOTO.\n"
+    "- Если сомневаешься — выбирай PHOTO (не навязывай афишу).\n"
 )
 
 
@@ -251,7 +252,7 @@ async def openai_edit_image(
 ) -> bytes:
     """
     Универсальный image edit (gpt-image-1).
-    IMPORTANT: mask используется ТОЛЬКО для PHOTO-эдита, чтобы фон не перерисовывался.
+    mask используется ТОЛЬКО для PHOTO-эдита (чтобы фон не перерисовывался).
     Для афиш mask не передаём.
     """
     if not OPENAI_API_KEY:
@@ -375,7 +376,11 @@ async def openai_extract_poster_spec(user_text: str) -> Dict[str, str]:
         return {"headline": "", "style": raw, "price": price}
 
 
-def _poster_prompt_from_spec(spec: Dict[str, str]) -> str:
+def _poster_prompt_from_spec(spec: Dict[str, str], extra_strict: bool = False) -> str:
+    """
+    Афиша с премиум-типографикой и строгим запретом самодеятельных фраз.
+    extra_strict=True используется для второй попытки, если модель добавила лишние фразы.
+    """
     headline = (spec.get("headline") or "").strip()
     style = (spec.get("style") or "").strip()
     price = (spec.get("price") or "").strip()
@@ -384,39 +389,81 @@ def _poster_prompt_from_spec(spec: Dict[str, str]) -> str:
         headline = " "
 
     if price:
-        price_rule = f"Цена разрешена пользователем: {price}. Добавь цену ОДИН раз, крупно, без изменения цифр."
         digits_rule = "Цифры разрешены ТОЛЬКО в цене и только как указано пользователем."
+        price_rule = f"Цена разрешена пользователем: {price}. Добавь цену ОДИН раз, крупно, без изменения цифр."
     else:
-        price_rule = "Пользователь НЕ указал цену. Запрещено добавлять любые цены, валюту и любые цифры."
         digits_rule = "Запрещено добавлять любые цифры."
+        price_rule = "Пользователь НЕ указал цену. Запрещено добавлять любые цены, валюту и любые цифры."
+
+    strict_add = ""
+    if extra_strict:
+        strict_add = (
+            "\nДОПОЛНИТЕЛЬНОЕ СТРОГОЕ ПРАВИЛО:\n"
+            "Если есть соблазн добавить любой слоган/фразу/подзаголовок — НЕ добавляй. Оставь место пустым.\n"
+            "Запрещены любые дополнительные крупные надписи вне HEADLINE и PRICE.\n"
+        )
 
     return (
-        "Сделай профессиональную рекламную афишу / промо-баннер на основе предоставленного фото.\n\n"
-        "ТОВАР должен остаться максимально реалистичным и узнаваемым: НЕ менять бренд, упаковку, форму, цвета, логотипы.\n\n"
-        "ТЕКСТ НА АФИШЕ (СТРОГОЕ ПРАВИЛО):\n"
-        "• Печатай ТОЛЬКО headline (и цену, если разрешена).\n"
-        "• Запрещено добавлять слова от себя: 'АКЦИЯ', 'СКИДКА', 'ХИТ', 'НОВИНКА' и любые другие.\n"
-        f"• {digits_rule}\n"
-        f"• {price_rule}\n"
-        "• НЕ печатай фразы-инструкции и стиль (например: 'сделай красиво', 'в стиле эко').\n"
-        "• НЕ меняй написание букв в headline.\n\n"
-        "ТИПОГРАФИКА (КАК В ДОРОГИХ ПРОМО-АФИШАХ):\n"
-        "• Заголовок: крупный, жирный, рекламный.\n"
-        "• Псевдо-3D/эмбосс (легкий), без искажений букв.\n"
-        "• Контрастная обводка + мягкая тень, лёгкое свечение аккуратно.\n"
-        "• Можно ленту/плашку.\n"
-        "• НЕ делай плоский обычный шрифт.\n\n"
-        "РАЗМЕСТИ ТЕКСТ:\n"
-        f"HEADLINE (печатать): {headline}\n"
-        + (f"PRICE (печатать): {price}\n" if price else "PRICE: (не печатать)\n")
+        "Сделай профессиональную рекламную афишу/промо-баннер на основе предоставленного фото.\n\n"
+        "СОХРАНЕНИЕ ТОВАРА:\n"
+        "• Товар/упаковка должны остаться максимально реалистичными и узнаваемыми.\n"
+        "• Запрещено менять бренд, упаковку, форму, цвета, логотипы, название, вкусы.\n"
+        "• Разрешено: улучшить композицию, свет, фон, добавить атмосферные элементы/декор по стилю (НЕ текстом).\n\n"
+        "ТЕКСТ НА АФИШЕ — СТРОЖАЙШЕЕ ПРАВИЛО:\n"
+        "1) Печатай ТОЛЬКО:\n"
+        "   • HEADLINE (ровно как указано)\n"
+        "   • PRICE (только если цена разрешена)\n"
+        "2) Запрещено добавлять любые другие слова/фразы/слоганы от себя.\n"
+        "   НЕЛЬЗЯ: «АКЦИЯ», «СКИДКА», «ХИТ», «НОВИНКА», «ЛУЧШАЯ ЦЕНА», «МАКСИМУМ ВКУСА» и любые другие.\n"
+        f"3) {digits_rule}\n"
+        f"4) {price_rule}\n"
+        "5) НЕ печатай стиль/инструкции (например: «сделай красиво», «в стиле эко»).\n"
+        "6) Не искажай написание букв в HEADLINE.\n"
+        f"{strict_add}\n"
+        "ПРЕМИУМ-ТИПОГРАФИКА (как в дорогих брендовых постерах):\n"
+        "• Иерархия: Headline — главный, Price — второй.\n"
+        "• Headline: выразительный рекламный шрифт, жирный, объёмный (лёгкий 3D/эмбосс), аккуратная тень, чистая обводка.\n"
+        "• Кернинг: ровно, без «пляшущих» букв, без кривых деформаций.\n"
+        "• Price: крупная цена на отдельной премиальной плашке/бейдже (можно стеклянный/глянцевый бейдж), без слов типа «цена».\n"
+        "• Визуально «дорого»: чистые материалы, мягкие градиенты, аккуратное свечение, без кислотности.\n"
+        "• Никакого плоского «обычного» текста.\n\n"
+        "КОМПОЗИЦИЯ:\n"
+        "• Товар — главный объект.\n"
+        "• Добавь визуальные элементы вкуса/атмосферы по стилю (фрукты, сок, брызги, лёд и т.п.), но без перегруза.\n\n"
+        "РАЗМЕЩЕНИЕ ТЕКСТА (печатать строго):\n"
+        f"HEADLINE: {headline}\n"
+        + (f"PRICE: {price}\n" if price else "PRICE: (не печатать)\n")
         + "\n"
-        "СТИЛЬ/АТМОСФЕРА (НЕ ПЕЧАТАТЬ КАК ТЕКСТ, ТОЛЬКО ДЛЯ ОФОРМЛЕНИЯ):\n"
-        f"{style if style else 'Сделай визуально красиво, современно, чисто, без перегруза.'}\n\n"
+        "СТИЛЬ/АТМОСФЕРА (НЕ ПЕЧАТАТЬ КАК ТЕКСТ, только оформление):\n"
+        f"{style if style else 'Премиум, чисто, современно, без перегруза.'}\n\n"
         "ФОРМАТ: вертикальный, под сторис, высокое качество.\n"
     )
 
 
-# ---------------- Visual routing + PHOTO edit prompt + Auto-mask ----------------
+# ---------------- Visual routing + PHOTO edit prompt + Auto-mask + moderation ----------------
+
+def _sanitize_ip_terms_for_image(text: str) -> str:
+    """
+    Убираем/заменяем IP-имена персонажей/брендов, которые часто ловят блок.
+    """
+    t = (text or "")
+
+    replacements = {
+        r"\bбэтмен\b": "человек в темном костюме супергероя в маске (без логотипов и узнаваемых знаков)",
+        r"\bбатмен\b": "человек в темном костюме супергероя в маске (без логотипов и узнаваемых знаков)",
+        r"\bbatman\b": "a masked vigilante in a dark suit (no logos, no recognizable symbols)",
+    }
+
+    for pattern, repl in replacements.items():
+        t = re.sub(pattern, repl, t, flags=re.IGNORECASE)
+
+    return t
+
+
+def _is_moderation_blocked_error(err: Exception) -> bool:
+    msg = str(err).lower()
+    return ("moderation_blocked" in msg) or ("safety system" in msg) or ("image_generation_user_error" in msg)
+
 
 def _wants_strict_preserve(text: str) -> bool:
     t = (text or "").lower()
@@ -438,7 +485,6 @@ def _infer_zone_from_text(text: str) -> str:
     """
     t = (text or "").lower()
 
-    # Русские + частые варианты
     right_markers = ["справа", "правый", "правее", "вправо", "справа у", "справа возле", "справа около"]
     left_markers = ["слева", "левый", "левее", "влево", "слева у", "слева возле", "слева около"]
     top_markers = ["сверху", "вверху", "наверху", "верх", "под потолком"]
@@ -466,14 +512,15 @@ def _photo_edit_prompt(user_text: str, strict: bool) -> str:
             "• НЕЛЬЗЯ менять: стены, пол, мебель, двери, свет, тени, цвета, текстуры, предметы, перспективу.\n"
             "• НЕЛЬЗЯ делать ретушь/улучшайзинг/шарп/размытие/шумодав/перекраску.\n"
             "• НЕЛЬЗЯ кадрировать, менять угол камеры, менять экспозицию/баланс белого.\n"
-            "• Единственное изменение — ДОБАВИТЬ новый объект (как указано) и его естественную тень/контакт.\n"
+            "• Единственное изменение — ДОБАВИТЬ новый объект/персонажа и его естественную тень/контакт.\n"
         )
 
     return (
         "Сделай фотореалистичный эдит изображения по описанию пользователя.\n\n"
         "КРИТИЧЕСКИЕ ПРАВИЛА:\n"
-        "• Запрещено добавлять любой текст, буквы, цифры, слоганы, водяные знаки, логотипы.\n"
-        "• Никаких постерных элементов, плашек, лент, заголовков.\n"
+        "• Запрещено добавлять любой текст: буквы, цифры, цены, слоганы, подписи, водяные знаки, логотипы.\n"
+        "• Никаких постерных элементов: плашек, лент, заголовков, типографики, рекламных рамок.\n"
+        "• Если на фото есть люди — не меняй личность/лицо/возраст/черты/кожу/пропорции.\n"
         f"{strict_block}\n"
         "Если добавляешь персонажа/предмет:\n"
         "• Реалистичный масштаб.\n"
@@ -489,7 +536,7 @@ def _build_zone_mask_png(source_image_bytes: bytes, zone: str) -> Optional[bytes
     """
     Создаёт PNG-маску: белая зона = можно рисовать, чёрное = нельзя трогать.
     Пользователь ничего не выделяет. Зона выбирается эвристикой.
-    Если Pillow недоступен/ошибка — возвращает None (тогда будет обычный эдит без маски).
+    Если Pillow недоступен/ошибка — возвращает None (fallback на обычный эдит без маски).
     """
     try:
         from PIL import Image, ImageDraw  # type: ignore
@@ -500,12 +547,9 @@ def _build_zone_mask_png(source_image_bytes: bytes, zone: str) -> Optional[bytes
         im = Image.open(BytesIO(source_image_bytes)).convert("RGBA")
         w, h = im.size
 
-        # Маска: по умолчанию всё чёрное (нельзя менять)
         mask = Image.new("RGBA", (w, h), (0, 0, 0, 255))
         draw = ImageDraw.Draw(mask)
 
-        # Размеры зон (подобраны как компромисс)
-        # Чем меньше белая область, тем меньше шанс, что фон поплывёт.
         if zone == "right":
             x0 = int(w * 0.65)
             rect = (x0, 0, w, h)
@@ -519,14 +563,12 @@ def _build_zone_mask_png(source_image_bytes: bytes, zone: str) -> Optional[bytes
             y0 = int(h * 0.65)
             rect = (0, y0, w, h)
         else:
-            # center: центральная “вставочная” область
             x0 = int(w * 0.30)
             x1 = int(w * 0.70)
             y0 = int(h * 0.25)
             y1 = int(h * 0.85)
             rect = (x0, y0, x1, y1)
 
-        # Белая зона = разрешено редактировать
         draw.rectangle(rect, fill=(255, 255, 255, 255))
 
         buf = BytesIO()
@@ -544,7 +586,7 @@ async def openai_route_visual_mode(user_text: str) -> Tuple[str, str]:
     if not raw:
         return ("POSTER", "empty_text_default_poster")
 
-    # Быстрый хард-роутинг без вызова модели (для скорости и стабильности)
+    # Быстрый хард-роутинг без вызова модели
     t = raw.lower()
     poster_markers = [
         "афиша", "баннер", "реклама", "реклам", "постер",
@@ -563,7 +605,7 @@ async def openai_route_visual_mode(user_text: str) -> Tuple[str, str]:
     if any(m in t for m in poster_markers):
         return ("POSTER", "poster_markers")
 
-    # Если нет явных маркеров — спросим модель классификатором
+    # Если нет явных маркеров — спросим классификатором
     out = await openai_chat_answer(
         user_text=raw,
         system_prompt=VISUAL_ROUTER_SYSTEM_PROMPT,
@@ -580,6 +622,48 @@ async def openai_route_visual_mode(user_text: str) -> Tuple[str, str]:
         return (mode, reason or "model_router")
     except Exception:
         return ("PHOTO", "router_parse_fail")
+
+
+async def openai_check_poster_overlay_text(
+    image_bytes: bytes,
+    headline: str,
+    price: str,
+) -> Dict[str, Any]:
+    """
+    Проверка: не добавила ли модель лишние крупные рекламные фразы (вроде "максимум вкуса", "акция", "хит"),
+    и не напечатала ли неверные цифры/цену.
+    ВАЖНО: игнорируем текст на упаковке товара (бренд/вкус), проверяем только "добавленный" крупный оверлей/заголовки.
+    """
+    sys = (
+        "Ты проверяешь рекламную афишу.\n"
+        "Тебе нужно проверить ТОЛЬКО добавленный крупный текст-оверлей (заголовки/плашки/бейджи), "
+        "а НЕ текст, который напечатан на упаковке товара.\n\n"
+        "Разрешённый оверлей-текст:\n"
+        f"• HEADLINE: {headline}\n"
+        + (f"• PRICE: {price}\n" if price else "• PRICE: (отсутствует)\n")
+        + "\n"
+        "Запрещено:\n"
+        "• Любые другие слова/фразы/слоганы (например: АКЦИЯ, СКИДКА, ХИТ, НОВИНКА, МАКСИМУМ ВКУСА и т.п.).\n"
+        "• Любые дополнительные цифры/цены/₽ кроме разрешённой цены.\n\n"
+        "Верни строго JSON:\n"
+        "{\"ok\":true|false,\"extra_text\":\"...\",\"notes\":\"...\"}\n"
+    )
+    out = await openai_chat_answer(
+        user_text="Проверь оверлей-текст на афише по правилам и верни JSON.",
+        system_prompt=sys,
+        image_bytes=image_bytes,
+        temperature=0.0,
+        max_tokens=220,
+    )
+    try:
+        data = json.loads(out)
+        ok = bool(data.get("ok", False))
+        extra_text = str(data.get("extra_text", "")).strip()
+        notes = str(data.get("notes", "")).strip()
+        return {"ok": ok, "extra_text": extra_text, "notes": notes}
+    except Exception:
+        # если не распарсили — не блокируем, просто считаем ok=true
+        return {"ok": True, "extra_text": "", "notes": "parse_fail"}
 
 
 # ---------------- Webhook handler ----------------
@@ -687,7 +771,7 @@ async def webhook(secret: str, request: Request):
             await tg_send_message(chat_id, f"Ошибка при загрузке фото: {e}", reply_markup=_main_menu_keyboard())
             return {"ok": True}
 
-        # POSTER mode
+        # VISUAL mode
         if st.get("mode") == "poster":
             st["poster"] = {"step": "need_prompt", "photo_bytes": img_bytes}
             st["ts"] = _now()
@@ -776,7 +860,7 @@ async def webhook(secret: str, request: Request):
 
     # ---------------- Текст без фото ----------------
     if incoming_text:
-        # VISUAL mode (poster): после фото -> роутинг POSTER/PHOTO
+        # VISUAL flow (poster mode): после фото -> роутинг POSTER/PHOTO
         if st.get("mode") == "poster":
             poster = st.get("poster") or {}
             step: PosterStep = poster.get("step") or "need_photo"
@@ -790,22 +874,35 @@ async def webhook(secret: str, request: Request):
                 mode, _reason = await openai_route_visual_mode(incoming_text)
 
                 if mode == "POSTER":
-                    # ВАЖНО: афиши не трогаем маской вообще
                     await tg_send_message(chat_id, "Делаю афишу на основе твоего фото...")
                     try:
                         spec = await openai_extract_poster_spec(incoming_text)
-                        prompt = _poster_prompt_from_spec(spec)
-                        out_bytes = await openai_edit_image(photo_bytes, prompt, IMG_SIZE_DEFAULT, mask_png_bytes=None)
+                        prompt1 = _poster_prompt_from_spec(spec, extra_strict=False)
+                        out_bytes = await openai_edit_image(photo_bytes, prompt1, IMG_SIZE_DEFAULT, mask_png_bytes=None)
+
+                        # Проверка на лишний оверлей-текст (одна попытка рефайна)
+                        check = await openai_check_poster_overlay_text(
+                            image_bytes=out_bytes,
+                            headline=(spec.get("headline") or "").strip(),
+                            price=(spec.get("price") or "").strip(),
+                        )
+                        if not bool(check.get("ok", True)):
+                            # Вторая попытка: супер-строгий промпт
+                            prompt2 = _poster_prompt_from_spec(spec, extra_strict=True)
+                            out_bytes = await openai_edit_image(photo_bytes, prompt2, IMG_SIZE_DEFAULT, mask_png_bytes=None)
+
                         await tg_send_photo_bytes(chat_id, out_bytes, caption="Готово (афиша).")
                     except Exception as e:
                         await tg_send_message(chat_id, f"Не получилось сгенерировать афишу: {e}")
 
                 else:
-                    # PHOTO: авто-маска по зоне, чтобы фон не перерисовывался
-                    strict = _wants_strict_preserve(incoming_text)
-                    zone = _infer_zone_from_text(incoming_text)
+                    # PHOTO: авто-маска по зоне + санитизация IP-слов
+                    safe_text = _sanitize_ip_terms_for_image(incoming_text)
+
+                    strict = _wants_strict_preserve(safe_text)
+                    zone = _infer_zone_from_text(safe_text)
                     mask_png = _build_zone_mask_png(photo_bytes, zone)  # может быть None (fallback)
-                    prompt = _photo_edit_prompt(incoming_text, strict=strict)
+                    prompt = _photo_edit_prompt(safe_text, strict=strict)
 
                     await tg_send_message(
                         chat_id,
@@ -816,7 +913,15 @@ async def webhook(secret: str, request: Request):
                         out_bytes = await openai_edit_image(photo_bytes, prompt, IMG_SIZE_DEFAULT, mask_png_bytes=mask_png)
                         await tg_send_photo_bytes(chat_id, out_bytes, caption="Готово (без текста).")
                     except Exception as e:
-                        await tg_send_message(chat_id, f"Не получилось сгенерировать картинку: {e}")
+                        if _is_moderation_blocked_error(e):
+                            await tg_send_message(
+                                chat_id,
+                                "Запрос отклонён модерацией (часто из-за упоминания известных персонажей/брендов).\n"
+                                "Попробуй без имени, например:\n"
+                                "«Добавь человека в тёмном костюме в маске, без логотипов, фон не менять.»"
+                            )
+                        else:
+                            await tg_send_message(chat_id, f"Не получилось сгенерировать картинку: {e}")
 
                 # reset
                 st["poster"] = {"step": "need_photo", "photo_bytes": None}
