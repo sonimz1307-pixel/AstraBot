@@ -23,7 +23,6 @@ STATE_TTL_SECONDS = int(os.getenv("STATE_TTL_SECONDS", "1800"))  # 30 минут
 STATE: Dict[Tuple[int, int], Dict[str, Any]] = {}
 
 PosterStep = Literal["need_photo", "need_prompt"]
-PhotoshootStep = Literal["need_photo", "need_prompt"]
 
 # Anti-duplicate (idempotency)
 PROCESSED_TTL_SECONDS = int(os.getenv("PROCESSED_TTL_SECONDS", "1800"))  # 30 минут
@@ -62,32 +61,18 @@ def _get_user_key(chat_id: int, user_id: int) -> Tuple[int, int]:
 def _ensure_state(chat_id: int, user_id: int) -> Dict[str, Any]:
     key = _get_user_key(chat_id, user_id)
     if key not in STATE:
-        STATE[key] = {
-            "mode": "chat",
-            "ts": _now(),
-            "poster": {},
-            "photoshoot": {},
-        }
-    # если старое состояние без новых ключей
-    if "poster" not in STATE[key]:
-        STATE[key]["poster"] = {}
-    if "photoshoot" not in STATE[key]:
-        STATE[key]["photoshoot"] = {}
+        STATE[key] = {"mode": "chat", "ts": _now(), "poster": {}}
     STATE[key]["ts"] = _now()
     return STATE[key]
 
 
-def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photoshoot"]):
+def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster"]):
     st = _ensure_state(chat_id, user_id)
     st["mode"] = mode
     st["ts"] = _now()
-
     if mode == "poster":
         # Визуальный режим: афиша ИЛИ обычный фото-эдит (после фото)
         st["poster"] = {"step": "need_photo", "photo_bytes": None}
-    if mode == "photoshoot":
-        # Нейро фотосессия: максимально сохранить личность, фон по умолчанию НЕ менять
-        st["photoshoot"] = {"step": "need_photo", "photo_bytes": None}
 
 
 # ---------------- Reply keyboard ----------------
@@ -96,7 +81,6 @@ def _main_menu_keyboard() -> dict:
     return {
         "keyboard": [
             [{"text": "ИИ (чат)"}, {"text": "Фото/Афиши"}],
-            [{"text": "Нейро фотосессия"}],
             [{"text": "Помощь"}],
         ],
         "resize_keyboard": True,
@@ -494,27 +478,6 @@ def _wants_strict_preserve(text: str) -> bool:
     return any(m in t for m in markers)
 
 
-def _wants_change_background(text: str) -> bool:
-    """
-    Для режима 'Нейро фотосессия' (вариант B):
-    фон меняем ТОЛЬКО если пользователь явно попросил.
-    """
-    t = (text or "").lower()
-
-    explicit_markers = [
-        "фон поменяй", "поменяй фон", "измени фон", "сменить фон", "замени фон",
-        "другой фон", "на другом фоне", "сделай фон", "фон сделай",
-        "на фоне", "на заднем плане", "задний план",
-        "в студии", "фотостудия", "студийная съемка", "студийная съёмка",
-        "на улице", "в городе", "в центре города", "на пляже", "в горах", "в лесу",
-        "в кафе", "в ресторане", "в офисе", "в спортзале", "в квартире",
-        "ночной город", "неон", "париж", "дубай", "нью-йорк", "астрахань",
-    ]
-
-    # Просьба про фон/локацию считается явной
-    return any(m in t for m in explicit_markers)
-
-
 def _infer_zone_from_text(text: str) -> str:
     """
     Простая эвристика: без участия пользователя.
@@ -564,52 +527,6 @@ def _photo_edit_prompt(user_text: str, strict: bool) -> str:
         "• Освещение и тени должны соответствовать сцене.\n"
         "• Не менять остальную сцену.\n\n"
         "ОПИСАНИЕ ПОЛЬЗОВАТЕЛЯ:\n"
-        f"{raw}\n\n"
-        "ФОРМАТ: вертикальный, под сторис, высокое качество.\n"
-    )
-
-
-def _photoshoot_prompt(user_text: str, allow_background_change: bool) -> str:
-    """
-    Нейро-фотосессия: сохранить человека 1в1. Текст/цифры запрещены.
-    allow_background_change=False: фон оставить как есть (и обычно будет mask по центру).
-    allow_background_change=True: фон можно менять, но всё равно нельзя менять личность.
-    """
-    raw = (user_text or "").strip()
-
-    bg_rule = ""
-    if not allow_background_change:
-        bg_rule = (
-            "ФОН: не менять. Сохрани фон, интерьер/улицу, освещение сцены, перспективу и все детали как в исходнике.\n"
-            "Менять можно ТОЛЬКО внешний вид человека (одежда/аксессуары/причёска/макияж) и позу/выражение в разумных пределах.\n"
-        )
-    else:
-        bg_rule = (
-            "ФОН: пользователь явно попросил сменить фон/локацию — можно изменить фон под запрос.\n"
-            "Но человек должен остаться тем же: лицо 1в1, возраст, пол, телосложение, черты.\n"
-        )
-
-    return (
-        "Сделай фотореалистичную «нейро фотосессию» на основе исходного фото.\n\n"
-        "КРИТИЧЕСКИ ВАЖНО — СОХРАНЕНИЕ ЧЕЛОВЕКА 1в1:\n"
-        "• Если на фото есть человек/люди: СТРОГО сохранить личность. Лицо, черты, возраст, пол, цвет кожи, пропорции — НЕ менять.\n"
-        "• Нельзя «улучшать» лицо, делать другое лицо, менять форму носа/губ/глаз, менять мимику до неузнаваемости.\n"
-        "• Нельзя менять тело/телосложение радикально.\n"
-        "• Нельзя превращать фото в рисунок/мульт/иллюстрацию — только фотореализм.\n\n"
-        "ЗАПРЕТ НА ТЕКСТ:\n"
-        "• Запрещено добавлять любые буквы/цифры/слова/водяные знаки/логотипы.\n\n"
-        f"{bg_rule}\n"
-        "РАЗРЕШЕНО МЕНЯТЬ (как в фотосессии):\n"
-        "• Одежду (стиль, цвет, бренд-нейтрально),\n"
-        "• Аксессуары (очки, серьги, часы, цепочки и т.п.),\n"
-        "• Причёску/укладку/цвет волос (если пользователь просит),\n"
-        "• Макияж (деликатно),\n"
-        "• Поза/жест/выражение (умеренно),\n"
-        "• Свет (студийный/мягкий), но без изменения личности.\n\n"
-        "СТИЛЬ:\n"
-        "• Выглядит как профессиональная фотосессия: чистый свет, аккуратные тени, высокая детализация.\n"
-        "• Никаких артефактов, лишних конечностей, «пластика», потёков.\n\n"
-        "ЗАПРОС ПОЛЬЗОВАТЕЛЯ (одежда/аксессуары/причёска/стиль):\n"
         f"{raw}\n\n"
         "ФОРМАТ: вертикальный, под сторис, высокое качество.\n"
     )
@@ -803,8 +720,7 @@ async def webhook(secret: str, request: Request):
             "Привет!\n"
             "Режимы:\n"
             "• «ИИ (чат)» — вопросы/анализ фото/решение задач.\n"
-            "• «Фото/Афиши» — делаю афишу ИЛИ обычный фото-эдит (по твоему тексту).\n"
-            "• «Нейро фотосессия» — фотосессии по твоему описанию, с максимальным сохранением личности.\n",
+            "• «Фото/Афиши» — делаю афишу ИЛИ обычный фото-эдит (по твоему тексту).\n",
             reply_markup=_main_menu_keyboard(),
         )
         return {"ok": True}
@@ -827,22 +743,6 @@ async def webhook(secret: str, request: Request):
         )
         return {"ok": True}
 
-    if incoming_text == "Нейро фотосессия":
-        _set_mode(chat_id, user_id, "photoshoot")
-        await tg_send_message(
-            chat_id,
-            "Режим «Нейро фотосессия».\n"
-            "1) Пришли фото.\n"
-            "2) Потом одним сообщением опиши желаемый образ:\n"
-            "   • одежда/стиль\n"
-            "   • аксессуары\n"
-            "   • причёска/макияж\n"
-            "   • (опционально) локация/фон — фон меняю ТОЛЬКО если ты явно попросишь.\n"
-            "Важно: я стараюсь сохранить человека 1в1.\n",
-            reply_markup=_main_menu_keyboard(),
-        )
-        return {"ok": True}
-
     if incoming_text == "Помощь":
         await tg_send_message(
             chat_id,
@@ -850,9 +750,7 @@ async def webhook(secret: str, request: Request):
             "• Фото/Афиши: фото → потом текст.\n"
             "  — если просишь надпись/цену/афишу → сделаю афишу\n"
             "  — если описываешь сцену / пишешь 'без текста' → сделаю обычный фото-эдит\n"
-            "  — в обычном фото-эдите бот автоматически ограничивает правку маской, чтобы фон не менялся\n"
-            "• Нейро фотосессия: фото → потом описание образа (одежда/аксессуары/причёска).\n"
-            "  — фон меняю только если явно попросишь (например: 'в студии', 'на пляже', 'фон поменяй').\n",
+            "  — в обычном фото-эдите бот автоматически ограничивает правку маской, чтобы фон не менялся\n",
             reply_markup=_main_menu_keyboard(),
         )
         return {"ok": True}
@@ -873,7 +771,7 @@ async def webhook(secret: str, request: Request):
             await tg_send_message(chat_id, f"Ошибка при загрузке фото: {e}", reply_markup=_main_menu_keyboard())
             return {"ok": True}
 
-        # VISUAL mode: poster
+        # VISUAL mode
         if st.get("mode") == "poster":
             st["poster"] = {"step": "need_prompt", "photo_bytes": img_bytes}
             st["ts"] = _now()
@@ -882,21 +780,6 @@ async def webhook(secret: str, request: Request):
                 "Фото получил. Теперь одним сообщением напиши:\n"
                 "• для афиши: надпись/цена/стиль (или слово 'афиша')\n"
                 "• для обычной картинки: опиши сцену (или 'без текста').",
-                reply_markup=_main_menu_keyboard()
-            )
-            return {"ok": True}
-
-        # VISUAL mode: photoshoot
-        if st.get("mode") == "photoshoot":
-            st["photoshoot"] = {"step": "need_prompt", "photo_bytes": img_bytes}
-            st["ts"] = _now()
-            await tg_send_message(
-                chat_id,
-                "Фото получил. Теперь одним сообщением опиши фотосессию:\n"
-                "• одежда/стиль\n"
-                "• аксессуары\n"
-                "• причёска/макияж\n"
-                "• (опционально) фон/локация — фон меняю только если ты явно попросишь.\n",
                 reply_markup=_main_menu_keyboard()
             )
             return {"ok": True}
@@ -947,20 +830,6 @@ async def webhook(secret: str, request: Request):
                     "Фото получил. Теперь одним сообщением напиши:\n"
                     "• для афиши: надпись/цена/стиль (или слово 'афиша')\n"
                     "• для обычной картинки: опиши сцену (или 'без текста').",
-                    reply_markup=_main_menu_keyboard()
-                )
-                return {"ok": True}
-
-            if st.get("mode") == "photoshoot":
-                st["photoshoot"] = {"step": "need_prompt", "photo_bytes": img_bytes}
-                st["ts"] = _now()
-                await tg_send_message(
-                    chat_id,
-                    "Фото получил. Теперь одним сообщением опиши фотосессию:\n"
-                    "• одежда/стиль\n"
-                    "• аксессуары\n"
-                    "• причёска/макияж\n"
-                    "• (опционально) фон/локация — фон меняю только если ты явно попросишь.\n",
                     reply_markup=_main_menu_keyboard()
                 )
                 return {"ok": True}
@@ -1060,55 +929,6 @@ async def webhook(secret: str, request: Request):
                 return {"ok": True}
 
             await tg_send_message(chat_id, "Пришли фото, затем одним сообщением текст.", reply_markup=_main_menu_keyboard())
-            return {"ok": True}
-
-        # VISUAL flow (photoshoot mode): после фото -> фотосессия
-        if st.get("mode") == "photoshoot":
-            ps = st.get("photoshoot") or {}
-            step: PhotoshootStep = ps.get("step") or "need_photo"
-            photo_bytes = ps.get("photo_bytes")
-
-            if step == "need_photo" or not photo_bytes:
-                await tg_send_message(chat_id, "Сначала пришли фото для фотосессии.", reply_markup=_main_menu_keyboard())
-                return {"ok": True}
-
-            if step == "need_prompt":
-                safe_text = _sanitize_ip_terms_for_image(incoming_text)
-
-                allow_bg_change = _wants_change_background(safe_text)
-                # Вариант B: по умолчанию фон сохраняем.
-                # Если фон менять НЕ просили — ограничим правку центром (обычно там человек).
-                mask_png = None
-                if not allow_bg_change:
-                    mask_png = _build_zone_mask_png(photo_bytes, "center")
-
-                prompt = _photoshoot_prompt(safe_text, allow_background_change=allow_bg_change)
-
-                await tg_send_message(
-                    chat_id,
-                    "Делаю нейро фотосессию (с сохранением человека 1в1)... "
-                    + ("Фон меняю по твоему запросу." if allow_bg_change else "Фон сохраняю как в исходнике.")
-                )
-                try:
-                    out_bytes = await openai_edit_image(photo_bytes, prompt, IMG_SIZE_DEFAULT, mask_png_bytes=mask_png)
-                    await tg_send_photo_bytes(chat_id, out_bytes, caption="Готово (нейро фотосессия).")
-                except Exception as e:
-                    if _is_moderation_blocked_error(e):
-                        await tg_send_message(
-                            chat_id,
-                            "Запрос отклонён модерацией.\n"
-                            "Попробуй переформулировать без имён брендов/персонажей и без чувствительных тем.\n"
-                            "Пример: «Сделай студийную фотосессию, чёрный костюм, аккуратная укладка, фон не менять.»"
-                        )
-                    else:
-                        await tg_send_message(chat_id, f"Не получилось сделать фотосессию: {e}")
-
-                # reset
-                st["photoshoot"] = {"step": "need_photo", "photo_bytes": None}
-                st["ts"] = _now()
-                return {"ok": True}
-
-            await tg_send_message(chat_id, "Пришли фото, затем одним сообщением текст с образом.", reply_markup=_main_menu_keyboard())
             return {"ok": True}
 
         # CHAT: обычный текстовый ответ
