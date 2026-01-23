@@ -372,7 +372,7 @@ def _extract_price_any(text: str) -> str:
 async def openai_extract_poster_spec(user_text: str) -> Dict[str, Any]:
     raw = (user_text or "").strip()
     if not raw:
-        return {"headline": "", "style": "", "price": "", "simple_text": False}
+        return {"headline": "", "style": "", "price": "", "simple_text": False, "short_headline": True}
 
     price = _extract_price_any(raw)
     simple_text = _wants_simple_text(raw)
@@ -383,7 +383,8 @@ async def openai_extract_poster_spec(user_text: str) -> Dict[str, Any]:
         if m:
             headline = m.group(1).strip().strip('"“”')
             style_part = re.split(r"надпись\s*[:\-]", raw, flags=re.IGNORECASE)[0].strip()
-            return {"headline": headline, "style": style_part, "price": price, "simple_text": simple_text}
+            is_short = (len(headline.split()) <= 3) if headline else True
+            return {"headline": headline, "style": style_part, "price": price, "simple_text": simple_text, "short_headline": is_short}
 
     sys = (
         "Ты парсер для рекламных афиш.\n"
@@ -410,9 +411,11 @@ async def openai_extract_poster_spec(user_text: str) -> Dict[str, Any]:
         if not price2 and price:
             price2 = price
 
-        return {"headline": headline, "style": style, "price": price2, "simple_text": simple_text}
+        is_short = (len(headline.split()) <= 3) if headline else True
+        return {"headline": headline, "style": style, "price": price2, "simple_text": simple_text, "short_headline": is_short}
     except Exception:
-        return {"headline": "", "style": raw, "price": price, "simple_text": simple_text}
+        is_short = True
+        return {"headline": "", "style": raw, "price": price, "simple_text": simple_text, "short_headline": is_short}
 
 
 def _poster_prompt_from_spec(spec: Dict[str, Any], extra_strict: bool = False) -> str:
@@ -425,6 +428,7 @@ def _poster_prompt_from_spec(spec: Dict[str, Any], extra_strict: bool = False) -
     style = (spec.get("style") or "").strip()
     price = (spec.get("price") or "").strip()
     simple_text = bool(spec.get("simple_text", False))
+    short_headline = bool(spec.get("short_headline", False))
 
     if not headline:
         headline = " "
@@ -443,6 +447,26 @@ def _poster_prompt_from_spec(spec: Dict[str, Any], extra_strict: bool = False) -
             "Если есть соблазн добавить любой слоган/фразу/подзаголовок — НЕ добавляй. Оставь место пустым.\n"
             "Запрещены любые дополнительные крупные надписи вне HEADLINE и PRICE.\n"
         )
+
+    headline_boost = (
+        "УСИЛЕНИЕ КОРОТКОГО ЗАГОЛОВКА:
+"
+        "• HEADLINE состоит из 1–3 слов — это нормально.
+"
+        "• Сделай типографику максимально выразительной, как в дорогих брендовых постерах:
+"
+        "  — очень крупный кегль и сильная иерархия
+"
+        "  — артистичное размещение и баланс композиции
+"
+        "  — аккуратный кернинг/трекинг, чистые края, ощущение премиум
+"
+        "  — допускается перенос слов на 2–3 строки (без изменения букв/регистра)
+"
+        "• НЕ добавляй новых слов. Работай ТОЛЬКО дизайном.
+
+"
+    ) if (short_headline and not simple_text) else ""
 
     typography_block = (
         "ТИПОГРАФИКА (ПРОСТАЯ — ПО ЗАПРОСУ ПОЛЬЗОВАТЕЛЯ):\n"
@@ -476,7 +500,9 @@ def _poster_prompt_from_spec(spec: Dict[str, Any], extra_strict: bool = False) -
         f"4) {price_rule}\n"
         "5) НЕ печатай стиль/инструкции (например: «сделай красиво», «в стиле эко»).\n"
         "6) Не искажай написание букв в HEADLINE.\n"
-        f"{strict_add}\n"
+        f"{strict_add}
+"
+        f"{headline_boost}"
         f"{typography_block}"
         "КОМПОЗИЦИЯ:\n"
         "• Товар — главный объект.\n"
