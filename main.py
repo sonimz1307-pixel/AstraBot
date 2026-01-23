@@ -72,7 +72,7 @@ def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster"]):
     st["ts"] = _now()
     if mode == "poster":
         # Визуальный режим: афиша ИЛИ обычный фото-эдит (после фото)
-        st["poster"] = {"step": "need_photo", "photo_bytes": None}
+        st["poster"] = {"step": "need_photo", "photo_bytes": None, "light": "bright"}
 
 
 # ---------------- Reply keyboard ----------------
@@ -88,6 +88,23 @@ def _main_menu_keyboard() -> dict:
         "selective": False,
     }
 
+
+
+
+def _poster_menu_keyboard(light: str = "bright") -> dict:
+    """Клавиатура для режима «Фото/Афиши» с выбором света для афиши."""
+    bright_label = "Афиша: Ярко" + (" ✅" if light == "bright" else "")
+    cinema_label = "Афиша: Кино" + (" ✅" if light == "cinema" else "")
+    return {
+        "keyboard": [
+            [{"text": bright_label}, {"text": cinema_label}],
+            [{"text": "ИИ (чат)"}, {"text": "Фото/Афиши"}],
+            [{"text": "Помощь"}],
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+        "selective": False,
+    }
 
 # ---------------- Telegram helpers ----------------
 
@@ -425,7 +442,7 @@ ART_DIRECTOR_NEGATIVE = (
     "low contrast, boring design, stock typography, watermark, random slogan, extra text"
 )
 
-def _poster_prompt_art_director(spec: Dict[str, Any]) -> str:
+def _poster_prompt_art_director(spec: Dict[str, Any], light: str = "bright") -> str:
     """
     VARIANT A: просим модель САМОЙ нарисовать типографику как объект сцены.
     Никакого overlay Pillow. Цель — дизайнерский результат, а не стабильный шрифт.
@@ -439,6 +456,29 @@ def _poster_prompt_art_director(spec: Dict[str, Any]) -> str:
     # Фото может быть любым: не только цветы. Поэтому стиль используем как описание сцены/настроения.
     # Если пользователь дал просто "сделай красиво" — задаём универсальный арт-директорский каркас.
     scene = style if style else "Premium, clean, modern, cinematic atmosphere that matches the provided photo."
+
+    # Lighting preset
+    light = (light or "bright").strip().lower()
+    if light not in ("bright", "cinema"):
+        light = "bright"
+
+    if light == "bright":
+        lighting = (
+            "LIGHTING & EXPOSURE (CRITICAL):\n"
+            "Bright high-key lighting. Daylight or studio soft light.\n"
+            "High exposure, airy and fresh look. Clean highlights.\n"
+            "No dark mood, no low-key lighting, no gloomy atmosphere.\n"
+            "Vivid but natural colors, fresh palette, no muddy/brown tones.\n"
+        )
+        opener = "Create a bright high-end vertical poster based on the provided photo."
+    else:
+        lighting = (
+            "LIGHTING & EXPOSURE (CRITICAL):\n"
+            "Cinematic contrast lighting. Controlled shadows, depth and atmosphere.\n"
+            "Still keep legibility and premium clarity.\n"
+        )
+        opener = "Create a cinematic vertical poster based on the provided photo."
+
 
     # Price: печатаем только если пользователь указал цену
     price_block = ""
@@ -466,7 +506,8 @@ def _poster_prompt_art_director(spec: Dict[str, Any]) -> str:
         "• Keep the main subject from the photo realistic and recognizable.\n"
         "• Do not change branding/shape/colors of the subject.\n"
         "• Improve lighting/composition/background atmosphere only.\n\n"
-        f"SCENE / MOOD:\n{scene}\n"
+        f"SCENE / MOOD:\n{scene}\n\n"
+        + lighting + "\n"
         f"{price_block}\n"
         f"Negative prompt: {ART_DIRECTOR_NEGATIVE}\n\n"
         "Output: one high-quality vertical poster for stories.\n"
@@ -1130,7 +1171,7 @@ async def webhook(secret: str, request: Request):
             "2) Потом одним сообщением:\n"
             "   • если хочешь афишу — напиши надпись/цену/стиль (или слово 'афиша')\n"
             "   • если хочешь обычную картинку — просто опиши сцену (или напиши 'без текста').\n",
-            reply_markup=_main_menu_keyboard(),
+            reply_markup=_poster_menu_keyboard((st.get("poster") or {}).get("light", "bright")),
         )
         return {"ok": True}
 
@@ -1164,14 +1205,30 @@ async def webhook(secret: str, request: Request):
 
         # VISUAL mode
         if st.get("mode") == "poster":
-            st["poster"] = {"step": "need_prompt", "photo_bytes": img_bytes}
+            # Выбор света для афиши (работает в любом шаге режима «Фото/Афиши»)
+            t = incoming_text.strip()
+            t_norm = t.replace("✅", "").strip().lower()
+            if t_norm in ("афиша: ярко", "ярко"):
+                st.setdefault("poster", {})
+                st["poster"]["light"] = "bright"
+                st["ts"] = _now()
+                await tg_send_message(chat_id, "Ок. Для афиш включен режим света: Ярко.", reply_markup=_poster_menu_keyboard("bright"))
+                return {"ok": True}
+            if t_norm in ("афиша: кино", "кино"):
+                st.setdefault("poster", {})
+                st["poster"]["light"] = "cinema"
+                st["ts"] = _now()
+                await tg_send_message(chat_id, "Ок. Для афиш включен режим света: Кино.", reply_markup=_poster_menu_keyboard("cinema"))
+                return {"ok": True}
+
+            st["poster"] = {"step": "need_prompt", "photo_bytes": img_bytes, "light": (st.get("poster") or {}).get("light", "bright")}
             st["ts"] = _now()
             await tg_send_message(
                 chat_id,
                 "Фото получил. Теперь одним сообщением напиши:\n"
                 "• для афиши: надпись/цена/стиль (или слово 'афиша')\n"
                 "• для обычной картинки: опиши сцену (или 'без текста').",
-                reply_markup=_main_menu_keyboard()
+                reply_markup=_poster_menu_keyboard((st.get("poster") or {}).get("light", "bright"))
             )
             return {"ok": True}
 
@@ -1214,7 +1271,7 @@ async def webhook(secret: str, request: Request):
                 return {"ok": True}
 
             if st.get("mode") == "poster":
-                st["poster"] = {"step": "need_prompt", "photo_bytes": img_bytes}
+                st["poster"] = {"step": "need_prompt", "photo_bytes": img_bytes, "light": (st.get("poster") or {}).get("light", "bright")}
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
@@ -1268,7 +1325,7 @@ async def webhook(secret: str, request: Request):
                     await tg_send_message(chat_id, "Делаю афишу на основе твоего фото...")
                     try:
                         spec = await openai_extract_poster_spec(incoming_text)
-                        poster_prompt = _poster_prompt_art_director(spec)
+                        poster_prompt = _poster_prompt_art_director(spec, light=(poster.get("light") or "bright"))
                         out_bytes = await openai_edit_image(
                             photo_bytes,
                             poster_prompt,
@@ -1308,7 +1365,7 @@ async def webhook(secret: str, request: Request):
                             await tg_send_message(chat_id, f"Не получилось сгенерировать картинку: {e}")
 
                 # reset
-                st["poster"] = {"step": "need_photo", "photo_bytes": None}
+                st["poster"] = {"step": "need_photo", "photo_bytes": None, "light": "bright"}
                 st["ts"] = _now()
                 return {"ok": True}
 
