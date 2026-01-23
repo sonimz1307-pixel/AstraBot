@@ -323,23 +323,59 @@ def _is_math_request(text: str) -> bool:
 
 # ---------------- Poster parsing ----------------
 
-def _extract_price_any(text: str) -> str:
+def _wants_simple_text(text: str) -> bool:
+    """
+    Если пользователь явно просит плоскую/обычную надпись — выключаем премиум-типографику.
+    """
     t = (text or "").lower()
-    m = re.search(r"(цена\s*)?(\d[\d\s]{1,8})(\s*(р|₽))?", t)
-    if not m:
-        return ""
-    price_num = (m.group(2) or "").replace(" ", "").strip()
-    if not price_num:
-        return ""
-    return f"{price_num}₽"
+    markers = [
+        "обычный текст",
+        "простая надпись",
+        "без эффектов",
+        "плоский текст",
+        "просто текст",
+        "как обычный шрифт",
+        "без дизайна",
+        "без свечения",
+        "без 3d",
+    ]
+    return any(m in t for m in markers)
 
 
-async def openai_extract_poster_spec(user_text: str) -> Dict[str, str]:
+def _extract_price_any(text: str) -> str:
+    """
+    Цена считается ценой ТОЛЬКО если:
+    - есть валюта (₽/р/руб/рублей) рядом с числом, ИЛИ
+    - есть слово 'цена' рядом с числом.
+    Это защищает от ложных срабатываний на 0.6/1.4/12000 в описании.
+    """
+    raw = (text or "")
+    t = raw.lower()
+
+    # 1) число + валюта
+    m1 = re.search(r"(\d[\d\s]{1,8})\s*(₽|р\.?|руб\.?|рублей)\b", t)
+    if m1:
+        price_num = (m1.group(1) or "").replace(" ", "").strip()
+        if price_num:
+            return f"{price_num}₽"
+
+    # 2) слово "цена" + число (валюта может отсутствовать)
+    m2 = re.search(r"\bцена\b[^0-9]{0,10}(\d[\d\s]{1,8})\b", t)
+    if m2:
+        price_num = (m2.group(1) or "").replace(" ", "").strip()
+        if price_num:
+            return f"{price_num}₽"
+
+    return ""
+
+
+async def openai_extract_poster_spec(user_text: str) -> Dict[str, Any]:
     raw = (user_text or "").strip()
     if not raw:
-        return {"headline": "", "style": "", "price": ""}
+        return {"headline": "", "style": "", "price": "", "simple_text": False}
 
     price = _extract_price_any(raw)
+    simple_text = _wants_simple_text(raw)
 
     low = raw.lower()
     if "надпись" in low:
@@ -347,7 +383,7 @@ async def openai_extract_poster_spec(user_text: str) -> Dict[str, str]:
         if m:
             headline = m.group(1).strip().strip('"“”')
             style_part = re.split(r"надпись\s*[:\-]", raw, flags=re.IGNORECASE)[0].strip()
-            return {"headline": headline, "style": style_part, "price": price}
+            return {"headline": headline, "style": style_part, "price": price, "simple_text": simple_text}
 
     sys = (
         "Ты парсер для рекламных афиш.\n"
@@ -369,21 +405,26 @@ async def openai_extract_poster_spec(user_text: str) -> Dict[str, str]:
         headline = str(data.get("headline", "")).strip()
         style = str(data.get("style", "")).strip()
         price2 = str(data.get("price", "")).strip()
+
+        # Если модель не распознала price, но эвристика нашла валидный price — используем эвристику
         if not price2 and price:
             price2 = price
-        return {"headline": headline, "style": style, "price": price2}
+
+        return {"headline": headline, "style": style, "price": price2, "simple_text": simple_text}
     except Exception:
-        return {"headline": "", "style": raw, "price": price}
+        return {"headline": "", "style": raw, "price": price, "simple_text": simple_text}
 
 
-def _poster_prompt_from_spec(spec: Dict[str, str], extra_strict: bool = False) -> str:
+def _poster_prompt_from_spec(spec: Dict[str, Any], extra_strict: bool = False) -> str:
     """
-    Афиша с премиум-типографикой и строгим запретом самодеятельных фраз.
+    Афиша с премиум-типографикой по умолчанию.
+    Простой плоский текст — только если пользователь явно попросил (spec['simple_text']=True).
     extra_strict=True используется для второй попытки, если модель добавила лишние фразы.
     """
     headline = (spec.get("headline") or "").strip()
     style = (spec.get("style") or "").strip()
     price = (spec.get("price") or "").strip()
+    simple_text = bool(spec.get("simple_text", False))
 
     if not headline:
         headline = " "
@@ -403,6 +444,22 @@ def _poster_prompt_from_spec(spec: Dict[str, str], extra_strict: bool = False) -
             "Запрещены любые дополнительные крупные надписи вне HEADLINE и PRICE.\n"
         )
 
+    typography_block = (
+        "ТИПОГРАФИКА (ПРОСТАЯ — ПО ЗАПРОСУ ПОЛЬЗОВАТЕЛЯ):\n"
+        "• Плоский обычный текст.\n"
+        "• Без объёма, без свечения, без декоративных эффектов.\n"
+        "• Нейтральный читаемый шрифт.\n"
+        "• ВАЖНО: всё равно аккуратно и как у дизайнера (ровно, чисто, без кривых деформаций).\n\n"
+    ) if simple_text else (
+        "ПРЕМИУМ-ТИПОГРАФИКА (ПО УМОЛЧАНИЮ — ВСЕГДА):\n"
+        "• Headline — главный элемент, как в дорогих брендовых постерах.\n"
+        "• Объёмные или псевдо-3D буквы (лёгкий эмбосс/тиснение), мягкое свечение по краям.\n"
+        "• Лёгкая тень для глубины, чистая обводка, аккуратный кернинг.\n"
+        "• Материал букв: кремово-золотистый / слоновая кость / тёплый перламутр.\n"
+        "• Текст — часть композиции, выглядит дорого и современно.\n"
+        "• Никакого плоского «обычного» текста.\n\n"
+    )
+
     return (
         "Сделай профессиональную рекламную афишу/промо-баннер на основе предоставленного фото.\n\n"
         "СОХРАНЕНИЕ ТОВАРА:\n"
@@ -420,13 +477,7 @@ def _poster_prompt_from_spec(spec: Dict[str, str], extra_strict: bool = False) -
         "5) НЕ печатай стиль/инструкции (например: «сделай красиво», «в стиле эко»).\n"
         "6) Не искажай написание букв в HEADLINE.\n"
         f"{strict_add}\n"
-        "ПРЕМИУМ-ТИПОГРАФИКА (как в дорогих брендовых постерах):\n"
-        "• Иерархия: Headline — главный, Price — второй.\n"
-        "• Headline: выразительный рекламный шрифт, жирный, объёмный (лёгкий 3D/эмбосс), аккуратная тень, чистая обводка.\n"
-        "• Кернинг: ровно, без «пляшущих» букв, без кривых деформаций.\n"
-        "• Price: крупная цена на отдельной премиальной плашке/бейдже (можно стеклянный/глянцевый бейдж), без слов типа «цена».\n"
-        "• Визуально «дорого»: чистые материалы, мягкие градиенты, аккуратное свечение, без кислотности.\n"
-        "• Никакого плоского «обычного» текста.\n\n"
+        f"{typography_block}"
         "КОМПОЗИЦИЯ:\n"
         "• Товар — главный объект.\n"
         "• Добавь визуальные элементы вкуса/атмосферы по стилю (фрукты, сок, брызги, лёд и т.п.), но без перегруза.\n\n"
