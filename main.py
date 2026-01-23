@@ -1319,6 +1319,27 @@ async def webhook(secret: str, request: Request):
                 return {"ok": True}
 
             if step == "need_prompt":
+                # Перехват кнопок выбора света, чтобы они НЕ воспринимались как промпт генерации
+                btn = incoming_text.strip().replace("✅", "").strip().lower()
+                if btn.startswith("афиша:") or btn in ("ярко", "кино"):
+                    st.setdefault("poster", {})
+                    if ("ярко" in btn) or (btn == "ярко"):
+                        st["poster"]["light"] = "bright"
+                        await tg_send_message(
+                            chat_id,
+                            "Ок. Режим света для афиш: Ярко. Теперь напиши текст для афиши одним сообщением.",
+                            reply_markup=_poster_menu_keyboard("bright"),
+                        )
+                        return {"ok": True}
+                    if ("кино" in btn) or (btn == "кино"):
+                        st["poster"]["light"] = "cinema"
+                        await tg_send_message(
+                            chat_id,
+                            "Ок. Режим света для афиш: Кино. Теперь напиши текст для афиши одним сообщением.",
+                            reply_markup=_poster_menu_keyboard("cinema"),
+                        )
+                        return {"ok": True}
+
                 mode, _reason = await openai_route_visual_mode(incoming_text)
 
                 if mode == "POSTER":
