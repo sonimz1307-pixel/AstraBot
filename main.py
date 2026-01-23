@@ -737,6 +737,44 @@ async def openai_check_poster_overlay_text(
         return {"ok": True, "extra_text": "", "notes": "parse_fail"}
 
 
+
+async def openai_check_poster_typography_quality(image_bytes: bytes) -> Dict[str, Any]:
+    """
+    Проверка качества типографики оверлей-заголовка:
+    избегаем "обычного шрифта" и добиваемся премиум-леттеринга/брендового вида.
+    """
+    sys = (
+        "Ты арт-директор и оцениваешь ТОЛЬКО добавленный крупный заголовок/типографику на афише (не текст на упаковке).\n"
+        "Оцени: выглядит ли заголовок как премиум-дизайн (кастомный леттеринг/фольгирование/тиснение/иерархия), "
+        "или как простой стандартный шрифт.\n\n"
+        "Верни строго JSON без текста вокруг:\n"
+        "{\"wow\":1-10,\"plain\":true|false,\"notes\":\"коротко\"}\n\n"
+        "Правила:\n"
+        "• plain=true, если заголовок выглядит как обычная печатная надпись без дизайнерского характера.\n"
+        "• wow>=8 — это реально 'вау', как брендовый постер.\n"
+        "• Учитывай только оверлей-текст, игнорируй текст на товаре/упаковке."
+    )
+    out = await openai_chat_answer(
+        user_text="Оцени типографику заголовка и верни JSON.",
+        system_prompt=sys,
+        image_bytes=image_bytes,
+        temperature=0.0,
+        max_tokens=180,
+    )
+    try:
+        data = json.loads(out)
+        wow = int(data.get("wow", 0))
+        plain = bool(data.get("plain", False))
+        notes = str(data.get("notes", "")).strip()[:200]
+        if wow < 1:
+            wow = 1
+        if wow > 10:
+            wow = 10
+        return {"wow": wow, "plain": plain, "notes": notes}
+    except Exception:
+        return {"wow": 7, "plain": False, "notes": "parse_fail"}
+
+
 # ---------------- Webhook handler ----------------
 
 @app.get("/health")
@@ -961,6 +999,17 @@ async def webhook(secret: str, request: Request):
                             # Вторая попытка: супер-строгий промпт
                             prompt2 = _poster_prompt_from_spec(spec, extra_strict=True)
                             out_bytes = await openai_edit_image(photo_bytes, prompt2, IMG_SIZE_DEFAULT, mask_png_bytes=None)
+
+                        # Проверка качества типографики (ВАУ): если выглядит как обычный шрифт — ещё одна попытка
+                        quality = await openai_check_poster_typography_quality(out_bytes)
+                        if bool(quality.get('plain')) or int(quality.get('wow', 0)) < 8:
+                            prompt3 = _poster_prompt_from_spec(spec, extra_strict=True) + (
+                                "\nСУПЕР-ВАУ ТРЕБОВАНИЕ: Сделай заголовок как кастомный брендовый леттеринг (не дефолтный шрифт), "
+                                "с логотипным характером, богатой формой, тиснением/фольгой, выразительными бликами и глубиной. "
+                                "Разрешён художественный перенос на 2–3 строки и композиционное размещение. "
+                                "Никаких новых слов не добавляй."
+                            )
+                            out_bytes = await openai_edit_image(photo_bytes, prompt3, IMG_SIZE_DEFAULT, mask_png_bytes=None)
 
                         await tg_send_photo_bytes(chat_id, out_bytes, caption="Готово (афиша).")
                     except Exception as e:
