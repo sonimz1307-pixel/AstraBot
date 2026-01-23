@@ -511,6 +511,444 @@ def _poster_prompt_from_spec(spec: Dict[str, Any], extra_strict: bool = False) -
     )
 
 
+
+# ---------------- Poster: background-only prompt + deterministic WOW text overlay ----------------
+
+
+def detect_style_profile(spec: Dict[str, Any]) -> str:
+    """
+    Универсальный детектор стиля по тексту пользователя (style + headline).
+    Возвращает один из: luxury, neon, nature, kids, food, editorial, neutral
+    """
+    text = f"{spec.get('headline','')} {spec.get('style','')}".lower()
+    if any(k in text for k in ["неон", "neon", "кибер", "tech", "техно", "глитч", "hologram", "хай-тек", "футур"]):
+        return "neon"
+    if any(k in text for k in ["эко", "eco", "природ", "лист", "лепест", "цвет", "organic", "натураль", "ботан", "сад"]):
+        return "nature"
+    if any(k in text for k in ["дет", "kids", "ребен", "игруш", "мульт", "cartoon", "школ", "садик"]):
+        return "kids"
+    if any(k in text for k in ["еда", "food", "кафе", "кофе", "coffee", "пицц", "бургер", "ролл", "шаурм", "доставка", "меню", "вкус"]):
+        return "food"
+    if any(k in text for k in ["fashion", "мода", "журнал", "editorial", "минимал", "lookbook"]):
+        return "editorial"
+    if any(k in text for k in ["премиум", "lux", "luxury", "золото", "gold", "элит", "дорого", "бренд"]):
+        return "luxury"
+    return "neutral"
+
+
+STYLE_PRESETS: Dict[str, Dict[str, Any]] = {
+    "luxury": {
+        "prefer_serif": True,
+        "topc": (255, 248, 230, 255),
+        "midc": (235, 204, 140, 255),
+        "botc": (255, 246, 220, 255),
+        "outline": (90, 60, 20, 190),
+        "glow": (255, 244, 220, 255),
+        "shadow": (0, 0, 0, 140),
+        "emboss": True,
+        "glow_strength": 0.12,
+        "shadow_strength": 0.06,
+    },
+    "neon": {
+        "prefer_serif": False,
+        "topc": (220, 255, 255, 255),
+        "midc": (120, 255, 220, 255),
+        "botc": (180, 200, 255, 255),
+        "outline": (20, 40, 80, 210),
+        "glow": (120, 255, 240, 255),
+        "shadow": (0, 0, 0, 160),
+        "emboss": False,
+        "glow_strength": 0.18,
+        "shadow_strength": 0.05,
+    },
+    "nature": {
+        "prefer_serif": True,
+        "topc": (245, 255, 245, 255),
+        "midc": (170, 220, 170, 255),
+        "botc": (240, 250, 240, 255),
+        "outline": (40, 80, 40, 190),
+        "glow": (210, 255, 210, 255),
+        "shadow": (0, 0, 0, 130),
+        "emboss": False,
+        "glow_strength": 0.10,
+        "shadow_strength": 0.06,
+    },
+    "kids": {
+        "prefer_serif": False,
+        "topc": (255, 255, 255, 255),
+        "midc": (255, 210, 240, 255),
+        "botc": (255, 240, 200, 255),
+        "outline": (40, 40, 40, 200),
+        "glow": (255, 220, 240, 255),
+        "shadow": (0, 0, 0, 150),
+        "emboss": False,
+        "glow_strength": 0.14,
+        "shadow_strength": 0.06,
+    },
+    "food": {
+        "prefer_serif": False,
+        "topc": (255, 250, 240, 255),
+        "midc": (255, 200, 140, 255),
+        "botc": (255, 245, 230, 255),
+        "outline": (120, 60, 20, 190),
+        "glow": (255, 220, 190, 255),
+        "shadow": (0, 0, 0, 140),
+        "emboss": False,
+        "glow_strength": 0.10,
+        "shadow_strength": 0.06,
+    },
+    "editorial": {
+        "prefer_serif": True,
+        "topc": (255, 255, 255, 255),
+        "midc": (240, 240, 240, 255),
+        "botc": (255, 255, 255, 255),
+        "outline": (0, 0, 0, 210),
+        "glow": (255, 255, 255, 0),
+        "shadow": (0, 0, 0, 110),
+        "emboss": False,
+        "glow_strength": 0.00,
+        "shadow_strength": 0.04,
+    },
+    "neutral": {
+        "prefer_serif": True,
+        "topc": (255, 248, 230, 255),
+        "midc": (235, 204, 140, 255),
+        "botc": (255, 246, 220, 255),
+        "outline": (80, 60, 30, 180),
+        "glow": (255, 244, 220, 255),
+        "shadow": (0, 0, 0, 140),
+        "emboss": True,
+        "glow_strength": 0.10,
+        "shadow_strength": 0.06,
+    },
+}
+
+def _poster_background_prompt_from_spec(spec: Dict[str, Any]) -> str:
+    """
+    Генерируем ТОЛЬКО фон/композицию афиши без печати текста.
+    Текст будем накладывать сами (Pillow), чтобы он всегда был 'ВАУ' и без искажений.
+    """
+    style = (spec.get("style") or "").strip()
+    price = (spec.get("price") or "").strip()
+
+    # ВАЖНО: не печатать никаких букв/цифр, включая цену — цену тоже наложим сами.
+    return (
+        "Сделай профессиональную рекламную афишу/промо-баннер на основе предоставленного фото.\n\n"
+        "КРИТИЧЕСКОЕ ПРАВИЛО: НИКАКОГО ТЕКСТА.\n"
+        "• Запрещены любые буквы, слова, цифры, цены, символы валют, слоганы, водяные знаки, логотипы.\n"
+        "• НЕ печатай даже HEADLINE и цену.\n\n"
+        "КОМПОЗИЦИЯ:\n"
+        "• Товар/объект (то, что на фото) должен остаться максимально реалистичным и узнаваемым.\n"
+        "• Разрешено улучшить композицию, свет, фон, добавить атмосферные элементы по стилю (НЕ текстом).\n"
+        "• Оставь чистое свободное место под заголовок в верхней части кадра (примерно верхние 25–30%).\n"
+        "• Если нужно — затемни/размой фон в верхней зоне, чтобы на нём хорошо читался будущий заголовок.\n\n"
+        "СТИЛЬ/АТМОСФЕРА (НЕ ПЕЧАТАТЬ КАК ТЕКСТ, только оформление):\n"
+        f"{style if style else 'Премиум, чисто, современно, без перегруза.'}\n\n"
+        "ФОРМАТ: вертикальный, под сторис, высокое качество.\n"
+    )
+
+
+def _split_headline_lines(headline: str) -> str:
+    """
+    Делим короткий заголовок на 2 строки максимально красиво.
+    Возвращает текст с \n если нужно.
+    """
+    h = (headline or "").strip()
+    if not h:
+        return " "
+    words = h.split()
+    if len(words) <= 1:
+        return h
+    if len(words) == 2:
+        return words[0] + "\n" + words[1]
+    # 3+ слов — балансируем примерно пополам
+    mid = len(words) // 2
+    return " ".join(words[:mid]) + "\n" + " ".join(words[mid:])
+
+
+def _load_font(prefer_serif: bool, size: int):
+    """
+    Пытаемся загрузить системные шрифты (обычно доступны на Render/Linux).
+    """
+    try:
+        from PIL import ImageFont  # type: ignore
+    except Exception:
+        return None
+
+    candidates = []
+    if prefer_serif:
+        candidates = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeSerifBold.ttf",
+        ]
+    else:
+        candidates = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        ]
+
+    for p in candidates:
+        try:
+            return ImageFont.truetype(p, size=size)
+        except Exception:
+            continue
+
+    # fallback pillow default
+    try:
+        return ImageFont.load_default()
+    except Exception:
+        return None
+
+
+
+def _draw_text_with_effects(img_rgba, text: str, y_top: int, preset: Dict[str, Any], premium: bool = True):
+    """
+    Рисуем заголовок 'ВАУ' (фольга/тиснение/свечение) детерминированно.
+    preset управляет палитрой и эффектами.
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFilter  # type: ignore
+    except Exception:
+        return img_rgba  # без Pillow не сможем
+
+    W, H = img_rgba.size
+    headline = _split_headline_lines(text)
+
+    base_size = int(W * (0.18 if "\n" in headline else 0.20))
+    prefer_serif = bool(preset.get("prefer_serif", True))
+    font = _load_font(prefer_serif=prefer_serif, size=base_size) if premium else _load_font(prefer_serif=False, size=base_size)
+    if font is None:
+        return img_rgba
+
+    dummy = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(dummy)
+    spacing = int(base_size * 0.10)
+
+    bbox = d.multiline_textbbox((0, 0), headline, font=font, align="center", spacing=spacing)
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+
+    while tw > int(W * 0.92) and base_size > 20:
+        base_size = int(base_size * 0.92)
+        spacing = int(base_size * 0.10)
+        font = _load_font(prefer_serif=prefer_serif, size=base_size) if premium else _load_font(prefer_serif=False, size=base_size)
+        bbox = d.multiline_textbbox((0, 0), headline, font=font, align="center", spacing=spacing)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+
+    x = (W - tw) // 2
+    y = max(10, y_top)
+
+    # Glow
+    if premium and float(preset.get("glow_strength", 0.0)) > 0.0:
+        glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        gd = ImageDraw.Draw(glow)
+        glow_color = tuple(preset.get("glow", (255, 244, 220, 255)))
+        gd.multiline_text((x, y), headline, font=font, fill=glow_color, align="center", spacing=spacing)
+        glow_strength = float(preset.get("glow_strength", 0.12))
+        glow = glow.filter(ImageFilter.GaussianBlur(radius=max(1, int(base_size * glow_strength))))
+        img_rgba = Image.alpha_composite(img_rgba, glow)
+
+    # Shadow
+    shadow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(shadow)
+    shadow_color = tuple(preset.get("shadow", (0, 0, 0, 140)))
+    sd.multiline_text((x + int(base_size * 0.05), y + int(base_size * 0.05)), headline, font=font, fill=shadow_color, align="center", spacing=spacing)
+    shadow_strength = float(preset.get("shadow_strength", 0.06))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(radius=max(1, int(base_size * shadow_strength))))
+    img_rgba = Image.alpha_composite(img_rgba, shadow)
+
+    # Outline
+    text_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    td = ImageDraw.Draw(text_layer)
+    stroke_w = max(2, int(base_size * 0.04)) if premium else 1
+    outline_color = tuple(preset.get("outline", (90, 60, 20, 180))) if premium else (0, 0, 0, 180)
+
+    for dx in (-stroke_w, 0, stroke_w):
+        for dy in (-stroke_w, 0, stroke_w):
+            if dx == 0 and dy == 0:
+                continue
+            td.multiline_text((x + dx, y + dy), headline, font=font, fill=outline_color, align="center", spacing=spacing)
+
+    # Fill mask
+    mask = Image.new("L", (W, H), 0)
+    md = ImageDraw.Draw(mask)
+    md.multiline_text((x, y), headline, font=font, fill=255, align="center", spacing=spacing)
+
+    # Gradient fill
+    topc = tuple(preset.get("topc", (255, 248, 230, 255)))
+    midc = tuple(preset.get("midc", (235, 204, 140, 255)))
+    botc = tuple(preset.get("botc", (255, 246, 220, 255)))
+
+    grad = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    gdraw = ImageDraw.Draw(grad)
+    for yy in range(y, min(H, y + th + 4)):
+        t = 0.5 if th <= 1 else (yy - y) / float(th)
+        if t < 0.5:
+            tt = t / 0.5
+            c = (
+                int(topc[0] + (midc[0] - topc[0]) * tt),
+                int(topc[1] + (midc[1] - topc[1]) * tt),
+                int(topc[2] + (midc[2] - topc[2]) * tt),
+                255,
+            )
+        else:
+            tt = (t - 0.5) / 0.5
+            c = (
+                int(midc[0] + (botc[0] - midc[0]) * tt),
+                int(midc[1] + (botc[1] - midc[1]) * tt),
+                int(midc[2] + (botc[2] - midc[2]) * tt),
+                255,
+            )
+        gdraw.line([(0, yy), (W, yy)], fill=c)
+
+    fill_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    fill_layer.paste(grad, (0, 0), mask=mask)
+
+    # Emboss
+    if premium and bool(preset.get("emboss", False)):
+        emb = fill_layer.filter(ImageFilter.EMBOSS)
+        emb = emb.filter(ImageFilter.GaussianBlur(radius=max(1, int(base_size * 0.02))))
+        fill_layer = Image.alpha_composite(fill_layer, emb)
+
+    # Compose
+    img_rgba = Image.alpha_composite(img_rgba, text_layer)
+    img_rgba = Image.alpha_composite(img_rgba, fill_layer)
+    return img_rgba
+
+
+
+    # измерение текста
+    dummy = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(dummy)
+    bbox = d.multiline_textbbox((0, 0), headline, font=font, align="center", spacing=int(base_size * 0.10))
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+
+    # если слишком широко — уменьшаем
+    while tw > int(W * 0.92) and base_size > 20:
+        base_size = int(base_size * 0.92)
+        font = _load_font(prefer_serif=True, size=base_size) if premium else _load_font(prefer_serif=False, size=base_size)
+        bbox = d.multiline_textbbox((0, 0), headline, font=font, align="center", spacing=int(base_size * 0.10))
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+
+    x = (W - tw) // 2
+    y = max(10, y_top)
+
+    # слой с маской текста
+    text_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    td = ImageDraw.Draw(text_layer)
+
+    spacing = int(base_size * 0.10)
+    # Glow
+    if premium:
+        glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        gd = ImageDraw.Draw(glow)
+        gd.multiline_text((x, y), headline, font=font, fill=(255, 244, 220, 255), align="center", spacing=spacing)
+        glow = glow.filter(ImageFilter.GaussianBlur(radius=int(base_size * 0.12)))
+        img_rgba = Image.alpha_composite(img_rgba, glow)
+
+    # Shadow
+    shadow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(shadow)
+    sd.multiline_text((x + int(base_size * 0.05), y + int(base_size * 0.05)), headline, font=font, fill=(0, 0, 0, 140), align="center", spacing=spacing)
+    shadow = shadow.filter(ImageFilter.GaussianBlur(radius=int(base_size * 0.06)))
+    img_rgba = Image.alpha_composite(img_rgba, shadow)
+
+    # Outline (stroke)
+    stroke_w = max(2, int(base_size * 0.04)) if premium else 1
+    for dx in (-stroke_w, 0, stroke_w):
+        for dy in (-stroke_w, 0, stroke_w):
+            if dx == 0 and dy == 0:
+                continue
+            td.multiline_text((x + dx, y + dy), headline, font=font, fill=(90, 60, 20, 180) if premium else (0, 0, 0, 180), align="center", spacing=spacing)
+
+    # Fill: "foil" gradient using mask
+    mask = Image.new("L", (W, H), 0)
+    md = ImageDraw.Draw(mask)
+    md.multiline_text((x, y), headline, font=font, fill=255, align="center", spacing=spacing)
+
+    grad = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    # вертикальный градиент (золото/перламутр)
+    topc = (255, 248, 230, 255)
+    midc = (235, 204, 140, 255)
+    botc = (255, 246, 220, 255)
+    for yy in range(y, min(H, y + th + 4)):
+        if th <= 1:
+            t = 0.5
+        else:
+            t = (yy - y) / float(th)
+        if t < 0.5:
+            # top -> mid
+            tt = t / 0.5
+            c = (
+                int(topc[0] + (midc[0] - topc[0]) * tt),
+                int(topc[1] + (midc[1] - topc[1]) * tt),
+                int(topc[2] + (midc[2] - topc[2]) * tt),
+                255,
+            )
+        else:
+            # mid -> bot
+            tt = (t - 0.5) / 0.5
+            c = (
+                int(midc[0] + (botc[0] - midc[0]) * tt),
+                int(midc[1] + (botc[1] - midc[1]) * tt),
+                int(midc[2] + (botc[2] - midc[2]) * tt),
+                255,
+            )
+        ImageDraw.Draw(grad).line([(0, yy), (W, yy)], fill=c)
+
+    fill_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    fill_layer.paste(grad, (0, 0), mask=mask)
+
+    # лёгкий эмбосс/блик
+    if premium:
+        emb = fill_layer.filter(ImageFilter.EMBOSS)
+        emb = emb.filter(ImageFilter.GaussianBlur(radius=int(base_size * 0.02)))
+        fill_layer = Image.alpha_composite(fill_layer, emb)
+
+    img_rgba = Image.alpha_composite(img_rgba, fill_layer)
+    return img_rgba
+
+
+
+def overlay_poster_text(image_bytes: bytes, headline: str, price: str, simple_text: bool, style_text: str) -> bytes:
+    """
+    Накладываем текст детерминированно поверх готового фона.
+    Выбор пресета идёт автоматически по смыслу (style_text).
+    """
+    try:
+        from PIL import Image  # type: ignore
+    except Exception:
+        return image_bytes
+
+    from io import BytesIO
+    im = Image.open(BytesIO(image_bytes)).convert("RGBA")
+    W, H = im.size
+
+    premium = not bool(simple_text)
+    profile = detect_style_profile({"headline": headline, "style": style_text})
+    preset = STYLE_PRESETS.get(profile, STYLE_PRESETS["neutral"])
+
+    # Заголовок
+    top_zone = int(H * 0.06)
+    im = _draw_text_with_effects(im, headline, y_top=top_zone, preset=preset, premium=premium)
+
+    # Цена (если есть)
+    if price:
+        y_price = int(H * 0.80)
+        im = _draw_text_with_effects(im, str(price).strip(), y_top=y_price, preset=preset, premium=premium)
+
+    out = BytesIO()
+    im.convert("RGB").save(out, format="PNG")
+    return out.getvalue()
+
+
+
 # ---------------- Visual routing + PHOTO edit prompt + Auto-mask + moderation ----------------
 
 def _sanitize_ip_terms_for_image(text: str) -> str:
@@ -986,31 +1424,17 @@ async def webhook(secret: str, request: Request):
                     await tg_send_message(chat_id, "Делаю афишу на основе твоего фото...")
                     try:
                         spec = await openai_extract_poster_spec(incoming_text)
-                        prompt1 = _poster_prompt_from_spec(spec, extra_strict=False)
-                        out_bytes = await openai_edit_image(photo_bytes, prompt1, IMG_SIZE_DEFAULT, mask_png_bytes=None)
-
-                        # Проверка на лишний оверлей-текст (одна попытка рефайна)
-                        check = await openai_check_poster_overlay_text(
-                            image_bytes=out_bytes,
-                            headline=(spec.get("headline") or "").strip(),
+                        # 1) Генерируем фон/композицию БЕЗ ТЕКСТА (текст наложим сами)
+                        bg_prompt = _poster_background_prompt_from_spec(spec)
+                        bg_bytes = await openai_edit_image(photo_bytes, bg_prompt, IMG_SIZE_DEFAULT, mask_png_bytes=None)
+                        # 2) Накладываем детерминированный WOW-текст без искажений
+                        out_bytes = overlay_poster_text(
+                            image_bytes=bg_bytes,
+                            headline=(spec.get("headline") or "").strip() or " ",
                             price=(spec.get("price") or "").strip(),
+                            simple_text=bool(spec.get("simple_text", False)),
+                            style_text=(spec.get("style") or ""),
                         )
-                        if not bool(check.get("ok", True)):
-                            # Вторая попытка: супер-строгий промпт
-                            prompt2 = _poster_prompt_from_spec(spec, extra_strict=True)
-                            out_bytes = await openai_edit_image(photo_bytes, prompt2, IMG_SIZE_DEFAULT, mask_png_bytes=None)
-
-                        # Проверка качества типографики (ВАУ): если выглядит как обычный шрифт — ещё одна попытка
-                        quality = await openai_check_poster_typography_quality(out_bytes)
-                        if bool(quality.get('plain')) or int(quality.get('wow', 0)) < 8:
-                            prompt3 = _poster_prompt_from_spec(spec, extra_strict=True) + (
-                                "\nСУПЕР-ВАУ ТРЕБОВАНИЕ: Сделай заголовок как кастомный брендовый леттеринг (не дефолтный шрифт), "
-                                "с логотипным характером, богатой формой, тиснением/фольгой, выразительными бликами и глубиной. "
-                                "Разрешён художественный перенос на 2–3 строки и композиционное размещение. "
-                                "Никаких новых слов не добавляй."
-                            )
-                            out_bytes = await openai_edit_image(photo_bytes, prompt3, IMG_SIZE_DEFAULT, mask_png_bytes=None)
-
                         await tg_send_photo_bytes(chat_id, out_bytes, caption="Готово (афиша).")
                     except Exception as e:
                         await tg_send_message(chat_id, f"Не получилось сгенерировать афишу: {e}")
