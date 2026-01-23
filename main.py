@@ -463,7 +463,6 @@ def _poster_prompt_from_spec(spec: Dict[str, Any], extra_strict: bool = False) -
     else ""
 )
 
-
     typography_block = (
         "ТИПОГРАФИКА (ПРОСТАЯ — ПО ЗАПРОСУ ПОЛЬЗОВАТЕЛЯ):\n"
         "• Плоский обычный текст.\n"
@@ -496,8 +495,7 @@ def _poster_prompt_from_spec(spec: Dict[str, Any], extra_strict: bool = False) -
         f"4) {price_rule}\n"
         "5) НЕ печатай стиль/инструкции (например: «сделай красиво», «в стиле эко»).\n"
         "6) Не искажай написание букв в HEADLINE.\n"
-        f"{strict_add}
-"
+        f"{strict_add}\n"
         f"{headline_boost}"
         f"{typography_block}"
         "КОМПОЗИЦИЯ:\n"
