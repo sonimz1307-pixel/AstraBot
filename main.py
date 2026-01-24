@@ -1326,7 +1326,7 @@ async def webhook(secret: str, request: Request):
 
         # PHOTOSESSION mode (Seedream/ModelArk)
         if st.get("mode") == "photosession":
-            st["photosession"] = {"step": "need_prompt", "photo_bytes": img_bytes, "photo_file_id": best_photo.get("file_id")}
+            st["photosession"] = {"step": "need_prompt", "photo_bytes": img_bytes, "photo_file_id": file_id}
             st["ts"] = _now()
             await tg_send_message(
                 chat_id,
@@ -1406,7 +1406,7 @@ async def webhook(secret: str, request: Request):
                 return {"ok": True}
 
             if st.get("mode") == "photosession":
-                st["photosession"] = {"step": "need_prompt", "photo_bytes": img_bytes, "photo_file_id": best_photo.get("file_id")}
+                st["photosession"] = {"step": "need_prompt", "photo_bytes": img_bytes, "photo_file_id": file_id}
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
