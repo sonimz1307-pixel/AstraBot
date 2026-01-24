@@ -24,6 +24,7 @@ ARK_SIZE_DEFAULT = os.getenv("ARK_SIZE_DEFAULT", "2K").strip()
 
 IMG_SIZE_DEFAULT = os.getenv("IMG_SIZE_DEFAULT", "1024x1536")
 TELEGRAM_API_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+TELEGRAM_FILE_BASE = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}"
 
 # ---------------- In-memory state ----------------
 STATE_TTL_SECONDS = int(os.getenv("STATE_TTL_SECONDS", "1800"))  # 30 минут
@@ -292,48 +293,80 @@ def _normalize_ark_size(size: str) -> str:
 async def ark_edit_image(
     source_image_bytes: bytes,
     prompt: str,
-    size: str,
+    size: str = "1024x1024",
     mask_png_bytes: Optional[bytes] = None,
+    *,
+    source_image_url: Optional[str] = None,
 ) -> bytes:
-    """
-    ModelArk OpenAI-compatible endpoint: POST {ARK_BASE_URL}/images/edits
-    Используется ТОЛЬКО в режиме «Нейро фотосессии».
-    """
-    if not ARK_API_KEY:
-        raise RuntimeError("ARK_API_KEY не задан в переменных окружения.")
-    if not ARK_IMAGE_MODEL:
-        raise RuntimeError("ARK_IMAGE_MODEL не задан (ожидается ep-... endpoint id).")
+    """Image-to-image via ModelArk (Seedream) using /images/generations.
 
-    ext, mime = _detect_image_type(source_image_bytes)
+    IMPORTANT:
+    - ModelArk V3 uses /images/generations for both text-to-image and image-to-image.
+    - For image-to-image, pass a publicly reachable image URL (recommended) via `source_image_url`.
+      We generate such a URL using Telegram File API in the caller.
+    - If `source_image_url` is not provided, we fall back to multipart upload to /images/generations.
+      (Some deployments may accept it; if your account only supports URL input, provide `source_image_url`.)
+    """
 
+    url = f"{ARK_BASE_URL.rstrip('/')}/images/generations"
     headers = {"Authorization": f"Bearer {ARK_API_KEY}"}
 
-    files = {"image": (f"source.{ext}", source_image_bytes, mime)}
-    if mask_png_bytes:
-        files["mask"] = ("mask.png", mask_png_bytes, "image/png")
+    # If we have an URL, prefer JSON payload (most compatible)
+    if source_image_url:
+        payload = {
+            "model": ARK_IMAGE_MODEL,
+            "prompt": prompt,
+            "response_format": "url",
+            "size": size,
+            # ModelArk expects list for multi-image fusion; single image works too
+            "image": [source_image_url],
+            "sequential_image_generation": "disabled",
+            "stream": False,
+            "watermark": True,
+        }
+        async with httpx.AsyncClient(timeout=ARK_TIMEOUT) as client:
+            resp = await client.post(url, headers={**headers, "Content-Type": "application/json"}, json=payload)
+            if resp.status_code >= 400:
+                raise RuntimeError(f"ModelArk Images Generations ({resp.status_code}): {resp.text}")
+            j = resp.json()
+    else:
+        # Fallback: try multipart (works on some setups)
+        files = {
+            "image": ("image.jpg", source_image_bytes, "image/jpeg"),
+        }
+        data = {
+            "model": ARK_IMAGE_MODEL,
+            "prompt": prompt,
+            "response_format": "url",
+            "size": size,
+            "sequential_image_generation": "disabled",
+            "stream": "false",
+            "watermark": "true",
+        }
+        async with httpx.AsyncClient(timeout=ARK_TIMEOUT) as client:
+            resp = await client.post(url, headers=headers, data=data, files=files)
+            if resp.status_code >= 400:
+                raise RuntimeError(f"ModelArk Images Generations ({resp.status_code}): {resp.text}")
+            j = resp.json()
 
-    data = {
-        "model": ARK_IMAGE_MODEL,  # endpoint id: ep-...
-        "prompt": prompt,
-        "size": _normalize_ark_size(size),
-        "n": "1",
-        "response_format": "b64_json",
-        "watermark": True,
-    }
+    # Expected OpenAI-compatible schema: {data: [{url: ...}]}
+    data_arr = j.get("data") or []
+    if not data_arr:
+        raise RuntimeError(f"ModelArk empty response: {j}")
+    img_url = data_arr[0].get("url") or data_arr[0].get("b64_json")
+    if not img_url:
+        raise RuntimeError(f"ModelArk missing url in response: {j}")
 
-    url = f"{ARK_BASE_URL}/images/edits"
-    async with httpx.AsyncClient(timeout=300) as client:
-        r = await client.post(url, headers=headers, data=data, files=files)
+    if data_arr[0].get("b64_json"):
+        import base64
+        return base64.b64decode(data_arr[0]["b64_json"])
 
-    if r.status_code != 200:
-        raise RuntimeError(f"Ошибка ModelArk Images Edit ({r.status_code}): {r.text[:2000]}")
-
-    resp = r.json()
-    b64_img = resp.get("data", [{}])[0].get("b64_json")
-    if not b64_img:
-        raise RuntimeError("ModelArk Images Edit вернул ответ без b64_json.")
-    return base64.b64decode(b64_img)
-
+    # Download the resulting image from the returned URL
+    async with httpx.AsyncClient(timeout=ARK_TIMEOUT) as client:
+        r2 = await client.get(img_url)
+        if r2.status_code >= 400:
+            raise RuntimeError(f"ModelArk result download ({r2.status_code}): {r2.text}")
+        return r2.content
 
 async def openai_edit_image(
     source_image_bytes: bytes,
@@ -1293,7 +1326,7 @@ async def webhook(secret: str, request: Request):
 
         # PHOTOSESSION mode (Seedream/ModelArk)
         if st.get("mode") == "photosession":
-            st["photosession"] = {"step": "need_prompt", "photo_bytes": img_bytes}
+            st["photosession"] = {"step": "need_prompt", "photo_bytes": img_bytes, "photo_file_id": best_photo.get("file_id")}
             st["ts"] = _now()
             await tg_send_message(
                 chat_id,
@@ -1373,7 +1406,7 @@ async def webhook(secret: str, request: Request):
                 return {"ok": True}
 
             if st.get("mode") == "photosession":
-                st["photosession"] = {"step": "need_prompt", "photo_bytes": img_bytes}
+                st["photosession"] = {"step": "need_prompt", "photo_bytes": img_bytes, "photo_file_id": best_photo.get("file_id")}
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
@@ -1447,11 +1480,18 @@ async def webhook(secret: str, request: Request):
             )
 
             try:
+                photo_file_id = ps.get("photo_file_id")
+                source_url = None
+                if photo_file_id:
+                    file_path = await tg_get_file_path(photo_file_id)
+                    source_url = f"{TELEGRAM_FILE_BASE}/{file_path}"
+
                 out_bytes = await ark_edit_image(
                     source_image_bytes=photo_bytes,
                     prompt=prompt,
                     size=ARK_SIZE_DEFAULT,
                     mask_png_bytes=None,
+                    source_image_url=source_url,
                 )
             except Exception as e:
                 await tg_send_message(chat_id, f"Ошибка нейро-фотосессии: {e}", reply_markup=_main_menu_keyboard())
