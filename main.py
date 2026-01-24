@@ -15,6 +15,13 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change_me")
 
+
+# ---- BytePlus / ModelArk (Seedream) — used ONLY for "Нейро фотосессии" mode ----
+ARK_API_KEY = os.getenv("ARK_API_KEY", "").strip()
+ARK_BASE_URL = os.getenv("ARK_BASE_URL", "https://ark.ap-southeast.bytepluses.com/api/v3").rstrip("/")
+ARK_IMAGE_MODEL = os.getenv("ARK_IMAGE_MODEL", "").strip()  # endpoint id: ep-...
+ARK_SIZE_DEFAULT = os.getenv("ARK_SIZE_DEFAULT", "2K").strip()
+
 IMG_SIZE_DEFAULT = os.getenv("IMG_SIZE_DEFAULT", "1024x1536")
 TELEGRAM_API_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
@@ -66,13 +73,17 @@ def _ensure_state(chat_id: int, user_id: int) -> Dict[str, Any]:
     return STATE[key]
 
 
-def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster"]):
+def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photosession"]):
     st = _ensure_state(chat_id, user_id)
     st["mode"] = mode
     st["ts"] = _now()
     if mode == "poster":
         # Визуальный режим: афиша ИЛИ обычный фото-эдит (после фото)
         st["poster"] = {"step": "need_photo", "photo_bytes": None, "light": "bright"}
+
+    if mode == "photosession":
+        # Нейро фотосессии: Seedream/ModelArk endpoint
+        st["photosession"] = {"step": "need_photo", "photo_bytes": None}
 
 
 # ---------------- Reply keyboard ----------------
@@ -81,6 +92,7 @@ def _main_menu_keyboard() -> dict:
     return {
         "keyboard": [
             [{"text": "ИИ (чат)"}, {"text": "Фото/Афиши"}],
+            [{"text": "Нейро фотосессии"}],
             [{"text": "Помощь"}],
         ],
         "resize_keyboard": True,
@@ -98,6 +110,7 @@ def _poster_menu_keyboard(light: str = "bright") -> dict:
     return {
         "keyboard": [
             [{"text": bright_label}, {"text": cinema_label}],
+            [{"text": "Нейро фотосессии"}],
             [{"text": "ИИ (чат)"}, {"text": "Фото/Афиши"}],
             [{"text": "Помощь"}],
         ],
@@ -259,6 +272,67 @@ def _detect_image_type(b: bytes) -> Tuple[str, str]:
     if b.startswith(b"RIFF") and len(b) >= 12 and b[8:12] == b"WEBP":
         return ("webp", "image/webp")
     return ("jpg", "image/jpeg")
+
+
+
+
+def _normalize_ark_size(size: str) -> str:
+    """
+    Seedream/ModelArk в консоли часто использует "2K"/"4K".
+    Если у тебя размер вида "1024x1536" — конвертируем в ARK_SIZE_DEFAULT.
+    """
+    s = (size or "").strip()
+    if not s:
+        return ARK_SIZE_DEFAULT
+    if "x" in s.lower():
+        return ARK_SIZE_DEFAULT
+    return s
+
+
+async def ark_edit_image(
+    source_image_bytes: bytes,
+    prompt: str,
+    size: str,
+    mask_png_bytes: Optional[bytes] = None,
+) -> bytes:
+    """
+    ModelArk OpenAI-compatible endpoint: POST {ARK_BASE_URL}/images/edits
+    Используется ТОЛЬКО в режиме «Нейро фотосессии».
+    """
+    if not ARK_API_KEY:
+        raise RuntimeError("ARK_API_KEY не задан в переменных окружения.")
+    if not ARK_IMAGE_MODEL:
+        raise RuntimeError("ARK_IMAGE_MODEL не задан (ожидается ep-... endpoint id).")
+
+    ext, mime = _detect_image_type(source_image_bytes)
+
+    headers = {"Authorization": f"Bearer {ARK_API_KEY}"}
+
+    files = {"image": (f"source.{ext}", source_image_bytes, mime)}
+    if mask_png_bytes:
+        files["mask"] = ("mask.png", mask_png_bytes, "image/png")
+
+    data = {
+        "model": ARK_IMAGE_MODEL,  # endpoint id: ep-...
+        "prompt": prompt,
+        "size": _normalize_ark_size(size),
+        "n": "1",
+        "response_format": "b64_json",
+        "watermark": True,
+    }
+
+    url = f"{ARK_BASE_URL}/images/edits"
+    async with httpx.AsyncClient(timeout=300) as client:
+        r = await client.post(url, headers=headers, data=data, files=files)
+
+    if r.status_code != 200:
+        raise RuntimeError(f"Ошибка ModelArk Images Edit ({r.status_code}): {r.text[:2000]}")
+
+    resp = r.json()
+    b64_img = resp.get("data", [{}])[0].get("b64_json")
+    if not b64_img:
+        raise RuntimeError("ModelArk Images Edit вернул ответ без b64_json.")
+    return base64.b64decode(b64_img)
 
 
 async def openai_edit_image(
@@ -1162,6 +1236,18 @@ async def webhook(secret: str, request: Request):
         await tg_send_message(chat_id, "Ок. Режим «ИИ (чат)».", reply_markup=_main_menu_keyboard())
         return {"ok": True}
 
+
+    if incoming_text == "Нейро фотосессии":
+        _set_mode(chat_id, user_id, "photosession")
+        await tg_send_message(
+            chat_id,
+            "Режим «Нейро фотосессии».\n"
+            "1) Пришли фото.\n"
+            "2) Потом одним сообщением напиши задачу: локация/стиль/одежда/детали.\n"
+            "Я постараюсь сохранить человека максимально 1к1 и сделать фото как профессиональную фотосессию.",
+            reply_markup=_main_menu_keyboard(),
+        )
+        return {"ok": True}
     if incoming_text == "Фото/Афиши":
         _set_mode(chat_id, user_id, "poster")
         await tg_send_message(
@@ -1201,6 +1287,22 @@ async def webhook(secret: str, request: Request):
             img_bytes = await tg_download_file_bytes(file_path)
         except Exception as e:
             await tg_send_message(chat_id, f"Ошибка при загрузке фото: {e}", reply_markup=_main_menu_keyboard())
+            return {"ok": True}
+
+
+
+        # PHOTOSESSION mode (Seedream/ModelArk)
+        if st.get("mode") == "photosession":
+            st["photosession"] = {"step": "need_prompt", "photo_bytes": img_bytes}
+            st["ts"] = _now()
+            await tg_send_message(
+                chat_id,
+                "Фото получил. Теперь напиши задачу для фотосессии:\n"
+                "• где находится человек (место/фон)\n"
+                "• стиль/настроение\n"
+                "• можно указать одежду/аксессуары\n",
+                reply_markup=_main_menu_keyboard(),
+            )
             return {"ok": True}
 
         # VISUAL mode
@@ -1270,6 +1372,19 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(chat_id, f"Ошибка при загрузке фото: {e}", reply_markup=_main_menu_keyboard())
                 return {"ok": True}
 
+            if st.get("mode") == "photosession":
+                st["photosession"] = {"step": "need_prompt", "photo_bytes": img_bytes}
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    "Фото получил. Теперь напиши задачу для фотосессии:\n"
+                    "• где находится человек (место/фон)\n"
+                    "• стиль/настроение\n"
+                    "• можно указать одежду/аксессуары\n",
+                    reply_markup=_main_menu_keyboard(),
+                )
+                return {"ok": True}
+
             if st.get("mode") == "poster":
                 st["poster"] = {"step": "need_prompt", "photo_bytes": img_bytes, "light": (st.get("poster") or {}).get("light", "bright")}
                 st["ts"] = _now()
@@ -1308,6 +1423,47 @@ async def webhook(secret: str, request: Request):
 
     # ---------------- Текст без фото ----------------
     if incoming_text:
+
+        # PHOTOSESSION flow: после фото -> генерация Seedream
+        if st.get("mode") == "photosession":
+            ps = st.get("photosession") or {}
+            step: PosterStep = ps.get("step") or "need_photo"
+            photo_bytes = ps.get("photo_bytes")
+
+            if step == "need_photo" or not photo_bytes:
+                await tg_send_message(chat_id, "Пришли фото для режима «Нейро фотосессии».", reply_markup=_main_menu_keyboard())
+                return {"ok": True}
+
+            # step == need_prompt
+            user_task = incoming_text.strip()
+
+            # Усиленный промпт: максимум похожести + фотосессия
+            prompt = (
+                "Neural photoshoot. Preserve the person's identity and facial features as close as possible to the original photo. "
+                "Do not change facial structure. Keep the same person. "
+                "High-quality professional photoshoot look: realistic, detailed, natural skin, sharp focus, good lighting, "
+                "cinematic but realistic, no artifacts.\n"
+                f"Task: {user_task}"
+            )
+
+            try:
+                out_bytes = await ark_edit_image(
+                    source_image_bytes=photo_bytes,
+                    prompt=prompt,
+                    size=ARK_SIZE_DEFAULT,
+                    mask_png_bytes=None,
+                )
+            except Exception as e:
+                await tg_send_message(chat_id, f"Ошибка нейро-фотосессии: {e}", reply_markup=_main_menu_keyboard())
+                # остаёмся в режиме, чтобы пользователь мог попробовать ещё раз
+                st["photosession"] = {"step": "need_photo", "photo_bytes": None}
+                st["ts"] = _now()
+                return {"ok": True}
+
+            await tg_send_photo_bytes(chat_id, out_bytes, caption="Готово. Если нужно ещё — пришли новое фото.")
+            st["photosession"] = {"step": "need_photo", "photo_bytes": None}
+            st["ts"] = _now()
+            return {"ok": True}
         # VISUAL flow (poster mode): после фото -> роутинг POSTER/PHOTO
         if st.get("mode") == "poster":
             poster = st.get("poster") or {}
