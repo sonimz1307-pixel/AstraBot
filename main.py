@@ -21,7 +21,8 @@ ARK_API_KEY = os.getenv("ARK_API_KEY", "").strip()
 ARK_BASE_URL = os.getenv("ARK_BASE_URL", "https://ark.ap-southeast.bytepluses.com/api/v3").rstrip("/")
 ARK_IMAGE_MODEL = os.getenv("ARK_IMAGE_MODEL", "").strip()  # endpoint id: ep-...
 ARK_SIZE_DEFAULT = os.getenv("ARK_SIZE_DEFAULT", "2K").strip()
-ARK_TIMEOUT = float(os.getenv("ARK_TIMEOUT", "120"))  # seconds
+ARK_TIMEOUT = float(os.getenv("ARK_TIMEOUT", "120"))
+ARK_WATERMARK = os.getenv("ARK_WATERMARK", "true").lower() in ("1","true","yes","y","on")  # seconds
 
 IMG_SIZE_DEFAULT = os.getenv("IMG_SIZE_DEFAULT", "1024x1536")
 TELEGRAM_API_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
@@ -82,6 +83,26 @@ def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photo
     if mode == "poster":
         # Визуальный режим: афиша ИЛИ обычный фото-эдит (после фото)
         st["poster"] = {"step": "need_photo", "photo_bytes": None, "light": "bright"}
+
+    if mode == "t2i":
+        t2i = st.get("t2i") or {}
+        if t2i.get("step") != "need_prompt":
+            st["t2i"] = {"step": "need_prompt"}
+            await tg_send_message(
+                chat_id,
+                "Режим «Текст→Картинка». Напиши описание, и я сгенерирую картинку (без фото).",
+                reply_markup=_main_menu_keyboard(),
+            )
+            return {"ok": True}
+        user_prompt = incoming_text
+        await tg_send_message(chat_id, "Генерирую изображение…")
+        try:
+            url = await ark_text_to_image(prompt=user_prompt, size="2K")
+            img_bytes = await http_download_bytes(url, timeout=ARK_TIMEOUT)
+            await tg_send_photo_bytes(chat_id, img_bytes, caption="Готово.")
+        except Exception as e:
+            await tg_send_message(chat_id, f"Ошибка T2I: {e}")
+        return {"ok": True}
 
     if mode == "photosession":
         # Нейро фотосессии: Seedream/ModelArk endpoint
@@ -155,6 +176,13 @@ async def tg_get_file_path(file_id: str) -> str:
 async def tg_download_file_bytes(file_path: str) -> bytes:
     url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
     async with httpx.AsyncClient(timeout=120) as client:
+        r = await client.get(url)
+    r.raise_for_status()
+    return r.content
+
+
+async def http_download_bytes(url: str, timeout: float = 180) -> bytes:
+    async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.get(url)
     r.raise_for_status()
     return r.content
@@ -1292,6 +1320,19 @@ async def webhook(secret: str, request: Request):
             "   • если хочешь афишу — напиши надпись/цену/стиль (или слово 'афиша')\n"
             "   • если хочешь обычную картинку — просто опиши сцену (или напиши 'без текста').\n",
             reply_markup=_poster_menu_keyboard((st.get("poster") or {}).get("light", "bright")),
+        )
+        return {"ok": True}
+
+    if incoming_text == "Текст→Картинка":
+        # Text-to-image mode (no input photo required)
+        _set_mode(chat_id, user_id, "t2i")
+        st["t2i"] = {"step": "need_prompt"}
+        await tg_send_message(
+            chat_id,
+            "Ок. Режим «Текст→Картинка» (без фото).\n"
+            "Напиши одним сообщением, что нужно сгенерировать.\n"
+            "Пример: «Яркая афиша открытия цветочного магазина, лепестки в воздухе, крупный заголовок»",
+            reply_markup=_main_menu_keyboard(),
         )
         return {"ok": True}
 
