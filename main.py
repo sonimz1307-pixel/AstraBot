@@ -22,7 +22,7 @@ ARK_BASE_URL = os.getenv("ARK_BASE_URL", "https://ark.ap-southeast.bytepluses.co
 ARK_IMAGE_MODEL = os.getenv("ARK_IMAGE_MODEL", "").strip()  # endpoint id: ep-...
 ARK_SIZE_DEFAULT = os.getenv("ARK_SIZE_DEFAULT", "2K").strip()
 ARK_TIMEOUT = float(os.getenv("ARK_TIMEOUT", "120"))
-ARK_WATERMARK = os.getenv("ARK_WATERMARK", "true").lower() in ("1","true","yes","y","on")  # seconds
+ARK_WATERMARK = os.getenv("ARK_WATERMARK", "true").lower() in ("1","true","yes","y","on")
 
 IMG_SIZE_DEFAULT = os.getenv("IMG_SIZE_DEFAULT", "1024x1536")
 TELEGRAM_API_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
@@ -76,37 +76,29 @@ def _ensure_state(chat_id: int, user_id: int) -> Dict[str, Any]:
     return STATE[key]
 
 
-def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photosession"]):
+def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photosession", "t2i"]):
     st = _ensure_state(chat_id, user_id)
     st["mode"] = mode
     st["ts"] = _now()
+
     if mode == "poster":
         # Визуальный режим: афиша ИЛИ обычный фото-эдит (после фото)
         st["poster"] = {"step": "need_photo", "photo_bytes": None, "light": "bright"}
 
-    if mode == "t2i":
-        t2i = st.get("t2i") or {}
-        if t2i.get("step") != "need_prompt":
-            st["t2i"] = {"step": "need_prompt"}
-            await tg_send_message(
-                chat_id,
-                "Режим «Текст→Картинка». Напиши описание, и я сгенерирую картинку (без фото).",
-                reply_markup=_main_menu_keyboard(),
-            )
-            return {"ok": True}
-        user_prompt = incoming_text
-        await tg_send_message(chat_id, "Генерирую изображение…")
-        try:
-            url = await ark_text_to_image(prompt=user_prompt, size="2K")
-            img_bytes = await http_download_bytes(url, timeout=ARK_TIMEOUT)
-            await tg_send_photo_bytes(chat_id, img_bytes, caption="Готово.")
-        except Exception as e:
-            await tg_send_message(chat_id, f"Ошибка T2I: {e}")
-        return {"ok": True}
-
-    if mode == "photosession":
-        # Нейро фотосессии: Seedream/ModelArk endpoint
+    elif mode == "photosession":
+        # Нейро фотосессии: Seedream/ModelArk endpoint (image-to-image)
         st["photosession"] = {"step": "need_photo", "photo_bytes": None}
+
+    elif mode == "t2i":
+        # Text-to-image: Seedream/ModelArk endpoint (text-to-image)
+        st["t2i"] = {"step": "need_prompt"}
+
+    else:
+        # chat
+        st.pop("poster", None)
+        st.pop("photosession", None)
+        st.pop("t2i", None)
+
 
 
 # ---------------- Reply keyboard ----------------
@@ -133,7 +125,7 @@ def _poster_menu_keyboard(light: str = "bright") -> dict:
     return {
         "keyboard": [
             [{"text": bright_label}, {"text": cinema_label}],
-            [{"text": "Нейро фотосессии"}],
+            [{"text": "Нейро фотосессии"}, {"text": "Текст→Картинка"}],
             [{"text": "ИИ (чат)"}, {"text": "Фото/Афиши"}],
             [{"text": "Помощь"}],
         ],
@@ -351,7 +343,7 @@ async def ark_edit_image(
             "image": [source_image_url],
             "sequential_image_generation": "disabled",
             "stream": False,
-            "watermark": True,
+            "watermark": bool(ARK_WATERMARK),
         }
         async with httpx.AsyncClient(timeout=ARK_TIMEOUT) as client:
             resp = await client.post(url, headers={**headers, "Content-Type": "application/json"}, json=payload)
@@ -370,7 +362,7 @@ async def ark_edit_image(
             "size": size,
             "sequential_image_generation": "disabled",
             "stream": "false",
-            "watermark": "true",
+            "watermark": "true" if ARK_WATERMARK else "false",
         }
         async with httpx.AsyncClient(timeout=ARK_TIMEOUT) as client:
             resp = await client.post(url, headers=headers, data=data, files=files)
@@ -396,6 +388,44 @@ async def ark_edit_image(
         if r2.status_code >= 400:
             raise RuntimeError(f"ModelArk result download ({r2.status_code}): {r2.text}")
         return r2.content
+
+
+
+async def ark_text_to_image(prompt: str, size: str = "2K") -> bytes:
+    """Text-to-image via ModelArk (Seedream) using /images/generations."""
+    url = f"{ARK_BASE_URL.rstrip('/')}/images/generations"
+    headers = {"Authorization": f"Bearer {ARK_API_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "model": ARK_IMAGE_MODEL,
+        "prompt": prompt,
+        "response_format": "url",
+        "size": size,
+        "sequential_image_generation": "disabled",
+        "stream": False,
+        "watermark": bool(ARK_WATERMARK),
+    }
+    async with httpx.AsyncClient(timeout=ARK_TIMEOUT) as client:
+        resp = await client.post(url, headers=headers, json=payload)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"ModelArk Images Generations ({resp.status_code}): {resp.text}")
+        j = resp.json()
+
+    data_arr = j.get("data") or []
+    if not data_arr:
+        raise RuntimeError(f"ModelArk empty response: {j}")
+    if data_arr[0].get("b64_json"):
+        import base64
+        return base64.b64decode(data_arr[0]["b64_json"])
+    img_url = data_arr[0].get("url")
+    if not img_url:
+        raise RuntimeError(f"ModelArk missing url in response: {j}")
+
+    async with httpx.AsyncClient(timeout=ARK_TIMEOUT) as client:
+        r2 = await client.get(img_url)
+        if r2.status_code >= 400:
+            raise RuntimeError(f"ModelArk result download ({r2.status_code}): {r2.text}")
+        return r2.content
+
 
 async def openai_edit_image(
     source_image_bytes: bytes,
@@ -1498,6 +1528,30 @@ async def webhook(secret: str, request: Request):
 
     # ---------------- Текст без фото ----------------
     if incoming_text:
+        # T2I flow: генерация Seedream по одному тексту (без входного фото)
+        if st.get("mode") == "t2i":
+            t2i = st.get("t2i") or {}
+            step = (t2i.get("step") or "need_prompt")
+            if step != "need_prompt":
+                st["t2i"] = {"step": "need_prompt"}
+
+            user_prompt = incoming_text.strip()
+            if not user_prompt:
+                await tg_send_message(chat_id, "Напиши описание для генерации (без фото).", reply_markup=_main_menu_keyboard())
+                return {"ok": True}
+
+            await tg_send_message(chat_id, "Генерирую изображение…", reply_markup=_main_menu_keyboard())
+            try:
+                img_bytes = await ark_text_to_image(prompt=user_prompt, size=ARK_SIZE_DEFAULT)
+                await tg_send_photo_bytes(chat_id, img_bytes, caption="Готово.")
+            except Exception as e:
+                await tg_send_message(chat_id, f"Ошибка T2I: {e}", reply_markup=_main_menu_keyboard())
+            finally:
+                # остаёмся в режиме t2i, чтобы можно было генерировать дальше без повторного выбора
+                st["t2i"] = {"step": "need_prompt"}
+                st["ts"] = _now()
+            return {"ok": True}
+
 
         # PHOTOSESSION flow: после фото -> генерация Seedream
         if st.get("mode") == "photosession":
