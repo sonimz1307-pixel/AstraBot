@@ -130,16 +130,15 @@ def _main_menu_keyboard() -> dict:
 
 
 def _poster_menu_keyboard(light: str = "bright") -> dict:
-    """Клавиатура для режима «Фото/Афиши» с выбором света для афиши."""
-    bright_label = "Афиша: Ярко" + (" ✅" if light == "bright" else "")
-    cinema_label = "Афиша: Кино" + (" ✅" if light == "cinema" else "")
+    """
+    Клавиатура для режима «Фото/Афиши».
+
+    По ТЗ: внутри режима не показываем другие вкладки/режимы и не дублируем «Фото/Афиши».
+    Оставляем только кнопку «Назад» (возврат в главное меню).
+    """
     return {
         "keyboard": [
-            [{"text": bright_label}, {"text": cinema_label}],
-            [{"text": "Нейро фотосессии"}, {"text": "Текст→Картинка"}],
-            [{"text": "2 фото"}],
-            [{"text": "ИИ (чат)"}, {"text": "Фото/Афиши"}],
-            [{"text": "Помощь"}],
+            [{"text": "⬅ Назад"}],
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False,
@@ -147,6 +146,7 @@ def _poster_menu_keyboard(light: str = "bright") -> dict:
     }
 
 # ---------------- Telegram helpers ----------------
+
 
 async def tg_send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None):
     if not TELEGRAM_BOT_TOKEN:
@@ -1367,6 +1367,13 @@ async def webhook(secret: str, request: Request):
         )
         return {"ok": True}
 
+
+if incoming_text in ("⬅ Назад", "Назад"):
+    # Возврат в главное меню из любого режима
+    _set_mode(chat_id, user_id, "chat")
+    await tg_send_message(chat_id, "Главное меню.", reply_markup=_main_menu_keyboard())
+    return {"ok": True}
+
     if incoming_text == "ИИ (чат)":
         _set_mode(chat_id, user_id, "chat")
         await tg_send_message(chat_id, "Ок. Режим «ИИ (чат)».", reply_markup=_main_menu_keyboard())
@@ -1634,7 +1641,7 @@ async def webhook(secret: str, request: Request):
                     "Фото получил. Теперь одним сообщением напиши:\n"
                     "• для афиши: надпись/цена/стиль (или слово 'афиша')\n"
                     "• для обычной картинки: опиши сцену (или 'без текста').",
-                    reply_markup=_main_menu_keyboard()
+                    reply_markup=_poster_menu_keyboard((st.get("poster") or {}).get("light", "bright"))
                 )
                 return {"ok": True}
 
