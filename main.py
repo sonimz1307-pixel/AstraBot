@@ -4,7 +4,7 @@ import time
 import re
 import json
 from io import BytesIO
-from typing import Optional, Literal, Dict, Any, Tuple
+from typing import Optional, Literal, Dict, Any, Tuple, List
 
 import httpx
 from fastapi import FastAPI, Request, Response
@@ -76,7 +76,7 @@ def _ensure_state(chat_id: int, user_id: int) -> Dict[str, Any]:
     return STATE[key]
 
 
-def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photosession", "t2i"]):
+def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photosession", "t2i", "two_photos"]):
     st = _ensure_state(chat_id, user_id)
     st["mode"] = mode
     st["ts"] = _now()
@@ -93,11 +93,22 @@ def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photo
         # Text-to-image: Seedream/ModelArk endpoint (text-to-image)
         st["t2i"] = {"step": "need_prompt"}
 
+    elif mode == "two_photos":
+        # 2 фото: multi-image (если эндпоинт поддерживает)
+        st["two_photos"] = {
+            "step": "need_photo_1",
+            "photo1_bytes": None,
+            "photo1_file_id": None,
+            "photo2_bytes": None,
+            "photo2_file_id": None,
+        }
+
     else:
         # chat
         st.pop("poster", None)
         st.pop("photosession", None)
         st.pop("t2i", None)
+        st.pop("two_photos", None)
 
 
 
@@ -107,7 +118,7 @@ def _main_menu_keyboard() -> dict:
     return {
         "keyboard": [
             [{"text": "ИИ (чат)"}, {"text": "Фото/Афиши"}],
-            [{"text": "Нейро фотосессии"}],
+            [{"text": "Нейро фотосессии"}, {"text": "2 фото"}],
             [{"text": "Помощь"}],
         ],
         "resize_keyboard": True,
@@ -126,6 +137,7 @@ def _poster_menu_keyboard(light: str = "bright") -> dict:
         "keyboard": [
             [{"text": bright_label}, {"text": cinema_label}],
             [{"text": "Нейро фотосессии"}, {"text": "Текст→Картинка"}],
+            [{"text": "2 фото"}],
             [{"text": "ИИ (чат)"}, {"text": "Фото/Афиши"}],
             [{"text": "Помощь"}],
         ],
@@ -318,6 +330,7 @@ async def ark_edit_image(
     mask_png_bytes: Optional[bytes] = None,
     *,
     source_image_url: Optional[str] = None,
+    source_image_urls: Optional[List[str]] = None,
 ) -> bytes:
     """Image-to-image via ModelArk (Seedream) using /images/generations.
 
@@ -332,15 +345,21 @@ async def ark_edit_image(
     url = f"{ARK_BASE_URL.rstrip('/')}/images/generations"
     headers = {"Authorization": f"Bearer {ARK_API_KEY}"}
 
-    # If we have an URL, prefer JSON payload (most compatible)
-    if source_image_url:
+    # If we have URL(s), prefer JSON payload (most compatible)
+    img_list: Optional[List[str]] = None
+    if source_image_urls and isinstance(source_image_urls, list) and len(source_image_urls) > 0:
+        img_list = [u for u in source_image_urls if u]
+    elif source_image_url:
+        img_list = [source_image_url]
+
+    if img_list:
         payload = {
             "model": ARK_IMAGE_MODEL,
             "prompt": prompt,
             "response_format": "url",
             "size": size,
             # ModelArk expects list for multi-image fusion; single image works too
-            "image": [source_image_url],
+            "image": img_list,
             "sequential_image_generation": "disabled",
             "stream": False,
             "watermark": bool(ARK_WATERMARK),
@@ -1264,6 +1283,31 @@ async def openai_check_poster_typography_quality(image_bytes: bytes) -> Dict[str
         return {"wow": 7, "plain": False, "notes": "parse_fail"}
 
 
+
+
+# ---------------- 2-photo prompt (ModelArk) ----------------
+
+def _two_photos_prompt(user_task: str) -> str:
+    """
+    Multi-image instruction wrapper.
+    Image 1 = BASE, Image 2 = REFERENCE.
+    User describes what to do in plain text.
+    """
+    task = (user_task or "").strip()
+    return (
+        "MULTI-IMAGE EDIT (2 references).\n"
+        "Image 1 = BASE: keep composition, pose, body, scene, camera angle.\n"
+        "Image 2 = REFERENCE: use as identity/style reference ONLY as requested by the user.\n\n"
+        "CRITICAL RULES:\n"
+        "• Follow the user's instruction exactly.\n"
+        "• Do NOT add any text, words, numbers, prices, watermarks.\n"
+        "• If user asks to replace face/identity: keep body/scene from Image 1 and transfer identity from Image 2.\n"
+        "• If user asks to keep identity from Image 1: do not change the person's face.\n"
+        "• Do not change age, gender, ethnicity unless user explicitly asks.\n"
+        "• Keep realism, correct anatomy, consistent lighting and shadows.\n\n"
+        f"USER TASK:\n{task}\n"
+    )
+
 # ---------------- Webhook handler ----------------
 
 @app.get("/health")
@@ -1353,6 +1397,20 @@ async def webhook(secret: str, request: Request):
         )
         return {"ok": True}
 
+
+    if incoming_text == "2 фото":
+        _set_mode(chat_id, user_id, "two_photos")
+        await tg_send_message(
+            chat_id,
+            "Режим «2 фото».\n"
+            "1) Пришли Фото 1 — это ОСНОВА (поза/тело/фон).\n"
+            "2) Потом Пришли Фото 2 — это ИСТОЧНИК (лицо/стиль/одежда — что скажешь).\n"
+            "3) Потом одним сообщением напиши, что сделать из этих двух фото.\n\n"
+            "Команда для сброса: /reset",
+            reply_markup=_main_menu_keyboard(),
+        )
+        return {"ok": True}
+
     if incoming_text == "Текст→Картинка":
         # Text-to-image mode (no input photo required)
         _set_mode(chat_id, user_id, "t2i")
@@ -1373,7 +1431,11 @@ async def webhook(secret: str, request: Request):
             "• Фото/Афиши: фото → потом текст.\n"
             "  — если просишь надпись/цену/афишу → сделаю афишу\n"
             "  — если описываешь сцену / пишешь 'без текста' → сделаю обычный фото-эдит\n"
-            "  — в обычном фото-эдите бот автоматически ограничивает правку маской, чтобы фон не менялся\n",
+            "  — в обычном фото-эдите бот автоматически ограничивает правку маской, чтобы фон не менялся\n"
+            "• Нейро фотосессии: фото → потом задача\n"
+            "• Текст→Картинка: без фото, просто описание\n"
+            "• 2 фото: фото1 → фото2 → потом текст, что сделать\n"
+            "• /reset — сбросить текущий режим\n",
             reply_markup=_main_menu_keyboard(),
         )
         return {"ok": True}
@@ -1396,7 +1458,51 @@ async def webhook(secret: str, request: Request):
 
 
 
-        # PHOTOSESSION mode (Seedream/ModelArk)
+        
+        # TWO PHOTOS mode
+        if st.get("mode") == "two_photos":
+            tp = st.get("two_photos") or {}
+            step = (tp.get("step") or "need_photo_1")
+
+            if step == "need_photo_1":
+                st["two_photos"] = {
+                    "step": "need_photo_2",
+                    "photo1_bytes": img_bytes,
+                    "photo1_file_id": file_id,
+                    "photo2_bytes": None,
+                    "photo2_file_id": None,
+                }
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    "Фото 1 получил. Теперь пришли Фото 2 (источник: лицо/стиль/одежда).",
+                    reply_markup=_main_menu_keyboard(),
+                )
+                return {"ok": True}
+
+            if step == "need_photo_2":
+                tp["photo2_bytes"] = img_bytes
+                tp["photo2_file_id"] = file_id
+                tp["step"] = "need_prompt"
+                st["two_photos"] = tp
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    "Фото 2 получил. Теперь одним сообщением напиши, что сделать из этих двух фото.\n"
+                    "Пример: «Возьми позу и фон с фото 1, а лицо с фото 2. Реалистично, без текста».",
+                    reply_markup=_main_menu_keyboard(),
+                )
+                return {"ok": True}
+
+            if step == "need_prompt":
+                await tg_send_message(
+                    chat_id,
+                    "Я уже получил 2 фото. Теперь пришли ТЕКСТОМ, что нужно сделать (или /reset).",
+                    reply_markup=_main_menu_keyboard(),
+                )
+                return {"ok": True}
+
+# PHOTOSESSION mode (Seedream/ModelArk)
         if st.get("mode") == "photosession":
             st["photosession"] = {"step": "need_prompt", "photo_bytes": img_bytes, "photo_file_id": file_id}
             st["ts"] = _now()
@@ -1477,6 +1583,36 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(chat_id, f"Ошибка при загрузке фото: {e}", reply_markup=_main_menu_keyboard())
                 return {"ok": True}
 
+            # TWO PHOTOS mode
+            if st.get("mode") == "two_photos":
+                tp = st.get("two_photos") or {}
+                step = (tp.get("step") or "need_photo_1")
+
+                if step == "need_photo_1":
+                    st["two_photos"] = {
+                        "step": "need_photo_2",
+                        "photo1_bytes": img_bytes,
+                        "photo1_file_id": file_id,
+                        "photo2_bytes": None,
+                        "photo2_file_id": None,
+                    }
+                    st["ts"] = _now()
+                    await tg_send_message(chat_id, "Фото 1 получил. Теперь пришли Фото 2.", reply_markup=_main_menu_keyboard())
+                    return {"ok": True}
+
+                if step == "need_photo_2":
+                    tp["photo2_bytes"] = img_bytes
+                    tp["photo2_file_id"] = file_id
+                    tp["step"] = "need_prompt"
+                    st["two_photos"] = tp
+                    st["ts"] = _now()
+                    await tg_send_message(chat_id, "Фото 2 получил. Теперь напиши текстом, что сделать.", reply_markup=_main_menu_keyboard())
+                    return {"ok": True}
+
+                if step == "need_prompt":
+                    await tg_send_message(chat_id, "Я уже получил 2 фото. Пришли текстом задачу (или /reset).", reply_markup=_main_menu_keyboard())
+                    return {"ok": True}
+
             if st.get("mode") == "photosession":
                 st["photosession"] = {"step": "need_prompt", "photo_bytes": img_bytes, "photo_file_id": file_id}
                 st["ts"] = _now()
@@ -1528,6 +1664,59 @@ async def webhook(secret: str, request: Request):
 
     # ---------------- Текст без фото ----------------
     if incoming_text:
+
+        # TWO PHOTOS: после 2 фото — пользователь пишет инструкцию
+        if st.get("mode") == "two_photos":
+            tp = st.get("two_photos") or {}
+            step = (tp.get("step") or "need_photo_1")
+            if step != "need_prompt":
+                await tg_send_message(chat_id, "В режиме «2 фото» сначала пришли 2 фото подряд.", reply_markup=_main_menu_keyboard())
+                return {"ok": True}
+
+            photo1_file_id = tp.get("photo1_file_id")
+            photo2_file_id = tp.get("photo2_file_id")
+            if not photo1_file_id or not photo2_file_id:
+                await tg_send_message(chat_id, "Не вижу оба фото. Пришли 2 фото заново (или /reset).", reply_markup=_main_menu_keyboard())
+                return {"ok": True}
+
+            user_task = incoming_text.strip()
+            if not user_task:
+                await tg_send_message(chat_id, "Напиши текстом, что сделать из этих 2 фото.", reply_markup=_main_menu_keyboard())
+                return {"ok": True}
+
+            await tg_send_message(chat_id, "Делаю генерацию по 2 фото…", reply_markup=_main_menu_keyboard())
+            try:
+                file_path1 = await tg_get_file_path(photo1_file_id)
+                file_path2 = await tg_get_file_path(photo2_file_id)
+                url1 = f"{TELEGRAM_FILE_BASE}/{file_path1}"
+                url2 = f"{TELEGRAM_FILE_BASE}/{file_path2}"
+
+                prompt = _two_photos_prompt(user_task)
+
+                out_bytes = await ark_edit_image(
+                    source_image_bytes=tp.get("photo1_bytes") or b"",
+                    prompt=prompt,
+                    size=ARK_SIZE_DEFAULT,
+                    mask_png_bytes=None,
+                    source_image_urls=[url1, url2],
+                )
+
+                await tg_send_photo_bytes(chat_id, out_bytes, caption="Готово (2 фото).")
+            except Exception as e:
+                await tg_send_message(
+                    chat_id,
+                    f"Ошибка 2 фото: {e}\n"
+                    "Если ошибка про 'image' / 'invalid' — возможно твой endpoint не поддерживает 2 изображения.\n"
+                    "Тогда нужен endpoint с multi-image или другой провайдер.",
+                    reply_markup=_main_menu_keyboard(),
+                )
+            finally:
+                # Сбрасываем режим, чтобы можно было сразу начать заново
+                _set_mode(chat_id, user_id, "two_photos")
+                st["ts"] = _now()
+
+            return {"ok": True}
+
         # T2I flow: генерация Seedream по одному тексту (без входного фото)
         if st.get("mode") == "t2i":
             t2i = st.get("t2i") or {}
