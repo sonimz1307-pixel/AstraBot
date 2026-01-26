@@ -1368,11 +1368,12 @@ async def webhook(secret: str, request: Request):
         return {"ok": True}
 
 
-if incoming_text in ("⬅ Назад", "Назад"):
-    # Возврат в главное меню из любого режима
-    _set_mode(chat_id, user_id, "chat")
-    await tg_send_message(chat_id, "Главное меню.", reply_markup=_main_menu_keyboard())
-    return {"ok": True}
+    if incoming_text in ("⬅ Назад", "Назад"):
+        # Возврат в главное меню из любого режима
+        _set_mode(chat_id, user_id, "chat")
+        await tg_send_message(chat_id, "Главное меню.", reply_markup=_main_menu_keyboard())
+        return {"ok": True}
+
 
     if incoming_text == "ИИ (чат)":
         _set_mode(chat_id, user_id, "chat")
