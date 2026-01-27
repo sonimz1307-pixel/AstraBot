@@ -61,6 +61,22 @@ def _cleanup_state():
     for k in expired_state:
         STATE.pop(k, None)
 
+# Cleanup download slots stored in per-user state
+for k, v in list(STATE.items()):
+    dl = v.get("dl")
+    if isinstance(dl, dict):
+        expired_tokens = []
+        for tok, meta in dl.items():
+            try:
+                ts2 = float((meta or {}).get("ts", 0))
+            except Exception:
+                ts2 = 0.0
+            if now - ts2 > STATE_TTL_SECONDS:
+                expired_tokens.append(tok)
+        for tok in expired_tokens:
+            dl.pop(tok, None)
+
+
     expired_updates = [k for k, ts in PROCESSED_UPDATES.items() if now - float(ts) > PROCESSED_TTL_SECONDS]
     for k in expired_updates:
         PROCESSED_UPDATES.pop(k, None)
@@ -77,7 +93,7 @@ def _get_user_key(chat_id: int, user_id: int) -> Tuple[int, int]:
 def _ensure_state(chat_id: int, user_id: int) -> Dict[str, Any]:
     key = _get_user_key(chat_id, user_id)
     if key not in STATE:
-        STATE[key] = {"mode": "chat", "ts": _now(), "poster": {}}
+        STATE[key] = {"mode": "chat", "ts": _now(), "poster": {}, "dl": {}}
     STATE[key]["ts"] = _now()
     return STATE[key]
 
@@ -159,6 +175,67 @@ def _poster_menu_keyboard(light: str = "bright") -> dict:
 
 # ---------------- Telegram helpers ----------------
 
+def _dl_keyboard(token: str) -> dict:
+    return {"inline_keyboard": [[{"text": "⬇️ Скачать оригинал 2К", "callback_data": f"dl2k:{token}"}]]}
+
+
+def _dl_init_slot(chat_id: int, user_id: int) -> str:
+    """Create a download slot and return token. Bytes will be filled later."""
+    st = _ensure_state(chat_id, user_id)
+    dl = st.setdefault("dl", {})
+    # short token suitable for callback_data
+    token = base64.urlsafe_b64encode(os.urandom(9)).decode("ascii").rstrip("=")
+    dl[token] = {"ts": _now(), "bytes": None, "ext": "png", "mime": "image/png"}
+    return token
+
+
+def _dl_set_bytes(chat_id: int, user_id: int, token: str, image_bytes: bytes):
+    st = _ensure_state(chat_id, user_id)
+    dl = st.setdefault("dl", {})
+    ext, mime = _detect_image_type(image_bytes)
+    dl[token] = {"ts": _now(), "bytes": image_bytes, "ext": ext, "mime": mime}
+
+
+def _dl_get(chat_id: int, user_id: int, token: str):
+    st = _ensure_state(chat_id, user_id)
+    dl = st.get("dl") or {}
+    meta = dl.get(token)
+    if not isinstance(meta, dict):
+        return None
+    return meta
+
+
+async def tg_answer_callback_query(callback_query_id: str, text: Optional[str] = None, show_alert: bool = False):
+    if not TELEGRAM_BOT_TOKEN:
+        return
+    payload = {"callback_query_id": callback_query_id, "show_alert": bool(show_alert)}
+    if text:
+        payload["text"] = text
+    async with httpx.AsyncClient(timeout=15) as client:
+        await client.post(f"{TELEGRAM_API_BASE}/answerCallbackQuery", json=payload)
+
+
+async def tg_send_document_bytes(chat_id: int, file_bytes: bytes, filename: str = "original_2k.png", caption: Optional[str] = None):
+    """Send as document to avoid Telegram compression."""
+    if not TELEGRAM_BOT_TOKEN:
+        return
+    ext, mime = _detect_image_type(file_bytes)
+    if not filename.lower().endswith(f".{ext}"):
+        filename = f"{os.path.splitext(filename)[0]}.{ext}"
+    files = {"document": (filename, file_bytes, mime)}
+    data = {"chat_id": str(chat_id)}
+    if caption:
+        data["caption"] = caption
+    if reply_markup is not None:
+        data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+    # caption already set above; keep compatibility
+    if caption:
+        # already set above
+        pass
+    async with httpx.AsyncClient(timeout=240) as client:
+        await client.post(f"{TELEGRAM_API_BASE}/sendDocument", data=data, files=files)
+
+
 
 async def tg_send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None):
     if not TELEGRAM_BOT_TOKEN:
@@ -193,7 +270,7 @@ async def tg_send_chat_action(chat_id: int, action: str = "typing"):
         await client.post(f"{TELEGRAM_API_BASE}/sendChatAction", json=payload)
 
 
-async def tg_send_photo_bytes_return_message_id(chat_id: int, image_bytes: bytes, caption: Optional[str] = None) -> Optional[int]:
+async def tg_send_photo_bytes_return_message_id(chat_id: int, image_bytes: bytes, caption: Optional[str] = None, reply_markup: Optional[dict] = None) -> Optional[int]:
     """
     sendPhoto, но возвращает message_id (нужен для editMessageCaption/editMessageMedia).
     """
@@ -222,7 +299,7 @@ async def tg_edit_message_caption(chat_id: int, message_id: int, caption: str):
         await client.post(f"{TELEGRAM_API_BASE}/editMessageCaption", json=payload)
 
 
-async def tg_edit_message_media_photo(chat_id: int, message_id: int, image_bytes: bytes, caption: Optional[str] = None):
+async def tg_edit_message_media_photo(chat_id: int, message_id: int, image_bytes: bytes, caption: Optional[str] = None, reply_markup: Optional[dict] = None):
     """
     Заменяет фото в существующем сообщении (эффект: был силуэт/превью → стало финальное изображение).
     """
@@ -234,6 +311,8 @@ async def tg_edit_message_media_photo(chat_id: int, message_id: int, image_bytes
 
     files = {"photo": ("image.png", image_bytes, "image/png")}
     data = {"chat_id": str(chat_id), "message_id": str(message_id), "media": json.dumps(media, ensure_ascii=False)}
+    if reply_markup is not None:
+        data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
 
     async with httpx.AsyncClient(timeout=180) as client:
         await client.post(f"{TELEGRAM_API_BASE}/editMessageMedia", data=data, files=files)
@@ -1459,11 +1538,41 @@ async def webhook(secret: str, request: Request):
     _cleanup_state()
     update = await request.json()
 
-    update_id = update.get("update_id")
-    if isinstance(update_id, int):
-        if update_id in PROCESSED_UPDATES:
-            return {"ok": True}
-        PROCESSED_UPDATES[update_id] = _now()
+    # --- Inline button callbacks (e.g., download 2K) ---
+    callback_query = update.get("callback_query")
+    if callback_query:
+        cq_id = callback_query.get("id") or ""
+        from_user = callback_query.get("from") or {}
+        user_id = int(from_user.get("id") or 0)
+        msg = callback_query.get("message") or {}
+        chat = msg.get("chat") or {}
+        chat_id = int(chat.get("id") or 0)
+        data = (callback_query.get("data") or "").strip()
+
+        if cq_id:
+            # instantly stop Telegram spinner
+            try:
+                await tg_answer_callback_query(str(cq_id))
+            except Exception:
+                pass
+
+        if chat_id and user_id and data.startswith("dl2k:"):
+            token = data.split(":", 1)[1].strip()
+            meta = _dl_get(chat_id, user_id, token)
+            if not meta:
+                await tg_answer_callback_query(str(cq_id), text="Ссылка устарела. Сгенерируй заново.", show_alert=True)
+                return {"ok": True}
+
+            b = meta.get("bytes")
+            if not b:
+                await tg_answer_callback_query(str(cq_id), text="Оригинал ещё генерируется…", show_alert=False)
+                return {"ok": True}
+
+            try:
+                await tg_send_document_bytes(chat_id, b, filename=f"original_2k.{meta.get('ext','png')}", caption="⬇️ Оригинал 2К (без сжатия)")
+            except Exception:
+                await tg_send_message(chat_id, "Не смог отправить оригинал файлом. Попробуй ещё раз.")
+        return {"ok": True}
 
     message = update.get("message") or update.get("edited_message")
     if not message:
@@ -1839,7 +1948,8 @@ async def webhook(secret: str, request: Request):
 
                 # Placeholder + fake progress
                 placeholder = _make_blur_placeholder(tp.get("photo1_bytes") or b"")
-                msg_id = await tg_send_photo_bytes_return_message_id(chat_id, placeholder, caption="Генерация по 2 фото…")
+                token = _dl_init_slot(chat_id, user_id)
+                msg_id = await tg_send_photo_bytes_return_message_id(chat_id, placeholder, caption="Генерация по 2 фото…", reply_markup=_dl_keyboard(token))
                 stop = asyncio.Event()
                 prog_task = None
                 if msg_id is not None:
@@ -1857,6 +1967,10 @@ async def webhook(secret: str, request: Request):
                     source_image_urls=[url1, url2],
                 )
 
+                _dl_set_bytes(chat_id, user_id, token, out_bytes)
+
+                _dl_set_bytes(chat_id, user_id, token, out_bytes)
+
                 stop.set()
                 if prog_task:
                     try:
@@ -1866,7 +1980,7 @@ async def webhook(secret: str, request: Request):
 
                 if msg_id is not None:
                     try:
-                        await tg_edit_message_media_photo(chat_id, msg_id, out_bytes, caption="Готово (2 фото).")
+                        await tg_edit_message_media_photo(chat_id, msg_id, out_bytes, caption="Готово (2 фото).", reply_markup=_dl_keyboard(token))
                         _sent_via_edit = True
                     except Exception:
                         pass
@@ -1908,7 +2022,8 @@ async def webhook(secret: str, request: Request):
 
             # Placeholder + fake progress
             placeholder = _make_blur_placeholder(None)
-            msg_id = await tg_send_photo_bytes_return_message_id(chat_id, placeholder, caption="Генерация изображения…")
+            token = _dl_init_slot(chat_id, user_id)
+            msg_id = await tg_send_photo_bytes_return_message_id(chat_id, placeholder, caption="Генерация изображения…", reply_markup=_dl_keyboard(token))
             stop = asyncio.Event()
             prog_task = None
             if msg_id is not None:
@@ -1919,6 +2034,8 @@ async def webhook(secret: str, request: Request):
             try:
                 img_bytes = await ark_text_to_image(prompt=user_prompt, size=ARK_SIZE_DEFAULT)
 
+                _dl_set_bytes(chat_id, user_id, token, img_bytes)
+
                 stop.set()
                 if prog_task:
                     try:
@@ -1928,7 +2045,7 @@ async def webhook(secret: str, request: Request):
 
                 if msg_id is not None:
                     try:
-                        await tg_edit_message_media_photo(chat_id, msg_id, img_bytes, caption="Готово.")
+                        await tg_edit_message_media_photo(chat_id, msg_id, img_bytes, caption="Готово.", reply_markup=_dl_keyboard(token))
                     except Exception:
                         await tg_send_photo_bytes(chat_id, img_bytes, caption="Готово.")
                 else:
@@ -1973,7 +2090,8 @@ async def webhook(secret: str, request: Request):
 
             # Placeholder + fake progress (только для генерации изображений)
             placeholder = _make_blur_placeholder(photo_bytes)
-            msg_id = await tg_send_photo_bytes_return_message_id(chat_id, placeholder, caption="Генерация фотосессии…")
+            token = _dl_init_slot(chat_id, user_id)
+            msg_id = await tg_send_photo_bytes_return_message_id(chat_id, placeholder, caption="Генерация фотосессии…", reply_markup=_dl_keyboard(token))
             stop = asyncio.Event()
             prog_task = None
             if msg_id is not None:
@@ -2006,7 +2124,7 @@ async def webhook(secret: str, request: Request):
 
                 if msg_id is not None:
                     try:
-                        await tg_edit_message_media_photo(chat_id, msg_id, out_bytes, caption="Готово.")
+                        await tg_edit_message_media_photo(chat_id, msg_id, out_bytes, caption="Готово.", reply_markup=_dl_keyboard(token))
                         _sent_via_edit = True
                     except Exception:
                         pass
@@ -2066,7 +2184,8 @@ async def webhook(secret: str, request: Request):
                 if mode == "POSTER":
                     # Placeholder + fake progress (только для генерации изображений)
                     placeholder = _make_blur_placeholder(photo_bytes)
-                    msg_id = await tg_send_photo_bytes_return_message_id(chat_id, placeholder, caption="Генерация афиши…")
+                    token = _dl_init_slot(chat_id, user_id)
+                    msg_id = await tg_send_photo_bytes_return_message_id(chat_id, placeholder, caption="Генерация афиши…", reply_markup=_dl_keyboard(token))
                     stop = asyncio.Event()
                     prog_task = None
                     if msg_id is not None:
@@ -2084,6 +2203,8 @@ async def webhook(secret: str, request: Request):
                             mask_png_bytes=None,
                         )
 
+                        _dl_set_bytes(chat_id, user_id, token, out_bytes)
+
                         stop.set()
                         if prog_task:
                             try:
@@ -2093,7 +2214,7 @@ async def webhook(secret: str, request: Request):
 
                         if msg_id is not None:
                             try:
-                                await tg_edit_message_media_photo(chat_id, msg_id, out_bytes, caption="Готово (афиша).")
+                                await tg_edit_message_media_photo(chat_id, msg_id, out_bytes, caption="Готово (афиша).", reply_markup=_dl_keyboard(token))
                             except Exception:
                                 await tg_send_photo_bytes(chat_id, out_bytes, caption="Готово (афиша).")
                         else:
@@ -2122,7 +2243,8 @@ async def webhook(secret: str, request: Request):
                         + ("Фон максимально сохраняю..." if strict else "...")
                     )
                     placeholder = _make_blur_placeholder(photo_bytes)
-                    msg_id = await tg_send_photo_bytes_return_message_id(chat_id, placeholder, caption="Генерация изображения…")
+                    token = _dl_init_slot(chat_id, user_id)
+                    msg_id = await tg_send_photo_bytes_return_message_id(chat_id, placeholder, caption="Генерация изображения…", reply_markup=_dl_keyboard(token))
                     stop = asyncio.Event()
                     prog_task = None
                     if msg_id is not None:
@@ -2133,6 +2255,8 @@ async def webhook(secret: str, request: Request):
                     try:
                         out_bytes = await openai_edit_image(photo_bytes, prompt, IMG_SIZE_DEFAULT, mask_png_bytes=mask_png)
 
+                        _dl_set_bytes(chat_id, user_id, token, out_bytes)
+
                         stop.set()
                         if prog_task:
                             try:
@@ -2142,7 +2266,7 @@ async def webhook(secret: str, request: Request):
 
                         if msg_id is not None:
                             try:
-                                await tg_edit_message_media_photo(chat_id, msg_id, out_bytes, caption="Готово (без текста).")
+                                await tg_edit_message_media_photo(chat_id, msg_id, out_bytes, caption="Готово (без текста).", reply_markup=_dl_keyboard(token))
                             except Exception:
                                 await tg_send_photo_bytes(chat_id, out_bytes, caption="Готово (без текста).")
                         else:
