@@ -1,6 +1,7 @@
 import os
 import base64
 import time
+import asyncio
 import re
 import json
 from io import BytesIO
@@ -25,6 +26,11 @@ ARK_TIMEOUT = float(os.getenv("ARK_TIMEOUT", "120"))
 ARK_WATERMARK = os.getenv("ARK_WATERMARK", "true").lower() in ("1","true","yes","y","on")
 
 IMG_SIZE_DEFAULT = os.getenv("IMG_SIZE_DEFAULT", "1024x1536")
+
+# Fake progress UI (Telegram): updates caption while generating images
+PROGRESS_UI_ENABLED = os.getenv("PROGRESS_UI_ENABLED", "true").lower() in ("1","true","yes","y","on")
+PROGRESS_EXPECTED_SECONDS = float(os.getenv("PROGRESS_EXPECTED_SECONDS", "22"))  # how fast % grows
+PROGRESS_UPDATE_EVERY = float(os.getenv("PROGRESS_UPDATE_EVERY", "2.0"))
 TELEGRAM_API_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 TELEGRAM_FILE_BASE = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}"
 
@@ -175,73 +181,129 @@ async def tg_send_photo_bytes(chat_id: int, image_bytes: bytes, caption: Optiona
         await client.post(f"{TELEGRAM_API_BASE}/sendPhoto", data=data, files=files)
 
 
-async def tg_answer_callback_query(callback_query_id: str, text: str = "", show_alert: bool = False):
-    """Acknowledge inline button presses so Telegram UI doesn't keep 'loading'."""
-    if not TELEGRAM_BOT_TOKEN or not callback_query_id:
-        return
-    payload = {"callback_query_id": callback_query_id}
-    if text:
-        payload["text"] = text
-    if show_alert:
-        payload["show_alert"] = True
-    async with httpx.AsyncClient(timeout=20) as client:
-        await client.post(f"{TELEGRAM_API_BASE}/answerCallbackQuery", json=payload)
-
-
-async def tg_send_document_bytes(chat_id: int, file_bytes: bytes, filename: str, mime: str, caption: Optional[str] = None):
-    """Send file as document (NO Telegram compression)."""
+async def tg_send_chat_action(chat_id: int, action: str = "typing"):
+    """
+    Показывает системный индикатор Telegram (typing/upload_photo/record_video и т.п.).
+    Это не "полоска прогресса", но создаёт ощущение активности.
+    """
     if not TELEGRAM_BOT_TOKEN:
         return
-    files = {"document": (filename, file_bytes, mime)}
+    payload = {"chat_id": str(chat_id), "action": action}
+    async with httpx.AsyncClient(timeout=15) as client:
+        await client.post(f"{TELEGRAM_API_BASE}/sendChatAction", json=payload)
+
+
+async def tg_send_photo_bytes_return_message_id(chat_id: int, image_bytes: bytes, caption: Optional[str] = None) -> Optional[int]:
+    """
+    sendPhoto, но возвращает message_id (нужен для editMessageCaption/editMessageMedia).
+    """
+    if not TELEGRAM_BOT_TOKEN:
+        return None
+    files = {"photo": ("image.png", image_bytes, "image/png")}
     data = {"chat_id": str(chat_id)}
     if caption:
         data["caption"] = caption
     async with httpx.AsyncClient(timeout=180) as client:
-        await client.post(f"{TELEGRAM_API_BASE}/sendDocument", data=data, files=files)
+        r = await client.post(f"{TELEGRAM_API_BASE}/sendPhoto", data=data, files=files)
+    try:
+        j = r.json()
+        if isinstance(j, dict) and j.get("ok") and j.get("result") and j["result"].get("message_id") is not None:
+            return int(j["result"]["message_id"])
+    except Exception:
+        pass
+    return None
 
 
-async def tg_send_preview_with_download_button(chat_id: int, image_bytes: bytes, caption: Optional[str] = None):
+async def tg_edit_message_caption(chat_id: int, message_id: int, caption: str):
+    if not TELEGRAM_BOT_TOKEN:
+        return
+    payload = {"chat_id": str(chat_id), "message_id": int(message_id), "caption": caption}
+    async with httpx.AsyncClient(timeout=20) as client:
+        await client.post(f"{TELEGRAM_API_BASE}/editMessageCaption", json=payload)
+
+
+async def tg_edit_message_media_photo(chat_id: int, message_id: int, image_bytes: bytes, caption: Optional[str] = None):
     """
-    Send preview as photo (Telegram-compressed) with inline button to request original 2K as document.
-    The original bytes are stored per-user in STATE by tg_store_last_generated_image().
+    Заменяет фото в существующем сообщении (эффект: был силуэт/превью → стало финальное изображение).
     """
     if not TELEGRAM_BOT_TOKEN:
         return
-
-    reply_markup = {
-        "inline_keyboard": [
-            [{"text": "⬇️ Скачать оригинал 2К", "callback_data": "dl2k"}]
-        ]
-    }
-
-    ext, mime = _detect_image_type(image_bytes)
-
-    files = {"photo": (f"preview.{ext}", image_bytes, mime)}
-    data = {"chat_id": str(chat_id), "reply_markup": json.dumps(reply_markup)}
+    media = {"type": "photo", "media": "attach://photo"}
     if caption:
-        data["caption"] = caption
+        media["caption"] = caption
+
+    files = {"photo": ("image.png", image_bytes, "image/png")}
+    data = {"chat_id": str(chat_id), "message_id": str(message_id), "media": json.dumps(media, ensure_ascii=False)}
 
     async with httpx.AsyncClient(timeout=180) as client:
-        await client.post(f"{TELEGRAM_API_BASE}/sendPhoto", data=data, files=files)
+        await client.post(f"{TELEGRAM_API_BASE}/editMessageMedia", data=data, files=files)
 
 
-async def tg_store_last_generated_image(chat_id: int, user_id: int, image_bytes: bytes):
-    """Keep last generated image bytes in memory so we can send original via button."""
-    st = _ensure_state(chat_id, user_id)
-    ext, mime = _detect_image_type(image_bytes)
-    # Friendly filename for the document
-    filename = f"original_2k.{ext}"
-    st["last_generated"] = {"bytes": image_bytes, "ext": ext, "mime": mime, "filename": filename}
-    st["ts"] = _now()
+def _make_blur_placeholder(source_image_bytes: Optional[bytes], size_hint: Tuple[int, int] = (768, 1152)) -> bytes:
+    """
+    Быстро генерит 'силуэт/превью' (пикселизация + блюр + затемнение), чтобы отправить как placeholder.
+    Если исходника нет (T2I), рисуем нейтральный фон.
+    """
+    from PIL import Image, ImageDraw, ImageFilter  # type: ignore
+
+    W, H = size_hint
+    try:
+        if source_image_bytes:
+            img = Image.open(BytesIO(source_image_bytes)).convert("RGB")
+            # подгоняем под вертикаль
+            img = img.resize((W, H), Image.LANCZOS)
+            # пикселизация
+            small = img.resize((max(32, W // 24), max(32, H // 24)), Image.BILINEAR)
+            img = small.resize((W, H), Image.NEAREST)
+        else:
+            img = Image.new("RGB", (W, H), (40, 40, 40))
+        img = img.filter(ImageFilter.GaussianBlur(radius=6))
+
+        overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        d = ImageDraw.Draw(overlay)
+        d.rectangle((0, 0, W, H), fill=(0, 0, 0, 90))
+        # лёгкая "плашка" внизу
+        d.rounded_rectangle((int(W*0.07), int(H*0.83), int(W*0.93), int(H*0.93)), radius=22, fill=(0, 0, 0, 110))
+        img = Image.alpha_composite(img.convert("RGBA"), overlay)
+
+        bio = BytesIO()
+        img.save(bio, format="PNG")
+        return bio.getvalue()
+    except Exception:
+        # fallback: пустая картинка
+        img = Image.new("RGB", (W, H), (40, 40, 40))
+        bio = BytesIO()
+        img.save(bio, format="PNG")
+        return bio.getvalue()
 
 
-async def tg_send_preview_and_store(chat_id: int, user_id: int, image_bytes: bytes, caption: Optional[str] = None):
-    """Best-practice UX: preview now, original later by button."""
-    await tg_store_last_generated_image(chat_id, user_id, image_bytes)
-    # For preview, keep whatever bytes we got — Telegram will compress anyway.
-    await tg_send_preview_with_download_button(chat_id, image_bytes, caption=caption)
+async def _progress_caption_updater(chat_id: int, message_id: int, base_text: str, stop: asyncio.Event):
+    """
+    Фейковый прогресс: обновляем caption каждые N секунд до 99%.
+    """
+    if not PROGRESS_UI_ENABLED:
+        return
 
+    start = _now()
+    last_sent = -1
 
+    while not stop.is_set():
+        elapsed = _now() - start
+        pct = int(min(99, max(1, (elapsed / max(1.0, PROGRESS_EXPECTED_SECONDS)) * 100)))
+
+        # лёгкая "шкала" из кружков
+        filled = max(0, min(5, int(round(pct / 20))))
+        bar = "🟢" * filled + "⚪" * (5 - filled)
+
+        if pct != last_sent:
+            last_sent = pct
+            try:
+                await tg_edit_message_caption(chat_id, message_id, f"{base_text}\n{bar} ({pct}%)")
+            except Exception:
+                # если Telegram не даёт слишком часто — просто молча продолжаем
+                pass
+
+        await asyncio.sleep(PROGRESS_UPDATE_EVERY)
 
 async def tg_get_file_path(file_id: str) -> str:
     async with httpx.AsyncClient(timeout=20) as client:
@@ -1403,38 +1465,7 @@ async def webhook(secret: str, request: Request):
             return {"ok": True}
         PROCESSED_UPDATES[update_id] = _now()
 
-# ---------------- Inline button callbacks ----------------
-callback = update.get("callback_query")
-if callback:
-    cb_id = callback.get("id") or ""
-    data = (callback.get("data") or "").strip()
-    cb_from = callback.get("from") or {}
-    cb_user_id = int(cb_from.get("id") or 0)
-
-    cb_message = callback.get("message") or {}
-    cb_chat = cb_message.get("chat") or {}
-    cb_chat_id = int(cb_chat.get("id") or 0)
-
-    if cb_chat_id and cb_user_id:
-        st_cb = _ensure_state(cb_chat_id, cb_user_id)
-
-        if data == "dl2k":
-            last = st_cb.get("last_generated") or {}
-            b = last.get("bytes")
-            filename = last.get("filename") or "original_2k.png"
-            mime = last.get("mime") or "image/png"
-
-            if b:
-                await tg_send_document_bytes(cb_chat_id, b, filename=filename, mime=mime, caption="Оригинал 2К (без сжатия).")
-                await tg_answer_callback_query(cb_id, text="Отправляю оригинал 2К…", show_alert=False)
-            else:
-                await tg_answer_callback_query(cb_id, text="Оригинал не найден. Сгенерируй заново.", show_alert=True)
-        else:
-            await tg_answer_callback_query(cb_id)
-    return {"ok": True}
-
-
-    message = update.get(\"message\") or update.get("edited_message")
+    message = update.get("message") or update.get("edited_message")
     if not message:
         return {"ok": True}
 
@@ -1806,6 +1837,18 @@ if callback:
 
                 prompt = _two_photos_prompt(user_task)
 
+                # Placeholder + fake progress
+                placeholder = _make_blur_placeholder(tp.get("photo1_bytes") or b"")
+                msg_id = await tg_send_photo_bytes_return_message_id(chat_id, placeholder, caption="Генерация по 2 фото…")
+                stop = asyncio.Event()
+                prog_task = None
+                if msg_id is not None:
+                    prog_task = asyncio.create_task(_progress_caption_updater(chat_id, msg_id, "Генерация по 2 фото…", stop))
+                else:
+                    await tg_send_chat_action(chat_id, "upload_photo")
+
+                _sent_via_edit = False
+
                 out_bytes = await ark_edit_image(
                     source_image_bytes=tp.get("photo1_bytes") or b"",
                     prompt=prompt,
@@ -1814,8 +1857,29 @@ if callback:
                     source_image_urls=[url1, url2],
                 )
 
-                await tg_send_preview_and_store(chat_id, user_id, out_bytes, caption="Готово (2 фото).")
+                stop.set()
+                if prog_task:
+                    try:
+                        await prog_task
+                    except Exception:
+                        pass
+
+                if msg_id is not None:
+                    try:
+                        await tg_edit_message_media_photo(chat_id, msg_id, out_bytes, caption="Готово (2 фото).")
+                        _sent_via_edit = True
+                    except Exception:
+                        pass
+
+                if not _sent_via_edit:
+                    await tg_send_photo_bytes(chat_id, out_bytes, caption="Готово (2 фото).")
             except Exception as e:
+                stop.set()
+                if prog_task:
+                    try:
+                        await prog_task
+                    except Exception:
+                        pass
                 await tg_send_message(
                     chat_id,
                     f"Ошибка 2 фото: {e}\n"
@@ -1842,11 +1906,41 @@ if callback:
                 await tg_send_message(chat_id, "Напиши описание для генерации (без фото).", reply_markup=_main_menu_keyboard())
                 return {"ok": True}
 
-            await tg_send_message(chat_id, "Генерирую изображение…", reply_markup=_main_menu_keyboard())
+            # Placeholder + fake progress
+            placeholder = _make_blur_placeholder(None)
+            msg_id = await tg_send_photo_bytes_return_message_id(chat_id, placeholder, caption="Генерация изображения…")
+            stop = asyncio.Event()
+            prog_task = None
+            if msg_id is not None:
+                prog_task = asyncio.create_task(_progress_caption_updater(chat_id, msg_id, "Генерация изображения…", stop))
+            else:
+                await tg_send_chat_action(chat_id, "upload_photo")
+
             try:
                 img_bytes = await ark_text_to_image(prompt=user_prompt, size=ARK_SIZE_DEFAULT)
-                await tg_send_preview_and_store(chat_id, user_id, img_bytes, caption="Готово.")
+
+                stop.set()
+                if prog_task:
+                    try:
+                        await prog_task
+                    except Exception:
+                        pass
+
+                if msg_id is not None:
+                    try:
+                        await tg_edit_message_media_photo(chat_id, msg_id, img_bytes, caption="Готово.")
+                    except Exception:
+                        await tg_send_photo_bytes(chat_id, img_bytes, caption="Готово.")
+                else:
+                    await tg_send_photo_bytes(chat_id, img_bytes, caption="Готово.")
+
             except Exception as e:
+                stop.set()
+                if prog_task:
+                    try:
+                        await prog_task
+                    except Exception:
+                        pass
                 await tg_send_message(chat_id, f"Ошибка T2I: {e}", reply_markup=_main_menu_keyboard())
             finally:
                 # остаёмся в режиме t2i, чтобы можно было генерировать дальше без повторного выбора
@@ -1877,6 +1971,17 @@ if callback:
                 f"Task: {user_task}"
             )
 
+            # Placeholder + fake progress (только для генерации изображений)
+            placeholder = _make_blur_placeholder(photo_bytes)
+            msg_id = await tg_send_photo_bytes_return_message_id(chat_id, placeholder, caption="Генерация фотосессии…")
+            stop = asyncio.Event()
+            prog_task = None
+            if msg_id is not None:
+                prog_task = asyncio.create_task(_progress_caption_updater(chat_id, msg_id, "Генерация фотосессии…", stop))
+            else:
+                await tg_send_chat_action(chat_id, "upload_photo")
+
+            _sent_via_edit = False
             try:
                 photo_file_id = ps.get("photo_file_id")
                 source_url = None
@@ -1891,14 +1996,36 @@ if callback:
                     mask_png_bytes=None,
                     source_image_url=source_url,
                 )
+
+                stop.set()
+                if prog_task:
+                    try:
+                        await prog_task
+                    except Exception:
+                        pass
+
+                if msg_id is not None:
+                    try:
+                        await tg_edit_message_media_photo(chat_id, msg_id, out_bytes, caption="Готово.")
+                        _sent_via_edit = True
+                    except Exception:
+                        pass
+
             except Exception as e:
+                stop.set()
+                if prog_task:
+                    try:
+                        await prog_task
+                    except Exception:
+                        pass
                 await tg_send_message(chat_id, f"Ошибка нейро-фотосессии: {e}", reply_markup=_main_menu_keyboard())
                 # остаёмся в режиме, чтобы пользователь мог попробовать ещё раз
                 st["photosession"] = {"step": "need_photo", "photo_bytes": None}
                 st["ts"] = _now()
                 return {"ok": True}
 
-            await tg_send_preview_and_store(chat_id, user_id, out_bytes, caption="Готово. Если нужно ещё — пришли новое фото.")
+            if not _sent_via_edit:
+                await tg_send_photo_bytes(chat_id, out_bytes, caption="Готово. Если нужно ещё — пришли новое фото.")
             st["photosession"] = {"step": "need_photo", "photo_bytes": None}
             st["ts"] = _now()
             return {"ok": True}
@@ -1937,7 +2064,16 @@ if callback:
                 mode, _reason = await openai_route_visual_mode(incoming_text)
 
                 if mode == "POSTER":
-                    await tg_send_message(chat_id, "Делаю афишу на основе твоего фото...")
+                    # Placeholder + fake progress (только для генерации изображений)
+                    placeholder = _make_blur_placeholder(photo_bytes)
+                    msg_id = await tg_send_photo_bytes_return_message_id(chat_id, placeholder, caption="Генерация афиши…")
+                    stop = asyncio.Event()
+                    prog_task = None
+                    if msg_id is not None:
+                        prog_task = asyncio.create_task(_progress_caption_updater(chat_id, msg_id, "Генерация афиши…", stop))
+                    else:
+                        await tg_send_chat_action(chat_id, "upload_photo")
+
                     try:
                         spec = await openai_extract_poster_spec(incoming_text)
                         poster_prompt = _poster_prompt_art_director(spec, light=(poster.get("light") or "bright"))
@@ -1947,10 +2083,30 @@ if callback:
                             IMG_SIZE_DEFAULT,
                             mask_png_bytes=None,
                         )
-                        await tg_send_preview_and_store(chat_id, user_id, out_bytes, caption="Готово (афиша).")
-                    except Exception as e:
-                        await tg_send_message(chat_id, f"Не получилось сгенерировать афишу: {e}")
 
+                        stop.set()
+                        if prog_task:
+                            try:
+                                await prog_task
+                            except Exception:
+                                pass
+
+                        if msg_id is not None:
+                            try:
+                                await tg_edit_message_media_photo(chat_id, msg_id, out_bytes, caption="Готово (афиша).")
+                            except Exception:
+                                await tg_send_photo_bytes(chat_id, out_bytes, caption="Готово (афиша).")
+                        else:
+                            await tg_send_photo_bytes(chat_id, out_bytes, caption="Готово (афиша).")
+
+                    except Exception as e:
+                        stop.set()
+                        if prog_task:
+                            try:
+                                await prog_task
+                            except Exception:
+                                pass
+                        await tg_send_message(chat_id, f"Не получилось сгенерировать афишу: {e}")
                 else:
                     # PHOTO: авто-маска по зоне + санитизация IP-слов
                     safe_text = _sanitize_ip_terms_for_image(incoming_text)
@@ -1965,10 +2121,40 @@ if callback:
                         f"Делаю обычный фото-эдит (без текста). Зона: {zone}. "
                         + ("Фон максимально сохраняю..." if strict else "...")
                     )
+                    placeholder = _make_blur_placeholder(photo_bytes)
+                    msg_id = await tg_send_photo_bytes_return_message_id(chat_id, placeholder, caption="Генерация изображения…")
+                    stop = asyncio.Event()
+                    prog_task = None
+                    if msg_id is not None:
+                        prog_task = asyncio.create_task(_progress_caption_updater(chat_id, msg_id, "Генерация изображения…", stop))
+                    else:
+                        await tg_send_chat_action(chat_id, "upload_photo")
+
                     try:
                         out_bytes = await openai_edit_image(photo_bytes, prompt, IMG_SIZE_DEFAULT, mask_png_bytes=mask_png)
-                        await tg_send_preview_and_store(chat_id, user_id, out_bytes, caption="Готово (без текста).")
+
+                        stop.set()
+                        if prog_task:
+                            try:
+                                await prog_task
+                            except Exception:
+                                pass
+
+                        if msg_id is not None:
+                            try:
+                                await tg_edit_message_media_photo(chat_id, msg_id, out_bytes, caption="Готово (без текста).")
+                            except Exception:
+                                await tg_send_photo_bytes(chat_id, out_bytes, caption="Готово (без текста).")
+                        else:
+                            await tg_send_photo_bytes(chat_id, out_bytes, caption="Готово (без текста).")
+
                     except Exception as e:
+                        stop.set()
+                        if prog_task:
+                            try:
+                                await prog_task
+                            except Exception:
+                                pass
                         if _is_moderation_blocked_error(e):
                             await tg_send_message(
                                 chat_id,
