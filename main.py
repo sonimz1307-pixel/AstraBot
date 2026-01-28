@@ -9,6 +9,7 @@ from typing import Optional, Literal, Dict, Any, Tuple, List
 
 import httpx
 from fastapi import FastAPI, Request, Response
+from db_supabase import track_user_activity
 
 app = FastAPI()
 
@@ -1693,6 +1694,8 @@ async def webhook(secret: str, request: Request):
         cq_id = callback_query.get("id") or ""
         from_user = callback_query.get("from") or {}
         user_id = int(from_user.get("id") or 0)
+        # 📊 Supabase: user + DAU tracking
+        track_user_activity(from_user)
         msg = callback_query.get("message") or {}
         chat = msg.get("chat") or {}
         chat_id = int(chat.get("id") or 0)
