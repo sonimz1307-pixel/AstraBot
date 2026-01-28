@@ -215,25 +215,42 @@ async def tg_answer_callback_query(callback_query_id: str, text: Optional[str] =
         await client.post(f"{TELEGRAM_API_BASE}/answerCallbackQuery", json=payload)
 
 
-async def tg_send_document_bytes(chat_id: int, file_bytes: bytes, filename: str = "original_2k.png", caption: Optional[str] = None):
+async def tg_send_document_bytes(
+    chat_id: int,
+    file_bytes: bytes,
+    filename: str = "original_2k.png",
+    caption: Optional[str] = None,
+    reply_markup: Optional[dict] = None,
+):
     """Send as document to avoid Telegram compression."""
     if not TELEGRAM_BOT_TOKEN:
         return
+
+    if not file_bytes:
+        raise RuntimeError("Empty file bytes for sendDocument")
+
     ext, mime = _detect_image_type(file_bytes)
     if not filename.lower().endswith(f".{ext}"):
         filename = f"{os.path.splitext(filename)[0]}.{ext}"
+
     files = {"document": (filename, file_bytes, mime)}
     data = {"chat_id": str(chat_id)}
     if caption:
         data["caption"] = caption
     if reply_markup is not None:
         data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
-    # caption already set above; keep compatibility
-    if caption:
-        # already set above
-        pass
+
     async with httpx.AsyncClient(timeout=240) as client:
-        await client.post(f"{TELEGRAM_API_BASE}/sendDocument", data=data, files=files)
+        r = await client.post(f"{TELEGRAM_API_BASE}/sendDocument", data=data, files=files)
+
+    # Если Telegram вернул ошибку — поднимем исключение (его поймают выше и покажут пользователю)
+    try:
+        j = r.json()
+        if isinstance(j, dict) and not j.get("ok", False):
+            raise RuntimeError(f"Telegram sendDocument error: {j}")
+    except Exception:
+        if r.status_code >= 400:
+            raise RuntimeError(f"Telegram sendDocument HTTP {r.status_code}: {r.text[:1200]}")
 
 
 
