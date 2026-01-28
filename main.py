@@ -164,7 +164,7 @@ def _ensure_state(chat_id: int, user_id: int) -> Dict[str, Any]:
                 pending[:] = pending[-200:]
 
 
-    async def _ai_build_summary_chunk(chunk: List[Dict[str, str]], prev_summary: str) -> str:
+async def _ai_build_summary_chunk(chunk: List[Dict[str, str]], prev_summary: str) -> str:
     """
     Summarize a chunk of messages and merge into previous summary.
     """
@@ -205,20 +205,20 @@ def _ensure_state(chat_id: int, user_id: int) -> Dict[str, Any]:
     return (out or "").strip()
 
 
-    async def _ai_maybe_summarize(st: Dict[str, Any]):
-        """If pending has enough messages, update ai_summary and clear pending."""
-        pending = _ai_pending_get(st)
-        if len(pending) < AI_CHAT_SUMMARY_BATCH:
-            return
+async def _ai_maybe_summarize(st: Dict[str, Any]):
+    """If pending has enough messages, update ai_summary and clear pending."""
+    pending = _ai_pending_get(st)
+    if len(pending) < AI_CHAT_SUMMARY_BATCH:
+        return
 
-        chunk = pending[:AI_CHAT_SUMMARY_BATCH]
-        del pending[:AI_CHAT_SUMMARY_BATCH]
+    chunk = pending[:AI_CHAT_SUMMARY_BATCH]
+    del pending[:AI_CHAT_SUMMARY_BATCH]
 
-        prev = _ai_summary_get(st)
-        new_sum = await _ai_build_summary_chunk(chunk, prev)
-        if new_sum:
-            st["ai_summary"] = new_sum[:AI_CHAT_SUMMARY_MAX_CHARS]
-        st["ai_ts"] = _now()
+    prev = _ai_summary_get(st)
+    new_sum = await _ai_build_summary_chunk(chunk, prev)
+    if new_sum:
+        st["ai_summary"] = new_sum[:AI_CHAT_SUMMARY_MAX_CHARS]
+    st["ai_ts"] = _now()
 
 def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photosession", "t2i", "two_photos"]):
     st = _ensure_state(chat_id, user_id)
