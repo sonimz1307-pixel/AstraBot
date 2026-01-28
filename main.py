@@ -2132,6 +2132,8 @@ async def webhook(secret: str, request: Request):
                     source_image_url=source_url,
                 )
 
+                _dl_set_bytes(chat_id, user_id, token, out_bytes)
+
                 stop.set()
                 if prog_task:
                     try:
