@@ -1750,7 +1750,6 @@ async def webhook(secret: str, request: Request):
 
     # /start
     if incoming_text.startswith("/start"):
-        # reset handled separately
         _set_mode(chat_id, user_id, "chat")
         await tg_send_message(
             chat_id,
@@ -1761,15 +1760,6 @@ async def webhook(secret: str, request: Request):
             reply_markup=_main_menu_keyboard(),
         )
         return {"ok": True}
-
-if incoming_text.startswith("/reset"):
-    _set_mode(chat_id, user_id, "chat")
-    st.pop("poster", None)
-    st.pop("photosession", None)
-    st.pop("t2i", None)
-    st.pop("two_photos", None)
-    await tg_send_message(chat_id, "Режим сброшен. Можем продолжать диалог.", reply_markup=_main_menu_keyboard())
-    return {"ok": True}
 
 
     if incoming_text in ("⬅ Назад", "Назад"):
