@@ -38,6 +38,12 @@ TELEGRAM_FILE_BASE = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}"
 STATE_TTL_SECONDS = int(os.getenv("STATE_TTL_SECONDS", "1800"))  # 30 минут
 STATE: Dict[Tuple[int, int], Dict[str, Any]] = {}
 
+# ---------------- AI chat memory (in-RAM, only for mode=chat) ----------------
+AI_CHAT_HISTORY_MAX = int(os.getenv("AI_CHAT_HISTORY_MAX", "10"))  # last N messages (user+assistant)
+AI_CHAT_TTL_SECONDS = int(os.getenv("AI_CHAT_TTL_SECONDS", "7200"))  # 2 hours
+AI_CHAT_SUMMARY_MAX_CHARS = int(os.getenv("AI_CHAT_SUMMARY_MAX_CHARS", "800"))
+AI_CHAT_SUMMARY_BATCH = int(os.getenv("AI_CHAT_SUMMARY_BATCH", "10"))  # summarize each N trimmed messages
+
 PosterStep = Literal["need_photo", "need_prompt"]
 
 # Anti-duplicate (idempotency)
@@ -53,30 +59,46 @@ def _now() -> float:
 def _cleanup_state():
     now = _now()
 
+    # Cleanup expired per-user state
     expired_state = []
-    for k, v in STATE.items():
-        ts = float(v.get("ts", 0))
+    for k, v in list(STATE.items()):
+        try:
+            ts = float(v.get("ts", 0) or 0)
+        except Exception:
+            ts = 0.0
         if now - ts > STATE_TTL_SECONDS:
             expired_state.append(k)
     for k in expired_state:
         STATE.pop(k, None)
 
-# Cleanup download slots stored in per-user state
-for k, v in list(STATE.items()):
-    dl = v.get("dl")
-    if isinstance(dl, dict):
-        expired_tokens = []
-        for tok, meta in dl.items():
-            try:
-                ts2 = float((meta or {}).get("ts", 0))
-            except Exception:
-                ts2 = 0.0
-            if now - ts2 > STATE_TTL_SECONDS:
-                expired_tokens.append(tok)
-        for tok in expired_tokens:
-            dl.pop(tok, None)
+    # Cleanup download slots stored in per-user state
+    for _k, _v in list(STATE.items()):
+        dl = _v.get("dl")
+        if isinstance(dl, dict):
+            expired_tokens = []
+            for tok, meta in dl.items():
+                try:
+                    ts2 = float((meta or {}).get("ts", 0) or 0)
+                except Exception:
+                    ts2 = 0.0
+                if now - ts2 > STATE_TTL_SECONDS:
+                    expired_tokens.append(tok)
+            for tok in expired_tokens:
+                dl.pop(tok, None)
 
+    # Cleanup AI chat memory after TTL (only stored for mode=chat)
+    for _k, _v in list(STATE.items()):
+        try:
+            ts_ai = float(_v.get("ai_ts", 0) or 0)
+        except Exception:
+            ts_ai = 0.0
+        if ts_ai and (now - ts_ai > AI_CHAT_TTL_SECONDS):
+            _v.pop("ai_hist", None)
+            _v.pop("ai_pending", None)
+            _v.pop("ai_summary", None)
+            _v.pop("ai_ts", None)
 
+    # Anti-duplicate caches
     expired_updates = [k for k, ts in PROCESSED_UPDATES.items() if now - float(ts) > PROCESSED_TTL_SECONDS]
     for k in expired_updates:
         PROCESSED_UPDATES.pop(k, None)
@@ -96,6 +118,103 @@ def _ensure_state(chat_id: int, user_id: int) -> Dict[str, Any]:
         STATE[key] = {"mode": "chat", "ts": _now(), "poster": {}, "dl": {}}
     STATE[key]["ts"] = _now()
     return STATE[key]
+
+# ---------------- AI chat memory helpers ----------------
+
+def _ai_hist_get(st: Dict[str, Any]) -> List[Dict[str, str]]:
+    hist = st.get("ai_hist")
+    return hist if isinstance(hist, list) else []
+
+
+def _ai_summary_get(st: Dict[str, Any]) -> str:
+    s = st.get("ai_summary")
+    return s if isinstance(s, str) else ""
+
+
+def _ai_pending_get(st: Dict[str, Any]) -> List[Dict[str, str]]:
+    p = st.get("ai_pending")
+    if isinstance(p, list):
+        return p
+    st["ai_pending"] = []
+    return st["ai_pending"]
+
+
+def _ai_hist_add(st: Dict[str, Any], role: str, content: str):
+    """Add message to AI chat memory. Keeps last AI_CHAT_HISTORY_MAX messages.
+    Overflow messages are moved to ai_pending for later summarization."""
+    if role not in ("user", "assistant"):
+        return
+    if not isinstance(content, str) or not content.strip():
+        return
+
+    if "ai_hist" not in st or not isinstance(st.get("ai_hist"), list):
+        st["ai_hist"] = []
+    st["ai_hist"].append({"role": role, "content": content.strip()})
+    st["ai_ts"] = _now()
+
+    hist = st["ai_hist"]
+    if len(hist) > AI_CHAT_HISTORY_MAX:
+        overflow = hist[:-AI_CHAT_HISTORY_MAX]
+        st["ai_hist"] = hist[-AI_CHAT_HISTORY_MAX:]
+        pending = _ai_pending_get(st)
+        pending.extend(overflow)
+        # hard cap to avoid RAM bloat
+        if len(pending) > 200:
+            pending[:] = pending[-200:]
+
+
+async def _ai_build_summary_chunk(chunk: List[Dict[str, str]], prev_summary: str) -> str:
+    """Summarize a chunk of messages and merge into previous summary."""
+    sys = (
+        "Ты сжимаешь историю диалога для Telegram-бота. Пиши коротко и по делу. "
+        "Сохраняй: цель пользователя, важные факты, договоренности, текущий контекст. "
+        "Не добавляй новых фактов и не выдумывай."
+    )
+
+    lines: List[str] = []
+    for m in chunk:
+        r = m.get("role")
+        c = m.get("content")
+        if r in ("user", "assistant") and isinstance(c, str) and c.strip():
+            c2 = c.strip()
+            if len(c2) > 600:
+                c2 = c2[:600] + "…"
+            lines.append(f"{r}: {c2}")
+
+    user = (
+        "Обнови краткое резюме диалога.\n"
+        "Сохраняй: цель пользователя, важные факты, договоренности, текущий контекст.\n"
+        "Не добавляй новых фактов и не выдумывай.\n\n"
+        f"Предыдущее резюме:\n{prev_summary or '—'}\n\n"
+        "Новые сообщения:\n"
+        + "\n".join(lines)
+        + "\n\nВерни обновленное краткое резюме (без воды)."
+    )
+
+    out = await openai_chat_answer(
+        user_text=user,
+        system_prompt=sys,
+        image_bytes=None,
+        temperature=0.2,
+        max_tokens=250,
+    )
+    return (out or "").strip()
+
+
+async def _ai_maybe_summarize(st: Dict[str, Any]):
+    """If pending has enough messages, update ai_summary and trim pending."""
+    pending = _ai_pending_get(st)
+    if len(pending) < AI_CHAT_SUMMARY_BATCH:
+        return
+
+    chunk = pending[:AI_CHAT_SUMMARY_BATCH]
+    del pending[:AI_CHAT_SUMMARY_BATCH]
+
+    prev = _ai_summary_get(st)
+    new_sum = await _ai_build_summary_chunk(chunk, prev)
+    if new_sum:
+        st["ai_summary"] = new_sum[:AI_CHAT_SUMMARY_MAX_CHARS]
+    st["ai_ts"] = _now()
 
 
 def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photosession", "t2i", "two_photos"]):
@@ -485,15 +604,17 @@ async def openai_chat_answer(
     image_bytes: Optional[bytes] = None,
     temperature: float = 0.5,
     max_tokens: int = 800,
+    history: Optional[List[Dict[str, str]]] = None,
 ) -> str:
     if not OPENAI_API_KEY:
         return "OPENAI_API_KEY не задан в переменных окружения."
 
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
 
+    # IMAGE + TEXT (Vision)
     if image_bytes is not None:
         b64 = base64.b64encode(image_bytes).decode("utf-8")
-        user_content = []
+        user_content: List[Dict[str, Any]] = []
         if user_text:
             user_content.append({"type": "text", "text": user_text})
         user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
@@ -508,12 +629,23 @@ async def openai_chat_answer(
             "max_tokens": max_tokens,
         }
     else:
+        # TEXT ONLY (Chat) + optional history
+        msgs: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
+        if history:
+            for m in history:
+                if (
+                    isinstance(m, dict)
+                    and m.get("role") in ("system", "user", "assistant")
+                    and isinstance(m.get("content"), str)
+                    and m["content"].strip()
+                ):
+                    msgs.append({"role": m["role"], "content": m["content"]})
+
+        msgs.append({"role": "user", "content": user_text})
+
         payload = {
             "model": "gpt-4o-mini",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_text},
-            ],
+            "messages": msgs,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
@@ -1618,6 +1750,7 @@ async def webhook(secret: str, request: Request):
 
     # /start
     if incoming_text.startswith("/start"):
+        # reset handled separately
         _set_mode(chat_id, user_id, "chat")
         await tg_send_message(
             chat_id,
@@ -1628,6 +1761,15 @@ async def webhook(secret: str, request: Request):
             reply_markup=_main_menu_keyboard(),
         )
         return {"ok": True}
+
+if incoming_text.startswith("/reset"):
+    _set_mode(chat_id, user_id, "chat")
+    st.pop("poster", None)
+    st.pop("photosession", None)
+    st.pop("t2i", None)
+    st.pop("two_photos", None)
+    await tg_send_message(chat_id, "Режим сброшен. Можем продолжать диалог.", reply_markup=_main_menu_keyboard())
+    return {"ok": True}
 
 
     if incoming_text in ("⬅ Назад", "Назад"):
@@ -1825,6 +1967,9 @@ async def webhook(secret: str, request: Request):
                 temperature=0.3,
                 max_tokens=900,
             )
+            if st.get("mode") == "chat":
+                _ai_hist_add(st, "user", prompt)
+                _ai_hist_add(st, "assistant", answer)
             await tg_send_message(chat_id, answer, reply_markup=_main_menu_keyboard())
             return {"ok": True}
 
@@ -1837,6 +1982,9 @@ async def webhook(secret: str, request: Request):
             temperature=0.4,
             max_tokens=700,
         )
+        if st.get("mode") == "chat":
+            _ai_hist_add(st, "user", prompt)
+            _ai_hist_add(st, "assistant", answer)
         await tg_send_message(chat_id, answer, reply_markup=_main_menu_keyboard())
         return {"ok": True}
 
@@ -1917,6 +2065,9 @@ async def webhook(secret: str, request: Request):
                     temperature=0.3,
                     max_tokens=900,
                 )
+            if st.get("mode") == "chat":
+                _ai_hist_add(st, "user", prompt)
+                _ai_hist_add(st, "assistant", answer)
                 await tg_send_message(chat_id, answer, reply_markup=_main_menu_keyboard())
                 return {"ok": True}
 
@@ -1929,6 +2080,9 @@ async def webhook(secret: str, request: Request):
                 temperature=0.4,
                 max_tokens=700,
             )
+            if st.get("mode") == "chat":
+                _ai_hist_add(st, "user", prompt)
+                _ai_hist_add(st, "assistant", answer)
             await tg_send_message(chat_id, answer, reply_markup=_main_menu_keyboard())
             return {"ok": True}
 
@@ -2316,7 +2470,43 @@ async def webhook(secret: str, request: Request):
             await tg_send_message(chat_id, "Пришли фото, затем одним сообщением текст.", reply_markup=_main_menu_keyboard())
             return {"ok": True}
 
-        # CHAT: обычный текстовый ответ
+        # CHAT: обычный текстовый ответ (с памятью только для режима ИИ-чата)
+        if st.get("mode") == "chat":
+            # update summary if we have enough trimmed messages
+            try:
+                await _ai_maybe_summarize(st)
+            except Exception:
+                pass
+
+            summary = _ai_summary_get(st)
+            hist = _ai_hist_get(st)
+
+            history_for_model: List[Dict[str, str]] = []
+            if summary:
+                history_for_model.append({
+                    "role": "system",
+                    "content": f"Краткое резюме диалога (для контекста):\n{summary}",
+                })
+            # last N messages
+            history_for_model.extend(hist)
+
+            answer = await openai_chat_answer(
+                user_text=incoming_text,
+                system_prompt=DEFAULT_TEXT_SYSTEM_PROMPT,
+                image_bytes=None,
+                temperature=0.6,
+                max_tokens=700,
+                history=history_for_model,
+            )
+
+            # store ONLY chat dialog
+            _ai_hist_add(st, "user", incoming_text)
+            _ai_hist_add(st, "assistant", answer)
+
+            await tg_send_message(chat_id, answer, reply_markup=_main_menu_keyboard())
+            return {"ok": True}
+
+        # fallback (should not happen): if not in chat mode, just answer without memory
         answer = await openai_chat_answer(
             user_text=incoming_text,
             system_prompt=DEFAULT_TEXT_SYSTEM_PROMPT,
@@ -2327,5 +2517,4 @@ async def webhook(secret: str, request: Request):
         await tg_send_message(chat_id, answer, reply_markup=_main_menu_keyboard())
         return {"ok": True}
 
-    await tg_send_message(chat_id, "Я понимаю текст и фото. Выбери режим в меню снизу.", reply_markup=_main_menu_keyboard())
     return {"ok": True}
