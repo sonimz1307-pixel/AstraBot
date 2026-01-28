@@ -165,44 +165,44 @@ def _ensure_state(chat_id: int, user_id: int) -> Dict[str, Any]:
 
 
     async def _ai_build_summary_chunk(chunk: List[Dict[str, str]], prev_summary: str) -> str:
-        """Summarize a chunk of messages and merge into previous summary."""
-        sys = (
-            "Ты сжимаешь историю диалога для Telegram-бота. Пиши коротко и по делу. "
-            "Сохраняй: цель пользователя, важные факты, договоренности, текущий контекст. "
-            "Не добавляй новых фактов и не выдумывай."
-        )
-        lines = []
-        for m in chunk:
-            r = m.get("role")
-            c = m.get("content")
-            if r in ("user", "assistant") and isinstance(c, str) and c.strip():
-                # ограничим длину отдельных сообщений в резюме-запросе
-                c2 = c.strip()
-                if len(c2) > 600:
-                    c2 = c2[:600] + "…"
-                lines.append(f"{r}: {c2}")
-        user = (
-            "Обнови краткое резюме диалога.
+    """
+    Summarize a chunk of messages and merge into previous summary.
+    """
+    sys = (
+        "Ты сжимаешь историю диалога для Telegram-бота. "
+        "Пиши коротко и по делу. "
+        "Сохраняй: цель пользователя, важные факты, договоренности, текущий контекст. "
+        "Не добавляй новых фактов и не выдумывай."
+    )
 
-"
-            f"Предыдущее резюме:
-{prev_summary or '—'}
+    lines = []
+    for m in chunk:
+        r = m.get("role")
+        c = m.get("content")
+        if r in ("user", "assistant") and isinstance(c, str) and c.strip():
+            c2 = c.strip()
+            if len(c2) > 600:
+                c2 = c2[:600] + "…"
+            lines.append(f"{r}: {c2}")
 
-"
-            "Новые сообщения:
-" + "\n".join(lines) + "
+    user = (
+        "Обнови краткое резюме диалога.\n"
+        "Сохраняй: цель пользователя, важные факты, договоренности, текущий контекст.\n"
+        "Не добавляй новых фактов и не выдумывай.\n\n"
+        f"Предыдущее резюме:\n{prev_summary or '—'}\n\n"
+        "Новые сообщения:\n"
+        + "\n".join(lines)
+        + "\n\nВерни обновленное краткое резюме (без воды)."
+    )
 
-"
-            "Верни обновленное краткое резюме (без воды)."
-        )
-        out = await openai_chat_answer(
-            user_text=user,
-            system_prompt=sys,
-            image_bytes=None,
-            temperature=0.2,
-            max_tokens=250,
-        )
-        return (out or "").strip()
+    out = await openai_chat_answer(
+        user_text=user,
+        system_prompt=sys,
+        image_bytes=None,
+        temperature=0.2,
+        max_tokens=250,
+    )
+    return (out or "").strip()
 
 
     async def _ai_maybe_summarize(st: Dict[str, Any]):
