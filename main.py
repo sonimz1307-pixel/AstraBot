@@ -1749,6 +1749,9 @@ async def webhook(secret: str, request: Request):
 
     from_user = message.get("from") or {}
     user_id = int(from_user.get("id") or 0)
+    # 📊 Supabase: user + DAU tracking (для любых сообщений/режимов)
+    track_user_activity(from_user)
+
 
     if not chat_id or not user_id:
         return {"ok": True}
