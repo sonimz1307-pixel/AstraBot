@@ -264,19 +264,25 @@ def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photo
 
 # ---------------- Reply keyboard ----------------
 
-def _main_menu_keyboard() -> dict:
+def _main_menu_keyboard(is_admin: bool = False) -> dict:
+    rows = [
+        [{"text": "ИИ (чат)"}, {"text": "Фото/Афиши"}],
+        [{"text": "Нейро фотосессии"}, {"text": "2 фото"}],
+        [{"text": "Помощь"}],
+    ]
+    if is_admin:
+        rows.append([{"text": "📊 Статистика"}])
+
     return {
-        "keyboard": [
-            [{"text": "ИИ (чат)"}, {"text": "Фото/Афиши"}],
-            [{"text": "Нейро фотосессии"}, {"text": "2 фото"}],
-            [{"text": "Помощь"}],
-        ],
+        "keyboard": rows,
         "resize_keyboard": True,
         "one_time_keyboard": False,
         "selective": False,
     }
 
 
+def _main_menu_for(user_id: int) -> dict:
+    return _main_menu_keyboard(_is_admin(user_id))
 
 
 def _poster_menu_keyboard(light: str = "bright") -> dict:
@@ -1768,7 +1774,7 @@ async def webhook(secret: str, request: Request):
             "Режимы:\n"
             "• «ИИ (чат)» — вопросы/анализ фото/решение задач.\n"
             "• «Фото/Афиши» — делаю афишу ИЛИ обычный фото-эдит (по твоему тексту).\n",
-            reply_markup=_main_menu_keyboard(),
+            reply_markup=_main_menu_for(user_id),
         )
         return {"ok": True}
 
@@ -1776,13 +1782,13 @@ async def webhook(secret: str, request: Request):
     if incoming_text in ("⬅ Назад", "Назад"):
         # Возврат в главное меню из любого режима
         _set_mode(chat_id, user_id, "chat")
-        await tg_send_message(chat_id, "Главное меню.", reply_markup=_main_menu_keyboard())
+        await tg_send_message(chat_id, "Главное меню.", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
 
 
     if incoming_text == "ИИ (чат)":
         _set_mode(chat_id, user_id, "chat")
-        await tg_send_message(chat_id, "Ок. Режим «ИИ (чат)».", reply_markup=_main_menu_keyboard())
+        await tg_send_message(chat_id, "Ок. Режим «ИИ (чат)».", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
 
 
@@ -1794,7 +1800,7 @@ async def webhook(secret: str, request: Request):
             "1) Пришли фото.\n"
             "2) Потом одним сообщением напиши задачу: локация/стиль/одежда/детали.\n"
             "Я постараюсь сохранить человека максимально 1к1 и сделать фото как профессиональную фотосессию.",
-            reply_markup=_main_menu_keyboard(),
+            reply_markup=_main_menu_for(user_id),
         )
         return {"ok": True}
     if incoming_text == "Фото/Афиши":
@@ -1820,7 +1826,7 @@ async def webhook(secret: str, request: Request):
             "2) Потом Пришли Фото 2 — это ИСТОЧНИК (лицо/стиль/одежда — что скажешь).\n"
             "3) Потом одним сообщением напиши, что сделать из этих двух фото.\n\n"
             "Команда для сброса: /reset",
-            reply_markup=_main_menu_keyboard(),
+            reply_markup=_main_menu_for(user_id),
         )
         return {"ok": True}
 
@@ -1833,7 +1839,7 @@ async def webhook(secret: str, request: Request):
             "Ок. Режим «Текст→Картинка» (без фото).\n"
             "Напиши одним сообщением, что нужно сгенерировать.\n"
             "Пример: «Яркая афиша открытия цветочного магазина, лепестки в воздухе, крупный заголовок»",
-            reply_markup=_main_menu_keyboard(),
+            reply_markup=_main_menu_for(user_id),
         )
         return {"ok": True}
 
@@ -1849,7 +1855,7 @@ async def webhook(secret: str, request: Request):
             "• Текст→Картинка: без фото, просто описание\n"
             "• 2 фото: фото1 → фото2 → потом текст, что сделать\n"
             "• /reset — сбросить текущий режим\n",
-            reply_markup=_main_menu_keyboard(),
+            reply_markup=_main_menu_for(user_id),
         )
         return {"ok": True}
 
@@ -1859,14 +1865,14 @@ async def webhook(secret: str, request: Request):
         largest = photos[-1]
         file_id = largest.get("file_id")
         if not file_id:
-            await tg_send_message(chat_id, "Не смог прочитать file_id. Отправь фото ещё раз.", reply_markup=_main_menu_keyboard())
+            await tg_send_message(chat_id, "Не смог прочитать file_id. Отправь фото ещё раз.", reply_markup=_main_menu_for(user_id))
             return {"ok": True}
 
         try:
             file_path = await tg_get_file_path(file_id)
             img_bytes = await tg_download_file_bytes(file_path)
         except Exception as e:
-            await tg_send_message(chat_id, f"Ошибка при загрузке фото: {e}", reply_markup=_main_menu_keyboard())
+            await tg_send_message(chat_id, f"Ошибка при загрузке фото: {e}", reply_markup=_main_menu_for(user_id))
             return {"ok": True}
 
 
@@ -1889,7 +1895,7 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(
                     chat_id,
                     "Фото 1 получил. Теперь пришли Фото 2 (источник: лицо/стиль/одежда).",
-                    reply_markup=_main_menu_keyboard(),
+                    reply_markup=_main_menu_for(user_id),
                 )
                 return {"ok": True}
 
@@ -1903,7 +1909,7 @@ async def webhook(secret: str, request: Request):
                     chat_id,
                     "Фото 2 получил. Теперь одним сообщением напиши, что сделать из этих двух фото.\n"
                     "Пример: «Возьми позу и фон с фото 1, а лицо с фото 2. Реалистично, без текста».",
-                    reply_markup=_main_menu_keyboard(),
+                    reply_markup=_main_menu_for(user_id),
                 )
                 return {"ok": True}
 
@@ -1911,7 +1917,7 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(
                     chat_id,
                     "Я уже получил 2 фото. Теперь пришли ТЕКСТОМ, что нужно сделать (или /reset).",
-                    reply_markup=_main_menu_keyboard(),
+                    reply_markup=_main_menu_for(user_id),
                 )
                 return {"ok": True}
 
@@ -1925,7 +1931,7 @@ async def webhook(secret: str, request: Request):
                 "• где находится человек (место/фон)\n"
                 "• стиль/настроение\n"
                 "• можно указать одежду/аксессуары\n",
-                reply_markup=_main_menu_keyboard(),
+                reply_markup=_main_menu_for(user_id),
             )
             return {"ok": True}
 
@@ -1971,10 +1977,10 @@ async def webhook(secret: str, request: Request):
             if st.get("mode") == "chat":
                 _ai_hist_add(st, "user", prompt)
                 _ai_hist_add(st, "assistant", answer)
-            await tg_send_message(chat_id, answer, reply_markup=_main_menu_keyboard())
+            await tg_send_message(chat_id, answer, reply_markup=_main_menu_for(user_id))
             return {"ok": True}
 
-        await tg_send_message(chat_id, "Фото получил. Анализирую...", reply_markup=_main_menu_keyboard())
+        await tg_send_message(chat_id, "Фото получил. Анализирую...", reply_markup=_main_menu_for(user_id))
         prompt = incoming_text if incoming_text else VISION_DEFAULT_USER_PROMPT
         answer = await openai_chat_answer(
             user_text=prompt,
@@ -1986,7 +1992,7 @@ async def webhook(secret: str, request: Request):
         if st.get("mode") == "chat":
             _ai_hist_add(st, "user", prompt)
             _ai_hist_add(st, "assistant", answer)
-        await tg_send_message(chat_id, answer, reply_markup=_main_menu_keyboard())
+        await tg_send_message(chat_id, answer, reply_markup=_main_menu_for(user_id))
         return {"ok": True}
 
     # ---------------- Фото (document image/*) ----------------
@@ -1999,7 +2005,7 @@ async def webhook(secret: str, request: Request):
                 file_path = await tg_get_file_path(file_id)
                 img_bytes = await tg_download_file_bytes(file_path)
             except Exception as e:
-                await tg_send_message(chat_id, f"Ошибка при загрузке фото: {e}", reply_markup=_main_menu_keyboard())
+                await tg_send_message(chat_id, f"Ошибка при загрузке фото: {e}", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
             # TWO PHOTOS mode
@@ -2016,7 +2022,7 @@ async def webhook(secret: str, request: Request):
                         "photo2_file_id": None,
                     }
                     st["ts"] = _now()
-                    await tg_send_message(chat_id, "Фото 1 получил. Теперь пришли Фото 2.", reply_markup=_main_menu_keyboard())
+                    await tg_send_message(chat_id, "Фото 1 получил. Теперь пришли Фото 2.", reply_markup=_main_menu_for(user_id))
                     return {"ok": True}
 
                 if step == "need_photo_2":
@@ -2025,11 +2031,11 @@ async def webhook(secret: str, request: Request):
                     tp["step"] = "need_prompt"
                     st["two_photos"] = tp
                     st["ts"] = _now()
-                    await tg_send_message(chat_id, "Фото 2 получил. Теперь напиши текстом, что сделать.", reply_markup=_main_menu_keyboard())
+                    await tg_send_message(chat_id, "Фото 2 получил. Теперь напиши текстом, что сделать.", reply_markup=_main_menu_for(user_id))
                     return {"ok": True}
 
                 if step == "need_prompt":
-                    await tg_send_message(chat_id, "Я уже получил 2 фото. Пришли текстом задачу (или /reset).", reply_markup=_main_menu_keyboard())
+                    await tg_send_message(chat_id, "Я уже получил 2 фото. Пришли текстом задачу (или /reset).", reply_markup=_main_menu_for(user_id))
                     return {"ok": True}
 
             if st.get("mode") == "photosession":
@@ -2041,7 +2047,7 @@ async def webhook(secret: str, request: Request):
                     "• где находится человек (место/фон)\n"
                     "• стиль/настроение\n"
                     "• можно указать одежду/аксессуары\n",
-                    reply_markup=_main_menu_keyboard(),
+                    reply_markup=_main_menu_for(user_id),
                 )
                 return {"ok": True}
 
@@ -2069,10 +2075,10 @@ async def webhook(secret: str, request: Request):
             if st.get("mode") == "chat":
                 _ai_hist_add(st, "user", prompt)
                 _ai_hist_add(st, "assistant", answer)
-                await tg_send_message(chat_id, answer, reply_markup=_main_menu_keyboard())
+                await tg_send_message(chat_id, answer, reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
-            await tg_send_message(chat_id, "Фото получил. Анализирую...", reply_markup=_main_menu_keyboard())
+            await tg_send_message(chat_id, "Фото получил. Анализирую...", reply_markup=_main_menu_for(user_id))
             prompt = incoming_text if incoming_text else VISION_DEFAULT_USER_PROMPT
             answer = await openai_chat_answer(
                 user_text=prompt,
@@ -2084,7 +2090,7 @@ async def webhook(secret: str, request: Request):
             if st.get("mode") == "chat":
                 _ai_hist_add(st, "user", prompt)
                 _ai_hist_add(st, "assistant", answer)
-            await tg_send_message(chat_id, answer, reply_markup=_main_menu_keyboard())
+            await tg_send_message(chat_id, answer, reply_markup=_main_menu_for(user_id))
             return {"ok": True}
 
     # ---------------- Текст без фото ----------------
@@ -2095,21 +2101,21 @@ async def webhook(secret: str, request: Request):
             tp = st.get("two_photos") or {}
             step = (tp.get("step") or "need_photo_1")
             if step != "need_prompt":
-                await tg_send_message(chat_id, "В режиме «2 фото» сначала пришли 2 фото подряд.", reply_markup=_main_menu_keyboard())
+                await tg_send_message(chat_id, "В режиме «2 фото» сначала пришли 2 фото подряд.", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
             photo1_file_id = tp.get("photo1_file_id")
             photo2_file_id = tp.get("photo2_file_id")
             if not photo1_file_id or not photo2_file_id:
-                await tg_send_message(chat_id, "Не вижу оба фото. Пришли 2 фото заново (или /reset).", reply_markup=_main_menu_keyboard())
+                await tg_send_message(chat_id, "Не вижу оба фото. Пришли 2 фото заново (или /reset).", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
             user_task = incoming_text.strip()
             if not user_task:
-                await tg_send_message(chat_id, "Напиши текстом, что сделать из этих 2 фото.", reply_markup=_main_menu_keyboard())
+                await tg_send_message(chat_id, "Напиши текстом, что сделать из этих 2 фото.", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
-            await tg_send_message(chat_id, "Делаю генерацию по 2 фото…", reply_markup=_main_menu_keyboard())
+            await tg_send_message(chat_id, "Делаю генерацию по 2 фото…", reply_markup=_main_menu_for(user_id))
             try:
                 file_path1 = await tg_get_file_path(photo1_file_id)
                 file_path2 = await tg_get_file_path(photo2_file_id)
@@ -2171,7 +2177,7 @@ async def webhook(secret: str, request: Request):
                     f"Ошибка 2 фото: {e}\n"
                     "Если ошибка про 'image' / 'invalid' — возможно твой endpoint не поддерживает 2 изображения.\n"
                     "Тогда нужен endpoint с multi-image или другой провайдер.",
-                    reply_markup=_main_menu_keyboard(),
+                    reply_markup=_main_menu_for(user_id),
                 )
             finally:
                 # Сбрасываем режим, чтобы можно было сразу начать заново
@@ -2189,7 +2195,7 @@ async def webhook(secret: str, request: Request):
 
             user_prompt = incoming_text.strip()
             if not user_prompt:
-                await tg_send_message(chat_id, "Напиши описание для генерации (без фото).", reply_markup=_main_menu_keyboard())
+                await tg_send_message(chat_id, "Напиши описание для генерации (без фото).", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
             # Placeholder + fake progress
@@ -2230,7 +2236,7 @@ async def webhook(secret: str, request: Request):
                         await prog_task
                     except Exception:
                         pass
-                await tg_send_message(chat_id, f"Ошибка T2I: {e}", reply_markup=_main_menu_keyboard())
+                await tg_send_message(chat_id, f"Ошибка T2I: {e}", reply_markup=_main_menu_for(user_id))
             finally:
                 # остаёмся в режиме t2i, чтобы можно было генерировать дальше без повторного выбора
                 st["t2i"] = {"step": "need_prompt"}
@@ -2245,7 +2251,7 @@ async def webhook(secret: str, request: Request):
             photo_bytes = ps.get("photo_bytes")
 
             if step == "need_photo" or not photo_bytes:
-                await tg_send_message(chat_id, "Пришли фото для режима «Нейро фотосессии».", reply_markup=_main_menu_keyboard())
+                await tg_send_message(chat_id, "Пришли фото для режима «Нейро фотосессии».", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
             # step == need_prompt
@@ -2310,7 +2316,7 @@ async def webhook(secret: str, request: Request):
                         await prog_task
                     except Exception:
                         pass
-                await tg_send_message(chat_id, f"Ошибка нейро-фотосессии: {e}", reply_markup=_main_menu_keyboard())
+                await tg_send_message(chat_id, f"Ошибка нейро-фотосессии: {e}", reply_markup=_main_menu_for(user_id))
                 # остаёмся в режиме, чтобы пользователь мог попробовать ещё раз
                 st["photosession"] = {"step": "need_photo", "photo_bytes": None}
                 st["ts"] = _now()
@@ -2328,7 +2334,7 @@ async def webhook(secret: str, request: Request):
             photo_bytes = poster.get("photo_bytes")
 
             if step == "need_photo" or not photo_bytes:
-                await tg_send_message(chat_id, "Сначала пришли фото.", reply_markup=_main_menu_keyboard())
+                await tg_send_message(chat_id, "Сначала пришли фото.", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
             if step == "need_prompt":
@@ -2468,7 +2474,7 @@ async def webhook(secret: str, request: Request):
                 st["ts"] = _now()
                 return {"ok": True}
 
-            await tg_send_message(chat_id, "Пришли фото, затем одним сообщением текст.", reply_markup=_main_menu_keyboard())
+            await tg_send_message(chat_id, "Пришли фото, затем одним сообщением текст.", reply_markup=_main_menu_for(user_id))
             return {"ok": True}
 
         # CHAT: обычный текстовый ответ (с памятью только для режима ИИ-чата)
@@ -2504,7 +2510,7 @@ async def webhook(secret: str, request: Request):
             _ai_hist_add(st, "user", incoming_text)
             _ai_hist_add(st, "assistant", answer)
 
-            await tg_send_message(chat_id, answer, reply_markup=_main_menu_keyboard())
+            await tg_send_message(chat_id, answer, reply_markup=_main_menu_for(user_id))
             return {"ok": True}
 
         # fallback (should not happen): if not in chat mode, just answer without memory
@@ -2515,7 +2521,7 @@ async def webhook(secret: str, request: Request):
             temperature=0.6,
             max_tokens=700,
         )
-        await tg_send_message(chat_id, answer, reply_markup=_main_menu_keyboard())
+        await tg_send_message(chat_id, answer, reply_markup=_main_menu_for(user_id))
         return {"ok": True}
 
     return {"ok": True}
