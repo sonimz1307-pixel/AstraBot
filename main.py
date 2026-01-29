@@ -9,7 +9,7 @@ from typing import Optional, Literal, Dict, Any, Tuple, List
 
 import httpx
 from fastapi import FastAPI, Request, Response
-from db_supabase import track_user_activity
+from db_supabase import track_user_activity, get_basic_stats
 
 app = FastAPI()
 
