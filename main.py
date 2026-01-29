@@ -16,6 +16,14 @@ app = FastAPI()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change_me")
+ADMIN_IDS = set(
+    int(x.strip())
+    for x in (os.getenv("ADMIN_IDS", "")).split(",")
+    if x.strip().isdigit()
+)
+
+def _is_admin(user_id: int) -> bool:
+    return int(user_id) in ADMIN_IDS
 
 
 # ---- BytePlus / ModelArk (Seedream) — used ONLY for "Нейро фотосессии" mode ----
