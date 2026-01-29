@@ -24,7 +24,8 @@ def track_user_activity(tg_user: Dict[str, Any]) -> None:
     """
     if supabase is None:
         return
-
+    print("TRACK USER CALLED:", tg_user.get("id"))
+    
     try:
         telegram_user_id = int(tg_user["id"])
 
