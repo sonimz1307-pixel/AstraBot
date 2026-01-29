@@ -1,5 +1,5 @@
 import os
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from typing import Dict, Any
 
 from supabase import create_client
@@ -56,7 +56,7 @@ def track_user_activity(tg_user: Dict[str, Any]) -> None:
     except Exception:
         # аналитика не должна ломать бота
         pass
-from datetime import date, timedelta
+
 
 def get_basic_stats() -> dict:
     """
@@ -78,12 +78,22 @@ def get_basic_stats() -> dict:
     total_users = r_total.count or 0
 
     # DAU сегодня/вчера
-    r_today = supabase.table("bot_daily_active").select("telegram_user_id", count="exact").eq("day", str(today)).execute()
-    r_yest  = supabase.table("bot_daily_active").select("telegram_user_id", count="exact").eq("day", str(yesterday)).execute()
+    r_today = (
+        supabase.table("bot_daily_active")
+        .select("telegram_user_id", count="exact")
+        .eq("day", str(today))
+        .execute()
+    )
+    r_yest = (
+        supabase.table("bot_daily_active")
+        .select("telegram_user_id", count="exact")
+        .eq("day", str(yesterday))
+        .execute()
+    )
     dau_today = r_today.count or 0
     dau_yesterday = r_yest.count or 0
 
-    # Последние 7 дней (считаем в питоне)
+    # Последние 7 дней
     r_week = (
         supabase.table("bot_daily_active")
         .select("day,telegram_user_id")
@@ -97,7 +107,6 @@ def get_basic_stats() -> dict:
         d = str(row.get("day"))
         by_day[d] = by_day.get(d, 0) + 1
 
-    # сортировка по дате убыв.
     last7 = dict(sorted(by_day.items(), reverse=True))
 
     return {
