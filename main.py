@@ -1767,6 +1767,47 @@ async def webhook(secret: str, request: Request):
 
     # ✅ Telegram: текст может быть в caption
     incoming_text = (message.get("text") or message.get("caption") or "").strip()
+        # ----- Admin stats -----
+    if incoming_text == "📊 Статистика":
+        if not _is_admin(user_id):
+            await tg_send_message(
+                chat_id,
+                "Нет доступа.",
+                reply_markup=_main_menu_for(user_id),
+            )
+            return {"ok": True}
+
+        stats = get_basic_stats()
+        if not stats.get("ok"):
+            await tg_send_message(
+                chat_id,
+                f"Supabase недоступен: {stats.get('error','')}",
+                reply_markup=_main_menu_for(user_id),
+            )
+            return {"ok": True}
+
+        lines = [
+            "📊 Статистика бота",
+            f"👤 Всего пользователей: {stats['total_users']}",
+            f"✅ DAU сегодня: {stats['dau_today']}",
+            f"✅ DAU вчера: {stats['dau_yesterday']}",
+            "",
+            "📅 DAU (последние 7 дней):",
+        ]
+
+        last7 = stats.get("last7") or {}
+        if not last7:
+            lines.append("— пока данных нет —")
+        else:
+            for day, cnt in last7.items():
+                lines.append(f"{day}: {cnt}")
+
+        await tg_send_message(
+            chat_id,
+            "\n".join(lines),
+            reply_markup=_main_menu_for(user_id),
+        )
+        return {"ok": True}
 
     # /start
     if incoming_text.startswith("/start"):
