@@ -10,6 +10,7 @@ from typing import Optional, Literal, Dict, Any, Tuple, List
 import httpx
 from fastapi import FastAPI, Request, Response
 from db_supabase import track_user_activity, get_basic_stats
+from kling_flow import run_motion_control_from_bytes
 
 app = FastAPI()
 
@@ -226,7 +227,7 @@ async def _ai_maybe_summarize(st: Dict[str, Any]):
     st["ai_ts"] = _now()
 
 
-def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photosession", "t2i", "two_photos"]):
+def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photosession", "t2i", "two_photos", "kling_mc"]):
     st = _ensure_state(chat_id, user_id)
     st["mode"] = mode
     st["ts"] = _now()
@@ -271,6 +272,7 @@ def _main_menu_keyboard(is_admin: bool = False) -> dict:
         [{"text": "Помощь"}],
     ]
     if is_admin:
+        rows.append([{"text": "🎬 Видео будущего"}])
         rows.append([{"text": "📊 Статистика"}])
 
     return {
@@ -1809,6 +1811,30 @@ async def webhook(secret: str, request: Request):
         )
         return {"ok": True}
 
+    # ----- Admin: Video future (Kling Motion Control) -----
+    if incoming_text == "🎬 Видео будущего":
+        if not _is_admin(user_id):
+            await tg_send_message(chat_id, "Нет доступа.", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+
+        _set_mode(chat_id, user_id, "kling_mc")
+        st["kling_mc"] = {
+            "step": "need_avatar",
+            "avatar_bytes": None,
+            "video_bytes": None,
+        }
+        st["ts"] = _now()
+
+        await tg_send_message(
+            chat_id,
+            "🎬 Видео будущего → Motion Control\n\n"
+            "Шаг 1) Пришли ФОТО аватара (кого анимируем).\n"
+            "Шаг 2) Потом пришли ВИДЕО с движением (3–10 сек).\n"
+            "Шаг 3) Потом текстом напиши, что должно происходить (или просто: Старт).",
+            reply_markup=_main_menu_for(user_id),
+        )
+        return {"ok": True}
+
     # /start
     if incoming_text.startswith("/start"):
         _set_mode(chat_id, user_id, "chat")
@@ -1922,6 +1948,33 @@ async def webhook(secret: str, request: Request):
 
 
         
+        
+        # ---- KLING Motion Control: step=need_avatar ----
+        if st.get("mode") == "kling_mc":
+            km = st.get("kling_mc") or {}
+            step = (km.get("step") or "need_avatar")
+
+            if step == "need_avatar":
+                km["avatar_bytes"] = img_bytes
+                km["step"] = "need_video"
+                st["kling_mc"] = km
+                st["ts"] = _now()
+
+                await tg_send_message(
+                    chat_id,
+                    "Фото аватара получил ✅\nТеперь пришли ВИДЕО с движением (3–10 сек).",
+                    reply_markup=_main_menu_for(user_id),
+                )
+                return {"ok": True}
+
+            await tg_send_message(
+                chat_id,
+                "Аватар уже есть ✅ Теперь жду ВИДЕО с движением (или /start чтобы выйти).",
+                reply_markup=_main_menu_for(user_id),
+            )
+            return {"ok": True}
+
+
         # TWO PHOTOS mode
         if st.get("mode") == "two_photos":
             tp = st.get("two_photos") or {}
@@ -2039,11 +2092,76 @@ async def webhook(secret: str, request: Request):
         await tg_send_message(chat_id, answer, reply_markup=_main_menu_for(user_id))
         return {"ok": True}
 
+    
+    # ---------------- Video (message.video) ----------------
+    vid = message.get("video") or {}
+    if vid:
+        if st.get("mode") == "kling_mc":
+            km = st.get("kling_mc") or {}
+            step = (km.get("step") or "need_avatar")
+
+            if step != "need_video":
+                await tg_send_message(chat_id, "Сначала пришли ФОТО аватара.", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            file_id = vid.get("file_id")
+            if not file_id:
+                await tg_send_message(chat_id, "Не смог прочитать file_id видео. Пришли видео ещё раз.", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            try:
+                file_path = await tg_get_file_path(file_id)
+                video_bytes = await tg_download_file_bytes(file_path)
+            except Exception as e:
+                await tg_send_message(chat_id, f"Ошибка при загрузке видео: {e}", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            km["video_bytes"] = video_bytes
+            km["step"] = "need_prompt"
+            st["kling_mc"] = km
+            st["ts"] = _now()
+
+            await tg_send_message(
+                chat_id,
+                "Видео получил ✅\nТеперь напиши текстом, что должно происходить (или просто: Старт).",
+                reply_markup=_main_menu_for(user_id),
+            )
+            return {"ok": True}
+
+
     # ---------------- Фото (document image/*) ----------------
     doc = message.get("document") or {}
     if doc:
         mime = (doc.get("mime_type") or "").lower()
         file_id = doc.get("file_id")
+
+        # ---- KLING Motion Control: accept video as document ----
+        if file_id and mime.startswith("video/") and st.get("mode") == "kling_mc":
+            km = st.get("kling_mc") or {}
+            step = (km.get("step") or "need_avatar")
+
+            if step != "need_video":
+                await tg_send_message(chat_id, "Сначала пришли ФОТО аватара.", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            try:
+                file_path = await tg_get_file_path(file_id)
+                video_bytes = await tg_download_file_bytes(file_path)
+            except Exception as e:
+                await tg_send_message(chat_id, f"Ошибка при загрузке видео: {e}", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            km["video_bytes"] = video_bytes
+            km["step"] = "need_prompt"
+            st["kling_mc"] = km
+            st["ts"] = _now()
+
+            await tg_send_message(
+                chat_id,
+                "Видео получил ✅\nТеперь напиши текстом, что должно происходить (или просто: Старт).",
+                reply_markup=_main_menu_for(user_id),
+            )
+            return {"ok": True}
         if file_id and mime.startswith("image/"):
             try:
                 file_path = await tg_get_file_path(file_id)
@@ -2229,6 +2347,48 @@ async def webhook(secret: str, request: Request):
                 st["ts"] = _now()
 
             return {"ok": True}
+
+        
+        # ---- KLING Motion Control: step=need_prompt ----
+        if st.get("mode") == "kling_mc":
+            km = st.get("kling_mc") or {}
+            step = (km.get("step") or "need_avatar")
+
+            if step != "need_prompt":
+                await tg_send_message(chat_id, "Жду фото/видео для Motion Control. Нажми «🎬 Видео будущего» и следуй шагам.", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            avatar_bytes = km.get("avatar_bytes")
+            video_bytes = km.get("video_bytes")
+            if not avatar_bytes or not video_bytes:
+                await tg_send_message(chat_id, "Не хватает фото или видео. Нажми «🎬 Видео будущего» и начни заново.", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            user_prompt = incoming_text.strip()
+            if user_prompt.lower() in ("старт", "start", "go"):
+                user_prompt = "A person performs the same motion as in the reference video."
+
+            await tg_send_message(chat_id, "🎬 Генерирую видео (обычно 3–7 минут)…", reply_markup=_main_menu_for(user_id))
+
+            try:
+                out_url = await run_motion_control_from_bytes(
+                    user_id=user_id,
+                    avatar_bytes=avatar_bytes,
+                    motion_video_bytes=video_bytes,
+                    prompt=user_prompt or "A person performs the same motion as in the reference video.",
+                    mode="std",
+                    character_orientation="video",
+                    keep_original_sound=True,
+                )
+                await tg_send_message(chat_id, f"✅ Готово!\n{out_url}", reply_markup=_main_menu_for(user_id))
+            except Exception as e:
+                await tg_send_message(chat_id, f"❌ Ошибка Kling Motion Control: {e}", reply_markup=_main_menu_for(user_id))
+            finally:
+                st["kling_mc"] = {"step": "need_avatar", "avatar_bytes": None, "video_bytes": None}
+                _set_mode(chat_id, user_id, "chat")
+
+            return {"ok": True}
+
 
         # T2I flow: генерация Seedream по одному тексту (без входного фото)
         if st.get("mode") == "t2i":
