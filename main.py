@@ -1776,7 +1776,58 @@ async def webhook(secret: str, request: Request):
 
     # ✅ Telegram: текст может быть в caption
     incoming_text = (message.get("text") or message.get("caption") or "").strip()
-        # ----- Admin stats -----
+
+    # ----- WebApp data (Kling settings) -----
+    web_app_data = message.get("web_app_data") or {}
+    if isinstance(web_app_data, dict) and web_app_data.get("data"):
+        raw = web_app_data.get("data")
+        try:
+            payload = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        except Exception:
+            payload = {"raw": raw}
+
+        # из WebApp у тебя сейчас прилетает примерно так: {"flow":"motion","mode":"pro"}
+        flow = (payload.get("flow") or payload.get("gen_type") or payload.get("genType") or "").lower().strip()
+        quality = (payload.get("mode") or payload.get("quality") or "std").lower().strip()
+
+        # нормализация flow
+        if flow in ("motion", "motion_control", "mc"):
+            flow = "motion"
+        elif flow in ("i2v", "image_to_video", "image2video", "image->video"):
+            flow = "i2v"
+        else:
+            flow = "motion" if not flow else flow
+
+        # нормализация quality
+        quality = "pro" if quality in ("pro", "professional") else "std"
+
+        # сохраняем настройки Kling в state
+        st["kling_settings"] = {"flow": flow, "quality": quality}
+        st["ts"] = _now()
+
+        # после сохранения — запускаем нужный сценарий и выходим из апдейта
+        if flow == "motion":
+            _set_mode(chat_id, user_id, "kling_mc")
+            st["kling_mc"] = {"step": "need_avatar", "avatar_bytes": None, "video_bytes": None}
+
+            await tg_send_message(
+                chat_id,
+                f"✅ Настройки сохранены: Motion Control • {quality.upper()}\n\n"
+                "Шаг 1) Пришли ФОТО аватара (кого анимируем).\n"
+                "Шаг 2) Потом пришли ВИДЕО с движением (3–10 сек).\n"
+                "Шаг 3) Потом текстом напиши, что должно происходить (или просто: Старт).",
+                reply_markup=_main_menu_for(user_id),
+            )
+        else:
+            await tg_send_message(
+                chat_id,
+                "✅ Настройки сохранены.\nРежим Image → Video пока не подключён (подключим следующим шагом).",
+                reply_markup=_main_menu_for(user_id),
+            )
+
+        return {"ok": True}
+
+    # ----- Admin stats -----
     if incoming_text == "📊 Статистика":
         if not _is_admin(user_id):
             await tg_send_message(
@@ -2378,12 +2429,17 @@ async def webhook(secret: str, request: Request):
             await tg_send_message(chat_id, "🎬 Генерирую видео (обычно 3–7 минут)…", reply_markup=_main_menu_for(user_id))
 
             try:
+                # настройки Kling из WebApp (если нет — дефолт std)
+                ks = st.get("kling_settings") or {}
+                quality = (ks.get("quality") or "std").lower()
+                kling_mode = "pro" if quality in ("pro", "professional") else "std"
+
                 out_url = await run_motion_control_from_bytes(
                     user_id=user_id,
                     avatar_bytes=avatar_bytes,
                     motion_video_bytes=video_bytes,
                     prompt=user_prompt or "A person performs the same motion as in the reference video.",
-                    mode="std",
+                    mode=kling_mode,
                     character_orientation="video",
                     keep_original_sound=True,
                 )
