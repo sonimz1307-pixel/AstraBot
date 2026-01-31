@@ -4,9 +4,77 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Kling Settings</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 16px; }
+    .card { border: 1px solid #ddd; border-radius: 12px; padding: 14px; margin: 10px 0; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; }
+    .btn { padding: 12px 14px; border: 0; border-radius: 10px; cursor: pointer; width: 100%; font-size: 16px; }
+    .btn-primary { background: #2ea6ff; color: #fff; }
+    .muted { color: #666; font-size: 13px; }
+    label { display:block; margin: 8px 0; }
+    select { width: 100%; padding: 10px; border-radius: 10px; border:1px solid #ccc; font-size: 16px; }
+    input[type="radio"]{ transform: scale(1.2); margin-right: 8px; }
+  </style>
 </head>
-<body style="font-family:Arial,sans-serif;padding:16px">
+<body>
   <h2>🎬 Видео будущего — настройки Kling</h2>
-  <p>Если ты видишь эту страницу — WebApp подключён правильно ✅</p>
+
+  <div class="card">
+    <b>Тип генерации</b>
+    <label><input type="radio" name="flow" value="motion" checked> Motion Control <span class="muted">(фото + видео 3–10 сек)</span></label>
+    <label><input type="radio" name="flow" value="i2v"> Image → Video <span class="muted">(только фото)</span></label>
+  </div>
+
+  <div class="card">
+    <b>Качество</b>
+    <label><input type="radio" name="mode" value="std" checked> Standard</label>
+    <label><input type="radio" name="mode" value="pro"> Pro</label>
+  </div>
+
+  <div class="card" id="durationCard" style="display:none;">
+    <b>Длительность (только для Image → Video)</b>
+    <select id="duration">
+      <option value="5">5 секунд</option>
+      <option value="10">10 секунд</option>
+    </select>
+  </div>
+
+  <button class="btn btn-primary" id="saveBtn">Сохранить и вернуться в бот</button>
+  <p class="muted" id="debug"></p>
+
+  <script>
+    function getFlow() {
+      return document.querySelector('input[name="flow"]:checked').value;
+    }
+    function getMode() {
+      return document.querySelector('input[name="mode"]:checked').value;
+    }
+    function updateUI() {
+      const flow = getFlow();
+      document.getElementById('durationCard').style.display = (flow === 'i2v') ? 'block' : 'none';
+    }
+
+    document.querySelectorAll('input[name="flow"]').forEach(el => el.addEventListener('change', updateUI));
+    updateUI();
+
+    document.getElementById('saveBtn').addEventListener('click', () => {
+      const flow = getFlow();
+      const mode = getMode();
+      const payload = { flow, mode };
+
+      if (flow === 'i2v') {
+        payload.duration = parseInt(document.getElementById('duration').value, 10);
+      }
+
+      // Отправляем данные обратно в Telegram
+      if (window.Telegram && Telegram.WebApp) {
+        Telegram.WebApp.sendData(JSON.stringify(payload));
+        Telegram.WebApp.close();
+      } else {
+        // если открыл в браузере — просто покажем
+        document.getElementById('debug').textContent = "DEBUG payload: " + JSON.stringify(payload);
+      }
+    });
+  </script>
 </body>
 </html>
