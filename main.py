@@ -2442,6 +2442,7 @@ async def webhook(secret: str, request: Request):
                     mode=kling_mode,
                     character_orientation="video",
                     keep_original_sound=True,
+                    duration_seconds=vid.get("duration"),
                 )
                 await tg_send_message(chat_id, f"✅ Готово!\n{out_url}", reply_markup=_main_menu_for(user_id))
             except Exception as e:
