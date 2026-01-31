@@ -1773,7 +1773,50 @@ async def webhook(secret: str, request: Request):
         PROCESSED_MESSAGES[key] = _now()
 
     st = _ensure_state(chat_id, user_id)
+    # --- WebApp data (Kling settings) ---
+web_app = message.get("web_app_data")
+if isinstance(web_app, dict) and web_app.get("data"):
+    raw = web_app.get("data") or ""
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else (raw or {})
+    except Exception:
+        payload = {"raw": raw}
 
+    # Твои поля из WebApp (у тебя сейчас DEBUG: {"flow":"motion","mode":"pro"})
+    flow = (payload.get("flow") or payload.get("gen_type") or "").lower().strip()
+    quality = (payload.get("mode") or payload.get("quality") or "std").lower().strip()
+
+    # нормализация
+    if flow in ("motion", "motion_control", "mc"):
+        flow = "motion"
+    elif flow in ("i2v", "image_to_video", "image2video", "image->video"):
+        flow = "i2v"
+    else:
+        flow = "motion"
+
+    st["kling_settings"] = {"flow": flow, "quality": quality}
+    st["ts"] = _now()
+
+if flow == "motion":
+    _set_mode(chat_id, user_id, "kling_mc")
+    st["kling_mc"] = {
+        "step": "need_avatar",
+        "avatar_bytes": None,
+        "video_bytes": None,
+    }
+
+    await tg_send_message(
+        chat_id,
+        "🎬 Видео будущего → Motion Control\n\n"
+        "Шаг 1) Пришли ФОТО аватара (кого анимируем).\n"
+        "Шаг 2) Потом пришли ВИДЕО с движением (3–10 сек).\n"
+        "Шаг 3) Потом текстом напиши, что должно происходить (или просто: Старт).",
+        reply_markup=main_menu_for(user_id),
+    )
+
+return {"ok": True}
+
+    
     # ✅ Telegram: текст может быть в caption
     incoming_text = (message.get("text") or message.get("caption") or "").strip()
         # ---------------- WebApp data (Telegram WebApp) ----------------
