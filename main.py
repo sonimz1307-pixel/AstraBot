@@ -21,6 +21,7 @@ async def webapp_kling():
         return f.read()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+WEBAPP_KLING_URL = os.getenv("WEBAPP_KLING_URL", "https://astrabot-tchj.onrender.com/webapp/kling")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change_me")
 ADMIN_IDS = set(
@@ -278,7 +279,7 @@ def _main_menu_keyboard(is_admin: bool = False) -> dict:
         [{"text": "Помощь"}],
     ]
     if is_admin:
-        rows.append([{"text": "🎬 Видео будущего"}])
+        rows.append([{"text": "🎬 Видео будущего", "web_app": {"url": WEBAPP_KLING_URL}}])
         rows.append([{"text": "📊 Статистика"}])
 
     return {
