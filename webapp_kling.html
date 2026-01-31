@@ -271,7 +271,7 @@
     qs('#saveBtn').addEventListener('click', () => {
       const flow = getFlow();
       const mode = getMode();
-      const payload = { flow, mode };
+      const payload = { type: "kling_settings", flow, mode };
 
       if (flow === 'i2v'){
         payload.duration = parseInt(qs('#duration').value, 10);
