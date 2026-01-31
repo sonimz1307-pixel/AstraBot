@@ -1782,7 +1782,7 @@ if isinstance(web_app, dict) and web_app.get("data"):
     except Exception:
         payload = {"raw": raw}
 
-    # Твои поля из WebApp (у тебя сейчас DEBUG: {"flow":"motion","mode":"pro"})
+    # поля из WebApp (у тебя сейчас приходит: {"flow":"motion","mode":"pro"})
     flow = (payload.get("flow") or payload.get("gen_type") or "").lower().strip()
     quality = (payload.get("mode") or payload.get("quality") or "std").lower().strip()
 
@@ -1794,34 +1794,32 @@ if isinstance(web_app, dict) and web_app.get("data"):
     else:
         flow = "motion"
 
-            # сохраняем настройки Kling в state
-        st["kling_settings"] = {"flow": flow, "quality": quality}
-        st["ts"] = _now()
+    st["kling_settings"] = {"flow": flow, "quality": quality}
+    st["ts"] = _now()
 
-        # ✅ после сохранения — запускаем нужный сценарий и выходим из апдейта
-        if flow == "motion":
-            _set_mode(chat_id, user_id, "kling_mc")
-            st["kling_mc"] = {"step": "need_avatar", "avatar_bytes": None, "video_bytes": None}
+    # после сохранения — запускаем нужный сценарий и ВЫХОДИМ из апдейта
+    if flow == "motion":
+        _set_mode(chat_id, user_id, "kling_mc")
+        st["kling_mc"] = {"step": "need_avatar", "avatar_bytes": None, "video_bytes": None}
 
-            await tg_send_message(
-                chat_id,
-                "🎬 Видео будущего → Motion Control\n\n"
-                "Шаг 1) Пришли ФОТО аватара (кого анимируем).\n"
-                "Шаг 2) Потом пришли ВИДЕО с движением (3–10 сек).\n"
-                "Шаг 3) Потом текстом напиши, что должно происходить (или просто: Старт).",
-                reply_markup=main_menu_for(user_id),
-            )
-            return {"ok": True}
-
-        # (на будущее) i2v
         await tg_send_message(
             chat_id,
-            "✅ Настройки сохранены.\nРежим Image → Video подключим следующим шагом.",
+            "🎬 Видео будущего → Motion Control\n\n"
+            "Шаг 1) Пришли ФОТО аватара (кого анимируем).\n"
+            "Шаг 2) Потом пришли ВИДЕО с движением (3–10 сек).\n"
+            "Шаг 3) Потом текстом напиши, что должно происходить (или просто: Старт).",
             reply_markup=main_menu_for(user_id),
         )
         return {"ok": True}
 
-    incoming_text = (message.get("text") or message.get("caption") or "").strip()
+    # i2v пока не подключён
+    await tg_send_message(
+        chat_id,
+        "✅ Настройки сохранены.\nРежим Image → Video пока не подключён (подключим следующим шагом).",
+        reply_markup=main_menu_for(user_id),
+    )
+    return {"ok": True}
+
         # ---------------- WebApp data (Telegram WebApp) ----------------
     web_app_data = message.get("web_app_data") or {}
     if isinstance(web_app_data, dict) and web_app_data.get("data"):
