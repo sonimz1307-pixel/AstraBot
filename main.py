@@ -1813,8 +1813,7 @@ if flow == "motion":
         "Шаг 3) Потом текстом напиши, что должно происходить (или просто: Старт).",
         reply_markup=main_menu_for(user_id),
     )
-
-return {"ok": True}
+    return {"ok": True}
 
     
     # ✅ Telegram: текст может быть в caption
