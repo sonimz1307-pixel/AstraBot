@@ -2410,12 +2410,16 @@ async def webhook(secret: str, request: Request):
             await tg_send_message(chat_id, "🎬 Генерирую видео (обычно 3–7 минут)…", reply_markup=_main_menu_for(user_id))
 
             try:
+                # настройки Kling из WebApp (если нет — дефолт std)
+                ks = st.get("kling_settings") or {}
+                quality = (ks.get("quality") or "std").lower()
+                kling_mode = "pro" if quality in ("pro", "professional") else "std"
                 out_url = await run_motion_control_from_bytes(
                     user_id=user_id,
                     avatar_bytes=avatar_bytes,
                     motion_video_bytes=video_bytes,
                     prompt=user_prompt or "A person performs the same motion as in the reference video.",
-                    mode="std",
+                    mode=kling_mode,
                     character_orientation="video",
                     keep_original_sound=True,
                 )
