@@ -13,6 +13,12 @@ from db_supabase import track_user_activity, get_basic_stats
 from kling_flow import run_motion_control_from_bytes
 
 app = FastAPI()
+from fastapi.responses import HTMLResponse
+
+@app.get("/webapp/kling", response_class=HTMLResponse)
+async def webapp_kling():
+    with open("webapp_kling.html", "r", encoding="utf-8") as f:
+        return f.read()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
