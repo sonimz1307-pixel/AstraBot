@@ -2,77 +2,299 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Kling Settings</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Видео будущего — настройки Kling</title>
   <style>
-    body { font-family: Arial, sans-serif; padding: 16px; }
-    .card { border: 1px solid #ddd; border-radius: 12px; padding: 14px; margin: 10px 0; }
-    .row { display: flex; gap: 10px; flex-wrap: wrap; }
-    .btn { padding: 12px 14px; border: 0; border-radius: 10px; cursor: pointer; width: 100%; font-size: 16px; }
-    .btn-primary { background: #2ea6ff; color: #fff; }
-    .muted { color: #666; font-size: 13px; }
-    label { display:block; margin: 8px 0; }
-    select { width: 100%; padding: 10px; border-radius: 10px; border:1px solid #ccc; font-size: 16px; }
-    input[type="radio"]{ transform: scale(1.2); margin-right: 8px; }
+    :root{
+      --bg:#060b16;
+      --card:#0b1430;
+      --card2:#0a1228;
+      --text:#e8eefc;
+      --muted:#9fb0d4;
+      --stroke:rgba(170,190,255,.16);
+      --accent:#2ea6ff;
+      --accent2:#1f6feb;
+      --danger:#ff4d4d;
+      --shadow:0 12px 30px rgba(0,0,0,.35);
+      --radius:18px;
+    }
+    *{ box-sizing:border-box; }
+    body{
+      margin:0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "Apple Color Emoji","Segoe UI Emoji";
+      background: radial-gradient(1200px 500px at 30% -10%, rgba(46,166,255,.18), transparent 60%),
+                  radial-gradient(900px 450px at 110% 0%, rgba(31,111,235,.22), transparent 55%),
+                  var(--bg);
+      color:var(--text);
+      padding: 18px 16px 88px;
+    }
+    .wrap{ max-width: 520px; margin: 0 auto; }
+    .title{
+      display:flex; align-items:center; gap:10px;
+      font-weight:800; letter-spacing:.2px;
+      font-size: 20px;
+      margin: 6px 0 14px;
+    }
+    .badge{
+      font-size:12px; color:var(--muted);
+      border:1px solid var(--stroke);
+      padding:4px 10px; border-radius:999px;
+      background: rgba(255,255,255,.02);
+    }
+
+    .card{
+      background: linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02));
+      border:1px solid var(--stroke);
+      border-radius: var(--radius);
+      padding: 14px 14px 12px;
+      box-shadow: var(--shadow);
+      margin: 10px 0;
+    }
+    .card h3{
+      margin:0 0 10px;
+      font-size:14px;
+      font-weight:700;
+      color: var(--muted);
+      letter-spacing:.25px;
+      text-transform: uppercase;
+    }
+
+    /* Segmented controls */
+    .seg{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap:10px;
+    }
+    .seg input{ display:none; }
+    .seg label{
+      cursor:pointer;
+      user-select:none;
+      background: rgba(255,255,255,.03);
+      border:1px solid var(--stroke);
+      border-radius: 14px;
+      padding: 12px 12px;
+      display:flex;
+      flex-direction:column;
+      gap:4px;
+      transition: transform .06s ease, border-color .15s ease, background .15s ease, box-shadow .15s ease;
+    }
+    .seg label:active{ transform: scale(.99); }
+    .seg .name{ font-weight:800; font-size:15px; }
+    .seg .desc{ font-size:12px; color: var(--muted); line-height:1.25; }
+
+    .seg input:checked + label{
+      border-color: rgba(46,166,255,.55);
+      background: linear-gradient(180deg, rgba(46,166,255,.18), rgba(31,111,235,.10));
+      box-shadow: 0 10px 22px rgba(46,166,255,.12);
+    }
+
+    .row{
+      display:flex; gap:10px; flex-wrap:wrap;
+    }
+
+    /* Select */
+    select{
+      width:100%;
+      padding: 12px 12px;
+      border-radius: 14px;
+      border:1px solid var(--stroke);
+      background: rgba(0,0,0,.18);
+      color: var(--text);
+      outline:none;
+      font-size: 15px;
+    }
+    select:focus{ border-color: rgba(46,166,255,.55); }
+
+    .hint{
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.35;
+    }
+
+    /* Bottom action bar */
+    .bar{
+      position: fixed;
+      left:0; right:0; bottom:0;
+      padding: 12px 14px calc(12px + env(safe-area-inset-bottom));
+      background: linear-gradient(180deg, rgba(6,11,22,0), rgba(6,11,22,.88) 25%, rgba(6,11,22,.96));
+      backdrop-filter: blur(10px);
+    }
+    .bar .inner{ max-width: 520px; margin:0 auto; }
+    .btn{
+      width:100%;
+      border:0;
+      border-radius: 16px;
+      padding: 14px 14px;
+      font-weight: 900;
+      font-size: 16px;
+      cursor:pointer;
+      color: #071022;
+      background: linear-gradient(180deg, var(--accent), var(--accent2));
+      box-shadow: 0 14px 28px rgba(31,111,235,.18);
+      transition: transform .06s ease, filter .15s ease;
+    }
+    .btn:active{ transform: scale(.99); }
+    .btn[disabled]{
+      filter: grayscale(.4) brightness(.8);
+      cursor:not-allowed;
+    }
+
+    .toast{
+      margin-top:10px;
+      padding: 10px 12px;
+      border-radius: 14px;
+      border:1px solid var(--stroke);
+      background: rgba(255,255,255,.03);
+      color: var(--muted);
+      font-size: 12px;
+      display:none;
+    }
+    .toast.show{ display:block; }
+
+    .debug{
+      margin-top:10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+      color: rgba(180,200,255,.85);
+      opacity:.9;
+      display:none;
+      word-break: break-word;
+    }
+    .debug.show{ display:block; }
   </style>
 </head>
 <body>
-  <h2>🎬 Видео будущего — настройки Kling</h2>
+  <div class="wrap">
+    <div class="title">
+      🎬 Видео будущего — настройки Kling
+      <span class="badge" id="platformBadge">WebApp</span>
+    </div>
 
-  <div class="card">
-    <b>Тип генерации</b>
-    <label><input type="radio" name="flow" value="motion" checked> Motion Control <span class="muted">(фото + видео 3–10 сек)</span></label>
-    <label><input type="radio" name="flow" value="i2v"> Image → Video <span class="muted">(только фото)</span></label>
+    <div class="card">
+      <h3>Тип генерации</h3>
+      <div class="seg" role="radiogroup" aria-label="Тип генерации">
+        <input id="flow_motion" type="radio" name="flow" value="motion" checked>
+        <label for="flow_motion">
+          <span class="name">Motion Control</span>
+          <span class="desc">Фото + видео 3–10 сек</span>
+        </label>
+
+        <input id="flow_i2v" type="radio" name="flow" value="i2v">
+        <label for="flow_i2v">
+          <span class="name">Image → Video</span>
+          <span class="desc">Только фото</span>
+        </label>
+      </div>
+      <div class="hint">Для Motion Control длительность задаётся референс‑видео (3–10 сек).</div>
+    </div>
+
+    <div class="card">
+      <h3>Качество</h3>
+      <div class="seg" role="radiogroup" aria-label="Качество">
+        <input id="mode_std" type="radio" name="mode" value="std" checked>
+        <label for="mode_std">
+          <span class="name">Standard</span>
+          <span class="desc">Быстрее / дешевле</span>
+        </label>
+
+        <input id="mode_pro" type="radio" name="mode" value="pro">
+        <label for="mode_pro">
+          <span class="name">Pro</span>
+          <span class="desc">Лучше качество</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="card" id="durationCard" style="display:none;">
+      <h3>Длительность</h3>
+      <select id="duration" aria-label="Длительность">
+        <option value="5">5 секунд</option>
+        <option value="10">10 секунд</option>
+      </select>
+      <div class="hint">Длительность применяется только для Image → Video.</div>
+    </div>
+
+    <div class="debug" id="debug"></div>
   </div>
 
-  <div class="card">
-    <b>Качество</b>
-    <label><input type="radio" name="mode" value="std" checked> Standard</label>
-    <label><input type="radio" name="mode" value="pro"> Pro</label>
+  <div class="bar">
+    <div class="inner">
+      <button class="btn" id="saveBtn">Сохранить и вернуться в бот</button>
+      <div class="toast" id="toast">Готово ✅ Если окно не закрылось — закрой его крестиком (×).</div>
+    </div>
   </div>
-
-  <div class="card" id="durationCard" style="display:none;">
-    <b>Длительность (только для Image → Video)</b>
-    <select id="duration">
-      <option value="5">5 секунд</option>
-      <option value="10">10 секунд</option>
-    </select>
-  </div>
-
-  <button class="btn btn-primary" id="saveBtn">Сохранить и вернуться в бот</button>
-  <p class="muted" id="debug"></p>
 
   <script>
-    function getFlow() {
-      return document.querySelector('input[name="flow"]:checked').value;
-    }
-    function getMode() {
-      return document.querySelector('input[name="mode"]:checked').value;
-    }
-    function updateUI() {
-      const flow = getFlow();
-      document.getElementById('durationCard').style.display = (flow === 'i2v') ? 'block' : 'none';
-    }
+    const qs = (s) => document.querySelector(s);
+    const qsa = (s) => Array.from(document.querySelectorAll(s));
+    const debugEl = qs('#debug');
+    const toastEl = qs('#toast');
 
-    document.querySelectorAll('input[name="flow"]').forEach(el => el.addEventListener('change', updateUI));
+    const DEBUG = new URLSearchParams(location.search).get('debug') === '1';
+
+    function getFlow(){ return qs('input[name="flow"]:checked').value; }
+    function getMode(){ return qs('input[name="mode"]:checked').value; }
+
+    function updateUI(){
+      const flow = getFlow();
+      qs('#durationCard').style.display = (flow === 'i2v') ? 'block' : 'none';
+    }
+    qsa('input[name="flow"]').forEach(el => el.addEventListener('change', updateUI));
     updateUI();
 
-    document.getElementById('saveBtn').addEventListener('click', () => {
+    // Telegram init (safe)
+    const tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
+    const platformBadge = qs('#platformBadge');
+
+    if (tg){
+      try{
+        tg.ready();
+        tg.expand();
+        platformBadge.textContent = (tg.platform || 'telegram') + (tg.version ? (' v' + tg.version) : '');
+      }catch(e){}
+    } else {
+      platformBadge.textContent = 'browser';
+    }
+
+    function showDebug(payload){
+      if (!DEBUG) return;
+      debugEl.classList.add('show');
+      debugEl.textContent = 'DEBUG payload: ' + JSON.stringify(payload);
+    }
+
+    function showToast(){
+      toastEl.classList.add('show');
+      setTimeout(() => toastEl.classList.remove('show'), 6000);
+    }
+
+    qs('#saveBtn').addEventListener('click', () => {
       const flow = getFlow();
       const mode = getMode();
       const payload = { flow, mode };
 
-      if (flow === 'i2v') {
-        payload.duration = parseInt(document.getElementById('duration').value, 10);
+      if (flow === 'i2v'){
+        payload.duration = parseInt(qs('#duration').value, 10);
       }
 
-      // Отправляем данные обратно в Telegram
-      if (window.Telegram && Telegram.WebApp) {
-        Telegram.WebApp.sendData(JSON.stringify(payload));
-        Telegram.WebApp.close();
+      showDebug(payload);
+
+      if (tg){
+        try{
+          tg.sendData(JSON.stringify(payload));
+        }catch(e){
+          // ignore
+        }
+
+        // Некоторые клиенты Telegram могут игнорировать close().
+        // Делаем небольшой таймаут и показываем подсказку.
+        setTimeout(() => {
+          try{ tg.close(); }catch(e){}
+          showToast();
+        }, 150);
       } else {
         // если открыл в браузере — просто покажем
-        document.getElementById('debug').textContent = "DEBUG payload: " + JSON.stringify(payload);
+        showToast();
       }
     });
   </script>
