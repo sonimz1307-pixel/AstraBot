@@ -1776,6 +1776,38 @@ async def webhook(secret: str, request: Request):
 
     # ✅ Telegram: текст может быть в caption
     incoming_text = (message.get("text") or message.get("caption") or "").strip()
+        # ---------------- WebApp data (Telegram WebApp) ----------------
+    web_app_data = message.get("web_app_data") or {}
+    if isinstance(web_app_data, dict) and web_app_data.get("data"):
+        raw = str(web_app_data.get("data") or "").strip()
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            payload = None
+
+        if isinstance(payload, dict) and payload.get("type") == "kling_settings":
+            gen_type = str(payload.get("gen_type") or "").strip()
+            quality = str(payload.get("quality") or "").strip()
+
+            # сохраняем настройки в state (на пользователя)
+            st["kling_settings"] = {
+                "gen_type": gen_type,
+                "quality": quality,
+                "ts": _now(),
+            }
+            st["ts"] = _now()
+
+            await tg_send_message(
+                chat_id,
+                f"✅ Настройки Kling сохранены:\n"
+                f"• gen_type: {gen_type}\n"
+                f"• quality: {quality}",
+                reply_markup=_main_menu_for(user_id),
+            )
+            return {"ok": True}
+
+        # если пришло что-то другое — просто игнорируем, чтобы не ломать UX
+
         # ----- Admin stats -----
     if incoming_text == "📊 Статистика":
         if not _is_admin(user_id):
