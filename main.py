@@ -1794,29 +1794,33 @@ if isinstance(web_app, dict) and web_app.get("data"):
     else:
         flow = "motion"
 
-    st["kling_settings"] = {"flow": flow, "quality": quality}
-    st["ts"] = _now()
+            # сохраняем настройки Kling в state
+        st["kling_settings"] = {"flow": flow, "quality": quality}
+        st["ts"] = _now()
 
-if flow == "motion":
-    _set_mode(chat_id, user_id, "kling_mc")
-    st["kling_mc"] = {
-        "step": "need_avatar",
-        "avatar_bytes": None,
-        "video_bytes": None,
-    }
+        # ✅ после сохранения — запускаем нужный сценарий и выходим из апдейта
+        if flow == "motion":
+            _set_mode(chat_id, user_id, "kling_mc")
+            st["kling_mc"] = {"step": "need_avatar", "avatar_bytes": None, "video_bytes": None}
 
-    await tg_send_message(
-        chat_id,
-        "🎬 Видео будущего → Motion Control\n\n"
-        "Шаг 1) Пришли ФОТО аватара (кого анимируем).\n"
-        "Шаг 2) Потом пришли ВИДЕО с движением (3–10 сек).\n"
-        "Шаг 3) Потом текстом напиши, что должно происходить (или просто: Старт).",
-        reply_markup=main_menu_for(user_id),
-    )
-    return {"ok": True}
+            await tg_send_message(
+                chat_id,
+                "🎬 Видео будущего → Motion Control\n\n"
+                "Шаг 1) Пришли ФОТО аватара (кого анимируем).\n"
+                "Шаг 2) Потом пришли ВИДЕО с движением (3–10 сек).\n"
+                "Шаг 3) Потом текстом напиши, что должно происходить (или просто: Старт).",
+                reply_markup=main_menu_for(user_id),
+            )
+            return {"ok": True}
 
-    
-    # ✅ Telegram: текст может быть в caption
+        # (на будущее) i2v
+        await tg_send_message(
+            chat_id,
+            "✅ Настройки сохранены.\nРежим Image → Video подключим следующим шагом.",
+            reply_markup=main_menu_for(user_id),
+        )
+        return {"ok": True}
+
     incoming_text = (message.get("text") or message.get("caption") or "").strip()
         # ---------------- WebApp data (Telegram WebApp) ----------------
     web_app_data = message.get("web_app_data") or {}
@@ -1848,9 +1852,7 @@ if flow == "motion":
             )
             return {"ok": True}
 
-        # если пришло что-то другое — просто игнорируем, чтобы не ломать UX
-
-        # ----- Admin stats -----
+               # ----- Admin stats -----
     if incoming_text == "📊 Статистика":
         if not _is_admin(user_id):
             await tg_send_message(
