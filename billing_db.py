@@ -26,27 +26,43 @@ def _require_client():
         raise RuntimeError("Supabase disabled: SUPABASE_URL / SUPABASE_SERVICE_KEY not set")
 
 
+def _uid(telegram_user_id: int) -> int:
+    """
+    Жёсткая проверка: чтобы НИКОГДА не улетало NULL в telegram_user_id.
+    """
+    if telegram_user_id is None:
+        raise ValueError("telegram_user_id is None")
+    uid = int(telegram_user_id)
+    if uid <= 0:
+        raise ValueError(f"telegram_user_id invalid: {telegram_user_id}")
+    return uid
+
+
 def ensure_user_row(telegram_user_id: int) -> None:
     """
     Гарантируем строку в bot_user_balance.
+    ВАЖНО: НЕ ТРОГАЕМ balance_tokens (иначе ты сам себя обнуляешь).
     """
     _require_client()
-    uid = int(telegram_user_id)
+    uid = _uid(telegram_user_id)
 
-    # upsert с дефолтным балансом 0
-    supabase.table("bot_user_balance").upsert(
-        {
-            "telegram_user_id": uid,
-            "balance_tokens": 0,
-            "updated_at": _now_iso(),
-        },
-        on_conflict="telegram_user_id",
-    ).execute()
+    # Вставляем строку, если её нет. Если есть — ничего не делаем.
+    # Для этого в таблице должен быть UNIQUE по telegram_user_id.
+    try:
+        supabase.table("bot_user_balance").insert(
+            {
+                "telegram_user_id": uid,
+                "updated_at": _now_iso(),
+            }
+        ).execute()
+    except Exception:
+        # Если строка уже есть (unique violation) или другая мелочь — просто игнорируем.
+        pass
 
 
 def get_balance(telegram_user_id: int) -> int:
     _require_client()
-    uid = int(telegram_user_id)
+    uid = _uid(telegram_user_id)
 
     r = (
         supabase.table("bot_user_balance")
@@ -55,8 +71,10 @@ def get_balance(telegram_user_id: int) -> int:
         .limit(1)
         .execute()
     )
+
     if not r.data:
         ensure_user_row(uid)
+        # balance_tokens должен иметь DEFAULT 0 в базе
         return 0
 
     try:
@@ -78,25 +96,22 @@ def add_tokens(
     Возвращает id ledger-записи (uuid).
     """
     _require_client()
-    uid = int(telegram_user_id)
+    uid = _uid(telegram_user_id)
     ensure_user_row(uid)
 
     delta = int(delta_tokens)
     if delta == 0:
         raise ValueError("delta_tokens cannot be 0")
 
-    # получаем текущий
     bal = get_balance(uid)
     new_bal = bal + delta
     if new_bal < 0:
         raise RuntimeError(f"Insufficient balance: have {bal}, need {-delta}")
 
-    # обновляем баланс
     supabase.table("bot_user_balance").update(
         {"balance_tokens": new_bal, "updated_at": _now_iso()}
     ).eq("telegram_user_id", uid).execute()
 
-    # пишем ledger
     ledger_id = str(uuid4())
     supabase.table("bot_balance_ledger").insert(
         {
@@ -125,7 +140,7 @@ def hold_tokens_for_kling(
     Возвращает job_id (uuid).
     """
     _require_client()
-    uid = int(telegram_user_id)
+    uid = _uid(telegram_user_id)
     ensure_user_row(uid)
 
     sec = int(seconds)
@@ -137,7 +152,7 @@ def hold_tokens_for_kling(
 
     job_id = str(uuid4())
 
-    # 1) списываем токены (hold = списали сразу, если упадёт — вернём rollback)
+    # списываем токены
     add_tokens(
         uid,
         -cost,
@@ -146,7 +161,7 @@ def hold_tokens_for_kling(
         ref_id=job_id,
     )
 
-    # 2) создаём job
+    # создаём job
     supabase.table("bot_kling_jobs").insert(
         {
             "id": job_id,
@@ -164,9 +179,6 @@ def hold_tokens_for_kling(
 
 
 def confirm_kling_job(job_id: str, *, out_url: Optional[str] = None, meta: Optional[Dict[str, Any]] = None) -> None:
-    """
-    Помечает job как success. Баланс уже списан на hold.
-    """
     _require_client()
     jid = str(job_id)
 
@@ -178,30 +190,28 @@ def confirm_kling_job(job_id: str, *, out_url: Optional[str] = None, meta: Optio
 
     supabase.table("bot_kling_jobs").update(payload).eq("id", jid).execute()
 
-    # (опционально) пишем ledger без изменения баланса — не нужно. Ledger уже содержит kling_hold.
-
 
 def rollback_kling_job(job_id: str, *, error: str) -> None:
-    """
-    Помечает job как failed и возвращает токены пользователю.
-    """
     _require_client()
     jid = str(job_id)
 
-    # читаем job, чтобы понять кому и сколько возвращать
-    r = supabase.table("bot_kling_jobs").select("telegram_user_id,tokens_cost").eq("id", jid).limit(1).execute()
+    r = (
+        supabase.table("bot_kling_jobs")
+        .select("telegram_user_id,tokens_cost")
+        .eq("id", jid)
+        .limit(1)
+        .execute()
+    )
     if not r.data:
         raise RuntimeError("Job not found for rollback")
 
-    uid = int(r.data[0]["telegram_user_id"])
+    uid = _uid(r.data[0]["telegram_user_id"])
     cost = int(r.data[0]["tokens_cost"])
 
-    # обновляем статус
     supabase.table("bot_kling_jobs").update(
         {"status": "failed", "error": (error or "")[:1500], "updated_at": _now_iso()}
     ).eq("id", jid).execute()
 
-    # возвращаем токены
     add_tokens(
         uid,
         +cost,
