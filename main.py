@@ -1820,6 +1820,46 @@ async def webhook(secret: str, request: Request):
                 await tg_send_document_bytes(chat_id, b, filename=f"original_2k.{meta.get('ext','png')}", caption="⬇️ Оригинал 2К (без сжатия)")
             except Exception:
                 await tg_send_message(chat_id, "Не смог отправить оригинал файлом. Попробуй ещё раз.")
+
+# --- Balance topup (Stars) ---
+if chat_id and user_id and data.startswith("topup:"):
+    # topup:menu
+    if data == "topup:menu":
+        await tg_send_message(
+            chat_id,
+            "💳 Пополнение баланса — выбери пакет:",
+            reply_markup=_topup_packs_kb(),
+        )
+        return {"ok": True}
+
+    # topup:pack:STD:10  (mode, seconds)
+    parts = data.split(":")
+    if len(parts) >= 4 and parts[1] == "pack":
+        mode = (parts[2] or "STD").upper()
+        try:
+            seconds = int(parts[3])
+        except Exception:
+            seconds = 0
+
+        pack = TOPUP_PACKS.get((mode, seconds))
+        if not pack:
+            await tg_send_message(chat_id, "Пакет не найден. Нажми «Баланс» → «Пополнить» ещё раз.")
+            return {"ok": True}
+
+        stars = int(pack["stars"])
+        tokens = int(pack["tokens"])
+        title = f"Пополнение: {tokens} токенов"
+        description = f"{mode} · {seconds} сек = {tokens} токенов"
+        payload = f"topup:{user_id}:{mode}:{seconds}:{tokens}"
+        await tg_send_stars_invoice(chat_id, title, description, payload, stars)
+        return {"ok": True}
+
+    # Unknown topup callback: ignore silently
+    return {"ok": True}
+
+if data == "noop":
+    return {"ok": True}
+
         return {"ok": True}
 
 
