@@ -54,56 +54,56 @@ TELEGRAM_FILE_BASE = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}"
 
 # ---------------- Stars top-up (XTR) ----------------
 # Токены — внутренняя логика.
-# Режим (STD/PRO) выбирается ПОЗЖЕ в WebApp и влияет ТОЛЬКО на расход токенов при генерации.
+# STD: 1 сек = 1 токен
+# PRO: x2 (1 сек = 2 токена)
 # Оплата: Stars (XTR)
 
-# Пакеты (Вариант A) — продаём токены. Никаких STD/PRO на этапе оплаты.
-# Пример UX:
-#  💎 10 токенов — 99⭐
-#  🔥 25 токенов — 199⭐
-#  🚀 60 токенов — 399⭐
-#  ⭐ 150 токенов — 799⭐
-#  👑 350 токенов — 1499⭐
 TOPUP_PACKS = [
-    {"tokens": 10,  "stars": 99},
-    {"tokens": 25,  "stars": 199},
-    {"tokens": 60,  "stars": 399},
-    {"tokens": 150, "stars": 799},
-    {"tokens": 350, "stars": 1499},
+    {"mode": "std", "seconds": 1,  "stars": 10},
+    {"mode": "std", "seconds": 5,  "stars": 50},
+    {"mode": "std", "seconds": 10, "stars": 100},
+    {"mode": "std", "seconds": 30, "stars": 300},
+    {"mode": "pro", "seconds": 1,  "stars": 20},
+    {"mode": "pro", "seconds": 5,  "stars": 100},
+    {"mode": "pro", "seconds": 10, "stars": 200},
+    {"mode": "pro", "seconds": 30, "stars": 600},
 ]
 
-def _find_pack_by_tokens(tokens: int) -> Optional[Dict[str, int]]:
-    try:
-        t = int(tokens)
-    except Exception:
-        return None
-    for p in TOPUP_PACKS:
-        if int(p.get("tokens", 0)) == t:
-            return p
-    return None
+def _tokens_for_mode_seconds(mode: str, seconds: int) -> int:
+    m = (mode or "std").lower().strip()
+    sec = int(seconds)
+    return sec * (2 if m == "pro" else 1)
 
 def _topup_balance_inline_kb() -> dict:
     return {"inline_keyboard": [[{"text": "➕ Пополнить ⭐", "callback_data": "topup:menu"}]]}
 
 def _topup_packs_kb() -> dict:
-    # 2 кнопки в ряд
-    btns = []
+    # 2 колонки: STD / PRO
+    std_rows = []
+    pro_rows = []
     for p in TOPUP_PACKS:
-        tokens = int(p["tokens"])
-        stars = int(p["stars"])
-        btns.append({"text": f"{tokens} токенов • {stars}⭐", "callback_data": f"topup:pack:{tokens}"})
-
-    def chunk(items, n=2):
-        return [items[i:i+n] for i in range(0, len(items), n)]
-
-    kb = [
-        [{"text": "Выбери пакет токенов:", "callback_data": "noop"}],
-    ]
-    kb += chunk(btns, 2)
+        label = f"{p['seconds']} сек • {p['stars']}⭐"
+        cb = f"topup:pack:{p['mode']}:{p['seconds']}"
+        if p["mode"] == "std":
+            std_rows.append({"text": label, "callback_data": cb})
+        else:
+            pro_rows.append({"text": label, "callback_data": cb})
+    # разбиваем по 2 кнопки в ряд
+    def chunk(btns, n=2):
+        return [btns[i:i+n] for i in range(0, len(btns), n)]
+    kb = []
+    kb.append([{"text":"STD (по умолчанию)", "callback_data":"noop"}])
+    kb += chunk(std_rows, 2)
+    kb.append([{"text":"PRO (x2)", "callback_data":"noop"}])
+    kb += chunk(pro_rows, 2)
     return {"inline_keyboard": kb}
 
-async def tg_send_stars_invoice(chat_id: int, title: str, description: str, payload: str, stars: int):
+async def tg_send_stars_invoice(chat_id: int, user_id: int, mode: str, seconds: int, stars: int, tokens: int):
     """Send Stars invoice (currency XTR)."""
+    title = f"Пополнение: {tokens} токенов"
+    description = f"{mode.upper()} • {seconds} сек • {stars}⭐"
+    payload = f"stars_topup:{mode}:{int(seconds)}:{int(user_id)}"
+
     body = {
         "chat_id": str(chat_id),
         "title": title,
@@ -111,18 +111,17 @@ async def tg_send_stars_invoice(chat_id: int, title: str, description: str, payl
         "payload": payload,
         "currency": "XTR",
         "prices": [{"label": title, "amount": int(stars)}],
-        # For Telegram Stars provider_token must be empty string
         "provider_token": "",
     }
     async with httpx.AsyncClient(timeout=20) as client:
         r = await client.post(f"{TELEGRAM_API_BASE}/sendInvoice", json=body)
+        j = {}
         try:
             j = r.json()
         except Exception:
-            j = {}
-        if not isinstance(j, dict) or not j.get("ok"):
+            pass
+        if not j.get("ok"):
             raise RuntimeError(f"sendInvoice failed: {r.status_code} {r.text[:800]}")
-
 
 # ---------------- In-memory state ----------------
 STATE_TTL_SECONDS = int(os.getenv("STATE_TTL_SECONDS", "1800"))  # 30 минут
@@ -1828,36 +1827,41 @@ async def webhook(secret: str, request: Request):
             if data == "topup:menu":
                 await tg_send_message(
                     chat_id,
-                    "💳 Пополнение баланса — выбери пакет токенов:",
+                    "💳 Пополнение баланса — выбери пакет:",
                     reply_markup=_topup_packs_kb(),
                 )
                 return {"ok": True}
 
-            # topup:pack:<tokens>
+            # topup:pack:STD:10  (mode, seconds)
             parts = data.split(":")
-            if len(parts) >= 3 and parts[1] == "pack":
+            if len(parts) >= 4 and parts[1] == "pack":
+                mode = (parts[2] or "STD").upper()
                 try:
-                    tokens = int(parts[2])
+                    seconds = int(parts[3])
                 except Exception:
-                    tokens = 0
+                    seconds = 0
 
-                pack = _find_pack_by_tokens(tokens)
+                pack = TOPUP_PACKS.get((mode, seconds))
                 if not pack:
                     await tg_send_message(chat_id, "Пакет не найден. Нажми «Баланс» → «Пополнить» ещё раз.")
                     return {"ok": True}
 
                 stars = int(pack["stars"])
+                tokens = int(pack["tokens"])
                 title = f"Пополнение: {tokens} токенов"
-                description = f"{tokens} токенов • {stars}⭐"
-                payload = f"stars_topup:{tokens}:{user_id}"
-
+                description = f"{mode} · {seconds} сек = {tokens} токенов"
+                payload = f"topup:{user_id}:{mode}:{seconds}:{tokens}"
                 await tg_send_stars_invoice(chat_id, title, description, payload, stars)
                 return {"ok": True}
 
             # Unknown topup callback: ignore silently
             return {"ok": True}
 
-# --- Stars: pre-checkout (must answer within ~10 seconds) ---
+
+
+        # any other callback: just ack and stop
+        return {"ok": True}
+    # --- Stars: pre-checkout (must answer within ~10 seconds) ---
     pre = update.get("pre_checkout_query")
     if pre:
         cq_id = pre.get("id")
@@ -1895,26 +1899,21 @@ async def webhook(secret: str, request: Request):
         currency = (sp.get("currency") or "").strip()
 
         if currency == "XTR" and payload.startswith("stars_topup:"):
-            # payload = stars_topup:<tokens>:<user_id>
+            # payload = stars_topup:<mode>:<seconds>:<user_id>
             try:
-                _p, tok_str, uid_str = payload.split(":", 2)
+                _p, mode, sec_str, uid_str = payload.split(":", 3)
                 uid_pay = int(uid_str)
-                tokens = int(tok_str)
-
+                seconds = int(sec_str)
                 if uid_pay != user_id:
-                    await tg_send_message(
-                        chat_id,
-                        "Оплата прошла, но user_id не совпал. Напиши админу.",
-                        reply_markup=_main_menu_for(user_id),
-                    )
+                    await tg_send_message(chat_id, "Оплата прошла, но user_id не совпал. Напиши админу.", reply_markup=_main_menu_for(user_id))
                     return {"ok": True}
 
-                ensure_user_row(user_id)
+                tokens = _tokens_for_mode_seconds(mode, seconds)
                 add_tokens(
                     user_id,
                     tokens,
                     reason="stars_topup",
-                    meta={"tokens": tokens, "currency": "XTR"},
+                    meta={"mode": mode, "seconds": seconds, "currency": "XTR"},
                 )
                 bal = int(get_balance(user_id) or 0)
 
@@ -1929,7 +1928,7 @@ async def webhook(secret: str, request: Request):
                     f"Оплата прошла, но не смог начислить токены: {e}",
                     reply_markup=_main_menu_for(user_id),
                 )
-return {"ok": True}
+        return {"ok": True}
 
 
     message_id = int(message.get("message_id") or 0)
@@ -2091,8 +2090,9 @@ return {"ok": True}
 
         await tg_send_message(
             chat_id,
-            f"💰 Баланс: {bal} токенов
-""Расход токенов зависит от режима генерации (выбирается в WebApp).",
+            f"💰 Баланс: {bal} токенов\n"
+            "STD: 1 сек = 1 токен\n"
+            "PRO: 1 сек = 2 токена",
             reply_markup=_topup_balance_inline_kb(),
         )
         return {"ok": True}
