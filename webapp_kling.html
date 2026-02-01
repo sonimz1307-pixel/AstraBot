@@ -187,7 +187,7 @@
           <span class="desc">Только фото</span>
         </label>
       </div>
-      <div class="hint">Для Motion Control длительность задаётся референс‑видео (3–10 сек).</div>
+      <div class="hint">Для Motion Control длительность задаётся референс-видео (3–10 сек).</div>
     </div>
 
     <div class="card">
@@ -204,6 +204,12 @@
           <span class="name">Pro</span>
           <span class="desc">Лучше качество</span>
         </label>
+      </div>
+
+      <!-- ✅ Подсказка по списанию токенов -->
+      <div class="hint" id="tokenRateHint">
+        Standard — <b>1 сек = 1 токен</b><br>
+        Pro — 1 сек = 2 токена
       </div>
     </div>
 
@@ -243,6 +249,21 @@
     }
     qsa('input[name="flow"]').forEach(el => el.addEventListener('change', updateUI));
     updateUI();
+
+    // ✅ Обновляем подсказку "1 сек = N токенов" при переключении качества
+    function updateTokenRateHint(){
+      const mode = getMode();
+      const el = qs('#tokenRateHint');
+      if (!el) return;
+
+      if (mode === 'pro'){
+        el.innerHTML = 'Standard — 1 сек = 1 токен<br>Pro — <b>1 сек = 2 токена</b>';
+      } else {
+        el.innerHTML = 'Standard — <b>1 сек = 1 токен</b><br>Pro — 1 сек = 2 токена';
+      }
+    }
+    qsa('input[name="mode"]').forEach(el => el.addEventListener('change', updateTokenRateHint));
+    updateTokenRateHint();
 
     // Telegram init (safe)
     const tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
