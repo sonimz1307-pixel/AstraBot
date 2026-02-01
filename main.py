@@ -347,8 +347,7 @@ def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photo
 
 def _main_menu_keyboard(is_admin: bool = False) -> dict:
     rows = [
-        [{"text": "ИИ (чат)"}, {"text": "Фото/Афиши"}],
-        [{"text": "Нейро фотосессии"}, {"text": "2 фото"}],
+        [{"text": "ИИ (чат)"}, {"text": "Фото будущего"}],
         [{"text": "💰 Баланс"}],
         [{"text": "Помощь"}],
     ]
@@ -366,6 +365,20 @@ def _main_menu_keyboard(is_admin: bool = False) -> dict:
 
 def _main_menu_for(user_id: int) -> dict:
     return _main_menu_keyboard(_is_admin(user_id))
+
+
+def _photo_future_menu_keyboard() -> dict:
+    """Подменю «Фото будущего» (объединяет фото-режимы в одну кнопку на главном экране)."""
+    return {
+        "keyboard": [
+            [{"text": "Фото/Афиши"}, {"text": "Нейро фотосессии"}],
+            [{"text": "2 фото"}],
+            [{"text": "⬅ Назад"}],
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+        "selective": False,
+    }
 
 
 def _poster_menu_keyboard(light: str = "bright") -> dict:
@@ -2065,7 +2078,7 @@ async def webhook(secret: str, request: Request):
             "Привет!\n"
             "Режимы:\n"
             "• «ИИ (чат)» — вопросы/анализ фото/решение задач.\n"
-            "• «Фото/Афиши» — делаю афишу ИЛИ обычный фото-эдит (по твоему тексту).\n",
+            "• «Фото будущего» — фото-режимы (Афиши / Нейро фотосессии / 2 фото).\n",
             reply_markup=_main_menu_for(user_id),
         )
         return {"ok": True}
@@ -2092,6 +2105,16 @@ async def webhook(secret: str, request: Request):
             reply_markup=_topup_balance_inline_kb(),
         )
         return {"ok": True}
+
+    if incoming_text == "Фото будущего":
+        # Подменю: объединённая точка входа в фото-режимы
+        await tg_send_message(
+            chat_id,
+            "📸 Фото будущего — выбери режим:",
+            reply_markup=_photo_future_menu_keyboard(),
+        )
+        return {"ok": True}
+
     if incoming_text == "ИИ (чат)":
         _set_mode(chat_id, user_id, "chat")
         await tg_send_message(chat_id, "Ок. Режим «ИИ (чат)».", reply_markup=_main_menu_for(user_id))
