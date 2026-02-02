@@ -10,7 +10,7 @@ from typing import Optional, Literal, Dict, Any, Tuple, List
 import httpx
 from fastapi import FastAPI, Request, Response
 from db_supabase import track_user_activity, get_basic_stats
-from kling_flow import run_motion_control_from_bytes
+from kling_flow import run_motion_control_from_bytes, run_image_to_video_from_bytes
 from billing_db import ensure_user_row, get_balance, add_tokens
 
 app = FastAPI()
@@ -2240,7 +2240,39 @@ async def webhook(secret: str, request: Request):
 
         
         
-        # ---- KLING Motion Control: step=need_avatar ----
+        
+        # ---- KLING Image → Video: step=need_image ----
+        if st.get("mode") == "kling_i2v":
+            ki = st.get("kling_i2v") or {}
+            step = (ki.get("step") or "need_image")
+
+            if step == "need_image":
+                ki["image_bytes"] = img_bytes
+                ki["step"] = "need_prompt"
+                st["kling_i2v"] = ki
+                st["ts"] = _now()
+
+                ks = st.get("kling_settings") or {}
+                quality = (ks.get("quality") or "std").lower()
+                duration = int((ks.get("duration") or ki.get("duration") or 5))
+                await tg_send_message(
+                    chat_id,
+                    f"Фото получил ✅\nТеперь напиши текстом, что должно происходить ({quality.upper()}, {duration} сек)\n"
+                    "Пример: «Камера плавно приближается, лёгкое движение волос, реализм».\n"
+                    "Можно просто: Старт",
+                    reply_markup=_main_menu_for(user_id),
+                )
+                return {"ok": True}
+
+            await tg_send_message(
+                chat_id,
+                "Фото уже есть ✅ Теперь жду ТЕКСТ (или /start чтобы выйти).",
+                reply_markup=_main_menu_for(user_id),
+            )
+            return {"ok": True}
+
+
+# ---- KLING Motion Control: step=need_avatar ----
         if st.get("mode") == "kling_mc":
             km = st.get("kling_mc") or {}
             step = (km.get("step") or "need_avatar")
@@ -2461,6 +2493,32 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(chat_id, f"Ошибка при загрузке фото: {e}", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
+
+            # ---- KLING Image → Video: accept start image as document ----
+            if st.get("mode") == "kling_i2v":
+                ki = st.get("kling_i2v") or {}
+                step = (ki.get("step") or "need_image")
+
+                if step == "need_image":
+                    ki["image_bytes"] = img_bytes
+                    ki["step"] = "need_prompt"
+                    st["kling_i2v"] = ki
+                    st["ts"] = _now()
+
+                    ks = st.get("kling_settings") or {}
+                    quality = (ks.get("quality") or "std").lower()
+                    duration = int((ks.get("duration") or ki.get("duration") or 5))
+                    await tg_send_message(
+                        chat_id,
+                        f"Фото получил ✅\nТеперь напиши текстом, что должно происходить ({quality.upper()}, {duration} сек)\n"
+                        "Можно просто: Старт",
+                        reply_markup=_main_menu_for(user_id),
+                    )
+                    return {"ok": True}
+
+                await tg_send_message(chat_id, "Фото уже есть ✅ Теперь жду ТЕКСТ.", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
             # TWO PHOTOS mode
             if st.get("mode") == "two_photos":
                 tp = st.get("two_photos") or {}
@@ -2641,7 +2699,52 @@ async def webhook(secret: str, request: Request):
 
         
         # ---- KLING Motion Control: step=need_prompt ----
-        if st.get("mode") == "kling_mc":
+        
+        # ---- KLING Image → Video: запуск по тексту ----
+        if st.get("mode") == "kling_i2v":
+            ki = st.get("kling_i2v") or {}
+            step = (ki.get("step") or "need_image")
+
+            if step != "need_prompt":
+                await tg_send_message(chat_id, "Сначала пришли СТАРТОВОЕ ФОТО.", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            start_image_bytes = ki.get("image_bytes")
+            if not start_image_bytes:
+                await tg_send_message(chat_id, "Не хватает фото. Нажми «🎬 Видео будущего» и начни заново.", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            user_prompt = incoming_text.strip()
+            if user_prompt.lower() in ("старт", "start", "go"):
+                user_prompt = "Cinematic realistic video, subtle natural motion, high quality."
+
+            ks = st.get("kling_settings") or {}
+            quality = (ks.get("quality") or "std").lower()
+            duration = int((ks.get("duration") or ki.get("duration") or 5))
+            kling_mode = "pro" if quality in ("pro", "professional") else "std"
+
+            await tg_send_message(chat_id, f"🎬 Генерирую видео ({duration} сек, {kling_mode.upper()})…", reply_markup=_main_menu_for(user_id))
+
+            try:
+                out_url = await run_image_to_video_from_bytes(
+                    user_id=user_id,
+                    start_image_bytes=start_image_bytes,
+                    prompt=user_prompt,
+                    duration_seconds=duration,
+                    mode=kling_mode,
+                    billing_meta={"flow": "i2v"},
+                )
+                await tg_send_message(chat_id, f"✅ Готово!\n{out_url}", reply_markup=_main_menu_for(user_id))
+            except Exception as e:
+                await tg_send_message(chat_id, f"❌ Ошибка Kling Image → Video: {e}", reply_markup=_main_menu_for(user_id))
+            finally:
+                st["kling_i2v"] = {"step": "need_image", "image_bytes": None, "duration": duration}
+                _set_mode(chat_id, user_id, "chat")
+
+            return {"ok": True}
+
+
+if st.get("mode") == "kling_mc":
             km = st.get("kling_mc") or {}
             step = (km.get("step") or "need_avatar")
 
