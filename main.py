@@ -348,11 +348,11 @@ def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photo
 def _main_menu_keyboard(is_admin: bool = False) -> dict:
     rows = [
         [{"text": "ИИ (чат)"}, {"text": "Фото будущего"}],
-        [{"text": "🎬 Видео будущего", "web_app": {"url": WEBAPP_KLING_URL}}],
         [{"text": "💰 Баланс"}],
         [{"text": "Помощь"}],
     ]
     if is_admin:
+        rows.append([{"text": "🎬 Видео будущего", "web_app": {"url": WEBAPP_KLING_URL}}])
         rows.append([{"text": "📊 Статистика"}])
 
     return {
@@ -362,8 +362,6 @@ def _main_menu_keyboard(is_admin: bool = False) -> dict:
         "selective": False,
     }
 
-
-def _main_menu_for(user_id: int) -> dict:
 
 def _main_menu_for(user_id: int) -> dict:
     return _main_menu_keyboard(_is_admin(user_id))
@@ -2096,8 +2094,11 @@ async def webhook(secret: str, request: Request):
         )
         return {"ok": True}
 
-    # ----- Video future (Kling Motion Control) -----
+    # ----- Admin: Video future (Kling Motion Control) -----
     if incoming_text == "🎬 Видео будущего":
+        if not _is_admin(user_id):
+            await tg_send_message(chat_id, "Нет доступа.", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
 
         _set_mode(chat_id, user_id, "kling_mc")
         st["kling_mc"] = {
@@ -2116,9 +2117,6 @@ async def webhook(secret: str, request: Request):
             reply_markup=_main_menu_for(user_id),
         )
         return {"ok": True}
-
-
-    # /start
 
     # /start
     if incoming_text.startswith("/start"):
