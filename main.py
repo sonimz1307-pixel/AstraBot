@@ -1900,48 +1900,80 @@ async def webhook(secret: str, request: Request):
         return {"ok": True}
 
 
-
     # --- Stars: successful payment ---
     sp = (message.get("successful_payment") or {})
     if sp:
         payload = (sp.get("invoice_payload") or "").strip()
         currency = (sp.get("currency") or "").strip()
+        total_amount = sp.get("total_amount")
+        tg_charge_id = (sp.get("telegram_payment_charge_id") or "").strip()
 
-        if currency == "XTR" and payload.startswith("stars_topup:"):
-            # payload = stars_topup:<tokens>:<user_id>
-            try:
-                _p, tok_str, uid_str = payload.split(":", 2)
-                uid_pay = int(uid_str)
-                tokens = int(tok_str)
+        # Debug to logs (Render)
+        print("STARS_SUCCESSFUL_PAYMENT:", {"currency": currency, "payload": payload, "total_amount": total_amount, "charge_id": tg_charge_id})
 
-                if uid_pay != user_id:
-                    await tg_send_message(
-                        chat_id,
-                        "Оплата прошла, но user_id не совпал. Напиши админу.",
-                        reply_markup=_main_menu_for(user_id),
-                    )
-                    return {"ok": True}
+        if currency != "XTR":
+            await tg_send_message(chat_id, f"Оплата получена, но валюта не XTR: {currency}", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
 
-                ensure_user_row(user_id)
-                add_tokens(
-                    user_id,
-                    tokens,
-                    reason="stars_topup",
-                    meta={"tokens": tokens, "currency": "XTR"},
-                )
-                bal = int(get_balance(user_id) or 0)
+        if not payload.startswith("stars_topup:"):
+            if ADMIN_IDS:
+                try:
+                    admin_id = next(iter(ADMIN_IDS))
+                    await tg_send_message(admin_id, f"⚠️ Stars payment payload не распознан: {payload} (user {user_id})")
+                except Exception:
+                    pass
+            await tg_send_message(chat_id, "Оплата прошла, но я не понял платёж. Напиши админу.", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
 
-                await tg_send_message(
-                    chat_id,
-                    f"✅ Оплата прошла!\nНачислено: +{tokens} токенов\nБаланс: {bal}",
-                    reply_markup=_main_menu_for(user_id),
-                )
-            except Exception as e:
-                await tg_send_message(
-                    chat_id,
-                    f"Оплата прошла, но не смог начислить токены: {e}",
-                    reply_markup=_main_menu_for(user_id),
-                )
+        # Supported payload:
+        # stars_topup:<tokens>:<user_id>
+        parts = payload.split(":")
+        try:
+            tokens = int(parts[1]) if len(parts) >= 3 else 0
+            uid_pay = int(parts[2]) if len(parts) >= 3 else 0
+        except Exception:
+            tokens = 0
+            uid_pay = 0
+
+        if tokens <= 0 or uid_pay <= 0:
+            if ADMIN_IDS:
+                try:
+                    admin_id = next(iter(ADMIN_IDS))
+                    await tg_send_message(admin_id, f"⚠️ Stars payload parse failed: {payload} (user {user_id})")
+                except Exception:
+                    pass
+            await tg_send_message(chat_id, "Оплата прошла, но я не смог обработать платёж. Напиши админу.", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+
+        if uid_pay != user_id:
+            await tg_send_message(chat_id, "Оплата прошла, но user_id не совпал. Напиши админу.", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+
+        try:
+            ensure_user_row(user_id)
+            add_tokens(
+                user_id,
+                tokens,
+                reason="stars_topup",
+                meta={"tokens": tokens, "currency": "XTR", "payload": payload, "charge_id": tg_charge_id},
+            )
+            bal = int(get_balance(user_id) or 0)
+
+            await tg_send_message(
+                chat_id,
+                f"✅ Оплата прошла!\nНачислено: +{tokens} токенов\nБаланс: {bal}",
+                reply_markup=_main_menu_for(user_id),
+            )
+        except Exception as e:
+            if ADMIN_IDS:
+                try:
+                    admin_id = next(iter(ADMIN_IDS))
+                    await tg_send_message(admin_id, f"❌ Stars начисление упало: {e}\nuser={user_id} payload={payload}")
+                except Exception:
+                    pass
+            await tg_send_message(chat_id, f"Оплата прошла, но не смог начислить токены: {e}", reply_markup=_main_menu_for(user_id))
+        return {"ok": True}
+
     message_id = int(message.get("message_id") or 0)
     if message_id:
         key = (chat_id, message_id)
