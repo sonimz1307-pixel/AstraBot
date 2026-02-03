@@ -4,6 +4,10 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
   <title>Музыка будущего</title>
+
+  <!-- ✅ ВАЖНО: подключаем Telegram WebApp SDK ДО твоего JS -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+
   <style>
     :root{
       --bg:#0b1020;
@@ -224,6 +228,7 @@
     }
   </style>
 </head>
+
 <body>
   <div class="wrap">
     <div class="header">
@@ -307,20 +312,39 @@
   </div>
 
   <script>
-    // ---- Telegram helpers ----
-    const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+    // -----------------------------
+    // Telegram init (устойчивый)
+    // -----------------------------
     const tgBadge = document.getElementById('tgBadge');
     const warnTg = document.getElementById('warnTg');
-    if (!tg) {
-      tgBadge.textContent = "Browser Preview";
-      warnTg.style.display = "block";
-    } else {
-      try { tg.ready(); } catch(e){}
-      tgBadge.textContent = "Telegram WebApp";
-      try { tg.expand(); } catch(e){}
+    const okCopied = document.getElementById('okCopied');
+
+    function getTg(){
+      return (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
     }
 
-    // ---- Tabs ----
+    function initTelegram(){
+      const t = getTg();
+      if (!t) {
+        tgBadge.textContent = "Browser Preview";
+        warnTg.style.display = "block";
+        return null;
+      }
+      warnTg.style.display = "none";
+      tgBadge.textContent = "Telegram WebApp";
+      try { t.ready(); } catch(e){}
+      try { t.expand(); } catch(e){}
+      return t;
+    }
+
+    // ✅ В некоторых клиентах объект появляется не мгновенно — делаем пару попыток
+    let tg = initTelegram();
+    if (!tg) setTimeout(() => { tg = initTelegram(); }, 150);
+    if (!tg) setTimeout(() => { tg = initTelegram(); }, 350);
+
+    // -----------------------------
+    // Tabs
+    // -----------------------------
     let mode = "idea"; // idea | lyrics
     const tabIdea = document.getElementById('tabIdea');
     const tabLyrics = document.getElementById('tabLyrics');
@@ -340,7 +364,9 @@
     tabIdea.addEventListener('click', () => setMode("idea"));
     tabLyrics.addEventListener('click', () => setMode("lyrics"));
 
-    // ---- Chips -> add to tags ----
+    // -----------------------------
+    // Chips -> add to tags
+    // -----------------------------
     const tagsEl = document.getElementById('tags');
     document.getElementById('moodChips').addEventListener('click', (e) => {
       const chip = e.target.closest('.chip');
@@ -348,21 +374,24 @@
       const add = (chip.dataset.add || "").trim();
       if(!add) return;
 
-      // toggle behavior
       chip.classList.toggle('on');
       const parts = tagsEl.value.split(',').map(s=>s.trim()).filter(Boolean);
-      const has = parts.map(p=>p.toLowerCase()).includes(add.toLowerCase());
+      const low = parts.map(p=>p.toLowerCase());
+      const has = low.includes(add.toLowerCase());
+
       if (chip.classList.contains('on') && !has){
         parts.push(add);
       }
       if (!chip.classList.contains('on') && has){
-        const idx = parts.map(p=>p.toLowerCase()).indexOf(add.toLowerCase());
+        const idx = low.indexOf(add.toLowerCase());
         if (idx >= 0) parts.splice(idx, 1);
       }
       tagsEl.value = parts.join(', ');
     });
 
-    // ---- Build payload for bot ----
+    // -----------------------------
+    // Build payload for bot
+    // -----------------------------
     function buildPayload(){
       const title = document.getElementById('title').value.trim();
       const tags = tagsEl.value.trim();
@@ -370,13 +399,11 @@
       const desc = document.getElementById('desc').value.trim();
       const lyrics = document.getElementById('lyrics').value.trim();
 
-      // What bot needs (minimal, stable)
-      // We do NOT send service_mode/debug.
       const payload = {
         feature: "music_future",
         provider: "piapi",
         model: "suno",
-        mv: "chirp-crow", // v5 mapping in PiAPI docs
+        mv: "chirp-crow",
         mode: mode, // "idea" or "lyrics"
         title: title || "",
         tags: tags || "",
@@ -391,35 +418,39 @@
       return payload;
     }
 
-    // ---- Save -> sendData -> close ----
-    const okCopied = document.getElementById('okCopied');
+    // -----------------------------
+    // Save -> sendData -> close
+    // -----------------------------
     document.getElementById('btnSave').addEventListener('click', () => {
       const payload = buildPayload();
-
-      // basic validation: if both idea and lyrics empty, let bot ask later (allowed)
-      const hasIdea = (payload.gpt_description_prompt && payload.gpt_description_prompt.length > 0);
-      const hasLyrics = (payload.prompt && payload.prompt.length > 0);
-
-      // send data
       const dataStr = JSON.stringify(payload);
 
-      if (tg) {
+      // пробуем получить tg ещё раз прямо перед отправкой (на случай поздней инициализации)
+      const t = tg || initTelegram();
+
+      if (t) {
         try {
-          tg.sendData(dataStr);
+          t.sendData(dataStr);
+          okCopied.textContent = "Готово ✅ Данные отправлены в бот.";
           okCopied.style.display = "block";
-          setTimeout(() => { try { tg.close(); } catch(e){} }, 250);
+          setTimeout(() => { try { t.close(); } catch(e){} }, 250);
           return;
         } catch(e) {
-          // fallback to clipboard
+          // fallback below
         }
       }
+
       // Browser fallback: copy to clipboard
-      navigator.clipboard && navigator.clipboard.writeText(dataStr).then(() => {
-        okCopied.textContent = "Скопировано в буфер ✅ (открыто в браузере)";
-        okCopied.style.display = "block";
-      }).catch(() => {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(dataStr).then(() => {
+          okCopied.textContent = "Скопировано в буфер ✅ (открыто в браузере)";
+          okCopied.style.display = "block";
+        }).catch(() => {
+          alert(dataStr);
+        });
+      } else {
         alert(dataStr);
-      });
+      }
     });
 
     document.getElementById('btnClear').addEventListener('click', () => {
@@ -433,8 +464,5 @@
       okCopied.style.display = "none";
     });
   </script>
-
-  <!-- Telegram WebApp script is auto-injected in Telegram environment, but safe to include -->
-  <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </body>
 </html>
