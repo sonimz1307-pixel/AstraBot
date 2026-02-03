@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Музыка будущего — настройки</title>
+  <style>
+    :root{
+      --bg:#060b16;
+      --card:#0b1430;
+      --card2:#0a1228;
+      --text:#e8eefc;
+      --muted:#9fb0d4;
+      --stroke:rgba(170,190,255,.16);
+      --accent:#2ea6ff;
+      --accent2:#1f6feb;
+      --danger:#ff4d4d;
+      --shadow:0 12px 30px rgba(0,0,0,.35);
+      --radius:18px;
+    }
+    *{ box-sizing:border-box; }
+    body{
+      margin:0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans";
+      background: radial-gradient(1200px 500px at 30% -10%, rgba(46,166,255,.18), transparent 60%),
+                  radial-gradient(900px 400px at 90% 10%, rgba(31,111,235,.16), transparent 55%),
+                  var(--bg);
+      color:var(--text);
+    }
+    .wrap{ padding:18px 16px 28px; max-width:760px; margin:0 auto; }
+    .h1{ font-size:22px; font-weight:800; letter-spacing:.2px; margin:6px 0 6px; }
+    .sub{ color:var(--muted); font-size:13px; line-height:1.45; margin:0 0 14px; }
+    .card{
+      background: linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02));
+      border:1px solid var(--stroke);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding:14px;
+      margin:12px 0;
+    }
+    .row{ display:flex; gap:10px; flex-wrap:wrap; }
+    .col{ flex:1 1 240px; min-width:240px; }
+    label{ display:block; font-size:12px; color:var(--muted); margin:10px 0 6px; }
+    input[type="text"], select, textarea{
+      width:100%;
+      border-radius:14px;
+      border:1px solid var(--stroke);
+      background: rgba(10,18,40,.6);
+      color: var(--text);
+      padding:12px 12px;
+      outline:none;
+      font-size:14px;
+    }
+    textarea{ min-height:120px; resize:vertical; }
+    .pill{
+      display:inline-flex; gap:8px; align-items:center;
+      padding:8px 10px;
+      border-radius:999px;
+      border:1px solid var(--stroke);
+      background: rgba(10,18,40,.55);
+      color: var(--text);
+      font-size:13px;
+      cursor:pointer;
+      user-select:none;
+    }
+    .pill input{ accent-color: var(--accent); }
+    .tabs{ display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
+    .tab{
+      flex:1 1 140px;
+      padding:10px 12px;
+      border-radius:14px;
+      border:1px solid var(--stroke);
+      background: rgba(10,18,40,.55);
+      color: var(--text);
+      text-align:center;
+      font-weight:700;
+      cursor:pointer;
+    }
+    .tab.active{
+      border-color: rgba(46,166,255,.55);
+      background: rgba(46,166,255,.14);
+    }
+    .btn{
+      width:100%;
+      border:0;
+      border-radius:16px;
+      padding:14px 14px;
+      font-size:15px;
+      font-weight:900;
+      color:white;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      cursor:pointer;
+      margin-top:10px;
+    }
+    .hint{ font-size:12px; color:var(--muted); margin-top:8px; line-height:1.4; }
+    .debug{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size:12px;
+      white-space:pre-wrap;
+      word-break:break-word;
+      color:#cfe2ff;
+      background: rgba(0,0,0,.25);
+      border:1px solid var(--stroke);
+      border-radius: 14px;
+      padding:10px;
+      margin-top:10px;
+      display:none;
+    }
+    .toast{
+      position: fixed;
+      left: 50%;
+      transform: translateX(-50%);
+      bottom: 18px;
+      background: rgba(0,0,0,.72);
+      border: 1px solid var(--stroke);
+      color: var(--text);
+      padding: 10px 12px;
+      border-radius: 12px;
+      font-size: 13px;
+      display:none;
+      z-index: 9999;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="h1">🎵 Музыка будущего</div>
+    <div class="sub">Настрой генерацию музыки через PiAPI (Suno V5). Можно выбрать режим: <b>по описанию</b> или <b>по готовому тексту</b>.</div>
+
+    <div class="card">
+      <div class="row">
+        <div class="col">
+          <label>Версия Suno (mv)</label>
+          <select id="mv">
+            <option value="chirp-crow" selected>chirp-crow (v5)</option>
+          </select>
+        </div>
+        <div class="col">
+          <label>Режим генерации</label>
+          <div class="tabs" role="tablist">
+            <div class="tab active" id="tabPrompt" data-mode="prompt">По описанию</div>
+            <div class="tab" id="tabCustom" data-mode="custom">По тексту (lyrics)</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="col">
+          <label>Название (title)</label>
+          <input id="title" type="text" placeholder="Напр.: Музыка будущего" />
+        </div>
+        <div class="col">
+          <label>Теги (tags)</label>
+          <input id="tags" type="text" placeholder="Напр.: pop, upbeat, russian, viral hook" />
+        </div>
+      </div>
+
+      <label>Инструментал (без вокала)</label>
+      <div class="pill"><input id="instrumental" type="checkbox" /> <span>make_instrumental = true</span></div>
+
+      <div id="promptBlock">
+        <label>Описание (gpt_description_prompt)</label>
+        <textarea id="desc" placeholder="Опиши музыку: жанр, настроение, тема, язык, референсы. Пример: 'Upbeat Russian pop about AI videos in Telegram, catchy hook, modern sound'"></textarea>
+        <div class="hint">Этот режим проще: ты даёшь описание, модель сама сформирует структуру.</div>
+      </div>
+
+      <div id="customBlock" style="display:none;">
+        <label>Текст песни (prompt / lyrics)</label>
+        <textarea id="lyrics" placeholder="[Verse]\n...\n\n[Chorus]\n..."></textarea>
+        <div class="hint">Этот режим даёт больше контроля: ты сам задаёшь куплеты/припевы.</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <div class="col">
+          <label>Сервисный режим (service_mode)</label>
+          <select id="serviceMode">
+            <option value="" selected>по умолчанию (как в Workspace)</option>
+            <option value="public">public (PAYG)</option>
+            <option value="private">private (HYA)</option>
+          </select>
+        </div>
+        <div class="col">
+          <label>Расширенные настройки (сохраняем на будущее)</label>
+          <input id="language" type="text" placeholder="Язык (RU/EN) — пока опционально" />
+        </div>
+      </div>
+
+      <label>Debug (показать JSON, который уйдёт в бота)</label>
+      <div class="pill"><input id="debugToggle" type="checkbox" /> <span>показать payload</span></div>
+      <div id="debug" class="debug"></div>
+
+      <button class="btn" id="sendBtn">✅ Сохранить и вернуться в бот</button>
+      <div class="hint">После сохранения бот попросит текст/описание, если поле пустое. Если ты уже заполнил описание/текст — бот может начать генерацию сразу.</div>
+    </div>
+
+    <div class="toast" id="toast">Данные отправлены. Можно вернуться в Telegram.</div>
+  </div>
+
+  <script>
+    const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+    if (tg){
+      tg.ready();
+      tg.expand();
+    }
+
+    const qs = (s) => document.querySelector(s);
+    const tabPrompt = qs('#tabPrompt');
+    const tabCustom = qs('#tabCustom');
+    const promptBlock = qs('#promptBlock');
+    const customBlock = qs('#customBlock');
+
+    let musicMode = 'prompt';
+
+    function setMode(mode){
+      musicMode = mode;
+      tabPrompt.classList.toggle('active', mode === 'prompt');
+      tabCustom.classList.toggle('active', mode === 'custom');
+      promptBlock.style.display = (mode === 'prompt') ? 'block' : 'none';
+      customBlock.style.display = (mode === 'custom') ? 'block' : 'none';
+      renderDebug();
+    }
+
+    tabPrompt.addEventListener('click', () => setMode('prompt'));
+    tabCustom.addEventListener('click', () => setMode('custom'));
+
+    function buildPayload(){
+      const payload = {
+        flow: "music",
+        provider: "piapi",
+        model: "suno",
+        task_type: "music",
+        mv: qs('#mv').value,
+        music_mode: musicMode,
+        title: qs('#title').value.trim(),
+        tags: qs('#tags').value.trim(),
+        make_instrumental: !!qs('#instrumental').checked,
+        service_mode: qs('#serviceMode').value,
+        language: qs('#language').value.trim()
+      };
+
+      const desc = qs('#desc').value.trim();
+      const lyrics = qs('#lyrics').value.trim();
+
+      if (musicMode === 'prompt'){
+        payload.gpt_description_prompt = desc;
+      } else {
+        payload.prompt = lyrics;
+      }
+      return payload;
+    }
+
+    function renderDebug(){
+      const on = qs('#debugToggle').checked;
+      const box = qs('#debug');
+      if(!on){
+        box.style.display = 'none';
+        return;
+      }
+      box.style.display = 'block';
+      box.textContent = JSON.stringify(buildPayload(), null, 2);
+    }
+
+    qs('#debugToggle').addEventListener('change', renderDebug);
+    qs('#title').addEventListener('input', renderDebug);
+    qs('#tags').addEventListener('input', renderDebug);
+    qs('#instrumental').addEventListener('change', renderDebug);
+    qs('#desc').addEventListener('input', renderDebug);
+    qs('#lyrics').addEventListener('input', renderDebug);
+    qs('#serviceMode').addEventListener('change', renderDebug);
+    qs('#language').addEventListener('input', renderDebug);
+
+    function showToast(){
+      const t = qs('#toast');
+      t.style.display = 'block';
+      setTimeout(() => { t.style.display = 'none'; }, 2600);
+    }
+
+    qs('#sendBtn').addEventListener('click', () => {
+      const payload = buildPayload();
+      renderDebug();
+
+      if (tg){
+        try{ tg.sendData(JSON.stringify(payload)); }catch(e){}
+        setTimeout(() => {
+          try{ tg.close(); }catch(e){}
+          showToast();
+        }, 150);
+      } else {
+        // browser test
+        console.log(payload);
+        showToast();
+      }
+    });
+  </script>
+</body>
+</html>
