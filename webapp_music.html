@@ -1,198 +1,226 @@
 <!doctype html>
 <html lang="ru">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
   <title>Музыка будущего</title>
-  <script>window.Telegram = window.Telegram || {};</script>
   <style>
     :root{
-      --bg:#0b1220;
-      --text:#e9f0ff;
-      --muted:#9bb0d2;
-      --line:rgba(255,255,255,.08);
-      --accent:#2b8cff;
-      --accent2:#1e6fe0;
+      --bg:#0b1020;
+      --card:rgba(255,255,255,.06);
+      --card2:rgba(255,255,255,.09);
+      --text:rgba(255,255,255,.92);
+      --muted:rgba(255,255,255,.62);
+      --muted2:rgba(255,255,255,.45);
+      --border:rgba(255,255,255,.12);
+      --accent:#3aa8ff;
+      --accent2:#6ee7ff;
+      --danger:#ff5a6a;
+      --ok:#39d98a;
       --radius:18px;
-      --shadow:0 14px 35px rgba(0,0,0,.35);
-      --shadow2:0 10px 20px rgba(0,0,0,.28);
-      --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, "Noto Sans", "Apple Color Emoji","Segoe UI Emoji";
+      --shadow: 0 10px 30px rgba(0,0,0,.35);
     }
     *{box-sizing:border-box}
     body{
       margin:0;
-      font-family:var(--font);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
       color:var(--text);
-      background: radial-gradient(1200px 700px at 30% -10%, rgba(43,140,255,.35), transparent 55%),
-                  radial-gradient(900px 600px at 95% 20%, rgba(36,209,143,.18), transparent 55%),
-                  var(--bg);
-      padding:16px 14px 28px;
+      background: radial-gradient(1200px 700px at 20% 10%, rgba(58,168,255,.18), transparent 60%),
+                  radial-gradient(900px 700px at 80% 30%, rgba(110,231,255,.12), transparent 55%),
+                  linear-gradient(180deg, #070a14 0%, #0b1020 50%, #070a14 100%);
+      min-height:100vh;
     }
-    .wrap{max-width:520px;margin:0 auto}
-    .header{display:flex;align-items:center;justify-content:space-between;padding:10px 6px 14px}
-    .brand{display:flex;gap:10px;align-items:center}
-    .logo{width:34px;height:34px;border-radius:12px;background:linear-gradient(135deg, rgba(43,140,255,.95), rgba(36,209,143,.85));box-shadow:var(--shadow2)}
-    .title{line-height:1.15}
-    .title h1{font-size:16px;margin:0 0 2px 0;font-weight:750}
-    .title div{font-size:12px;color:var(--muted)}
-    .btn-help{
-      border:1px solid var(--line);
-      background:rgba(255,255,255,.06);
-      color:var(--text);
-      border-radius:14px;
-      padding:9px 12px;
-      cursor:pointer;
-      font-weight:750;
+    .wrap{
+      padding:18px 14px 28px;
+      max-width:520px;
+      margin:0 auto;
     }
+    .header{
+      display:flex; align-items:center; justify-content:space-between;
+      gap:10px; margin-bottom:12px;
+    }
+    .brand{
+      display:flex; flex-direction:column; gap:2px;
+    }
+    .brand h1{
+      font-size:18px; margin:0;
+      letter-spacing:.2px;
+    }
+    .brand .sub{
+      font-size:12px; color:var(--muted);
+    }
+    .pill{
+      padding:8px 10px;
+      border:1px solid var(--border);
+      border-radius:999px;
+      background:rgba(255,255,255,.04);
+      color:var(--muted);
+      font-size:12px;
+      white-space:nowrap;
+    }
+
     .card{
-      background:linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.02));
-      border:1px solid var(--line);
+      background:var(--card);
+      border:1px solid var(--border);
       border-radius:var(--radius);
       box-shadow:var(--shadow);
       padding:14px;
-      margin:10px 0;
+      margin-top:12px;
+      backdrop-filter: blur(10px);
     }
-    .row{display:flex;gap:10px;flex-wrap:wrap}
-    .pillset{
-      display:flex;gap:8px;flex-wrap:wrap;
-      background:rgba(0,0,0,.12);
-      border:1px solid var(--line);
-      border-radius:16px;
-      padding:8px;
+
+    .tabs{
+      display:flex; gap:8px;
+      background:rgba(255,255,255,.04);
+      border:1px solid var(--border);
+      border-radius:999px;
+      padding:6px;
     }
-    .pill{
-      padding:10px 12px;
-      border-radius:14px;
+    .tab{
+      flex:1;
+      text-align:center;
+      padding:10px 10px;
+      border-radius:999px;
       cursor:pointer;
-      background:rgba(255,255,255,.05);
-      color:var(--muted);
-      font-weight:800;
-      font-size:13px;
       user-select:none;
+      font-weight:650;
+      color:var(--muted);
+      transition:.15s ease;
+      font-size:13px;
     }
-    .pill.active{
-      background:linear-gradient(135deg, rgba(43,140,255,.22), rgba(43,140,255,.10));
+    .tab.active{
+      background:linear-gradient(90deg, rgba(58,168,255,.35), rgba(110,231,255,.22));
       color:var(--text);
-      border:1px solid rgba(43,140,255,.35);
+      border:1px solid rgba(58,168,255,.30);
     }
-    label{display:block;font-size:12px;color:var(--muted);margin:10px 2px 6px;font-weight:700}
-    input, textarea, select{
+
+    .row{display:flex; gap:10px; flex-wrap:wrap}
+    label{
+      display:block; font-size:12px; color:var(--muted);
+      margin:12px 0 6px;
+    }
+    input[type="text"], textarea{
       width:100%;
       padding:12px 12px;
-      border-radius:16px;
-      border:1px solid var(--line);
-      background:rgba(0,0,0,.14);
+      border-radius:14px;
+      border:1px solid var(--border);
+      background:rgba(0,0,0,.16);
       color:var(--text);
       outline:none;
-      font-size:14px;
+      transition:.15s ease;
     }
-    textarea{min-height:148px;resize:vertical;line-height:1.35}
-    .hint{margin:8px 2px 0;font-size:12px;color:var(--muted);line-height:1.35}
-    .divider{height:1px;background:var(--line);margin:12px 0}
-    .switch{
-      display:flex;align-items:center;gap:10px;
-      padding:10px 12px;border:1px solid var(--line);
-      border-radius:16px;background:rgba(0,0,0,.10);
+    textarea{min-height:120px; resize:vertical; line-height:1.35}
+    input:focus, textarea:focus{
+      border-color:rgba(58,168,255,.55);
+      box-shadow:0 0 0 3px rgba(58,168,255,.14);
     }
-    .switch input{width:auto;transform:scale(1.1)}
-    .actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:space-between;margin-top:12px}
-    .btn{border:none;border-radius:18px;padding:14px 14px;font-weight:850;cursor:pointer;font-size:14px;flex:1}
-    .btn-primary{background:linear-gradient(135deg, var(--accent), var(--accent2));color:white;box-shadow:0 12px 22px rgba(43,140,255,.25)}
-    .btn-ghost{background:rgba(255,255,255,.06);border:1px solid var(--line);color:var(--text);flex:0 0 auto;padding:14px 16px}
-    .btn:active{transform:translateY(1px)}
-    .toast{
-      position:fixed;left:50%;bottom:16px;transform:translateX(-50%);
-      background:rgba(0,0,0,.72);border:1px solid var(--line);
-      color:var(--text);padding:10px 12px;border-radius:14px;
-      font-size:13px;max-width:92vw;box-shadow:var(--shadow2);
-      opacity:0;pointer-events:none;transition:opacity .18s ease;z-index:50;
+    .hint{
+      margin-top:8px; color:var(--muted2); font-size:12px; line-height:1.35;
     }
-    .toast.show{opacity:1}
-    .footer-note{text-align:center;margin-top:10px;font-size:11px;color:rgba(155,176,210,.65)}
 
-    /* NEW: slick bottom-sheet help */
-    .sheet-backdrop{
-      position:fixed;inset:0;
-      background:rgba(0,0,0,.55);
-      backdrop-filter: blur(8px);
-      -webkit-backdrop-filter: blur(8px);
-      display:none;
-      align-items:flex-end;
-      justify-content:center;
+    .toggle{
+      display:flex; align-items:center; gap:10px;
+      margin-top:10px;
       padding:12px;
-      z-index:80;
-    }
-    .sheet{
-      width:min(560px, 100%);
-      background:linear-gradient(180deg, rgba(16,27,51,.98), rgba(12,20,40,.96));
-      border:1px solid rgba(255,255,255,.10);
-      border-radius:24px;
-      box-shadow:var(--shadow);
-      overflow:hidden;
-      transform:translateY(18px);
-      opacity:0;
-      transition: transform .18s ease, opacity .18s ease;
-    }
-    .sheet-backdrop.show .sheet{transform:translateY(0);opacity:1}
-    .sheet-top{
-      padding:12px 14px 10px;
-      display:flex;align-items:center;justify-content:space-between;gap:10px;
-      border-bottom:1px solid rgba(255,255,255,.08);
-    }
-    .grab{width:40px;height:5px;border-radius:999px;background:rgba(255,255,255,.12);margin:8px auto 0}
-    .sheet-title{display:flex;flex-direction:column;gap:2px}
-    .sheet-title b{font-size:14px}
-    .sheet-title span{font-size:12px;color:var(--muted)}
-    .sheet-close{
-      border:1px solid rgba(255,255,255,.10);
-      background:rgba(255,255,255,.06);
-      color:var(--text);
+      border:1px solid var(--border);
       border-radius:14px;
-      padding:8px 10px;
-      cursor:pointer;
-      font-weight:900;
+      background:rgba(255,255,255,.03);
     }
-    .sheet-body{
-      padding:12px 14px 14px;
-      max-height:72vh;
-      overflow:auto;
+    .toggle input{width:18px; height:18px}
+    .toggle .ttext{display:flex; flex-direction:column; gap:2px}
+    .toggle .ttext b{font-size:13px}
+    .toggle .ttext span{font-size:12px; color:var(--muted)}
+
+    .chips{
+      display:flex; gap:8px; flex-wrap:wrap;
+      margin-top:10px;
     }
-    details{
-      border:1px solid rgba(255,255,255,.09);
+    .chip{
+      border:1px solid var(--border);
       background:rgba(255,255,255,.04);
-      border-radius:18px;
-      padding:10px 12px;
-      margin:10px 0;
-    }
-    summary{
-      cursor:pointer;
-      font-weight:850;
-      list-style:none;
-      display:flex;align-items:center;justify-content:space-between;gap:10px;
-      font-size:13px;
-    }
-    summary::-webkit-details-marker{display:none}
-    .chev{opacity:.7}
-    details[open] .chev{transform:rotate(180deg)}
-    .sheet p, .sheet li{color:var(--muted);font-size:13px;line-height:1.45}
-    .kb{
-      background:rgba(0,0,0,.25);
-      border:1px solid rgba(255,255,255,.10);
-      padding:10px 12px;border-radius:16px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-      white-space:pre-wrap;font-size:12px;color:#d9e6ff;
-      margin-top:8px;
-    }
-    .mini-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px}
-    .mini{
-      border:1px solid rgba(255,255,255,.10);
-      background:rgba(255,255,255,.06);
       color:var(--text);
-      border-radius:14px;
-      padding:10px 12px;
+      border-radius:999px;
+      padding:8px 10px;
+      font-size:12px;
       cursor:pointer;
-      font-weight:850;
-      font-size:13px;
+      user-select:none;
+      transition:.12s ease;
+    }
+    .chip:hover{transform:translateY(-1px); border-color:rgba(58,168,255,.45)}
+    .chip:active{transform:translateY(0px)}
+    .chip.small{padding:6px 9px; font-size:11px; color:var(--muted)}
+    .chip.on{
+      background:linear-gradient(90deg, rgba(58,168,255,.28), rgba(110,231,255,.18));
+      border-color:rgba(58,168,255,.55);
+    }
+
+    .actions{
+      display:flex; gap:10px; margin-top:14px;
+    }
+    .btn{
+      flex:1;
+      border:1px solid var(--border);
+      background:rgba(255,255,255,.05);
+      color:var(--text);
+      padding:12px 12px;
+      border-radius:14px;
+      cursor:pointer;
+      font-weight:700;
+      letter-spacing:.2px;
+    }
+    .btn.primary{
+      background:linear-gradient(90deg, rgba(58,168,255,.42), rgba(110,231,255,.22));
+      border-color:rgba(58,168,255,.45);
+    }
+    .btn:active{transform:translateY(1px)}
+    .footer-note{margin-top:10px; font-size:12px; color:var(--muted2); line-height:1.35}
+
+    details{
+      margin-top:12px;
+      border:1px solid var(--border);
+      border-radius:14px;
+      background:rgba(255,255,255,.03);
+      padding:10px 12px;
+    }
+    details summary{
+      cursor:pointer;
+      font-weight:700;
+      color:var(--muted);
+      outline:none;
+    }
+    details .dcontent{
+      margin-top:10px;
+      color:var(--muted);
+      font-size:12px;
+      line-height:1.45;
+    }
+    code.inline{
+      background:rgba(0,0,0,.22);
+      border:1px solid rgba(255,255,255,.10);
+      padding:2px 6px;
+      border-radius:8px;
+      font-size:11px;
+      color:rgba(255,255,255,.85);
+    }
+    .warn{
+      margin-top:10px;
+      border:1px solid rgba(255,90,106,.35);
+      background:rgba(255,90,106,.06);
+      padding:10px 12px;
+      border-radius:14px;
+      font-size:12px;
+      color:rgba(255,255,255,.78);
+      line-height:1.4;
+    }
+    .ok{
+      margin-top:10px;
+      border:1px solid rgba(57,217,138,.35);
+      background:rgba(57,217,138,.06);
+      padding:10px 12px;
+      border-radius:14px;
+      font-size:12px;
+      color:rgba(255,255,255,.78);
+      line-height:1.4;
     }
   </style>
 </head>
@@ -200,324 +228,213 @@
   <div class="wrap">
     <div class="header">
       <div class="brand">
-        <div class="logo"></div>
-        <div class="title">
-          <h1>🎵 Музыка будущего</h1>
-          <div>Сделай трек из идеи или текста</div>
-        </div>
+        <h1>🎵 Музыка будущего</h1>
+        <div class="sub">Собери настройки и вернись в бот</div>
       </div>
-      <button class="btn-help" id="helpBtn">Подсказки</button>
+      <div class="pill" id="tgBadge">Telegram WebApp</div>
     </div>
 
     <div class="card">
-      <label>Режим</label>
-      <div class="pillset" role="tablist" aria-label="mode">
-        <div class="pill active" id="modePrompt">✨ По описанию</div>
-        <div class="pill" id="modeLyrics">✍️ По тексту</div>
+      <div class="tabs" role="tablist" aria-label="Режим">
+        <div class="tab active" id="tabIdea" role="tab" aria-selected="true">✨ Идея</div>
+        <div class="tab" id="tabLyrics" role="tab" aria-selected="false">📝 Текст</div>
       </div>
 
-      <div class="row">
-        <div style="flex:1;min-width:160px">
-          <label>Название (опционально)</label>
-          <input id="title" placeholder="Напр.: Музыка будущего" maxlength="80" />
-        </div>
-        <div style="flex:1;min-width:160px">
-          <label>Теги (стиль/жанр)</label>
-          <input id="tags" placeholder="pop, upbeat, russian, viral hook" maxlength="140" />
-          <div class="hint">Теги сильнее всего влияют на стиль: жанр, настроение, вокал, инструменты.</div>
-        </div>
+      <label for="title">Название (необязательно)</label>
+      <input id="title" type="text" placeholder="Напр.: Музыка будущего"/>
+
+      <label for="tags">Теги (стиль/жанр)</label>
+      <input id="tags" type="text" placeholder="Напр.: russian pop, upbeat, modern, catchy hook"/>
+      <div class="hint">Теги сильнее всего влияют на стиль: жанр, настроение, вокал, инструменты.</div>
+
+      <div class="chips" id="moodChips">
+        <div class="chip small" data-add="energetic">⚡ энергичное</div>
+        <div class="chip small" data-add="calm">😌 спокойное</div>
+        <div class="chip small" data-add="sad">💔 грустное</div>
+        <div class="chip small" data-add="dark">🌑 тёмное</div>
+        <div class="chip small" data-add="club">🪩 club</div>
+        <div class="chip small" data-add="viral hook">🎯 viral hook</div>
       </div>
 
-      <div class="row" style="margin-top:10px">
-        <div style="flex:1;min-width:160px">
-          <label>Язык</label>
-          <select id="language">
-            <option value="auto">Авто</option>
-            <option value="ru">Русский</option>
-            <option value="en">English</option>
-          </select>
-        </div>
-        <div style="flex:1;min-width:160px">
-          <label>Настроение</label>
-          <select id="mood">
-            <option value="auto">Авто</option>
-            <option value="upbeat">Энергичная</option>
-            <option value="calm">Спокойная</option>
-            <option value="sad">Грустная</option>
-            <option value="inspiring">Вдохновляющая</option>
-            <option value="dark">Тёмная</option>
-          </select>
+      <div class="toggle">
+        <input id="instr" type="checkbox"/>
+        <div class="ttext">
+          <b>Инструментал</b>
+          <span>Без вокала (только музыка)</span>
         </div>
       </div>
 
-      <div class="divider"></div>
-
-      <div class="switch">
-        <input type="checkbox" id="instrumental" />
-        <div>
-          <b>Инструментал (без вокала)</b>
-          <div class="hint" style="margin:4px 0 0 0">Если включено — будет чистая музыка.</div>
-        </div>
-      </div>
-
-      <div id="promptBlock">
-        <label>Опиши песню</label>
-        <textarea id="desc" placeholder="Жанр, настроение, тема, язык, референсы. Пример: Upbeat Russian pop about AI videos in Telegram, catchy hook, modern sound"></textarea>
+      <div id="ideaBlock">
+        <label for="desc">Описание идеи (коротко)</label>
+        <textarea id="desc" placeholder="Жанр, настроение, тема, язык, референсы. Пример: Upbeat Russian pop about AI in Telegram, catchy hook, modern sound"></textarea>
         <div class="hint">Этот режим проще: ты даёшь идею — ИИ сам придумает структуру и слова.</div>
       </div>
 
       <div id="lyricsBlock" style="display:none">
-        <label>Текст песни</label>
-        <textarea id="lyrics" placeholder="[Verse]\n...\n\n[Chorus]\n...\n\n(Можно добавлять подсказки в скобках: (энергично), (шёпотом), (кульминация))"></textarea>
-
-        <div class="actions">
-          <button class="btn btn-ghost" id="tplBtn" type="button">Вставить шаблон</button>
-          <button class="btn btn-ghost" id="tagBtn" type="button">Пример тегов</button>
-        </div>
-
-        <div class="hint">Секции <b>[Verse]</b>, <b>[Chorus]</b>, <b>[Bridge]</b>. Скобки — подсказки для подачи (не обяз.).</div>
-      </div>
-
-      <div class="actions" style="margin-top:14px">
-        <button class="btn btn-primary" id="sendBtn" type="button">✅ Сохранить и вернуться в бот</button>
-      </div>
-
-      <div class="footer-note">@NeiroAstraBot</div>
-    </div>
-  </div>
-
-  <div class="toast" id="toast"></div>
-
-  <!-- NEW HELP SHEET -->
-  <div class="sheet-backdrop" id="sheetBackdrop">
-    <div class="sheet" role="dialog" aria-modal="true" aria-label="help">
-      <div class="grab"></div>
-      <div class="sheet-top">
-        <div class="sheet-title">
-          <b>Подсказки по музыке</b>
-          <span>2 минуты — и результат станет лучше</span>
-        </div>
-        <button class="sheet-close" id="sheetClose">✕</button>
-      </div>
-      <div class="sheet-body">
-        <details open>
-          <summary>✨ Режимы: по описанию / по тексту <span class="chev">▾</span></summary>
-          <ul>
-            <li><b>По описанию</b> — ты пишешь идею (жанр/вайб/тема), ИИ сам делает слова и структуру.</li>
-            <li><b>По тексту</b> — ты вставляешь текст, это больше контроля над куплетами/припевом.</li>
-          </ul>
-        </details>
-
-        <details>
-          <summary>✍️ Как задавать куплет/припев <span class="chev">▾</span></summary>
-          <p>Используй секции. Самое простое:</p>
-          <div class="kb">[Verse]
-Текст куплета...
-
+        <label for="lyrics">Текст песни (структура)</label>
+        <textarea id="lyrics" placeholder="[Verse]
+...
 [Chorus]
-Текст припева...
-
-[Verse]
-Второй куплет...
-
-[Bridge]
-Контраст/кульминация...
-
-[Chorus]
-Финальный припев...</div>
-          <div class="mini-actions">
-            <button class="mini" id="copyStruct" type="button">Скопировать структуру</button>
-          </div>
-        </details>
-
-        <details>
-          <summary>🧠 Скобки и теги — “фишка” <span class="chev">▾</span></summary>
-          <p><b>Скобки</b> — мягкие подсказки для подачи (ИИ обычно не поёт их буквально):</p>
-          <div class="kb">[Chorus]
-(очень цепляющий, короткие строки)
-Музыка будущего — в один клик...</div>
-          <p style="margin-top:10px"><b>Теги</b> — самое важное для стиля (через запятую): жанр, настроение, вокал, инструменты.</p>
-          <div class="kb">russian pop, upbeat, modern, catchy hook, club beat, female vocal</div>
-        </details>
-
-        <details>
-          <summary>✅ Золотое правило <span class="chev">▾</span></summary>
-          <ul>
-            <li><b>Текст</b> = смысл и слова</li>
-            <li><b>Теги</b> = жанр и вайб</li>
-            <li><b>Скобки</b> = подача/настроение (опционально)</li>
-          </ul>
-        </details>
+..."></textarea>
+        <div class="hint">Этот режим даёт больше контроля: ты сам задаёшь куплеты/припевы.</div>
+        <div class="hint">Подсказка: помечай части в квадратных скобках: <code class="inline">[Verse]</code>, <code class="inline">[Chorus]</code>, <code class="inline">[Bridge]</code>.</div>
       </div>
+
+      <details>
+        <summary>Как получить «вау»-результат (кратко)</summary>
+        <div class="dcontent">
+          <b>1) Сначала теги.</b> 4–8 тегов — достаточно. Пример: <code class="inline">russian pop, upbeat, modern, female vocal, catchy hook</code><br/>
+          <b>2) Потом 1–2 предложения идеи.</b> Тема + настроение + где звучит (club / tiktok / cinematic).<br/>
+          <b>3) Если пишешь текст:</b> делай короткие строки, повторяй припев 2–3 раза, используй <code class="inline">[Chorus]</code> для хука.
+        </div>
+      </details>
+
+      <div class="actions">
+        <button class="btn" id="btnClear" type="button">Очистить</button>
+        <button class="btn primary" id="btnSave" type="button">✅ Сохранить и вернуться</button>
+      </div>
+
+      <div class="footer-note">
+        После сохранения бот либо попросит текст/идею (если пусто), либо может запускать генерацию сразу — зависит от настроек бота.
+      </div>
+
+      <div class="warn" id="warnTg" style="display:none">
+        Не вижу Telegram WebApp API. Если ты открыл страницу в обычном браузере — кнопка всё равно сработает, но отправка данных в бота невозможна.
+      </div>
+
+      <div class="ok" id="okCopied" style="display:none">Готово ✅ Данные отправлены в бот.</div>
     </div>
   </div>
 
   <script>
-    const tg = window.Telegram?.WebApp;
-    if (tg) tg.ready();
+    // ---- Telegram helpers ----
+    const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+    const tgBadge = document.getElementById('tgBadge');
+    const warnTg = document.getElementById('warnTg');
+    if (!tg) {
+      tgBadge.textContent = "Browser Preview";
+      warnTg.style.display = "block";
+    } else {
+      try { tg.ready(); } catch(e){}
+      tgBadge.textContent = "Telegram WebApp";
+      try { tg.expand(); } catch(e){}
+    }
 
-    const els = {
-      modePrompt: document.getElementById('modePrompt'),
-      modeLyrics: document.getElementById('modeLyrics'),
-      promptBlock: document.getElementById('promptBlock'),
-      lyricsBlock: document.getElementById('lyricsBlock'),
-      title: document.getElementById('title'),
-      tags: document.getElementById('tags'),
-      desc: document.getElementById('desc'),
-      lyrics: document.getElementById('lyrics'),
-      instrumental: document.getElementById('instrumental'),
-      language: document.getElementById('language'),
-      mood: document.getElementById('mood'),
-      sendBtn: document.getElementById('sendBtn'),
-      toast: document.getElementById('toast'),
-      tplBtn: document.getElementById('tplBtn'),
-      tagBtn: document.getElementById('tagBtn'),
-      helpBtn: document.getElementById('helpBtn'),
-      sheetBackdrop: document.getElementById('sheetBackdrop'),
-      sheetClose: document.getElementById('sheetClose'),
-      copyStruct: document.getElementById('copyStruct'),
-    };
+    // ---- Tabs ----
+    let mode = "idea"; // idea | lyrics
+    const tabIdea = document.getElementById('tabIdea');
+    const tabLyrics = document.getElementById('tabLyrics');
+    const ideaBlock = document.getElementById('ideaBlock');
+    const lyricsBlock = document.getElementById('lyricsBlock');
 
-    let mode = "prompt";
+    function setMode(m){
+      mode = m;
+      const isIdea = (m === "idea");
+      tabIdea.classList.toggle('active', isIdea);
+      tabLyrics.classList.toggle('active', !isIdea);
+      tabIdea.setAttribute('aria-selected', isIdea ? 'true' : 'false');
+      tabLyrics.setAttribute('aria-selected', !isIdea ? 'true' : 'false');
+      ideaBlock.style.display = isIdea ? 'block' : 'none';
+      lyricsBlock.style.display = isIdea ? 'none' : 'block';
+    }
+    tabIdea.addEventListener('click', () => setMode("idea"));
+    tabLyrics.addEventListener('click', () => setMode("lyrics"));
 
-    function setMode(next){
-      mode = next;
-      if (mode === "prompt"){
-        els.modePrompt.classList.add('active');
-        els.modeLyrics.classList.remove('active');
-        els.promptBlock.style.display = '';
-        els.lyricsBlock.style.display = 'none';
-      } else {
-        els.modeLyrics.classList.add('active');
-        els.modePrompt.classList.remove('active');
-        els.promptBlock.style.display = 'none';
-        els.lyricsBlock.style.display = '';
+    // ---- Chips -> add to tags ----
+    const tagsEl = document.getElementById('tags');
+    document.getElementById('moodChips').addEventListener('click', (e) => {
+      const chip = e.target.closest('.chip');
+      if(!chip) return;
+      const add = (chip.dataset.add || "").trim();
+      if(!add) return;
+
+      // toggle behavior
+      chip.classList.toggle('on');
+      const parts = tagsEl.value.split(',').map(s=>s.trim()).filter(Boolean);
+      const has = parts.map(p=>p.toLowerCase()).includes(add.toLowerCase());
+      if (chip.classList.contains('on') && !has){
+        parts.push(add);
       }
-    }
-
-    function showToast(msg){
-      els.toast.textContent = msg;
-      els.toast.classList.add('show');
-      setTimeout(()=>els.toast.classList.remove('show'), 1800);
-    }
-
-    function openSheet(){
-      els.sheetBackdrop.style.display = 'flex';
-      requestAnimationFrame(()=>els.sheetBackdrop.classList.add('show'));
-    }
-    function closeSheet(){
-      els.sheetBackdrop.classList.remove('show');
-      setTimeout(()=>{ els.sheetBackdrop.style.display = 'none'; }, 160);
-    }
-
-    els.helpBtn.addEventListener('click', openSheet);
-    els.sheetClose.addEventListener('click', closeSheet);
-    els.sheetBackdrop.addEventListener('click', (e)=>{ if(e.target === els.sheetBackdrop) closeSheet(); });
-
-    els.modePrompt.addEventListener('click', ()=>setMode("prompt"));
-    els.modeLyrics.addEventListener('click', ()=>setMode("lyrics"));
-
-    els.tplBtn.addEventListener('click', ()=>{
-      const tpl = `[Verse]
-(разговорный стиль, уверенная подача)
-...
-
-[Pre-Chorus]
-(подводка к припеву)
-...
-
-[Chorus]
-(очень цепляющий, короткие строки)
-...
-
-[Verse]
-...
-
-[Chorus]
-...
-
-[Bridge]
-(контраст/кульминация)
-...
-
-[Chorus]
-...`;
-      els.lyrics.value = tpl;
-      showToast("Шаблон вставлен ✅");
-    });
-
-    els.tagBtn.addEventListener('click', ()=>{
-      els.tags.value = "russian pop, upbeat, modern, catchy hook, club beat, female vocal";
-      showToast("Пример тегов вставлен ✅");
-    });
-
-    els.copyStruct.addEventListener('click', async ()=>{
-      const txt = `[Verse]
-...
-
-[Chorus]
-...
-
-[Verse]
-...
-
-[Bridge]
-...
-
-[Chorus]
-...`;
-      try{
-        await navigator.clipboard.writeText(txt);
-        showToast("Скопировано ✅");
-      } catch(e){
-        showToast("Не удалось скопировать");
+      if (!chip.classList.contains('on') && has){
+        const idx = parts.map(p=>p.toLowerCase()).indexOf(add.toLowerCase());
+        if (idx >= 0) parts.splice(idx, 1);
       }
+      tagsEl.value = parts.join(', ');
     });
 
+    // ---- Build payload for bot ----
     function buildPayload(){
+      const title = document.getElementById('title').value.trim();
+      const tags = tagsEl.value.trim();
+      const make_instrumental = document.getElementById('instr').checked;
+      const desc = document.getElementById('desc').value.trim();
+      const lyrics = document.getElementById('lyrics').value.trim();
+
+      // What bot needs (minimal, stable)
+      // We do NOT send service_mode/debug.
       const payload = {
-        flow: "music",
-        mode,
-        title: (els.title.value || "").trim(),
-        tags: (els.tags.value || "").trim(),
-        make_instrumental: !!els.instrumental.checked,
-        language: els.language.value,
-        mood: els.mood.value
+        feature: "music_future",
+        provider: "piapi",
+        model: "suno",
+        mv: "chirp-crow", // v5 mapping in PiAPI docs
+        mode: mode, // "idea" or "lyrics"
+        title: title || "",
+        tags: tags || "",
+        make_instrumental: !!make_instrumental
       };
-      if (mode === "prompt"){
-        payload.gpt_description_prompt = (els.desc.value || "").trim();
+
+      if (mode === "idea") {
+        payload.gpt_description_prompt = desc || "";
       } else {
-        payload.prompt = (els.lyrics.value || "").trim();
+        payload.prompt = lyrics || "";
       }
       return payload;
     }
 
-    function validate(p){
-      if (p.mode === "prompt" && !p.gpt_description_prompt) return "Опиши песню (идея/стиль/настроение).";
-      if (p.mode === "lyrics" && !p.prompt) return "Вставь текст песни (lyrics).";
-      return null;
-    }
-
-    els.sendBtn.addEventListener('click', ()=>{
+    // ---- Save -> sendData -> close ----
+    const okCopied = document.getElementById('okCopied');
+    document.getElementById('btnSave').addEventListener('click', () => {
       const payload = buildPayload();
-      const err = validate(payload);
-      if (err){ showToast(err); return; }
-      try{
-        if (tg && tg.sendData){
-          tg.sendData(JSON.stringify(payload));
-          showToast("Сохранено ✅ Возвращаюсь в бот...");
-          setTimeout(()=>tg.close(), 450);
-        } else {
-          console.log("Payload:", payload);
-          showToast("Открой через Telegram WebApp.");
+
+      // basic validation: if both idea and lyrics empty, let bot ask later (allowed)
+      const hasIdea = (payload.gpt_description_prompt && payload.gpt_description_prompt.length > 0);
+      const hasLyrics = (payload.prompt && payload.prompt.length > 0);
+
+      // send data
+      const dataStr = JSON.stringify(payload);
+
+      if (tg) {
+        try {
+          tg.sendData(dataStr);
+          okCopied.style.display = "block";
+          setTimeout(() => { try { tg.close(); } catch(e){} }, 250);
+          return;
+        } catch(e) {
+          // fallback to clipboard
         }
-      } catch(e){
-        console.error(e);
-        showToast("Ошибка отправки данных.");
       }
+      // Browser fallback: copy to clipboard
+      navigator.clipboard && navigator.clipboard.writeText(dataStr).then(() => {
+        okCopied.textContent = "Скопировано в буфер ✅ (открыто в браузере)";
+        okCopied.style.display = "block";
+      }).catch(() => {
+        alert(dataStr);
+      });
     });
 
-    setMode("prompt");
+    document.getElementById('btnClear').addEventListener('click', () => {
+      document.getElementById('title').value = "";
+      document.getElementById('tags').value = "";
+      document.getElementById('instr').checked = false;
+      document.getElementById('desc').value = "";
+      document.getElementById('lyrics').value = "";
+      document.querySelectorAll('.chip.on').forEach(c=>c.classList.remove('on'));
+      setMode("idea");
+      okCopied.style.display = "none";
+    });
   </script>
+
+  <!-- Telegram WebApp script is auto-injected in Telegram environment, but safe to include -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </body>
 </html>
