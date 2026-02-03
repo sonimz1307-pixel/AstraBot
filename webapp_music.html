@@ -3,296 +3,537 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>Музыка будущего — настройки</title>
+  <title>Музыка будущего</title>
+  <script>
+    // Telegram WebApp guard
+    window.Telegram = window.Telegram || {};
+  </script>
   <style>
     :root{
-      --bg:#060b16;
-      --card:#0b1430;
-      --card2:#0a1228;
-      --text:#e8eefc;
-      --muted:#9fb0d4;
-      --stroke:rgba(170,190,255,.16);
-      --accent:#2ea6ff;
-      --accent2:#1f6feb;
-      --danger:#ff4d4d;
-      --shadow:0 12px 30px rgba(0,0,0,.35);
+      --bg:#0b1220;
+      --card:#101b33;
+      --text:#e9f0ff;
+      --muted:#9bb0d2;
+      --line:rgba(255,255,255,.08);
+      --accent:#2b8cff;
+      --accent2:#1e6fe0;
       --radius:18px;
+      --shadow:0 14px 35px rgba(0,0,0,.35);
+      --shadow2:0 10px 20px rgba(0,0,0,.28);
+      --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, "Noto Sans", "Apple Color Emoji","Segoe UI Emoji";
     }
-    *{ box-sizing:border-box; }
+    *{box-sizing:border-box}
     body{
       margin:0;
-      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans";
-      background: radial-gradient(1200px 500px at 30% -10%, rgba(46,166,255,.18), transparent 60%),
-                  radial-gradient(900px 400px at 90% 10%, rgba(31,111,235,.16), transparent 55%),
-                  var(--bg);
+      font-family:var(--font);
       color:var(--text);
+      background: radial-gradient(1200px 700px at 30% -10%, rgba(43,140,255,.35), transparent 55%),
+                  radial-gradient(900px 600px at 95% 20%, rgba(36,209,143,.18), transparent 55%),
+                  var(--bg);
+      padding:16px 14px 28px;
     }
-    .wrap{ padding:18px 16px 28px; max-width:760px; margin:0 auto; }
-    .h1{ font-size:22px; font-weight:800; letter-spacing:.2px; margin:6px 0 6px; }
-    .sub{ color:var(--muted); font-size:13px; line-height:1.45; margin:0 0 14px; }
-    .card{
-      background: linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02));
-      border:1px solid var(--stroke);
-      border-radius: var(--radius);
-      box-shadow: var(--shadow);
-      padding:14px;
-      margin:12px 0;
+    .wrap{max-width:520px;margin:0 auto}
+    .header{
+      display:flex;align-items:center;justify-content:space-between;
+      padding:10px 6px 14px;
     }
-    .row{ display:flex; gap:10px; flex-wrap:wrap; }
-    .col{ flex:1 1 240px; min-width:240px; }
-    label{ display:block; font-size:12px; color:var(--muted); margin:10px 0 6px; }
-    input[type="text"], select, textarea{
-      width:100%;
+    .brand{display:flex;gap:10px;align-items:center}
+    .logo{
+      width:34px;height:34px;border-radius:12px;
+      background:linear-gradient(135deg, rgba(43,140,255,.95), rgba(36,209,143,.85));
+      box-shadow:var(--shadow2);
+    }
+    .title{line-height:1.15}
+    .title h1{font-size:16px;margin:0 0 2px 0;font-weight:750;letter-spacing:.2px}
+    .title div{font-size:12px;color:var(--muted)}
+    .btn-help{
+      border:1px solid var(--line);
+      background:rgba(255,255,255,.04);
+      color:var(--text);
       border-radius:14px;
-      border:1px solid var(--stroke);
-      background: rgba(10,18,40,.6);
-      color: var(--text);
+      padding:9px 12px;
+      cursor:pointer;
+      font-weight:650;
+    }
+    .card{
+      background:linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.02));
+      border:1px solid var(--line);
+      border-radius:var(--radius);
+      box-shadow:var(--shadow);
+      padding:14px;
+      margin:10px 0;
+    }
+    .row{display:flex;gap:10px;flex-wrap:wrap}
+    .pillset{
+      display:flex;gap:8px;flex-wrap:wrap;
+      background:rgba(0,0,0,.12);
+      border:1px solid var(--line);
+      border-radius:16px;
+      padding:8px;
+    }
+    .pill{
+      padding:10px 12px;
+      border-radius:14px;
+      cursor:pointer;
+      border:1px solid transparent;
+      background:rgba(255,255,255,.04);
+      color:var(--muted);
+      font-weight:700;
+      font-size:13px;
+      user-select:none;
+    }
+    .pill.active{
+      background:linear-gradient(135deg, rgba(43,140,255,.22), rgba(43,140,255,.10));
+      color:var(--text);
+      border-color:rgba(43,140,255,.35);
+    }
+    label{
+      display:block;
+      font-size:12px;
+      color:var(--muted);
+      margin:10px 2px 6px;
+      font-weight:650;
+    }
+    input, textarea, select{
+      width:100%;
       padding:12px 12px;
+      border-radius:16px;
+      border:1px solid var(--line);
+      background:rgba(0,0,0,.14);
+      color:var(--text);
       outline:none;
       font-size:14px;
     }
-    textarea{ min-height:120px; resize:vertical; }
-    .pill{
-      display:inline-flex; gap:8px; align-items:center;
-      padding:8px 10px;
-      border-radius:999px;
-      border:1px solid var(--stroke);
-      background: rgba(10,18,40,.55);
-      color: var(--text);
-      font-size:13px;
-      cursor:pointer;
-      user-select:none;
+    textarea{min-height:148px;resize:vertical;line-height:1.35}
+    .hint{
+      margin:8px 2px 0;
+      font-size:12px;
+      color:var(--muted);
+      line-height:1.35;
     }
-    .pill input{ accent-color: var(--accent); }
-    .tabs{ display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
-    .tab{
-      flex:1 1 140px;
+    .switch{
+      display:flex;align-items:center;gap:10px;
       padding:10px 12px;
-      border-radius:14px;
-      border:1px solid var(--stroke);
-      background: rgba(10,18,40,.55);
-      color: var(--text);
-      text-align:center;
-      font-weight:700;
-      cursor:pointer;
+      border:1px solid var(--line);
+      border-radius:16px;
+      background:rgba(0,0,0,.10);
+      width:100%;
     }
-    .tab.active{
-      border-color: rgba(46,166,255,.55);
-      background: rgba(46,166,255,.14);
+    .switch input{width:auto;transform:scale(1.1)}
+    .switch b{font-size:13px}
+    .actions{
+      display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:space-between;
+      margin-top:12px;
     }
     .btn{
-      width:100%;
-      border:0;
-      border-radius:16px;
+      border:none;
+      border-radius:18px;
       padding:14px 14px;
-      font-size:15px;
-      font-weight:900;
-      color:white;
-      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      font-weight:800;
       cursor:pointer;
-      margin-top:10px;
+      font-size:14px;
+      flex:1;
     }
-    .hint{ font-size:12px; color:var(--muted); margin-top:8px; line-height:1.4; }
-    .debug{
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-      font-size:12px;
-      white-space:pre-wrap;
-      word-break:break-word;
-      color:#cfe2ff;
-      background: rgba(0,0,0,.25);
-      border:1px solid var(--stroke);
-      border-radius: 14px;
-      padding:10px;
-      margin-top:10px;
-      display:none;
+    .btn-primary{
+      background:linear-gradient(135deg, var(--accent), var(--accent2));
+      color:white;
+      box-shadow:0 12px 22px rgba(43,140,255,.25);
     }
+    .btn-ghost{
+      background:rgba(255,255,255,.06);
+      border:1px solid var(--line);
+      color:var(--text);
+      flex:0 0 auto;
+      padding:14px 16px;
+    }
+    .btn:active{transform:translateY(1px)}
+    .divider{height:1px;background:var(--line);margin:12px 0}
     .toast{
-      position: fixed;
-      left: 50%;
-      transform: translateX(-50%);
-      bottom: 18px;
-      background: rgba(0,0,0,.72);
-      border: 1px solid var(--stroke);
-      color: var(--text);
-      padding: 10px 12px;
-      border-radius: 12px;
-      font-size: 13px;
+      position:fixed;left:50%;bottom:16px;transform:translateX(-50%);
+      background:rgba(0,0,0,.72);
+      border:1px solid var(--line);
+      color:var(--text);
+      padding:10px 12px;border-radius:14px;
+      font-size:13px;
+      max-width:92vw;
+      box-shadow:var(--shadow2);
+      opacity:0;pointer-events:none;
+      transition:opacity .18s ease;
+      z-index:50;
+    }
+    .toast.show{opacity:1}
+    .modal-backdrop{
+      position:fixed;inset:0;
+      background:rgba(0,0,0,.55);
       display:none;
-      z-index: 9999;
+      align-items:flex-end;
+      justify-content:center;
+      padding:14px;
+      z-index:60;
+    }
+    .modal{
+      width:min(560px, 100%);
+      background:linear-gradient(180deg, rgba(16,27,51,.98), rgba(16,27,51,.92));
+      border:1px solid rgba(255,255,255,.10);
+      border-radius:22px;
+      box-shadow:var(--shadow);
+      max-height:82vh;
+      overflow:auto;
+      padding:14px;
+    }
+    .modal-head{
+      display:flex;justify-content:space-between;align-items:center;
+      gap:10px;margin-bottom:8px;
+    }
+    .modal-head h2{margin:0;font-size:15px;font-weight:800}
+    .x{
+      border:1px solid var(--line);
+      background:rgba(255,255,255,.06);
+      color:var(--text);
+      border-radius:14px;
+      padding:8px 10px;
+      cursor:pointer;
+      font-weight:800;
+    }
+    .kb{
+      background:rgba(255,255,255,.06);
+      border:1px solid var(--line);
+      padding:10px 12px;
+      border-radius:16px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      white-space:pre-wrap;
+      font-size:12px;
+      color:#d9e6ff;
+    }
+    .modal p, .modal li{color:var(--muted);font-size:13px;line-height:1.45}
+    .modal h3{margin:14px 0 8px;font-size:13px}
+    .tag{
+      display:inline-block;
+      padding:6px 10px;
+      border-radius:999px;
+      border:1px solid var(--line);
+      background:rgba(255,255,255,.06);
+      color:var(--text);
+      font-size:12px;
+      margin:4px 6px 0 0;
+      font-weight:700;
+    }
+    .footer-note{
+      text-align:center;
+      margin-top:10px;
+      font-size:11px;
+      color:rgba(155,176,210,.65);
     }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <div class="h1">🎵 Музыка будущего</div>
-    <div class="sub">Настрой генерацию музыки через PiAPI (Suno V5). Можно выбрать режим: <b>по описанию</b> или <b>по готовому тексту</b>.</div>
+    <div class="header">
+      <div class="brand">
+        <div class="logo"></div>
+        <div class="title">
+          <h1>🎵 Музыка будущего</h1>
+          <div>Сделай трек из идеи или текста</div>
+        </div>
+      </div>
+      <button class="btn-help" id="helpBtn">Подсказки</button>
+    </div>
 
     <div class="card">
+      <label>Режим</label>
+      <div class="pillset" role="tablist" aria-label="mode">
+        <div class="pill active" id="modePrompt" data-mode="prompt">✨ По описанию</div>
+        <div class="pill" id="modeLyrics" data-mode="lyrics">✍️ По тексту</div>
+      </div>
+
       <div class="row">
-        <div class="col">
-          <label>Версия Suno (mv)</label>
-          <select id="mv">
-            <option value="chirp-crow" selected>chirp-crow (v5)</option>
+        <div style="flex:1;min-width:160px">
+          <label>Название (опционально)</label>
+          <input id="title" placeholder="Напр.: Музыка будущего" maxlength="80" />
+        </div>
+        <div style="flex:1;min-width:160px">
+          <label>Теги (стиль/жанр)</label>
+          <input id="tags" placeholder="pop, upbeat, russian, viral hook" maxlength="140" />
+          <div class="hint">Теги сильнее всего влияют на стиль: жанр, настроение, вокал, инструменты.</div>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:10px">
+        <div style="flex:1;min-width:160px">
+          <label>Язык</label>
+          <select id="language">
+            <option value="auto">Авто</option>
+            <option value="ru">Русский</option>
+            <option value="en">English</option>
           </select>
         </div>
-        <div class="col">
-          <label>Режим генерации</label>
-          <div class="tabs" role="tablist">
-            <div class="tab active" id="tabPrompt" data-mode="prompt">По описанию</div>
-            <div class="tab" id="tabCustom" data-mode="custom">По тексту (lyrics)</div>
-          </div>
+        <div style="flex:1;min-width:160px">
+          <label>Настроение</label>
+          <select id="mood">
+            <option value="auto">Авто</option>
+            <option value="upbeat">Энергичная</option>
+            <option value="calm">Спокойная</option>
+            <option value="sad">Грустная</option>
+            <option value="inspiring">Вдохновляющая</option>
+            <option value="dark">Тёмная</option>
+          </select>
         </div>
       </div>
 
-      <div class="row">
-        <div class="col">
-          <label>Название (title)</label>
-          <input id="title" type="text" placeholder="Напр.: Музыка будущего" />
-        </div>
-        <div class="col">
-          <label>Теги (tags)</label>
-          <input id="tags" type="text" placeholder="Напр.: pop, upbeat, russian, viral hook" />
+      <div class="divider"></div>
+
+      <div class="switch">
+        <input type="checkbox" id="instrumental" />
+        <div>
+          <b>Инструментал (без вокала)</b>
+          <div class="hint" style="margin:4px 0 0 0">Если включено — будет чистая музыка.</div>
         </div>
       </div>
-
-      <label>Инструментал (без вокала)</label>
-      <div class="pill"><input id="instrumental" type="checkbox" /> <span>make_instrumental = true</span></div>
 
       <div id="promptBlock">
-        <label>Описание (gpt_description_prompt)</label>
-        <textarea id="desc" placeholder="Опиши музыку: жанр, настроение, тема, язык, референсы. Пример: 'Upbeat Russian pop about AI videos in Telegram, catchy hook, modern sound'"></textarea>
-        <div class="hint">Этот режим проще: ты даёшь описание, модель сама сформирует структуру.</div>
+        <label>Опиши песню</label>
+        <textarea id="desc" placeholder="Жанр, настроение, тема, язык, референсы. Пример: Upbeat Russian pop about AI videos in Telegram, catchy hook, modern sound"></textarea>
+        <div class="hint">Этот режим проще: ты даёшь идею — ИИ сам придумает структуру и слова.</div>
       </div>
 
-      <div id="customBlock" style="display:none;">
-        <label>Текст песни (prompt / lyrics)</label>
-        <textarea id="lyrics" placeholder="[Verse]\n...\n\n[Chorus]\n..."></textarea>
-        <div class="hint">Этот режим даёт больше контроля: ты сам задаёшь куплеты/припевы.</div>
+      <div id="lyricsBlock" style="display:none">
+        <label>Текст песни</label>
+        <textarea id="lyrics" placeholder="[Verse]\n...\n\n[Chorus]\n...\n\n(Можно добавлять подсказки в скобках: (энергично), (шёпотом), (кульминация) — ИИ использует их как настроение.)"></textarea>
+
+        <div class="actions">
+          <button class="btn btn-ghost" id="tplBtn" type="button">Вставить шаблон</button>
+          <button class="btn btn-ghost" id="tagBtn" type="button">Пример тегов</button>
+        </div>
+
+        <div class="hint">В этом режиме ты контролируешь куплеты/припевы через секции <b>[Verse]</b>, <b>[Chorus]</b>, <b>[Bridge]</b>. Подсказки в скобках — опционально.</div>
+      </div>
+
+      <div class="actions" style="margin-top:14px">
+        <button class="btn btn-primary" id="sendBtn" type="button">✅ Сохранить и вернуться в бот</button>
+      </div>
+
+      <div class="footer-note">@NeiroAstraBot</div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <div class="modal-backdrop" id="modalBackdrop">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="help">
+      <div class="modal-head">
+        <h2>Подсказки по музыке</h2>
+        <button class="x" id="closeModal">✕</button>
+      </div>
+
+      <h3>1) По описанию vs По тексту</h3>
+      <ul>
+        <li><b>По описанию</b>: опиши стиль/настроение/тему — ИИ сам сделает слова и структуру.</li>
+        <li><b>По тексту</b>: вставь готовый текст — это больше контроля (куплеты/припевы).</li>
+      </ul>
+
+      <h3>2) Структура текста (секциями)</h3>
+      <div class="kb">[Verse]
+Твой куплет...
+
+[Chorus]
+Твой припев...
+
+[Verse]
+Второй куплет...
+
+[Bridge]
+Мостик (контраст)...
+
+[Chorus]
+Финальный припев...</div>
+
+      <h3>3) Подсказки в скобках</h3>
+      <p>Можно добавлять пометки — ИИ использует их как настроение/подачу, но обычно не поёт буквально.</p>
+      <div class="kb">[Chorus]
+(очень цепляющий, короткие строки)
+Музыка будущего — в один клик...</div>
+
+      <h3>4) Теги — самое важное для стиля</h3>
+      <p>Пиши через запятую: жанр, настроение, вокал, инструменты, эпоха/вайб.</p>
+      <div>
+        <span class="tag">russian pop</span>
+        <span class="tag">upbeat</span>
+        <span class="tag">catchy hook</span>
+        <span class="tag">modern</span>
+        <span class="tag">female vocal</span>
+        <span class="tag">club beat</span>
+      </div>
+
+      <h3>5) Золотое правило</h3>
+      <ul>
+        <li><b>Текст</b> = смысл и слова</li>
+        <li><b>Теги</b> = жанр и вайб</li>
+        <li><b>Скобки</b> = подача/настроение (опционально)</li>
+      </ul>
+
+      <div class="actions" style="margin-top:12px">
+        <button class="btn btn-primary" id="closeModal2" type="button">Понял ✅</button>
       </div>
     </div>
-
-    <div class="card">
-      <div class="row">
-        <div class="col">
-          <label>Сервисный режим (service_mode)</label>
-          <select id="serviceMode">
-            <option value="" selected>по умолчанию (как в Workspace)</option>
-            <option value="public">public (PAYG)</option>
-            <option value="private">private (HYA)</option>
-          </select>
-        </div>
-        <div class="col">
-          <label>Расширенные настройки (сохраняем на будущее)</label>
-          <input id="language" type="text" placeholder="Язык (RU/EN) — пока опционально" />
-        </div>
-      </div>
-
-      <label>Debug (показать JSON, который уйдёт в бота)</label>
-      <div class="pill"><input id="debugToggle" type="checkbox" /> <span>показать payload</span></div>
-      <div id="debug" class="debug"></div>
-
-      <button class="btn" id="sendBtn">✅ Сохранить и вернуться в бот</button>
-      <div class="hint">После сохранения бот попросит текст/описание, если поле пустое. Если ты уже заполнил описание/текст — бот может начать генерацию сразу.</div>
-    </div>
-
-    <div class="toast" id="toast">Данные отправлены. Можно вернуться в Telegram.</div>
   </div>
 
   <script>
-    const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
-    if (tg){
-      tg.ready();
-      tg.expand();
+    const tg = window.Telegram?.WebApp;
+    if (tg) tg.ready();
+
+    const els = {
+      modePrompt: document.getElementById('modePrompt'),
+      modeLyrics: document.getElementById('modeLyrics'),
+      promptBlock: document.getElementById('promptBlock'),
+      lyricsBlock: document.getElementById('lyricsBlock'),
+      title: document.getElementById('title'),
+      tags: document.getElementById('tags'),
+      desc: document.getElementById('desc'),
+      lyrics: document.getElementById('lyrics'),
+      instrumental: document.getElementById('instrumental'),
+      language: document.getElementById('language'),
+      mood: document.getElementById('mood'),
+      sendBtn: document.getElementById('sendBtn'),
+      toast: document.getElementById('toast'),
+      tplBtn: document.getElementById('tplBtn'),
+      tagBtn: document.getElementById('tagBtn'),
+      helpBtn: document.getElementById('helpBtn'),
+      modalBackdrop: document.getElementById('modalBackdrop'),
+      closeModal: document.getElementById('closeModal'),
+      closeModal2: document.getElementById('closeModal2'),
+    };
+
+    let mode = "prompt"; // prompt | lyrics
+
+    function setMode(next){
+      mode = next;
+      if (mode === "prompt"){
+        els.modePrompt.classList.add('active');
+        els.modeLyrics.classList.remove('active');
+        els.promptBlock.style.display = '';
+        els.lyricsBlock.style.display = 'none';
+      } else {
+        els.modeLyrics.classList.add('active');
+        els.modePrompt.classList.remove('active');
+        els.promptBlock.style.display = 'none';
+        els.lyricsBlock.style.display = '';
+      }
     }
 
-    const qs = (s) => document.querySelector(s);
-    const tabPrompt = qs('#tabPrompt');
-    const tabCustom = qs('#tabCustom');
-    const promptBlock = qs('#promptBlock');
-    const customBlock = qs('#customBlock');
-
-    let musicMode = 'prompt';
-
-    function setMode(mode){
-      musicMode = mode;
-      tabPrompt.classList.toggle('active', mode === 'prompt');
-      tabCustom.classList.toggle('active', mode === 'custom');
-      promptBlock.style.display = (mode === 'prompt') ? 'block' : 'none';
-      customBlock.style.display = (mode === 'custom') ? 'block' : 'none';
-      renderDebug();
+    function showToast(msg){
+      els.toast.textContent = msg;
+      els.toast.classList.add('show');
+      setTimeout(()=>els.toast.classList.remove('show'), 1800);
     }
 
-    tabPrompt.addEventListener('click', () => setMode('prompt'));
-    tabCustom.addEventListener('click', () => setMode('custom'));
+    function openModal(){ els.modalBackdrop.style.display = 'flex'; }
+    function closeModal(){ els.modalBackdrop.style.display = 'none'; }
+
+    els.helpBtn.addEventListener('click', openModal);
+    els.closeModal.addEventListener('click', closeModal);
+    els.closeModal2.addEventListener('click', closeModal);
+    els.modalBackdrop.addEventListener('click', (e)=>{ if(e.target === els.modalBackdrop) closeModal(); });
+
+    els.modePrompt.addEventListener('click', ()=>setMode("prompt"));
+    els.modeLyrics.addEventListener('click', ()=>setMode("lyrics"));
+
+    els.tplBtn.addEventListener('click', ()=>{
+      const tpl = `[Verse]
+(разговорный стиль, уверенная подача)
+...
+
+[Pre-Chorus]
+(подводка к припеву)
+...
+
+[Chorus]
+(очень цепляющий, короткие строки)
+...
+
+[Verse]
+...
+
+[Chorus]
+...
+
+[Bridge]
+(контраст/кульминация)
+...
+
+[Chorus]
+...`;
+      els.lyrics.value = tpl;
+      showToast("Шаблон вставлен ✅");
+    });
+
+    els.tagBtn.addEventListener('click', ()=>{
+      els.tags.value = "russian pop, upbeat, modern, catchy hook, club beat, female vocal";
+      showToast("Пример тегов вставлен ✅");
+    });
 
     function buildPayload(){
+      const title = (els.title.value || "").trim();
+      const tags = (els.tags.value || "").trim();
+      const make_instrumental = !!els.instrumental.checked;
+      const language = els.language.value;
+      const mood = els.mood.value;
+
       const payload = {
         flow: "music",
-        provider: "piapi",
-        model: "suno",
-        task_type: "music",
-        mv: qs('#mv').value,
-        music_mode: musicMode,
-        title: qs('#title').value.trim(),
-        tags: qs('#tags').value.trim(),
-        make_instrumental: !!qs('#instrumental').checked,
-        service_mode: qs('#serviceMode').value,
-        language: qs('#language').value.trim()
+        mode,                 // "prompt" or "lyrics"
+        title,
+        tags,
+        make_instrumental,
+        language,
+        mood
       };
 
-      const desc = qs('#desc').value.trim();
-      const lyrics = qs('#lyrics').value.trim();
-
-      if (musicMode === 'prompt'){
-        payload.gpt_description_prompt = desc;
+      if (mode === "prompt"){
+        payload.gpt_description_prompt = (els.desc.value || "").trim();
       } else {
-        payload.prompt = lyrics;
+        payload.prompt = (els.lyrics.value || "").trim(); // lyrics
       }
+
       return payload;
     }
 
-    function renderDebug(){
-      const on = qs('#debugToggle').checked;
-      const box = qs('#debug');
-      if(!on){
-        box.style.display = 'none';
+    function validate(payload){
+      if (payload.mode === "prompt"){
+        if (!payload.gpt_description_prompt){
+          return "Опиши песню (идея/стиль/настроение).";
+        }
+      } else {
+        if (!payload.prompt){
+          return "Вставь текст песни (lyrics).";
+        }
+      }
+      return null;
+    }
+
+    els.sendBtn.addEventListener('click', ()=>{
+      const payload = buildPayload();
+      const err = validate(payload);
+      if (err){
+        showToast(err);
         return;
       }
-      box.style.display = 'block';
-      box.textContent = JSON.stringify(buildPayload(), null, 2);
-    }
 
-    qs('#debugToggle').addEventListener('change', renderDebug);
-    qs('#title').addEventListener('input', renderDebug);
-    qs('#tags').addEventListener('input', renderDebug);
-    qs('#instrumental').addEventListener('change', renderDebug);
-    qs('#desc').addEventListener('input', renderDebug);
-    qs('#lyrics').addEventListener('input', renderDebug);
-    qs('#serviceMode').addEventListener('change', renderDebug);
-    qs('#language').addEventListener('input', renderDebug);
-
-    function showToast(){
-      const t = qs('#toast');
-      t.style.display = 'block';
-      setTimeout(() => { t.style.display = 'none'; }, 2600);
-    }
-
-    qs('#sendBtn').addEventListener('click', () => {
-      const payload = buildPayload();
-      renderDebug();
-
-      if (tg){
-        try{ tg.sendData(JSON.stringify(payload)); }catch(e){}
-        setTimeout(() => {
-          try{ tg.close(); }catch(e){}
-          showToast();
-        }, 150);
-      } else {
-        // browser test
-        console.log(payload);
-        showToast();
+      try{
+        if (tg && tg.sendData){
+          tg.sendData(JSON.stringify(payload));
+          showToast("Сохранено ✅ Возвращаюсь в бот...");
+          setTimeout(()=>tg.close(), 450);
+        } else {
+          console.log("Payload:", payload);
+          showToast("Открой через Telegram WebApp.");
+        }
+      } catch(e){
+        console.error(e);
+        showToast("Ошибка отправки данных.");
       }
     });
+
+    setMode("prompt");
   </script>
 </body>
 </html>
