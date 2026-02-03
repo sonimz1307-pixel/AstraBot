@@ -2065,11 +2065,8 @@ async def webhook(secret: str, request: Request):
                             chat_id,
     await tg_send_message(chat_id, "✅ Настройки музыки сохранены.")
 
-"
                             "Теперь пришли текстом:
-"
                             "- в режиме «По описанию»: опиши музыку (жанр/настроение/тема/язык)
-"
                             "- в режиме «По тексту»: вставь lyrics (куплеты/припев)
 ",
                             reply_markup=_main_menu_for(user_id),
