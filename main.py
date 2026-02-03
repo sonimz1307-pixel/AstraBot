@@ -21,8 +21,16 @@ async def webapp_kling():
     with open("webapp_kling.html", "r", encoding="utf-8") as f:
         return f.read()
 
+
+@app.get("/webapp/music", response_class=HTMLResponse)
+async def webapp_music():
+    with open("webapp_music.html", "r", encoding="utf-8") as f:
+        return f.read()
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 WEBAPP_KLING_URL = os.getenv("WEBAPP_KLING_URL", "https://astrabot-tchj.onrender.com/webapp/kling")
+WEBAPP_MUSIC_URL = os.getenv("WEBAPP_MUSIC_URL", "https://astrabot-tchj.onrender.com/webapp/music")
+PIAPI_API_KEY = os.getenv("PIAPI_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change_me")
 ADMIN_IDS = set(
@@ -345,10 +353,59 @@ def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photo
 
 # ---------------- Reply keyboard ----------------
 
+
+# ---------------- PiAPI (Suno) helpers ----------------
+PIAPI_BASE_URL = "https://api.piapi.ai"
+
+async def piapi_create_task(payload: dict) -> dict:
+    """
+    POST /api/v1/task
+    Returns full JSON response as dict.
+    """
+    if not PIAPI_API_KEY:
+        raise RuntimeError("PIAPI_API_KEY is empty. Set it in Render env vars.")
+    url = f"{PIAPI_BASE_URL}/api/v1/task"
+    headers = {"X-API-Key": PIAPI_API_KEY, "Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(url, headers=headers, json=payload)
+        r.raise_for_status()
+        return r.json()
+
+async def piapi_get_task(task_id: str) -> dict:
+    """
+    GET /api/v1/task/{task_id}
+    """
+    if not PIAPI_API_KEY:
+        raise RuntimeError("PIAPI_API_KEY is empty. Set it in Render env vars.")
+    url = f"{PIAPI_BASE_URL}/api/v1/task/{task_id}"
+    headers = {"X-API-Key": PIAPI_API_KEY}
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.get(url, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+async def piapi_poll_task(task_id: str, *, timeout_sec: int = 240, sleep_sec: float = 2.0) -> dict:
+    """
+    Simple polling loop:
+    - checks status every sleep_sec seconds
+    - stops on Completed / Failed
+    - raises on timeout
+    """
+    t0 = time.time()
+    last = None
+    while True:
+        last = await piapi_get_task(task_id)
+        status = ((last.get("data") or {}).get("status") or "").lower()
+        if status in ("completed", "failed"):
+            return last
+        if time.time() - t0 > timeout_sec:
+            raise TimeoutError(f"PiAPI task timeout after {timeout_sec}s (task_id={task_id}, status={status})")
+        await asyncio.sleep(sleep_sec)
 def _main_menu_keyboard(is_admin: bool = False) -> dict:
     rows = [
         [{"text": "ИИ (чат)"}, {"text": "Фото будущего"}],
         [{"text": "🎬 Видео будущего", "web_app": {"url": WEBAPP_KLING_URL}}],
+        [{"text": "🎵 Музыка будущего", "web_app": {"url": WEBAPP_MUSIC_URL}}],
         [{"text": "💰 Баланс"}],
         [{"text": "Помощь"}],
     ]
@@ -1998,6 +2055,104 @@ async def webhook(secret: str, request: Request):
         except Exception:
             payload = {"raw": raw}
 
+
+        # ----- WebApp data (Music settings) -----
+        flow_raw = (payload.get("flow") or "").lower().strip()
+        task_type_raw = (payload.get("task_type") or "").lower().strip()
+
+        if flow_raw == "music" or task_type_raw == "music":
+            # сохраняем настройки музыки
+            st["music_settings"] = {
+                "mv": (payload.get("mv") or "chirp-crow").strip(),
+                "music_mode": (payload.get("music_mode") or "prompt").strip(),
+                "title": (payload.get("title") or "").strip(),
+                "tags": (payload.get("tags") or "").strip(),
+                "make_instrumental": bool(payload.get("make_instrumental")),
+                "gpt_description_prompt": (payload.get("gpt_description_prompt") or "").strip(),
+                "prompt": (payload.get("prompt") or "").strip(),
+                "service_mode": (payload.get("service_mode") or "public").strip(),
+                "language": (payload.get("language") or "").strip(),
+            }
+            st["ts"] = _now()
+            _set_mode(chat_id, user_id, "suno_music")
+
+            # если промпт/лирика уже пришли из WebApp — можно стартовать сразу
+            settings = st["music_settings"]
+            have_desc = bool(settings.get("gpt_description_prompt"))
+            have_lyrics = bool(settings.get("prompt"))
+
+            if not (have_desc or have_lyrics):
+                await tg_send_message(
+                    chat_id,
+                    """✅ Настройки музыки сохранены.
+
+Теперь пришли текстом:
+• в режиме Prompt — описание песни (например: «весёлый поп трек 120bpm…»)
+• в режиме Custom — текст/лирику с пометками [Verse]/[Chorus]
+
+После этого я отправлю задачу в Suno (через PiAPI).""",
+                    reply_markup=_main_menu_for(user_id),
+                )
+                return {"ok": True}
+
+            # сформировать payload для PiAPI и запустить
+            input_block = {
+                "mv": settings["mv"],
+                "title": settings["title"],
+                "tags": settings["tags"],
+                "make_instrumental": settings["make_instrumental"],
+            }
+            if settings["music_mode"] == "prompt":
+                input_block["gpt_description_prompt"] = settings["gpt_description_prompt"]
+            else:
+                input_block["prompt"] = settings["prompt"]
+
+            payload_api = {
+                "model": "suno",
+                "task_type": "music",
+                "input": input_block,
+                "config": {"service_mode": settings["service_mode"]},
+            }
+
+            await tg_send_message(chat_id, "⏳ Запускаю генерацию музыки…")
+            try:
+                created = await piapi_create_task(payload_api)
+                task_id = ((created.get("data") or {}).get("task_id")) or ""
+                if not task_id:
+                    raise RuntimeError(f"PiAPI did not return task_id: {created}")
+                done = await piapi_poll_task(task_id, timeout_sec=300, sleep_sec=2.0)
+                data = done.get("data") or {}
+                status = (data.get("status") or "")
+                if str(status).lower() != "completed":
+                    err = (data.get("error") or {}).get("message") or "unknown error"
+                    await tg_send_message(chat_id, f"❌ Музыка не сгенерировалась: {status}\n{err}")
+                    return {"ok": True}
+
+                out = data.get("output") or []
+                if isinstance(out, dict):
+                    out = [out]
+                if not out:
+                    await tg_send_message(chat_id, "✅ Готово, но PiAPI не вернул output. Проверь task в кабинете.")
+                    return {"ok": True}
+
+                # обычно Suno отдаёт 1–2 трека
+                lines = ["✅ Музыка готова:"]
+                for i, item in enumerate(out[:2], start=1):
+                    audio_url = item.get("audio_url") or ""
+                    video_url = item.get("video_url") or ""
+                    image_url = item.get("image_url") or ""
+                    lines.append(f"#{i}")
+                    if audio_url:
+                        lines.append(f"🎧 MP3: {audio_url}")
+                    if video_url:
+                        lines.append(f"🎬 MP4: {video_url}")
+                    if image_url:
+                        lines.append(f"🖼 Обложка: {image_url}")
+                await tg_send_message(chat_id, "\n".join(lines), reply_markup=_main_menu_for(user_id))
+            except Exception as e:
+                await tg_send_message(chat_id, f"❌ Ошибка PiAPI/Suno: {e}")
+            return {"ok": True}
+
         # из WebApp у тебя сейчас прилетает примерно так: {"flow":"motion","mode":"pro"}
         flow = (payload.get("flow") or payload.get("gen_type") or payload.get("genType") or "").lower().strip()
         quality = (payload.get("mode") or payload.get("quality") or "std").lower().strip()
@@ -2142,6 +2297,84 @@ async def webhook(secret: str, request: Request):
         return {"ok": True}
 
 
+    
+        # ---- SUNO Music: ждём текст (описание или лирику) ----
+        if st.get("mode") == "suno_music" and incoming_text:
+            settings = st.get("music_settings") or {
+                "mv": "chirp-crow",
+                "music_mode": "prompt",
+                "title": "",
+                "tags": "",
+                "make_instrumental": False,
+                "service_mode": "public",
+                "language": "",
+            }
+
+            # принимаем текст и кладём в нужное поле
+            if (settings.get("music_mode") or "").lower().strip() == "custom":
+                settings["prompt"] = incoming_text
+            else:
+                settings["gpt_description_prompt"] = incoming_text
+
+            st["music_settings"] = settings
+            st["ts"] = _now()
+
+            input_block = {
+                "mv": settings.get("mv") or "chirp-crow",
+                "title": settings.get("title") or "",
+                "tags": settings.get("tags") or "",
+                "make_instrumental": bool(settings.get("make_instrumental")),
+            }
+            if (settings.get("music_mode") or "").lower().strip() == "custom":
+                input_block["prompt"] = settings.get("prompt") or ""
+            else:
+                input_block["gpt_description_prompt"] = settings.get("gpt_description_prompt") or ""
+
+            payload_api = {
+                "model": "suno",
+                "task_type": "music",
+                "input": input_block,
+                "config": {"service_mode": settings.get("service_mode") or "public"},
+            }
+
+            await tg_send_message(chat_id, "⏳ Запускаю генерацию музыки…")
+            try:
+                created = await piapi_create_task(payload_api)
+                task_id = ((created.get("data") or {}).get("task_id")) or ""
+                if not task_id:
+                    raise RuntimeError(f"PiAPI did not return task_id: {created}")
+
+                done = await piapi_poll_task(task_id, timeout_sec=300, sleep_sec=2.0)
+                data = done.get("data") or {}
+                status = (data.get("status") or "")
+                if str(status).lower() != "completed":
+                    err = (data.get("error") or {}).get("message") or "unknown error"
+                    await tg_send_message(chat_id, f"❌ Музыка не сгенерировалась: {status}\n{err}")
+                    return {"ok": True}
+
+                out = data.get("output") or []
+                if isinstance(out, dict):
+                    out = [out]
+                if not out:
+                    await tg_send_message(chat_id, "✅ Готово, но PiAPI не вернул output. Проверь task в кабинете.")
+                    return {"ok": True}
+
+                lines = ["✅ Музыка готова:"]
+                for i, item in enumerate(out[:2], start=1):
+                    audio_url = item.get("audio_url") or ""
+                    video_url = item.get("video_url") or ""
+                    image_url = item.get("image_url") or ""
+                    lines.append(f"#{i}")
+                    if audio_url:
+                        lines.append(f"🎧 MP3: {audio_url}")
+                    if video_url:
+                        lines.append(f"🎬 MP4: {video_url}")
+                    if image_url:
+                        lines.append(f"🖼 Обложка: {image_url}")
+                await tg_send_message(chat_id, "\n".join(lines), reply_markup=_main_menu_for(user_id))
+            except Exception as e:
+                await tg_send_message(chat_id, f"❌ Ошибка PiAPI/Suno: {e}", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
     if incoming_text == "💰 Баланс":
         try:
             ensure_user_row(user_id)
