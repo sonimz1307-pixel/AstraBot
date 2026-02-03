@@ -4,14 +4,10 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <title>Музыка будущего</title>
-  <script>
-    // Telegram WebApp guard
-    window.Telegram = window.Telegram || {};
-  </script>
+  <script>window.Telegram = window.Telegram || {};</script>
   <style>
     :root{
       --bg:#0b1220;
-      --card:#101b33;
       --text:#e9f0ff;
       --muted:#9bb0d2;
       --line:rgba(255,255,255,.08);
@@ -33,27 +29,20 @@
       padding:16px 14px 28px;
     }
     .wrap{max-width:520px;margin:0 auto}
-    .header{
-      display:flex;align-items:center;justify-content:space-between;
-      padding:10px 6px 14px;
-    }
+    .header{display:flex;align-items:center;justify-content:space-between;padding:10px 6px 14px}
     .brand{display:flex;gap:10px;align-items:center}
-    .logo{
-      width:34px;height:34px;border-radius:12px;
-      background:linear-gradient(135deg, rgba(43,140,255,.95), rgba(36,209,143,.85));
-      box-shadow:var(--shadow2);
-    }
+    .logo{width:34px;height:34px;border-radius:12px;background:linear-gradient(135deg, rgba(43,140,255,.95), rgba(36,209,143,.85));box-shadow:var(--shadow2)}
     .title{line-height:1.15}
-    .title h1{font-size:16px;margin:0 0 2px 0;font-weight:750;letter-spacing:.2px}
+    .title h1{font-size:16px;margin:0 0 2px 0;font-weight:750}
     .title div{font-size:12px;color:var(--muted)}
     .btn-help{
       border:1px solid var(--line);
-      background:rgba(255,255,255,.04);
+      background:rgba(255,255,255,.06);
       color:var(--text);
       border-radius:14px;
       padding:9px 12px;
       cursor:pointer;
-      font-weight:650;
+      font-weight:750;
     }
     .card{
       background:linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.02));
@@ -75,25 +64,18 @@
       padding:10px 12px;
       border-radius:14px;
       cursor:pointer;
-      border:1px solid transparent;
-      background:rgba(255,255,255,.04);
+      background:rgba(255,255,255,.05);
       color:var(--muted);
-      font-weight:700;
+      font-weight:800;
       font-size:13px;
       user-select:none;
     }
     .pill.active{
       background:linear-gradient(135deg, rgba(43,140,255,.22), rgba(43,140,255,.10));
       color:var(--text);
-      border-color:rgba(43,140,255,.35);
+      border:1px solid rgba(43,140,255,.35);
     }
-    label{
-      display:block;
-      font-size:12px;
-      color:var(--muted);
-      margin:10px 2px 6px;
-      font-weight:650;
-    }
+    label{display:block;font-size:12px;color:var(--muted);margin:10px 2px 6px;font-weight:700}
     input, textarea, select{
       width:100%;
       padding:12px 12px;
@@ -105,124 +87,112 @@
       font-size:14px;
     }
     textarea{min-height:148px;resize:vertical;line-height:1.35}
-    .hint{
-      margin:8px 2px 0;
-      font-size:12px;
-      color:var(--muted);
-      line-height:1.35;
-    }
+    .hint{margin:8px 2px 0;font-size:12px;color:var(--muted);line-height:1.35}
+    .divider{height:1px;background:var(--line);margin:12px 0}
     .switch{
       display:flex;align-items:center;gap:10px;
-      padding:10px 12px;
-      border:1px solid var(--line);
-      border-radius:16px;
-      background:rgba(0,0,0,.10);
-      width:100%;
+      padding:10px 12px;border:1px solid var(--line);
+      border-radius:16px;background:rgba(0,0,0,.10);
     }
     .switch input{width:auto;transform:scale(1.1)}
-    .switch b{font-size:13px}
-    .actions{
-      display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:space-between;
-      margin-top:12px;
-    }
-    .btn{
-      border:none;
-      border-radius:18px;
-      padding:14px 14px;
-      font-weight:800;
-      cursor:pointer;
-      font-size:14px;
-      flex:1;
-    }
-    .btn-primary{
-      background:linear-gradient(135deg, var(--accent), var(--accent2));
-      color:white;
-      box-shadow:0 12px 22px rgba(43,140,255,.25);
-    }
-    .btn-ghost{
-      background:rgba(255,255,255,.06);
-      border:1px solid var(--line);
-      color:var(--text);
-      flex:0 0 auto;
-      padding:14px 16px;
-    }
+    .actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:space-between;margin-top:12px}
+    .btn{border:none;border-radius:18px;padding:14px 14px;font-weight:850;cursor:pointer;font-size:14px;flex:1}
+    .btn-primary{background:linear-gradient(135deg, var(--accent), var(--accent2));color:white;box-shadow:0 12px 22px rgba(43,140,255,.25)}
+    .btn-ghost{background:rgba(255,255,255,.06);border:1px solid var(--line);color:var(--text);flex:0 0 auto;padding:14px 16px}
     .btn:active{transform:translateY(1px)}
-    .divider{height:1px;background:var(--line);margin:12px 0}
     .toast{
       position:fixed;left:50%;bottom:16px;transform:translateX(-50%);
-      background:rgba(0,0,0,.72);
-      border:1px solid var(--line);
-      color:var(--text);
-      padding:10px 12px;border-radius:14px;
-      font-size:13px;
-      max-width:92vw;
-      box-shadow:var(--shadow2);
-      opacity:0;pointer-events:none;
-      transition:opacity .18s ease;
-      z-index:50;
+      background:rgba(0,0,0,.72);border:1px solid var(--line);
+      color:var(--text);padding:10px 12px;border-radius:14px;
+      font-size:13px;max-width:92vw;box-shadow:var(--shadow2);
+      opacity:0;pointer-events:none;transition:opacity .18s ease;z-index:50;
     }
     .toast.show{opacity:1}
-    .modal-backdrop{
+    .footer-note{text-align:center;margin-top:10px;font-size:11px;color:rgba(155,176,210,.65)}
+
+    /* NEW: slick bottom-sheet help */
+    .sheet-backdrop{
       position:fixed;inset:0;
       background:rgba(0,0,0,.55);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
       display:none;
       align-items:flex-end;
       justify-content:center;
-      padding:14px;
-      z-index:60;
+      padding:12px;
+      z-index:80;
     }
-    .modal{
+    .sheet{
       width:min(560px, 100%);
-      background:linear-gradient(180deg, rgba(16,27,51,.98), rgba(16,27,51,.92));
+      background:linear-gradient(180deg, rgba(16,27,51,.98), rgba(12,20,40,.96));
       border:1px solid rgba(255,255,255,.10);
-      border-radius:22px;
+      border-radius:24px;
       box-shadow:var(--shadow);
-      max-height:82vh;
-      overflow:auto;
-      padding:14px;
+      overflow:hidden;
+      transform:translateY(18px);
+      opacity:0;
+      transition: transform .18s ease, opacity .18s ease;
     }
-    .modal-head{
-      display:flex;justify-content:space-between;align-items:center;
-      gap:10px;margin-bottom:8px;
+    .sheet-backdrop.show .sheet{transform:translateY(0);opacity:1}
+    .sheet-top{
+      padding:12px 14px 10px;
+      display:flex;align-items:center;justify-content:space-between;gap:10px;
+      border-bottom:1px solid rgba(255,255,255,.08);
     }
-    .modal-head h2{margin:0;font-size:15px;font-weight:800}
-    .x{
-      border:1px solid var(--line);
+    .grab{width:40px;height:5px;border-radius:999px;background:rgba(255,255,255,.12);margin:8px auto 0}
+    .sheet-title{display:flex;flex-direction:column;gap:2px}
+    .sheet-title b{font-size:14px}
+    .sheet-title span{font-size:12px;color:var(--muted)}
+    .sheet-close{
+      border:1px solid rgba(255,255,255,.10);
       background:rgba(255,255,255,.06);
       color:var(--text);
       border-radius:14px;
       padding:8px 10px;
       cursor:pointer;
-      font-weight:800;
+      font-weight:900;
     }
-    .kb{
-      background:rgba(255,255,255,.06);
-      border:1px solid var(--line);
+    .sheet-body{
+      padding:12px 14px 14px;
+      max-height:72vh;
+      overflow:auto;
+    }
+    details{
+      border:1px solid rgba(255,255,255,.09);
+      background:rgba(255,255,255,.04);
+      border-radius:18px;
       padding:10px 12px;
-      border-radius:16px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-      white-space:pre-wrap;
-      font-size:12px;
-      color:#d9e6ff;
+      margin:10px 0;
     }
-    .modal p, .modal li{color:var(--muted);font-size:13px;line-height:1.45}
-    .modal h3{margin:14px 0 8px;font-size:13px}
-    .tag{
-      display:inline-block;
-      padding:6px 10px;
-      border-radius:999px;
-      border:1px solid var(--line);
+    summary{
+      cursor:pointer;
+      font-weight:850;
+      list-style:none;
+      display:flex;align-items:center;justify-content:space-between;gap:10px;
+      font-size:13px;
+    }
+    summary::-webkit-details-marker{display:none}
+    .chev{opacity:.7}
+    details[open] .chev{transform:rotate(180deg)}
+    .sheet p, .sheet li{color:var(--muted);font-size:13px;line-height:1.45}
+    .kb{
+      background:rgba(0,0,0,.25);
+      border:1px solid rgba(255,255,255,.10);
+      padding:10px 12px;border-radius:16px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      white-space:pre-wrap;font-size:12px;color:#d9e6ff;
+      margin-top:8px;
+    }
+    .mini-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px}
+    .mini{
+      border:1px solid rgba(255,255,255,.10);
       background:rgba(255,255,255,.06);
       color:var(--text);
-      font-size:12px;
-      margin:4px 6px 0 0;
-      font-weight:700;
-    }
-    .footer-note{
-      text-align:center;
-      margin-top:10px;
-      font-size:11px;
-      color:rgba(155,176,210,.65);
+      border-radius:14px;
+      padding:10px 12px;
+      cursor:pointer;
+      font-weight:850;
+      font-size:13px;
     }
   </style>
 </head>
@@ -242,8 +212,8 @@
     <div class="card">
       <label>Режим</label>
       <div class="pillset" role="tablist" aria-label="mode">
-        <div class="pill active" id="modePrompt" data-mode="prompt">✨ По описанию</div>
-        <div class="pill" id="modeLyrics" data-mode="lyrics">✍️ По тексту</div>
+        <div class="pill active" id="modePrompt">✨ По описанию</div>
+        <div class="pill" id="modeLyrics">✍️ По тексту</div>
       </div>
 
       <div class="row">
@@ -298,14 +268,14 @@
 
       <div id="lyricsBlock" style="display:none">
         <label>Текст песни</label>
-        <textarea id="lyrics" placeholder="[Verse]\n...\n\n[Chorus]\n...\n\n(Можно добавлять подсказки в скобках: (энергично), (шёпотом), (кульминация) — ИИ использует их как настроение.)"></textarea>
+        <textarea id="lyrics" placeholder="[Verse]\n...\n\n[Chorus]\n...\n\n(Можно добавлять подсказки в скобках: (энергично), (шёпотом), (кульминация))"></textarea>
 
         <div class="actions">
           <button class="btn btn-ghost" id="tplBtn" type="button">Вставить шаблон</button>
           <button class="btn btn-ghost" id="tagBtn" type="button">Пример тегов</button>
         </div>
 
-        <div class="hint">В этом режиме ты контролируешь куплеты/припевы через секции <b>[Verse]</b>, <b>[Chorus]</b>, <b>[Bridge]</b>. Подсказки в скобках — опционально.</div>
+        <div class="hint">Секции <b>[Verse]</b>, <b>[Chorus]</b>, <b>[Bridge]</b>. Скобки — подсказки для подачи (не обяз.).</div>
       </div>
 
       <div class="actions" style="margin-top:14px">
@@ -318,61 +288,66 @@
 
   <div class="toast" id="toast"></div>
 
-  <div class="modal-backdrop" id="modalBackdrop">
-    <div class="modal" role="dialog" aria-modal="true" aria-label="help">
-      <div class="modal-head">
-        <h2>Подсказки по музыке</h2>
-        <button class="x" id="closeModal">✕</button>
+  <!-- NEW HELP SHEET -->
+  <div class="sheet-backdrop" id="sheetBackdrop">
+    <div class="sheet" role="dialog" aria-modal="true" aria-label="help">
+      <div class="grab"></div>
+      <div class="sheet-top">
+        <div class="sheet-title">
+          <b>Подсказки по музыке</b>
+          <span>2 минуты — и результат станет лучше</span>
+        </div>
+        <button class="sheet-close" id="sheetClose">✕</button>
       </div>
+      <div class="sheet-body">
+        <details open>
+          <summary>✨ Режимы: по описанию / по тексту <span class="chev">▾</span></summary>
+          <ul>
+            <li><b>По описанию</b> — ты пишешь идею (жанр/вайб/тема), ИИ сам делает слова и структуру.</li>
+            <li><b>По тексту</b> — ты вставляешь текст, это больше контроля над куплетами/припевом.</li>
+          </ul>
+        </details>
 
-      <h3>1) По описанию vs По тексту</h3>
-      <ul>
-        <li><b>По описанию</b>: опиши стиль/настроение/тему — ИИ сам сделает слова и структуру.</li>
-        <li><b>По тексту</b>: вставь готовый текст — это больше контроля (куплеты/припевы).</li>
-      </ul>
-
-      <h3>2) Структура текста (секциями)</h3>
-      <div class="kb">[Verse]
-Твой куплет...
+        <details>
+          <summary>✍️ Как задавать куплет/припев <span class="chev">▾</span></summary>
+          <p>Используй секции. Самое простое:</p>
+          <div class="kb">[Verse]
+Текст куплета...
 
 [Chorus]
-Твой припев...
+Текст припева...
 
 [Verse]
 Второй куплет...
 
 [Bridge]
-Мостик (контраст)...
+Контраст/кульминация...
 
 [Chorus]
 Финальный припев...</div>
+          <div class="mini-actions">
+            <button class="mini" id="copyStruct" type="button">Скопировать структуру</button>
+          </div>
+        </details>
 
-      <h3>3) Подсказки в скобках</h3>
-      <p>Можно добавлять пометки — ИИ использует их как настроение/подачу, но обычно не поёт буквально.</p>
-      <div class="kb">[Chorus]
+        <details>
+          <summary>🧠 Скобки и теги — “фишка” <span class="chev">▾</span></summary>
+          <p><b>Скобки</b> — мягкие подсказки для подачи (ИИ обычно не поёт их буквально):</p>
+          <div class="kb">[Chorus]
 (очень цепляющий, короткие строки)
 Музыка будущего — в один клик...</div>
+          <p style="margin-top:10px"><b>Теги</b> — самое важное для стиля (через запятую): жанр, настроение, вокал, инструменты.</p>
+          <div class="kb">russian pop, upbeat, modern, catchy hook, club beat, female vocal</div>
+        </details>
 
-      <h3>4) Теги — самое важное для стиля</h3>
-      <p>Пиши через запятую: жанр, настроение, вокал, инструменты, эпоха/вайб.</p>
-      <div>
-        <span class="tag">russian pop</span>
-        <span class="tag">upbeat</span>
-        <span class="tag">catchy hook</span>
-        <span class="tag">modern</span>
-        <span class="tag">female vocal</span>
-        <span class="tag">club beat</span>
-      </div>
-
-      <h3>5) Золотое правило</h3>
-      <ul>
-        <li><b>Текст</b> = смысл и слова</li>
-        <li><b>Теги</b> = жанр и вайб</li>
-        <li><b>Скобки</b> = подача/настроение (опционально)</li>
-      </ul>
-
-      <div class="actions" style="margin-top:12px">
-        <button class="btn btn-primary" id="closeModal2" type="button">Понял ✅</button>
+        <details>
+          <summary>✅ Золотое правило <span class="chev">▾</span></summary>
+          <ul>
+            <li><b>Текст</b> = смысл и слова</li>
+            <li><b>Теги</b> = жанр и вайб</li>
+            <li><b>Скобки</b> = подача/настроение (опционально)</li>
+          </ul>
+        </details>
       </div>
     </div>
   </div>
@@ -398,12 +373,12 @@
       tplBtn: document.getElementById('tplBtn'),
       tagBtn: document.getElementById('tagBtn'),
       helpBtn: document.getElementById('helpBtn'),
-      modalBackdrop: document.getElementById('modalBackdrop'),
-      closeModal: document.getElementById('closeModal'),
-      closeModal2: document.getElementById('closeModal2'),
+      sheetBackdrop: document.getElementById('sheetBackdrop'),
+      sheetClose: document.getElementById('sheetClose'),
+      copyStruct: document.getElementById('copyStruct'),
     };
 
-    let mode = "prompt"; // prompt | lyrics
+    let mode = "prompt";
 
     function setMode(next){
       mode = next;
@@ -426,13 +401,18 @@
       setTimeout(()=>els.toast.classList.remove('show'), 1800);
     }
 
-    function openModal(){ els.modalBackdrop.style.display = 'flex'; }
-    function closeModal(){ els.modalBackdrop.style.display = 'none'; }
+    function openSheet(){
+      els.sheetBackdrop.style.display = 'flex';
+      requestAnimationFrame(()=>els.sheetBackdrop.classList.add('show'));
+    }
+    function closeSheet(){
+      els.sheetBackdrop.classList.remove('show');
+      setTimeout(()=>{ els.sheetBackdrop.style.display = 'none'; }, 160);
+    }
 
-    els.helpBtn.addEventListener('click', openModal);
-    els.closeModal.addEventListener('click', closeModal);
-    els.closeModal2.addEventListener('click', closeModal);
-    els.modalBackdrop.addEventListener('click', (e)=>{ if(e.target === els.modalBackdrop) closeModal(); });
+    els.helpBtn.addEventListener('click', openSheet);
+    els.sheetClose.addEventListener('click', closeSheet);
+    els.sheetBackdrop.addEventListener('click', (e)=>{ if(e.target === els.sheetBackdrop) closeSheet(); });
 
     els.modePrompt.addEventListener('click', ()=>setMode("prompt"));
     els.modeLyrics.addEventListener('click', ()=>setMode("lyrics"));
@@ -471,53 +451,57 @@
       showToast("Пример тегов вставлен ✅");
     });
 
-    function buildPayload(){
-      const title = (els.title.value || "").trim();
-      const tags = (els.tags.value || "").trim();
-      const make_instrumental = !!els.instrumental.checked;
-      const language = els.language.value;
-      const mood = els.mood.value;
+    els.copyStruct.addEventListener('click', async ()=>{
+      const txt = `[Verse]
+...
 
+[Chorus]
+...
+
+[Verse]
+...
+
+[Bridge]
+...
+
+[Chorus]
+...`;
+      try{
+        await navigator.clipboard.writeText(txt);
+        showToast("Скопировано ✅");
+      } catch(e){
+        showToast("Не удалось скопировать");
+      }
+    });
+
+    function buildPayload(){
       const payload = {
         flow: "music",
-        mode,                 // "prompt" or "lyrics"
-        title,
-        tags,
-        make_instrumental,
-        language,
-        mood
+        mode,
+        title: (els.title.value || "").trim(),
+        tags: (els.tags.value || "").trim(),
+        make_instrumental: !!els.instrumental.checked,
+        language: els.language.value,
+        mood: els.mood.value
       };
-
       if (mode === "prompt"){
         payload.gpt_description_prompt = (els.desc.value || "").trim();
       } else {
-        payload.prompt = (els.lyrics.value || "").trim(); // lyrics
+        payload.prompt = (els.lyrics.value || "").trim();
       }
-
       return payload;
     }
 
-    function validate(payload){
-      if (payload.mode === "prompt"){
-        if (!payload.gpt_description_prompt){
-          return "Опиши песню (идея/стиль/настроение).";
-        }
-      } else {
-        if (!payload.prompt){
-          return "Вставь текст песни (lyrics).";
-        }
-      }
+    function validate(p){
+      if (p.mode === "prompt" && !p.gpt_description_prompt) return "Опиши песню (идея/стиль/настроение).";
+      if (p.mode === "lyrics" && !p.prompt) return "Вставь текст песни (lyrics).";
       return null;
     }
 
     els.sendBtn.addEventListener('click', ()=>{
       const payload = buildPayload();
       const err = validate(payload);
-      if (err){
-        showToast(err);
-        return;
-      }
-
+      if (err){ showToast(err); return; }
       try{
         if (tg && tg.sendData){
           tg.sendData(JSON.stringify(payload));
