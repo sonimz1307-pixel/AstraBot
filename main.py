@@ -2053,25 +2053,58 @@ async def webhook(secret: str, request: Request):
         try:
             payload = json.loads(raw) if isinstance(raw, str) else (raw or {})
         except Exception:
-            payload = {"raw": raw}
-
-
-        # ----- WebApp data (Music settings) -----
+            payload = {"raw": raw}        # ----- WebApp data (Music settings) -----
+        # Поддерживаем разные версии WebApp payload:
+        # 1) legacy: {"flow":"music","task_type":"music","music_mode":"prompt|custom", ...}
+        # 2) v3 simple: {"feature":"music_future","model":"suno","mode":"idea|lyrics", ...}
         flow_raw = (payload.get("flow") or "").lower().strip()
         task_type_raw = (payload.get("task_type") or "").lower().strip()
+        feature_raw = (payload.get("feature") or "").lower().strip()
+        model_raw = (payload.get("model") or "").lower().strip()
+        provider_raw = (payload.get("provider") or "").lower().strip()
 
-        if flow_raw == "music" or task_type_raw == "music":
+        is_music = (
+            flow_raw == "music"
+            or task_type_raw == "music"
+            or feature_raw in ("music_future", "music")
+            or (model_raw == "suno" and (provider_raw in ("piapi", "") or True))
+        )
+
+        if is_music:
+            # нормализуем режим
+            raw_mode = (payload.get("music_mode") or payload.get("mode") or "prompt")
+            raw_mode = str(raw_mode).lower().strip()
+
+            # поддержка: idea->prompt, lyrics->custom
+            if raw_mode in ("idea", "prompt", "description", "prompt_mode", "gpt"):
+                music_mode = "prompt"
+            elif raw_mode in ("lyrics", "custom", "lyric", "text"):
+                music_mode = "custom"
+            else:
+                music_mode = "prompt"
+
+            mv = str(payload.get("mv") or "chirp-crow").strip()
+            title = str(payload.get("title") or "").strip()
+            tags = str(payload.get("tags") or "").strip()
+            make_instrumental = bool(payload.get("make_instrumental"))
+
+            gpt_desc = str(payload.get("gpt_description_prompt") or payload.get("description") or "").strip()
+            lyrics_text = str(payload.get("prompt") or payload.get("lyrics") or "").strip()
+
+            service_mode = str(payload.get("service_mode") or "public").strip()
+            language = str(payload.get("language") or "").strip()
+
             # сохраняем настройки музыки
             st["music_settings"] = {
-                "mv": (payload.get("mv") or "chirp-crow").strip(),
-                "music_mode": (payload.get("music_mode") or "prompt").strip(),
-                "title": (payload.get("title") or "").strip(),
-                "tags": (payload.get("tags") or "").strip(),
-                "make_instrumental": bool(payload.get("make_instrumental")),
-                "gpt_description_prompt": (payload.get("gpt_description_prompt") or "").strip(),
-                "prompt": (payload.get("prompt") or "").strip(),
-                "service_mode": (payload.get("service_mode") or "public").strip(),
-                "language": (payload.get("language") or "").strip(),
+                "mv": mv,
+                "music_mode": music_mode,
+                "title": title,
+                "tags": tags,
+                "make_instrumental": make_instrumental,
+                "gpt_description_prompt": gpt_desc,
+                "prompt": lyrics_text,
+                "service_mode": service_mode,
+                "language": language,
             }
             st["ts"] = _now()
             _set_mode(chat_id, user_id, "suno_music")
@@ -2087,8 +2120,8 @@ async def webhook(secret: str, request: Request):
                     """✅ Настройки музыки сохранены.
 
 Теперь пришли текстом:
-• в режиме Prompt — описание песни (например: «весёлый поп трек 120bpm…»)
-• в режиме Custom — текст/лирику с пометками [Verse]/[Chorus]
+• в режиме «Идея» — короткое описание песни (жанр/вайб/тема)
+• в режиме «Текст» — текст/лирику с пометками [Verse]/[Chorus]
 
 После этого я отправлю задачу в Suno (через PiAPI).""",
                     reply_markup=_main_menu_for(user_id),
@@ -2120,12 +2153,13 @@ async def webhook(secret: str, request: Request):
                 task_id = ((created.get("data") or {}).get("task_id")) or ""
                 if not task_id:
                     raise RuntimeError(f"PiAPI did not return task_id: {created}")
+
                 done = await piapi_poll_task(task_id, timeout_sec=300, sleep_sec=2.0)
                 data = done.get("data") or {}
                 status = (data.get("status") or "")
                 if str(status).lower() != "completed":
                     err = (data.get("error") or {}).get("message") or "unknown error"
-                    await tg_send_message(chat_id, f"❌ Музыка не сгенерировалась: {status}\n{err}")
+                    await tg_send_message(chat_id, f"❌ Музыка не сгенерировалась: {status}\\n{err}")
                     return {"ok": True}
 
                 out = data.get("output") or []
@@ -2135,7 +2169,6 @@ async def webhook(secret: str, request: Request):
                     await tg_send_message(chat_id, "✅ Готово, но PiAPI не вернул output. Проверь task в кабинете.")
                     return {"ok": True}
 
-                # обычно Suno отдаёт 1–2 трека
                 lines = ["✅ Музыка готова:"]
                 for i, item in enumerate(out[:2], start=1):
                     audio_url = item.get("audio_url") or ""
@@ -2153,7 +2186,7 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(chat_id, f"❌ Ошибка PiAPI/Suno: {e}")
             return {"ok": True}
 
-        # из WebApp у тебя сейчас прилетает примерно так: {"flow":"motion","mode":"pro"}
+        # из WebApp у тебя сейчас прилетает примерно так: {"flow":"motion","mode":"pro"} у тебя сейчас прилетает примерно так: {"flow":"motion","mode":"pro"}
         flow = (payload.get("flow") or payload.get("gen_type") or payload.get("genType") or "").lower().strip()
         quality = (payload.get("mode") or payload.get("quality") or "std").lower().strip()
 
