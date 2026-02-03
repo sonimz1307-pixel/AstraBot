@@ -11,7 +11,6 @@ import httpx
 from fastapi import FastAPI, Request, Response
 from db_supabase import track_user_activity, get_basic_stats
 from kling_flow import run_motion_control_from_bytes, run_image_to_video_from_bytes
-from piapi_suno import create_suno_music_task, poll_task_until_done, extract_audio_url
 from billing_db import ensure_user_row, get_balance, add_tokens
 
 app = FastAPI()
@@ -22,15 +21,8 @@ async def webapp_kling():
     with open("webapp_kling.html", "r", encoding="utf-8") as f:
         return f.read()
 
-@app.get("/webapp/music", response_class=HTMLResponse)
-async def webapp_music():
-    with open("webapp_music.html", "r", encoding="utf-8") as f:
-        return f.read()
-
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 WEBAPP_KLING_URL = os.getenv("WEBAPP_KLING_URL", "https://astrabot-tchj.onrender.com/webapp/kling")
-WEBAPP_MUSIC_URL = os.getenv("WEBAPP_MUSIC_URL", "https://astrabot-tchj.onrender.com/webapp/music")
-PIAPI_API_KEY = os.getenv("PIAPI_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change_me")
 ADMIN_IDS = set(
@@ -315,7 +307,7 @@ async def _ai_maybe_summarize(st: Dict[str, Any]):
     st["ai_ts"] = _now()
 
 
-def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photosession", "t2i", "two_photos", "kling_mc", "kling_i2v", "music"]):
+def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photosession", "t2i", "two_photos", "kling_mc", "kling_i2v"]):
     st = _ensure_state(chat_id, user_id)
     st["mode"] = mode
     st["ts"] = _now()
@@ -331,10 +323,6 @@ def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photo
     elif mode == "t2i":
         # Text-to-image: Seedream/ModelArk endpoint (text-to-image)
         st["t2i"] = {"step": "need_prompt"}
-
-    elif mode == "music":
-        # Music generation via PiAPI (Suno)
-        st["music"] = {"step": "need_prompt"}
 
     elif mode == "two_photos":
         # 2 фото: multi-image (если эндпоинт поддерживает)
@@ -361,7 +349,6 @@ def _main_menu_keyboard(is_admin: bool = False) -> dict:
     rows = [
         [{"text": "ИИ (чат)"}, {"text": "Фото будущего"}],
         [{"text": "🎬 Видео будущего", "web_app": {"url": WEBAPP_KLING_URL}}],
-        [{"text": "🎵 Музыка будущего", "web_app": {"url": WEBAPP_MUSIC_URL}}],
         [{"text": "💰 Баланс"}],
         [{"text": "Помощь"}],
     ]
@@ -509,30 +496,6 @@ async def tg_send_message(chat_id: int, text: str, reply_markup: Optional[dict] 
     async with httpx.AsyncClient(timeout=30) as client:
         await client.post(f"{TELEGRAM_API_BASE}/sendMessage", json=payload)
 
-
-
-
-async def tg_send_audio_url(
-    chat_id: int,
-    audio_url: str,
-    caption: str | None = None,
-    reply_markup: dict | None = None,
-):
-    """Send audio by URL via Telegram sendAudio."""
-    if not TELEGRAM_BOT_TOKEN:
-        return
-    if not audio_url:
-        raise RuntimeError("Empty audio_url for sendAudio")
-
-    data = {"chat_id": str(chat_id), "audio": audio_url}
-    if caption:
-        data["caption"] = caption
-    if reply_markup is not None:
-        data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
-
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(f"{TELEGRAM_API_BASE}/sendAudio", data=data)
-        r.raise_for_status()
 
 async def tg_send_photo_bytes(chat_id: int, image_bytes: bytes, caption: Optional[str] = None):
     if not TELEGRAM_BOT_TOKEN:
@@ -2035,83 +1998,7 @@ async def webhook(secret: str, request: Request):
         except Exception:
             payload = {"raw": raw}
 
-        
-        # --- Music WebApp (PiAPI/Suno) ---
-        raw_flow = (payload.get("flow") or payload.get("section") or "").lower().strip()
-        if raw_flow in ("music", "suno"):
-            st["music_settings"] = payload
-            st["ts"] = _now()
-            _set_mode(chat_id, user_id, "music")
-            st["music"] = {"step": "need_prompt"}
-
-            # если пользователь уже ввёл текст/описание в WebApp — запускаем сразу в фоне
-            async def _run_music_bg():
-                try:
-                    await tg_send_message(chat_id, "🎵 Запускаю генерацию музыки…")
-                    settings = st.get("music_settings") or {}
-                    music_mode = (settings.get("music_mode") or "prompt").lower().strip()
-                    mv = settings.get("mv") or "chirp-crow"
-                    title = settings.get("title") or ""
-                    tags = settings.get("tags") or ""
-                    make_instr = bool(settings.get("make_instrumental"))
-                    service_mode = settings.get("service_mode") or ""
-
-                    desc = (settings.get("gpt_description_prompt") or "").strip()
-                    lyr = (settings.get("prompt") or "").strip()
-
-                    # если пусто — попросим пользователя в чате
-                    if (music_mode == "prompt" and not desc) or (music_mode != "prompt" and not lyr):
-                        await tg_send_message(
-                            chat_id,
-                            "✅ Настройки музыки сохранены.
-
-"
-                            "Теперь пришли текстом:
-"
-                            "- в режиме «По описанию»: опиши музыку (жанр/настроение/тема/язык)
-"
-                            "- в режиме «По тексту»: вставь lyrics (куплеты/припев)
-",
-                            reply_markup=_main_menu_for(user_id),
-                        )
-                        return
-
-                    created = await create_suno_music_task(
-                        music_mode="prompt" if music_mode == "prompt" else "custom",
-                        mv=mv,
-                        title=title,
-                        tags=tags,
-                        make_instrumental=make_instr,
-                        gpt_description_prompt=desc,
-                        prompt=lyr,
-                        service_mode=service_mode if service_mode in ("public","private") else "",
-                        api_key=PIAPI_API_KEY or None,
-                    )
-                    task_id = ((created or {}).get("data") or {}).get("task_id")
-                    if not task_id:
-                        await tg_send_message(chat_id, f"Не получил task_id от PiAPI: {created}")
-                        return
-
-                    await tg_send_message(chat_id, f"⏳ Генерация запущена. task_id: {task_id}\nЖду результат…")
-                    done = await poll_task_until_done(task_id, timeout_sec=900, api_key=PIAPI_API_KEY or None)
-                    audio_url = extract_audio_url(done)
-                    if not audio_url:
-                        await tg_send_message(chat_id, f"Готово, но не нашёл audio_url в ответе.\n{done}")
-                        return
-
-                    await tg_send_audio_url(
-                        chat_id,
-                        audio_url,
-                        caption="✅ Готово! Вот твой трек 🎶",
-                        reply_markup=_main_menu_for(user_id),
-                    )
-                except Exception as e:
-                    await tg_send_message(chat_id, f"❌ Ошибка генерации музыки: {e}", reply_markup=_main_menu_for(user_id))
-
-            asyncio.create_task(_run_music_bg())
-            return {"ok": True}
-
-# из WebApp у тебя сейчас прилетает примерно так: {"flow":"motion","mode":"pro"}
+        # из WebApp у тебя сейчас прилетает примерно так: {"flow":"motion","mode":"pro"}
         flow = (payload.get("flow") or payload.get("gen_type") or payload.get("genType") or "").lower().strip()
         quality = (payload.get("mode") or payload.get("quality") or "std").lower().strip()
 
@@ -2168,67 +2055,7 @@ async def webhook(secret: str, request: Request):
             )
 
         return {"ok": True}
-    
-    # ----- Music mode: waiting for prompt/lyrics -----
-    if st.get("mode") == "music" and incoming_text:
-        ms = st.get("music_settings") or {}
-        mm = (ms.get("music_mode") or "prompt").lower().strip()
-        mv = ms.get("mv") or "chirp-crow"
-        title = ms.get("title") or ""
-        tags = ms.get("tags") or ""
-        make_instr = bool(ms.get("make_instrumental"))
-        service_mode = ms.get("service_mode") or ""
-
-        text_in = incoming_text
-
-        # если пользователь в режиме prompt — считаем, что он прислал описание
-        if mm == "prompt":
-            ms["gpt_description_prompt"] = text_in
-        else:
-            ms["prompt"] = text_in
-
-        st["music_settings"] = ms
-        st["ts"] = _now()
-
-        async def _run_music_bg2():
-            try:
-                await tg_send_message(chat_id, "🎵 Запускаю генерацию музыки…")
-                created = await create_suno_music_task(
-                    music_mode="prompt" if mm == "prompt" else "custom",
-                    mv=mv,
-                    title=title,
-                    tags=tags,
-                    make_instrumental=make_instr,
-                    gpt_description_prompt=(ms.get("gpt_description_prompt") or ""),
-                    prompt=(ms.get("prompt") or ""),
-                    service_mode=service_mode if service_mode in ("public","private") else "",
-                    api_key=PIAPI_API_KEY or None,
-                )
-                task_id = ((created or {}).get("data") or {}).get("task_id")
-                if not task_id:
-                    await tg_send_message(chat_id, f"Не получил task_id от PiAPI: {created}", reply_markup=_main_menu_for(user_id))
-                    return
-
-                await tg_send_message(chat_id, f"⏳ Генерация запущена. task_id: {task_id}\nЖду результат…")
-                done = await poll_task_until_done(task_id, timeout_sec=900, api_key=PIAPI_API_KEY or None)
-                audio_url = extract_audio_url(done)
-                if not audio_url:
-                    await tg_send_message(chat_id, f"Готово, но не нашёл audio_url в ответе.\n{done}", reply_markup=_main_menu_for(user_id))
-                    return
-
-                await tg_send_audio_url(
-                    chat_id,
-                    audio_url,
-                    caption="✅ Готово! Вот твой трек 🎶",
-                    reply_markup=_main_menu_for(user_id),
-                )
-            except Exception as e:
-                await tg_send_message(chat_id, f"❌ Ошибка генерации музыки: {e}", reply_markup=_main_menu_for(user_id))
-
-        asyncio.create_task(_run_music_bg2())
-        return {"ok": True}
-
-# ----- Admin stats -----
+    # ----- Admin stats -----
     if incoming_text == "📊 Статистика":
         if not _is_admin(user_id):
             await tg_send_message(
