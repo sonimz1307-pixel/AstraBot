@@ -9,56 +9,11 @@ from typing import Optional, Literal, Dict, Any, Tuple, List
 
 import httpx
 from fastapi import FastAPI, Request, Response
-from db_supabase import track_user_activity, get_basic_stats, supabase as SUPABASE
+from db_supabase import track_user_activity, get_basic_stats, supabase as sb
 from kling_flow import run_motion_control_from_bytes, run_image_to_video_from_bytes
 from billing_db import ensure_user_row, get_balance, add_tokens
 
 app = FastAPI()
-
-# ---------------------------
-# Supabase user state (bot_user_state)
-# ---------------------------
-def sb_get_user_state(user_id: int) -> Tuple[str, Optional[dict]]:
-    """Return (state, payload) from bot_user_state. Safe: never raises."""
-    if SUPABASE is None:
-        return "idle", None
-    try:
-        r = (
-            SUPABASE.table("bot_user_state")
-            .select("state,payload")
-            .eq("telegram_user_id", int(user_id))
-            .limit(1)
-            .execute()
-        )
-        if r.data:
-            row = r.data[0] or {}
-            return (row.get("state") or "idle"), row.get("payload")
-    except Exception:
-        pass
-    return "idle", None
-
-
-def sb_set_user_state(user_id: int, state: str, payload: Optional[dict] = None) -> None:
-    """Upsert bot_user_state for user. Safe: never raises."""
-    if SUPABASE is None:
-        return
-    try:
-        SUPABASE.table("bot_user_state").upsert(
-            {
-                "telegram_user_id": int(user_id),
-                "state": str(state),
-                "payload": payload,
-            },
-            on_conflict="telegram_user_id",
-        ).execute()
-    except Exception:
-        pass
-
-
-def sb_clear_user_state(user_id: int) -> None:
-    sb_set_user_state(user_id, "idle", None)
-
-
 from fastapi.responses import HTMLResponse
 
 @app.get("/webapp/kling", response_class=HTMLResponse)
@@ -104,6 +59,56 @@ PROGRESS_EXPECTED_SECONDS = float(os.getenv("PROGRESS_EXPECTED_SECONDS", "22")) 
 PROGRESS_UPDATE_EVERY = float(os.getenv("PROGRESS_UPDATE_EVERY", "2.0"))
 TELEGRAM_API_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 TELEGRAM_FILE_BASE = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}"
+
+
+# ---------------- Supabase: user state (bot_user_state) ----------------
+# Uses shared client from db_supabase.py (service key).
+def sb_get_user_state(user_id: int):
+    """
+    Returns (state, payload_dict) or ("idle", None) if not set / Supabase disabled.
+    """
+    if sb is None:
+        return ("idle", None)
+    try:
+        r = sb.table("bot_user_state").select("state,payload").eq("telegram_user_id", int(user_id)).limit(1).execute()
+        if r.data:
+            row = r.data[0] or {}
+            return (str(row.get("state") or "idle"), row.get("payload"))
+    except Exception:
+        pass
+    return ("idle", None)
+
+
+def sb_set_user_state(user_id: int, state: str, payload: dict | None = None):
+    if sb is None:
+        return
+    try:
+        sb.table("bot_user_state").upsert(
+            {
+                "telegram_user_id": int(user_id),
+                "state": str(state or "idle"),
+                "payload": payload,
+            },
+            on_conflict="telegram_user_id",
+        ).execute()
+    except Exception:
+        pass
+
+
+def sb_clear_user_state(user_id: int):
+    if sb is None:
+        return
+    try:
+        sb.table("bot_user_state").upsert(
+            {
+                "telegram_user_id": int(user_id),
+                "state": "idle",
+                "payload": None,
+            },
+            on_conflict="telegram_user_id",
+        ).execute()
+    except Exception:
+        pass
 
 # ---------------- Stars top-up (XTR) ----------------
 # Токены — внутренняя логика.
@@ -2091,13 +2096,13 @@ async def webhook(secret: str, request: Request):
     # ✅ Telegram: текст может быть в caption
     incoming_text = (message.get("text") or message.get("caption") or "").strip()
 
-# ----- Restore music wait state from Supabase (if server restarted) -----
-if incoming_text and st.get("mode") != "suno_music":
-    sb_state, sb_payload = sb_get_user_state(user_id)
-    if sb_state == "music_wait_text" and isinstance(sb_payload, dict):
-        st["music_settings"] = sb_payload
-        st["ts"] = _now()
-        _set_mode(chat_id, user_id, "suno_music")
+    # ----- Supabase state resume (Music Future) -----
+    # Если бот перезапустился, режим "ожидаем текст для музыки" берём из Supabase.
+    if incoming_text and not (incoming_text.startswith("/") or incoming_text in ("⬅ Назад", "Назад")):
+        sb_state, sb_payload = sb_get_user_state(user_id)
+        if sb_state == "music_wait_text" and isinstance(sb_payload, dict) and sb_payload:
+            st["music_settings"] = sb_payload
+            _set_mode(chat_id, user_id, "suno_music")
 
     # ----- WebApp data (Kling settings) -----
     web_app_data = message.get("web_app_data") or {}
@@ -2193,8 +2198,6 @@ if incoming_text and st.get("mode") != "suno_music":
             if settings["music_mode"] == "prompt":
                 input_block["gpt_description_prompt"] = settings["gpt_description_prompt"]
             else:
-                # текст/либо лирика уже есть из WebApp — состояние в Supabase не нужно
-                sb_clear_user_state(user_id)
                 input_block["prompt"] = settings["prompt"]
 
             payload_api = {
@@ -2203,6 +2206,9 @@ if incoming_text and st.get("mode") != "suno_music":
                 "input": input_block,
                 "config": {"service_mode": settings["service_mode"]},
             }
+
+                        # генерация стартует — ожидание текста больше не нужно
+            sb_clear_user_state(user_id)
 
             await tg_send_message(chat_id, "⏳ Запускаю генерацию музыки…")
             try:
@@ -2386,7 +2392,9 @@ if incoming_text and st.get("mode") != "suno_music":
         await tg_send_message(chat_id, "Главное меню.", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
 
-# ---- SUNO Music: ждём текст (описание или лирику) ----
+
+    
+    # ---- SUNO Music: ждём текст (описание или лирику) ----
     if st.get("mode") == "suno_music" and incoming_text:
         settings = st.get("music_settings") or {
             "mv": "chirp-crow",
@@ -2405,9 +2413,9 @@ if incoming_text and st.get("mode") != "suno_music":
             settings["gpt_description_prompt"] = incoming_text
 
         st["music_settings"] = settings
-        # сбрасываем ожидание текста (чтобы следующий ввод не уходил в музыку)
-        sb_clear_user_state(user_id)
         st["ts"] = _now()
+        # текст получен — сбрасываем ожидание в Supabase
+        sb_clear_user_state(user_id)
 
         input_block = {
             "mv": settings.get("mv") or "chirp-crow",
