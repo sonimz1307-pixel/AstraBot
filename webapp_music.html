@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
   <title>Музыка будущего</title>
 
-  <!-- ✅ ВАЖНО: подключаем Telegram WebApp SDK ДО твоего JS -->
+  <!-- ✅ Telegram WebApp SDK -->
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 
   <style>
@@ -18,7 +18,6 @@
       --muted2:rgba(255,255,255,.45);
       --border:rgba(255,255,255,.12);
       --accent:#3aa8ff;
-      --accent2:#6ee7ff;
       --danger:#ff5a6a;
       --ok:#39d98a;
       --radius:18px;
@@ -43,16 +42,9 @@
       display:flex; align-items:center; justify-content:space-between;
       gap:10px; margin-bottom:12px;
     }
-    .brand{
-      display:flex; flex-direction:column; gap:2px;
-    }
-    .brand h1{
-      font-size:18px; margin:0;
-      letter-spacing:.2px;
-    }
-    .brand .sub{
-      font-size:12px; color:var(--muted);
-    }
+    .brand{display:flex; flex-direction:column; gap:2px;}
+    .brand h1{font-size:18px; margin:0; letter-spacing:.2px;}
+    .brand .sub{font-size:12px; color:var(--muted);}
     .pill{
       padding:8px 10px;
       border:1px solid var(--border);
@@ -98,7 +90,6 @@
       border:1px solid rgba(58,168,255,.30);
     }
 
-    .row{display:flex; gap:10px; flex-wrap:wrap}
     label{
       display:block; font-size:12px; color:var(--muted);
       margin:12px 0 6px;
@@ -118,9 +109,7 @@
       border-color:rgba(58,168,255,.55);
       box-shadow:0 0 0 3px rgba(58,168,255,.14);
     }
-    .hint{
-      margin-top:8px; color:var(--muted2); font-size:12px; line-height:1.35;
-    }
+    .hint{margin-top:8px; color:var(--muted2); font-size:12px; line-height:1.35;}
 
     .toggle{
       display:flex; align-items:center; gap:10px;
@@ -135,10 +124,7 @@
     .toggle .ttext b{font-size:13px}
     .toggle .ttext span{font-size:12px; color:var(--muted)}
 
-    .chips{
-      display:flex; gap:8px; flex-wrap:wrap;
-      margin-top:10px;
-    }
+    .chips{display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;}
     .chip{
       border:1px solid var(--border);
       background:rgba(255,255,255,.04);
@@ -158,9 +144,7 @@
       border-color:rgba(58,168,255,.55);
     }
 
-    .actions{
-      display:flex; gap:10px; margin-top:14px;
-    }
+    .actions{display:flex; gap:10px; margin-top:14px;}
     .btn{
       flex:1;
       border:1px solid var(--border);
@@ -186,18 +170,8 @@
       background:rgba(255,255,255,.03);
       padding:10px 12px;
     }
-    details summary{
-      cursor:pointer;
-      font-weight:700;
-      color:var(--muted);
-      outline:none;
-    }
-    details .dcontent{
-      margin-top:10px;
-      color:var(--muted);
-      font-size:12px;
-      line-height:1.45;
-    }
+    details summary{cursor:pointer; font-weight:700; color:var(--muted); outline:none;}
+    details .dcontent{margin-top:10px; color:var(--muted); font-size:12px; line-height:1.45;}
     code.inline{
       background:rgba(0,0,0,.22);
       border:1px solid rgba(255,255,255,.10);
@@ -226,6 +200,89 @@
       color:rgba(255,255,255,.78);
       line-height:1.4;
     }
+
+    /* -----------------------------
+       Guide modal (simple & native)
+       ----------------------------- */
+    .modal-backdrop{
+      position:fixed;
+      inset:0;
+      background:rgba(0,0,0,.55);
+      display:none;
+      align-items:flex-end;
+      justify-content:center;
+      padding:14px 14px calc(14px + env(safe-area-inset-bottom));
+      z-index:9999;
+    }
+    .modal{
+      width:min(520px, 100%);
+      max-height:85vh;
+      background:rgba(12,16,32,.92);
+      border:1px solid rgba(255,255,255,.14);
+      border-radius:18px;
+      box-shadow:0 14px 40px rgba(0,0,0,.55);
+      overflow:hidden;
+      backdrop-filter: blur(12px);
+    }
+    .modal-header{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      padding:12px 12px;
+      border-bottom:1px solid rgba(255,255,255,.10);
+      background:rgba(255,255,255,.03);
+    }
+    .modal-header b{font-size:14px}
+    .icon-btn{
+      border:1px solid rgba(255,255,255,.12);
+      background:rgba(255,255,255,.06);
+      color:rgba(255,255,255,.88);
+      border-radius:12px;
+      padding:8px 10px;
+      cursor:pointer;
+      font-weight:800;
+      line-height:1;
+    }
+    .modal-body{
+      padding:12px 12px 14px;
+      overflow:auto;
+      max-height:calc(85vh - 52px);
+      color:rgba(255,255,255,.86);
+      font-size:13px;
+      line-height:1.45;
+    }
+    .modal-body h3{
+      margin:10px 0 6px;
+      font-size:13px;
+      letter-spacing:.2px;
+    }
+    .modal-body .muted{
+      color:rgba(255,255,255,.65);
+      font-size:12px;
+    }
+    .modal-body .box{
+      margin-top:10px;
+      padding:10px 10px;
+      border-radius:14px;
+      border:1px solid rgba(255,255,255,.12);
+      background:rgba(255,255,255,.04);
+    }
+    .modal-body ul{margin:8px 0 0 18px; padding:0;}
+    .modal-body li{margin:6px 0;}
+    .link-btn{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      margin-top:10px;
+      padding:10px 12px;
+      border-radius:14px;
+      border:1px solid rgba(58,168,255,.35);
+      background:linear-gradient(90deg, rgba(58,168,255,.22), rgba(110,231,255,.10));
+      color:rgba(255,255,255,.92);
+      cursor:pointer;
+      font-weight:750;
+    }
   </style>
 </head>
 
@@ -250,7 +307,10 @@
 
       <label for="tags">Теги (стиль/жанр)</label>
       <input id="tags" type="text" placeholder="Напр.: russian pop, upbeat, modern, catchy hook"/>
-      <div class="hint">Теги сильнее всего влияют на стиль: жанр, настроение, вокал, инструменты.</div>
+      <div class="hint">
+        Теги сильнее всего влияют на стиль: жанр, настроение, вокал, инструменты.
+        <br/><b>Лучше писать теги по-английски</b> (например: <code class="inline">female vocal</code>, <code class="inline">male vocal</code>, <code class="inline">calm</code>).
+      </div>
 
       <div class="chips" id="moodChips">
         <div class="chip small" data-add="energetic">⚡ энергичное</div>
@@ -259,6 +319,9 @@
         <div class="chip small" data-add="dark">🌑 тёмное</div>
         <div class="chip small" data-add="club">🪩 club</div>
         <div class="chip small" data-add="viral hook">🎯 viral hook</div>
+        <div class="chip small" data-add="female vocal">♀️ female vocal</div>
+        <div class="chip small" data-add="male vocal">♂️ male vocal</div>
+        <div class="chip small" data-add="duet">👫 duet</div>
       </div>
 
       <div class="toggle">
@@ -271,7 +334,7 @@
 
       <div id="ideaBlock">
         <label for="desc">Описание идеи (коротко)</label>
-        <textarea id="desc" placeholder="Жанр, настроение, тема, язык, референсы. Пример: Upbeat Russian pop about AI in Telegram, catchy hook, modern sound"></textarea>
+        <textarea id="desc" placeholder="Жанр, настроение, тема, язык, референсы. Пример: Calm russian pop song about love, female vocal, catchy chorus"></textarea>
         <div class="hint">Этот режим проще: ты даёшь идею — ИИ сам придумает структуру и слова.</div>
       </div>
 
@@ -281,16 +344,22 @@
 ...
 [Chorus]
 ..."></textarea>
-        <div class="hint">Этот режим даёт больше контроля: ты сам задаёшь куплеты/припевы.</div>
-        <div class="hint">Подсказка: помечай части в квадратных скобках: <code class="inline">[Verse]</code>, <code class="inline">[Chorus]</code>, <code class="inline">[Bridge]</code>.</div>
+        <div class="hint">
+          Этот режим даёт больше контроля: ты сам задаёшь куплеты/припевы.
+          <br/><b>Лучше пометки писать по-английски</b>: <code class="inline">[Verse]</code>, <code class="inline">[Chorus]</code>, <code class="inline">[Bridge]</code>.
+        </div>
       </div>
 
       <details>
         <summary>Как получить «вау»-результат (кратко)</summary>
         <div class="dcontent">
-          <b>1) Сначала теги.</b> 4–8 тегов — достаточно. Пример: <code class="inline">russian pop, upbeat, modern, female vocal, catchy hook</code><br/>
+          <b>1) Сначала теги.</b> 4–8 тегов — достаточно. Пример:
+          <code class="inline">russian pop, modern, female vocal, calm, catchy hook</code><br/>
           <b>2) Потом 1–2 предложения идеи.</b> Тема + настроение + где звучит (club / tiktok / cinematic).<br/>
-          <b>3) Если пишешь текст:</b> делай короткие строки, повторяй припев 2–3 раза, используй <code class="inline">[Chorus]</code> для хука.
+          <b>3) Если пишешь текст:</b> делай короткие строки, повторяй припев 2–3 раза, используй <code class="inline">[Chorus]</code>.
+          <div>
+            <button class="link-btn" id="btnOpenGuide" type="button">📖 Открыть полный гайд</button>
+          </div>
         </div>
       </details>
 
@@ -308,6 +377,76 @@
       </div>
 
       <div class="ok" id="okCopied" style="display:none">Готово ✅ Данные отправлены в бот.</div>
+    </div>
+  </div>
+
+  <!-- Full guide modal -->
+  <div class="modal-backdrop" id="guideBackdrop" aria-hidden="true">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="Гайд Suno">
+      <div class="modal-header">
+        <b>🎵 Полный гайд: как получить крутой трек</b>
+        <button class="icon-btn" id="btnCloseGuide" type="button">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="muted">
+          Главное правило: <b>команды и пометки лучше писать по‑английски</b> — Suno понимает стабильнее.
+          Текст песни можно писать на русском.
+        </div>
+
+        <div class="box">
+          <h3>1) Режимы</h3>
+          <ul>
+            <li><b>✨ Идея</b> — ты описываешь песню (вайб/жанр/тема). ИИ сам придумает слова и структуру.</li>
+            <li><b>📝 Текст</b> — ты даёшь готовые слова. ИИ подберёт музыку и вокал под твой текст.</li>
+          </ul>
+        </div>
+
+        <div class="box">
+          <h3>2) Теги (самое важное)</h3>
+          <div class="muted">Пиши 4–8 тегов через запятую. Лучше по‑английски.</div>
+          <ul>
+            <li><b>Жанр/стиль:</b> <code class="inline">pop</code>, <code class="inline">rap</code>, <code class="inline">house</code>, <code class="inline">lofi</code>, <code class="inline">phonk</code></li>
+            <li><b>Настроение:</b> <code class="inline">calm</code>, <code class="inline">sad</code>, <code class="inline">dark</code>, <code class="inline">energetic</code></li>
+            <li><b>Голос:</b> <code class="inline">female vocal</code>, <code class="inline">male vocal</code>, <code class="inline">duet</code></li>
+            <li><b>Хук:</b> <code class="inline">catchy hook</code>, <code class="inline">viral hook</code></li>
+          </ul>
+          <div class="muted">Пример: <code class="inline">russian pop, modern, female vocal, calm, catchy hook</code></div>
+        </div>
+
+        <div class="box">
+          <h3>3) Как выделить припев</h3>
+          <div class="muted">Самый надёжный способ — секции в квадратных скобках:</div>
+          <div class="box" style="margin-top:8px">
+            <code class="inline">[Verse]</code> — куплет<br/>
+            <code class="inline">[Chorus]</code> — припев (повтори 2–3 раза)<br/>
+            <code class="inline">[Bridge]</code> — бридж (переход)
+          </div>
+          <div class="muted" style="margin-top:8px">
+            Можно по‑русски (“Куплет/Припев”), но это менее стабильно.
+          </div>
+        </div>
+
+        <div class="box">
+          <h3>4) Мужской / женский голос / дуэт</h3>
+          <ul>
+            <li><b>Женский:</b> добавь <code class="inline">female vocal</code></li>
+            <li><b>Мужской:</b> добавь <code class="inline">male vocal</code></li>
+            <li><b>Дуэт:</b> добавь <code class="inline">duet</code> и/или пометь секции: <code class="inline">[Verse - Male Vocal]</code>, <code class="inline">[Chorus - Duet]</code></li>
+          </ul>
+        </div>
+
+        <div class="box">
+          <h3>5) Если “не то получилось”</h3>
+          <ul>
+            <li>Упрости теги (убери лишнее), оставь 4–8.</li>
+            <li>Сделай припев короче и повтори 2–3 раза.</li>
+            <li>Добавь/уточни голос: <code class="inline">female vocal</code> или <code class="inline">male vocal</code>.</li>
+            <li>Сгенерируй ещё раз — это нормально.</li>
+          </ul>
+        </div>
+
+        <button class="link-btn" id="btnCloseGuide2" type="button">✅ Понятно, закрыть</button>
+      </div>
     </div>
   </div>
 
@@ -337,7 +476,7 @@
       return t;
     }
 
-    // ✅ В некоторых клиентах объект появляется не мгновенно — делаем пару попыток
+    // In some clients object appears not instantly
     let tg = initTelegram();
     if (!tg) setTimeout(() => { tg = initTelegram(); }, 150);
     if (!tg) setTimeout(() => { tg = initTelegram(); }, 350);
@@ -390,6 +529,38 @@
     });
 
     // -----------------------------
+    // Guide modal
+    // -----------------------------
+    const guideBackdrop = document.getElementById('guideBackdrop');
+    const btnOpenGuide = document.getElementById('btnOpenGuide');
+    const btnCloseGuide = document.getElementById('btnCloseGuide');
+    const btnCloseGuide2 = document.getElementById('btnCloseGuide2');
+
+    function openGuide(){
+      guideBackdrop.style.display = 'flex';
+      guideBackdrop.setAttribute('aria-hidden', 'false');
+      // prevent background scroll
+      document.body.style.overflow = 'hidden';
+    }
+    function closeGuide(){
+      guideBackdrop.style.display = 'none';
+      guideBackdrop.setAttribute('aria-hidden', 'true');
+      document.body.style.overflow = '';
+    }
+
+    btnOpenGuide.addEventListener('click', openGuide);
+    btnCloseGuide.addEventListener('click', closeGuide);
+    btnCloseGuide2.addEventListener('click', closeGuide);
+    guideBackdrop.addEventListener('click', (e) => {
+      if (e.target === guideBackdrop) closeGuide();
+    });
+
+    // close on ESC (desktop)
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && guideBackdrop.style.display === 'flex') closeGuide();
+    });
+
+    // -----------------------------
     // Build payload for bot
     // -----------------------------
     function buildPayload(){
@@ -425,7 +596,7 @@
       const payload = buildPayload();
       const dataStr = JSON.stringify(payload);
 
-      // пробуем получить tg ещё раз прямо перед отправкой (на случай поздней инициализации)
+      // try get tg right before send (late init)
       const t = tg || initTelegram();
 
       if (t) {
@@ -462,6 +633,7 @@
       document.querySelectorAll('.chip.on').forEach(c=>c.classList.remove('on'));
       setMode("idea");
       okCopied.style.display = "none";
+      closeGuide();
     });
   </script>
 </body>
