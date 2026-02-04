@@ -9,11 +9,56 @@ from typing import Optional, Literal, Dict, Any, Tuple, List
 
 import httpx
 from fastapi import FastAPI, Request, Response
-from db_supabase import track_user_activity, get_basic_stats
+from db_supabase import track_user_activity, get_basic_stats, supabase as SUPABASE
 from kling_flow import run_motion_control_from_bytes, run_image_to_video_from_bytes
 from billing_db import ensure_user_row, get_balance, add_tokens
 
 app = FastAPI()
+
+# ---------------------------
+# Supabase user state (bot_user_state)
+# ---------------------------
+def sb_get_user_state(user_id: int) -> Tuple[str, Optional[dict]]:
+    """Return (state, payload) from bot_user_state. Safe: never raises."""
+    if SUPABASE is None:
+        return "idle", None
+    try:
+        r = (
+            SUPABASE.table("bot_user_state")
+            .select("state,payload")
+            .eq("telegram_user_id", int(user_id))
+            .limit(1)
+            .execute()
+        )
+        if r.data:
+            row = r.data[0] or {}
+            return (row.get("state") or "idle"), row.get("payload")
+    except Exception:
+        pass
+    return "idle", None
+
+
+def sb_set_user_state(user_id: int, state: str, payload: Optional[dict] = None) -> None:
+    """Upsert bot_user_state for user. Safe: never raises."""
+    if SUPABASE is None:
+        return
+    try:
+        SUPABASE.table("bot_user_state").upsert(
+            {
+                "telegram_user_id": int(user_id),
+                "state": str(state),
+                "payload": payload,
+            },
+            on_conflict="telegram_user_id",
+        ).execute()
+    except Exception:
+        pass
+
+
+def sb_clear_user_state(user_id: int) -> None:
+    sb_set_user_state(user_id, "idle", None)
+
+
 from fastapi.responses import HTMLResponse
 
 @app.get("/webapp/kling", response_class=HTMLResponse)
@@ -2046,6 +2091,14 @@ async def webhook(secret: str, request: Request):
     # ✅ Telegram: текст может быть в caption
     incoming_text = (message.get("text") or message.get("caption") or "").strip()
 
+# ----- Restore music wait state from Supabase (if server restarted) -----
+if incoming_text and st.get("mode") != "suno_music":
+    sb_state, sb_payload = sb_get_user_state(user_id)
+    if sb_state == "music_wait_text" and isinstance(sb_payload, dict):
+        st["music_settings"] = sb_payload
+        st["ts"] = _now()
+        _set_mode(chat_id, user_id, "suno_music")
+
     # ----- WebApp data (Kling settings) -----
     web_app_data = message.get("web_app_data") or {}
     if isinstance(web_app_data, dict) and web_app_data.get("data"):
@@ -2115,6 +2168,8 @@ async def webhook(secret: str, request: Request):
             have_lyrics = bool(settings.get("prompt"))
 
             if not (have_desc or have_lyrics):
+                # сохраняем ожидание текста в Supabase (переживает рестарт Render)
+                sb_set_user_state(user_id, "music_wait_text", settings)
                 await tg_send_message(
                     chat_id,
                     """✅ Настройки музыки сохранены.
@@ -2138,6 +2193,8 @@ async def webhook(secret: str, request: Request):
             if settings["music_mode"] == "prompt":
                 input_block["gpt_description_prompt"] = settings["gpt_description_prompt"]
             else:
+                # текст/либо лирика уже есть из WebApp — состояние в Supabase не нужно
+                sb_clear_user_state(user_id)
                 input_block["prompt"] = settings["prompt"]
 
             payload_api = {
@@ -2329,85 +2386,85 @@ async def webhook(secret: str, request: Request):
         await tg_send_message(chat_id, "Главное меню.", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
 
+# ---- SUNO Music: ждём текст (описание или лирику) ----
+    if st.get("mode") == "suno_music" and incoming_text:
+        settings = st.get("music_settings") or {
+            "mv": "chirp-crow",
+            "music_mode": "prompt",
+            "title": "",
+            "tags": "",
+            "make_instrumental": False,
+            "service_mode": "public",
+            "language": "",
+        }
 
-    
-        # ---- SUNO Music: ждём текст (описание или лирику) ----
-        if st.get("mode") == "suno_music" and incoming_text:
-            settings = st.get("music_settings") or {
-                "mv": "chirp-crow",
-                "music_mode": "prompt",
-                "title": "",
-                "tags": "",
-                "make_instrumental": False,
-                "service_mode": "public",
-                "language": "",
-            }
+        # принимаем текст и кладём в нужное поле
+        if (settings.get("music_mode") or "").lower().strip() == "custom":
+            settings["prompt"] = incoming_text
+        else:
+            settings["gpt_description_prompt"] = incoming_text
 
-            # принимаем текст и кладём в нужное поле
-            if (settings.get("music_mode") or "").lower().strip() == "custom":
-                settings["prompt"] = incoming_text
-            else:
-                settings["gpt_description_prompt"] = incoming_text
+        st["music_settings"] = settings
+        # сбрасываем ожидание текста (чтобы следующий ввод не уходил в музыку)
+        sb_clear_user_state(user_id)
+        st["ts"] = _now()
 
-            st["music_settings"] = settings
-            st["ts"] = _now()
+        input_block = {
+            "mv": settings.get("mv") or "chirp-crow",
+            "title": settings.get("title") or "",
+            "tags": settings.get("tags") or "",
+            "make_instrumental": bool(settings.get("make_instrumental")),
+        }
+        if (settings.get("music_mode") or "").lower().strip() == "custom":
+            input_block["prompt"] = settings.get("prompt") or ""
+        else:
+            input_block["gpt_description_prompt"] = settings.get("gpt_description_prompt") or ""
 
-            input_block = {
-                "mv": settings.get("mv") or "chirp-crow",
-                "title": settings.get("title") or "",
-                "tags": settings.get("tags") or "",
-                "make_instrumental": bool(settings.get("make_instrumental")),
-            }
-            if (settings.get("music_mode") or "").lower().strip() == "custom":
-                input_block["prompt"] = settings.get("prompt") or ""
-            else:
-                input_block["gpt_description_prompt"] = settings.get("gpt_description_prompt") or ""
+        payload_api = {
+            "model": "suno",
+            "task_type": "music",
+            "input": input_block,
+            "config": {"service_mode": settings.get("service_mode") or "public"},
+        }
 
-            payload_api = {
-                "model": "suno",
-                "task_type": "music",
-                "input": input_block,
-                "config": {"service_mode": settings.get("service_mode") or "public"},
-            }
+        await tg_send_message(chat_id, "⏳ Запускаю генерацию музыки…")
+        try:
+            created = await piapi_create_task(payload_api)
+            task_id = ((created.get("data") or {}).get("task_id")) or ""
+            if not task_id:
+                raise RuntimeError(f"PiAPI did not return task_id: {created}")
 
-            await tg_send_message(chat_id, "⏳ Запускаю генерацию музыки…")
-            try:
-                created = await piapi_create_task(payload_api)
-                task_id = ((created.get("data") or {}).get("task_id")) or ""
-                if not task_id:
-                    raise RuntimeError(f"PiAPI did not return task_id: {created}")
+            done = await piapi_poll_task(task_id, timeout_sec=300, sleep_sec=2.0)
+            data = done.get("data") or {}
+            status = (data.get("status") or "")
+            if str(status).lower() != "completed":
+                err = (data.get("error") or {}).get("message") or "unknown error"
+                await tg_send_message(chat_id, f"❌ Музыка не сгенерировалась: {status}\n{err}")
+                return {"ok": True}
 
-                done = await piapi_poll_task(task_id, timeout_sec=300, sleep_sec=2.0)
-                data = done.get("data") or {}
-                status = (data.get("status") or "")
-                if str(status).lower() != "completed":
-                    err = (data.get("error") or {}).get("message") or "unknown error"
-                    await tg_send_message(chat_id, f"❌ Музыка не сгенерировалась: {status}\n{err}")
-                    return {"ok": True}
+            out = data.get("output") or []
+            if isinstance(out, dict):
+                out = [out]
+            if not out:
+                await tg_send_message(chat_id, "✅ Готово, но PiAPI не вернул output. Проверь task в кабинете.")
+                return {"ok": True}
 
-                out = data.get("output") or []
-                if isinstance(out, dict):
-                    out = [out]
-                if not out:
-                    await tg_send_message(chat_id, "✅ Готово, но PiAPI не вернул output. Проверь task в кабинете.")
-                    return {"ok": True}
-
-                lines = ["✅ Музыка готова:"]
-                for i, item in enumerate(out[:2], start=1):
-                    audio_url = item.get("audio_url") or ""
-                    video_url = item.get("video_url") or ""
-                    image_url = item.get("image_url") or ""
-                    lines.append(f"#{i}")
-                    if audio_url:
-                        lines.append(f"🎧 MP3: {audio_url}")
-                    if video_url:
-                        lines.append(f"🎬 MP4: {video_url}")
-                    if image_url:
-                        lines.append(f"🖼 Обложка: {image_url}")
-                await tg_send_message(chat_id, "\n".join(lines), reply_markup=_main_menu_for(user_id))
-            except Exception as e:
-                await tg_send_message(chat_id, f"❌ Ошибка PiAPI/Suno: {e}", reply_markup=_main_menu_for(user_id))
-            return {"ok": True}
+            lines = ["✅ Музыка готова:"]
+            for i, item in enumerate(out[:2], start=1):
+                audio_url = item.get("audio_url") or ""
+                video_url = item.get("video_url") or ""
+                image_url = item.get("image_url") or ""
+                lines.append(f"#{i}")
+                if audio_url:
+                    lines.append(f"🎧 MP3: {audio_url}")
+                if video_url:
+                    lines.append(f"🎬 MP4: {video_url}")
+                if image_url:
+                    lines.append(f"🖼 Обложка: {image_url}")
+            await tg_send_message(chat_id, "\n".join(lines), reply_markup=_main_menu_for(user_id))
+        except Exception as e:
+            await tg_send_message(chat_id, f"❌ Ошибка PiAPI/Suno: {e}", reply_markup=_main_menu_for(user_id))
+        return {"ok": True}
     if incoming_text == "💰 Баланс":
         try:
             ensure_user_row(user_id)
