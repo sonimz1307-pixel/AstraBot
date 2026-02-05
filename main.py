@@ -2131,6 +2131,8 @@ async def webhook(secret: str, request: Request):
         model_raw = (payload.get("model") or "").lower().strip()
         provider_raw = (payload.get("provider") or "").lower().strip()
 
+        ai_raw = (payload.get("ai") or payload.get("ai_provider") or payload.get("aiProvider") or "").lower().strip()
+
         is_music = (
             flow_raw == "music"
             or task_type_raw == "music"
@@ -2173,6 +2175,7 @@ async def webhook(secret: str, request: Request):
                 "prompt": lyrics_text,
                 "service_mode": service_mode,
                 "language": language,
+                "ai": (ai_raw or "suno"),
             }
             st["ts"] = _now()
             _set_mode(chat_id, user_id, "suno_music")
@@ -2193,7 +2196,7 @@ async def webhook(secret: str, request: Request):
 • в режиме «Идея» — короткое описание песни (жанр/вайб/тема)
 • в режиме «Текст» — текст/лирику с пометками [Verse]/[Chorus]
 
-После этого я отправлю задачу в Suno (через PiAPI).""",
+После этого я отправлю задачу в AI музыки (Suno/Udio) через PiAPI.""",
                     reply_markup=_help_menu_for(user_id),
                 )
                 return {"ok": True}
@@ -2210,12 +2213,29 @@ async def webhook(secret: str, request: Request):
             else:
                 input_block["prompt"] = settings["prompt"]
 
-            payload_api = {
-                "model": "suno",
-                "task_type": "music",
-                "input": input_block,
-                "config": {"service_mode": settings["service_mode"]},
-            }
+            ai_choice = str((settings.get("ai") or "suno")).lower().strip()
+            if ai_choice not in ("suno", "udio"):
+                ai_choice = "suno"
+
+            if ai_choice == "udio":
+                # PiAPI Udio-like
+                udio_prompt = settings.get("gpt_description_prompt") if settings["music_mode"] == "prompt" else settings.get("prompt")
+                payload_api = {
+                    "model": "music-u",
+                    "task_type": "generate_music",
+                    "input": {
+                        "gpt_description_prompt": str(udio_prompt or "").strip(),
+                        "lyrics_type": "instrumental" if settings.get("make_instrumental") else "lyrics",
+                        "tags": settings.get("tags") or "",
+                    },
+                }
+            else:
+                payload_api = {
+                    "model": "suno",
+                    "task_type": "music",
+                    "input": input_block,
+                    "config": {"service_mode": settings["service_mode"]},
+                }
 
             # генерация стартует — ожидание текста больше не нужно
             sb_clear_user_state(user_id)
@@ -2261,7 +2281,7 @@ async def webhook(secret: str, request: Request):
 
                 lines = ["✅ Музыка готова:"]
                 for i, item in enumerate(out[:2], start=1):
-                    audio_url = item.get("audio_url") or ""
+                    audio_url = item.get("audio_url") or item.get("audio") or item.get("url") or item.get("song_url") or item.get("songUrl") or ""
                     video_url = item.get("video_url") or ""
                     image_url = item.get("image_url") or ""
                     lines.append(f"#{i}")
@@ -2274,7 +2294,7 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(chat_id, "\n".join(lines), reply_markup=_main_menu_for(user_id))
                 _clear_music_ctx()
             except Exception as e:
-                await tg_send_message(chat_id, f"❌ Ошибка PiAPI/Suno: {e}\n\nГенерация остановлена. Нажмите «Музыка будущего», чтобы попробовать снова.")
+                await tg_send_message(chat_id, f"❌ Ошибка PiAPI (music): {e}\n\nГенерация остановлена. Нажмите «Музыка будущего», чтобы попробовать снова.")
                 _clear_music_ctx()
             return {"ok": True}
 
