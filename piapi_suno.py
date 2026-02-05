@@ -11,8 +11,10 @@ import httpx
 PIAPI_API_KEY = os.getenv("PIAPI_API_KEY", "")
 PIAPI_BASE_URL = os.getenv("PIAPI_BASE_URL", "https://api.piapi.ai")
 
+
 class PiAPITimeout(Exception):
     pass
+
 
 class PiAPIJobFailed(Exception):
     pass
@@ -34,7 +36,7 @@ async def create_suno_music_task(
     make_instrumental: bool = False,
     gpt_description_prompt: str = "",
     prompt: str = "",
-    service_mode: str = "",   # 'public' | 'private' | ''
+    service_mode: str = "",  # 'public' | 'private' | ''
     webhook_endpoint: str = "",
     webhook_secret: str = "",
     api_key: Optional[str] = None,
@@ -70,27 +72,47 @@ async def create_suno_music_task(
         return r.json()
 
 
-
 async def create_udio_music_task(
     *,
     gpt_description_prompt: str,
-    tags: str = "",
-    negative_tags: str = "",
     lyrics_type: str = "lyrics",  # 'lyrics'|'instrumental'
+    negative_tags: str = "",
     seed: Optional[int] = None,
     api_key: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Create Udio-like music task via PiAPI. Returns {task_id, status, ...}."""
+    """Create Udio-like music task via PiAPI (model=music-u).
+
+    IMPORTANT: For stability, we send ONLY the fields that PiAPI's music-u sample supports:
+      - gpt_description_prompt (required, must be non-empty)
+      - lyrics_type ('lyrics' or 'instrumental')
+      - negative_tags (optional)
+      - seed (optional)
+
+    NOTE: Do NOT send 'tags' here — it can trigger PiAPI 500 for music-u.
+    """
+    prompt = (gpt_description_prompt or "").strip()
+    if not prompt:
+        # PiAPI can return 500 on empty prompt; provide safe default.
+        prompt = "Modern atmospheric music with emotional melody"
+
+    lt = (lyrics_type or "lyrics").strip().lower()
+    if lt not in ("lyrics", "instrumental"):
+        lt = "lyrics"
+
     inp: Dict[str, Any] = {
-        "gpt_description_prompt": gpt_description_prompt,
-        "lyrics_type": lyrics_type,
+        "gpt_description_prompt": prompt,
+        "lyrics_type": lt,
     }
-    if tags:
-        inp["tags"] = tags
-    if negative_tags:
-        inp["negative_tags"] = negative_tags
+
+    neg = (negative_tags or "").strip()
+    if neg:
+        inp["negative_tags"] = neg
+
     if seed is not None:
-        inp["seed"] = int(seed)
+        try:
+            inp["seed"] = int(seed)
+        except Exception:
+            pass
 
     body: Dict[str, Any] = {
         "model": "music-u",
@@ -102,6 +124,7 @@ async def create_udio_music_task(
         r = await client.post(f"{PIAPI_BASE_URL}/api/v1/task", headers=_headers(api_key), json=body)
         r.raise_for_status()
         return r.json()
+
 
 async def get_task(task_id: str, api_key: Optional[str] = None) -> Dict[str, Any]:
     async with httpx.AsyncClient(timeout=30) as client:
@@ -145,10 +168,12 @@ def extract_audio_url(task_payload: Dict[str, Any]) -> Optional[str]:
     """Try to extract audio url from PiAPI unified response."""
     data = (task_payload or {}).get("data") or {}
     out = data.get("output") or {}
+
     # common variants
     for key in ("audio_url", "audio", "audioUrl", "song_url", "songUrl", "url"):
         if isinstance(out, dict) and out.get(key):
             return out.get(key)
+
     # sometimes it's a list
     for key in ("audio_urls", "audios", "urls"):
         val = out.get(key) if isinstance(out, dict) else None
