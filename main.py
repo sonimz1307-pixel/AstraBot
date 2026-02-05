@@ -365,7 +365,7 @@ async def _ai_maybe_summarize(st: Dict[str, Any]):
     st["ai_ts"] = _now()
 
 
-def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photosession", "t2i", "two_photos", "kling_mc", "kling_i2v"]):
+def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photosession", "t2i", "two_photos", "kling_mc", "kling_i2v", "suno_music"]):
     st = _ensure_state(chat_id, user_id)
     st["mode"] = mode
     st["ts"] = _now()
@@ -1916,23 +1916,6 @@ async def webhook(secret: str, request: Request):
     _cleanup_state()
     update = await request.json()
 
-    def _clear_music_ctx(chat_id: int, user_id: int):
-        """Сброс музыкального контекста, чтобы не было автоповтора на любой текст/кнопку."""
-        try:
-            st_local = _ensure_state(chat_id, user_id)
-            st_local.pop("music_settings", None)
-        except Exception:
-            pass
-        try:
-            _set_mode(chat_id, user_id, "chat")
-        except Exception:
-            pass
-        try:
-            sb_clear_user_state(user_id)
-        except Exception:
-            pass
-
-
     # --- Inline button callbacks (e.g., download 2K) ---
     callback_query = update.get("callback_query")
     if callback_query:
@@ -2235,13 +2218,21 @@ async def webhook(secret: str, request: Request):
                 ai_choice = "suno"
 
             if ai_choice == "udio":
-                # PiAPI Udio-like
-                udio_prompt = settings.get("gpt_description_prompt") if settings["music_mode"] == "prompt" else settings.get("prompt")
+                # PiAPI Udio-like (music-u): используем ТОЛЬКО идею (gpt_description_prompt).
+                # Не доверяем music_mode: в стейте мог остаться "custom" от прошлых запусков,
+                # а у Udio текста песни в WebApp нет -> иначе улетит пустота и PiAPI часто отвечает 500.
+                udio_prompt = (
+                    (settings.get("gpt_description_prompt") or "").strip()
+                    or (settings.get("prompt") or "").strip()
+                )
+                if not udio_prompt:
+                    udio_prompt = "Modern atmospheric music with emotional melody"
+
                 payload_api = {
                     "model": "music-u",
                     "task_type": "generate_music",
                     "input": {
-                        "gpt_description_prompt": str(udio_prompt or "").strip(),
+                        "gpt_description_prompt": udio_prompt,
                         "lyrics_type": "instrumental" if settings.get("make_instrumental") else "lyrics",
                     },
                 }
@@ -2256,7 +2247,7 @@ async def webhook(secret: str, request: Request):
             # генерация стартует — ожидание текста больше не нужно
             sb_clear_user_state(user_id)
 
-            def _clear_music_ctx(chat_id, user_id):
+            def _clear_music_ctx():
                 # Полный сброс музыкального контекста, чтобы не было автоповтора на любой текст/кнопку.
                 try:
                     st.pop("music_settings", None)
@@ -2284,7 +2275,7 @@ async def webhook(secret: str, request: Request):
                 if str(status).lower() != "completed":
                     err = (data.get("error") or {}).get("message") or "unknown error"
                     await tg_send_message(chat_id, f"❌ Музыка не сгенерировалась.\nСтатус: {status}\n{err}\n\nГенерация остановлена. Нажмите «Музыка будущего», чтобы попробовать снова.")
-                    _clear_music_ctx(chat_id, user_id)
+                    _clear_music_ctx()
                     return {"ok": True}
 
                 out = data.get("output") or []
@@ -2292,7 +2283,7 @@ async def webhook(secret: str, request: Request):
                     out = [out]
                 if not out:
                     await tg_send_message(chat_id, "✅ Готово, но PiAPI не вернул output. Я сбросил режим, попробуйте снова через «Музыка будущего».")
-                    _clear_music_ctx(chat_id, user_id)
+                    _clear_music_ctx()
                     return {"ok": True}
 
                 lines = ["✅ Музыка готова:"]
@@ -2308,10 +2299,10 @@ async def webhook(secret: str, request: Request):
                     if image_url:
                         lines.append(f"🖼 Обложка: {image_url}")
                 await tg_send_message(chat_id, "\n".join(lines), reply_markup=_main_menu_for(user_id))
-                _clear_music_ctx(chat_id, user_id)
+                _clear_music_ctx()
             except Exception as e:
                 await tg_send_message(chat_id, f"❌ Ошибка PiAPI (music): {e}\n\nГенерация остановлена. Нажмите «Музыка будущего», чтобы попробовать снова.")
-                _clear_music_ctx(chat_id, user_id)
+                _clear_music_ctx()
             return {"ok": True}
 
         # из WebApp может прилетать примерно так: {"flow":"motion","mode":"pro"}
@@ -2475,99 +2466,84 @@ async def webhook(secret: str, request: Request):
     
     # ---- SUNO Music: ждём текст (описание или лирику) ----
     if st.get("mode") == "suno_music" and incoming_text:
-        # Если нажали кнопки меню/навигации — НЕ считаем это текстом песни
-        menu_cmds = {
-            "🎵 Музыка будущего",
-            "🎬 Видео будущего",
-            "🖼 Фото будущего",
-            "ИИ (чат)",
-            "💰 Баланс",
-            "🆘 Помощь",
-            "⬅ Назад",
-            "Назад",
-            "🔙 Назад",
+        settings = st.get("music_settings") or {
+            "mv": "chirp-crow",
+            "music_mode": "prompt",
+            "title": "",
+            "tags": "",
+            "make_instrumental": False,
+            "service_mode": "public",
+            "language": "",
         }
-        if incoming_text.strip() in menu_cmds:
-            _clear_music_ctx(chat_id, user_id)
+
+        # принимаем текст и кладём в нужное поле
+        if (settings.get("music_mode") or "").lower().strip() == "custom":
+            settings["prompt"] = incoming_text
         else:
-            settings = st.get("music_settings") or {
-                "mv": "chirp-crow",
-                "music_mode": "prompt",
-                "title": "",
-                "tags": "",
-                "make_instrumental": False,
-                "service_mode": "public",
-                "language": "",
-            }
+            settings["gpt_description_prompt"] = incoming_text
 
-            # принимаем текст и кладём в нужное поле
-            if (settings.get("music_mode") or "").lower().strip() == "custom":
-                settings["prompt"] = incoming_text
-            else:
-                settings["gpt_description_prompt"] = incoming_text
+        st["music_settings"] = settings
+        st["ts"] = _now()
+        # текст получен — сбрасываем ожидание в Supabase
+        sb_clear_user_state(user_id)
 
-            st["music_settings"] = settings
-            st["ts"] = _now()
-            # текст получен — сбрасываем ожидание в Supabase
-            sb_clear_user_state(user_id)
+        input_block = {
+            "mv": settings.get("mv") or "chirp-crow",
+            "title": settings.get("title") or "",
+            "tags": settings.get("tags") or "",
+            "make_instrumental": bool(settings.get("make_instrumental")),
+        }
+        if (settings.get("music_mode") or "").lower().strip() == "custom":
+            input_block["prompt"] = settings.get("prompt") or ""
+        else:
+            input_block["gpt_description_prompt"] = settings.get("gpt_description_prompt") or ""
 
-            input_block = {
-                "mv": settings.get("mv") or "chirp-crow",
-                "title": settings.get("title") or "",
-                "tags": settings.get("tags") or "",
-                "make_instrumental": bool(settings.get("make_instrumental")),
-            }
-            if (settings.get("music_mode") or "").lower().strip() == "custom":
-                input_block["prompt"] = settings.get("prompt") or ""
-            else:
-                input_block["gpt_description_prompt"] = settings.get("gpt_description_prompt") or ""
+        payload_api = {
+            "model": "suno",
+            "task_type": "music",
+            "input": input_block,
+            "config": {"service_mode": settings.get("service_mode") or "public"},
+        }
 
-            payload_api = {
-                "model": "suno",
-                "task_type": "music",
-                "input": input_block,
-                "config": {"service_mode": settings.get("service_mode") or "public"},
-            }
+        await tg_send_message(chat_id, "⏳ Запускаю генерацию музыки…")
+        try:
+            created = await piapi_create_task(payload_api)
+            task_id = ((created.get("data") or {}).get("task_id")) or ""
+            if not task_id:
+                raise RuntimeError(f"PiAPI did not return task_id: {created}")
 
-            await tg_send_message(chat_id, "⏳ Запускаю генерацию музыки…")
-            try:
-                created = await piapi_create_task(payload_api)
-                task_id = ((created.get("data") or {}).get("task_id")) or ""
-                if not task_id:
-                    raise RuntimeError(f"PiAPI did not return task_id: {created}")
+            done = await piapi_poll_task(task_id, timeout_sec=300, sleep_sec=2.0)
+            data = done.get("data") or {}
+            status = (data.get("status") or "")
+            if str(status).lower() != "completed":
+                err = (data.get("error") or {}).get("message") or "unknown error"
+                await tg_send_message(chat_id, f"❌ Музыка не сгенерировалась: {status}\n{err}")
+                return {"ok": True}
 
-                done = await piapi_poll_task(task_id, timeout_sec=300, sleep_sec=2.0)
-                data = done.get("data") or {}
-                status = (data.get("status") or "")
-                if str(status).lower() != "completed":
-                    err = (data.get("error") or {}).get("message") or "unknown error"
-                    await tg_send_message(chat_id, f"❌ Музыка не сгенерировалась: {status}\n{err}")
-                    return {"ok": True}
+            out = data.get("output") or []
+            if isinstance(out, dict):
+                out = [out]
+            if not out:
+                await tg_send_message(chat_id, "✅ Готово, но PiAPI не вернул output. Проверь task в кабинете.")
+                return {"ok": True}
 
-                out = data.get("output") or []
-                if isinstance(out, dict):
-                    out = [out]
-                if not out:
-                    await tg_send_message(chat_id, "✅ Готово, но PiAPI не вернул output. Проверь task в кабинете.")
-                    return {"ok": True}
-
-                lines = ["✅ Музыка готова:"]
-                for i, item in enumerate(out[:2], start=1):
-                    audio_url = item.get("audio_url") or ""
-                    video_url = item.get("video_url") or ""
-                    image_url = item.get("image_url") or ""
-                    lines.append(f"#{i}")
-                    if audio_url:
-                        lines.append(f"🎧 MP3: {audio_url}")
-                    if video_url:
-                        lines.append(f"🎬 MP4: {video_url}")
-                    if image_url:
-                        lines.append(f"🖼 Обложка: {image_url}")
-                await tg_send_message(chat_id, "\n".join(lines), reply_markup=_main_menu_for(user_id))
-                _clear_music_ctx(chat_id, user_id)
-            except Exception as e:
-                await tg_send_message(chat_id, f"❌ Ошибка PiAPI/Suno: {e}", reply_markup=_main_menu_for(user_id))
-            return {"ok": True}
+            lines = ["✅ Музыка готова:"]
+            for i, item in enumerate(out[:2], start=1):
+                audio_url = item.get("audio_url") or ""
+                video_url = item.get("video_url") or ""
+                image_url = item.get("image_url") or ""
+                lines.append(f"#{i}")
+                if audio_url:
+                    lines.append(f"🎧 MP3: {audio_url}")
+                if video_url:
+                    lines.append(f"🎬 MP4: {video_url}")
+                if image_url:
+                    lines.append(f"🖼 Обложка: {image_url}")
+            await tg_send_message(chat_id, "\n".join(lines), reply_markup=_main_menu_for(user_id))
+            _clear_music_ctx()
+        except Exception as e:
+            await tg_send_message(chat_id, f"❌ Ошибка PiAPI/Suno: {e}", reply_markup=_main_menu_for(user_id))
+        return {"ok": True}
     if incoming_text == "💰 Баланс":
         try:
             ensure_user_row(user_id)
