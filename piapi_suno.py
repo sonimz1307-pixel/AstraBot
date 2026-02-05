@@ -70,6 +70,39 @@ async def create_suno_music_task(
         return r.json()
 
 
+
+async def create_udio_music_task(
+    *,
+    gpt_description_prompt: str,
+    tags: str = "",
+    negative_tags: str = "",
+    lyrics_type: str = "lyrics",  # 'lyrics'|'instrumental'
+    seed: Optional[int] = None,
+    api_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create Udio-like music task via PiAPI. Returns {task_id, status, ...}."""
+    inp: Dict[str, Any] = {
+        "gpt_description_prompt": gpt_description_prompt,
+        "lyrics_type": lyrics_type,
+    }
+    if tags:
+        inp["tags"] = tags
+    if negative_tags:
+        inp["negative_tags"] = negative_tags
+    if seed is not None:
+        inp["seed"] = int(seed)
+
+    body: Dict[str, Any] = {
+        "model": "music-u",
+        "task_type": "generate_music",
+        "input": inp,
+    }
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(f"{PIAPI_BASE_URL}/api/v1/task", headers=_headers(api_key), json=body)
+        r.raise_for_status()
+        return r.json()
+
 async def get_task(task_id: str, api_key: Optional[str] = None) -> Dict[str, Any]:
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.get(f"{PIAPI_BASE_URL}/api/v1/task/{task_id}", headers=_headers(api_key))
