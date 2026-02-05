@@ -297,6 +297,11 @@
     </div>
 
     <div class="card">
+
+      <div class="tabs" role="tablist" aria-label="AI" style="margin-bottom:10px">
+        <div class="tab" id="aiSuno" role="tab" aria-selected="false">Suno</div>
+        <div class="tab active" id="aiUdio" role="tab" aria-selected="true">Udio</div>
+      </div>
       <div class="tabs" role="tablist" aria-label="Режим">
         <div class="tab active" id="tabIdea" role="tab" aria-selected="true">✨ Идея</div>
         <div class="tab" id="tabLyrics" role="tab" aria-selected="false">📝 Текст</div>
@@ -484,7 +489,24 @@
     // -----------------------------
     // Tabs
     // -----------------------------
-    let mode = "idea"; // idea | lyrics
+    let mode = "idea";
+    let ai = localStorage.getItem("music_ai") || "udio"; // idea | lyrics
+    const aiSuno = document.getElementById('aiSuno');
+    const aiUdio = document.getElementById('aiUdio');
+
+    function setAI(v){
+      ai = v;
+      localStorage.setItem("music_ai", v);
+      aiSuno.classList.toggle('active', v === "suno");
+      aiUdio.classList.toggle('active', v === "udio");
+      aiSuno.setAttribute("aria-selected", v === "suno" ? "true" : "false");
+      aiUdio.setAttribute("aria-selected", v === "udio" ? "true" : "false");
+    }
+
+    aiSuno.addEventListener('click', () => setAI("suno"));
+    aiUdio.addEventListener('click', () => setAI("udio"));
+    setAI(ai);
+
     const tabIdea = document.getElementById('tabIdea');
     const tabLyrics = document.getElementById('tabLyrics');
     const ideaBlock = document.getElementById('ideaBlock');
@@ -572,14 +594,15 @@
 
       const payload = {
         feature: "music_future",
-        provider: "piapi",
-        model: "suno",
-        mv: "chirp-crow",
+        ai: ai, // "suno" | "udio"
         mode: mode, // "idea" or "lyrics"
         title: title || "",
         tags: tags || "",
         make_instrumental: !!make_instrumental
       };
+
+      // Suno-specific (не мешает, если бэк игнорирует)
+      if (ai === "suno") payload.mv = "chirp-crow";
 
       if (mode === "idea") {
         payload.gpt_description_prompt = desc || "";
