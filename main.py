@@ -474,6 +474,17 @@ def _main_menu_for(user_id: int) -> dict:
     return _main_menu_keyboard(_is_admin(user_id))
 
 
+def _help_menu_for(user_id: int) -> dict:
+    """Главное меню + экстренная кнопка сброса генерации (показываем ТОЛЬКО в «Помощь»)."""
+    base = _main_menu_keyboard(_is_admin(user_id))
+    # defensive copy
+    rows = [list(r) for r in (base.get("keyboard") or [])]
+    rows.append([{"text": "🔄 Сбросить генерацию"}])
+    base2 = dict(base)
+    base2["keyboard"] = rows
+    return base2
+
+
 def _photo_future_menu_keyboard() -> dict:
     """Подменю «Фото будущего» (объединяет фото-режимы в одну кнопку на главном экране)."""
     return {
@@ -2069,7 +2080,7 @@ async def webhook(secret: str, request: Request):
             await tg_send_message(
                 chat_id,
                 f"✅ Оплата прошла!\nНачислено: +{tokens} токенов\nБаланс: {bal}",
-                reply_markup=_main_menu_for(user_id),
+                reply_markup=_help_menu_for(user_id),
             )
         except Exception as e:
             if ADMIN_IDS:
@@ -2183,7 +2194,7 @@ async def webhook(secret: str, request: Request):
 • в режиме «Текст» — текст/лирику с пометками [Verse]/[Chorus]
 
 После этого я отправлю задачу в Suno (через PiAPI).""",
-                    reply_markup=_main_menu_for(user_id),
+                    reply_markup=_help_menu_for(user_id),
                 )
                 return {"ok": True}
 
@@ -2278,7 +2289,7 @@ async def webhook(secret: str, request: Request):
                 "Шаг 1) Пришли ФОТО аватара (кого анимируем).\n"
                 "Шаг 2) Потом пришли ВИДЕО с движением (3–30 сек).\n"
                 "Шаг 3) Потом текстом напиши, что должно происходить (или просто: Старт).",
-                reply_markup=_main_menu_for(user_id),
+                reply_markup=_help_menu_for(user_id),
             )
         else:
             # Image → Video
@@ -2301,7 +2312,7 @@ async def webhook(secret: str, request: Request):
                 f"✅ Настройки сохранены: Image → Video • {quality.upper()} • {duration} сек\n\n"
                 "Шаг 1) Пришли СТАРТОВОЕ ФОТО.\n"
                 "Шаг 2) Потом текстом опиши, что должно происходить (или просто: Старт).",
-                reply_markup=_main_menu_for(user_id),
+                reply_markup=_help_menu_for(user_id),
             )
 
         return {"ok": True}
@@ -2311,7 +2322,7 @@ async def webhook(secret: str, request: Request):
             await tg_send_message(
                 chat_id,
                 "Нет доступа.",
-                reply_markup=_main_menu_for(user_id),
+                reply_markup=_help_menu_for(user_id),
             )
             return {"ok": True}
 
@@ -2320,7 +2331,7 @@ async def webhook(secret: str, request: Request):
             await tg_send_message(
                 chat_id,
                 f"Supabase недоступен: {stats.get('error','')}",
-                reply_markup=_main_menu_for(user_id),
+                reply_markup=_help_menu_for(user_id),
             )
             return {"ok": True}
 
@@ -2343,7 +2354,7 @@ async def webhook(secret: str, request: Request):
         await tg_send_message(
             chat_id,
             "\n".join(lines),
-            reply_markup=_main_menu_for(user_id),
+            reply_markup=_help_menu_for(user_id),
         )
         return {"ok": True}
 
@@ -2364,7 +2375,7 @@ async def webhook(secret: str, request: Request):
             "Шаг 1) Пришли ФОТО аватара (кого анимируем).\n"
             "Шаг 2) Потом пришли ВИДЕО с движением (3–30 сек).\n"
             "Шаг 3) Потом текстом напиши, что должно происходить (или просто: Старт).",
-            reply_markup=_main_menu_for(user_id),
+            reply_markup=_help_menu_for(user_id),
         )
         return {"ok": True}
 
@@ -2380,7 +2391,7 @@ async def webhook(secret: str, request: Request):
             "Режимы:\n"
             "• «ИИ (чат)» — вопросы/анализ фото/решение задач.\n"
             "• «Фото будущего» — фото-режимы (Афиши / Нейро фотосессии / 2 фото).\n",
-            reply_markup=_main_menu_for(user_id),
+            reply_markup=_help_menu_for(user_id),
         )
         return {"ok": True}
 
@@ -2524,7 +2535,7 @@ async def webhook(secret: str, request: Request):
             "1) Пришли фото.\n"
             "2) Потом одним сообщением напиши задачу: локация/стиль/одежда/детали.\n"
             "Я постараюсь сохранить человека максимально 1к1 и сделать фото как профессиональную фотосессию.",
-            reply_markup=_main_menu_for(user_id),
+            reply_markup=_help_menu_for(user_id),
         )
         return {"ok": True}
     if incoming_text == "Фото/Афиши":
@@ -2550,7 +2561,7 @@ async def webhook(secret: str, request: Request):
             "2) Потом Пришли Фото 2 — это ИСТОЧНИК (лицо/стиль/одежда — что скажешь).\n"
             "3) Потом одним сообщением напиши, что сделать из этих двух фото.\n\n"
             "Команда для сброса: /reset",
-            reply_markup=_main_menu_for(user_id),
+            reply_markup=_help_menu_for(user_id),
         )
         return {"ok": True}
 
@@ -2563,7 +2574,7 @@ async def webhook(secret: str, request: Request):
             "Ок. Режим «Текст→Картинка» (без фото).\n"
             "Напиши одним сообщением, что нужно сгенерировать.\n"
             "Пример: «Яркая афиша открытия цветочного магазина, лепестки в воздухе, крупный заголовок»",
-            reply_markup=_main_menu_for(user_id),
+            reply_markup=_help_menu_for(user_id),
         )
         return {"ok": True}
 
@@ -2578,8 +2589,8 @@ async def webhook(secret: str, request: Request):
             "• Нейро фотосессии: фото → потом задача\n"
             "• Текст→Картинка: без фото, просто описание\n"
             "• 2 фото: фото1 → фото2 → потом текст, что сделать\n"
-            "• /reset — сбросить текущий режим\n",
-            reply_markup=_main_menu_for(user_id),
+            "• 🔄 Сбросить генерацию — если музыка зациклилась/зависла\n• /reset — сбросить текущий режим\n",
+            reply_markup=_help_menu_for(user_id),
         )
         return {"ok": True}
 
@@ -2623,14 +2634,14 @@ async def webhook(secret: str, request: Request):
                     f"Фото получил ✅\nТеперь напиши текстом, что должно происходить ({quality.upper()}, {duration} сек)\n"
                     "Пример: «Камера плавно приближается, лёгкое движение волос, реализм».\n"
                     "Можно просто: Старт",
-                    reply_markup=_main_menu_for(user_id),
+                    reply_markup=_help_menu_for(user_id),
                 )
                 return {"ok": True}
 
             await tg_send_message(
                 chat_id,
                 "Фото уже есть ✅ Теперь жду ТЕКСТ (или /start чтобы выйти).",
-                reply_markup=_main_menu_for(user_id),
+                reply_markup=_help_menu_for(user_id),
             )
             return {"ok": True}
 
@@ -2649,14 +2660,14 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(
                     chat_id,
                     "Фото аватара получил ✅\nТеперь пришли ВИДЕО с движением (3–10 сек).",
-                    reply_markup=_main_menu_for(user_id),
+                    reply_markup=_help_menu_for(user_id),
                 )
                 return {"ok": True}
 
             await tg_send_message(
                 chat_id,
                 "Аватар уже есть ✅ Теперь жду ВИДЕО с движением (или /start чтобы выйти).",
-                reply_markup=_main_menu_for(user_id),
+                reply_markup=_help_menu_for(user_id),
             )
             return {"ok": True}
 
@@ -2678,7 +2689,7 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(
                     chat_id,
                     "Фото 1 получил. Теперь пришли Фото 2 (источник: лицо/стиль/одежда).",
-                    reply_markup=_main_menu_for(user_id),
+                    reply_markup=_help_menu_for(user_id),
                 )
                 return {"ok": True}
 
@@ -2692,7 +2703,7 @@ async def webhook(secret: str, request: Request):
                     chat_id,
                     "Фото 2 получил. Теперь одним сообщением напиши, что сделать из этих двух фото.\n"
                     "Пример: «Возьми позу и фон с фото 1, а лицо с фото 2. Реалистично, без текста».",
-                    reply_markup=_main_menu_for(user_id),
+                    reply_markup=_help_menu_for(user_id),
                 )
                 return {"ok": True}
 
@@ -2700,7 +2711,7 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(
                     chat_id,
                     "Я уже получил 2 фото. Теперь пришли ТЕКСТОМ, что нужно сделать (или /reset).",
-                    reply_markup=_main_menu_for(user_id),
+                    reply_markup=_help_menu_for(user_id),
                 )
                 return {"ok": True}
 
@@ -2714,7 +2725,7 @@ async def webhook(secret: str, request: Request):
                 "• где находится человек (место/фон)\n"
                 "• стиль/настроение\n"
                 "• можно указать одежду/аксессуары\n",
-                reply_markup=_main_menu_for(user_id),
+                reply_markup=_help_menu_for(user_id),
             )
             return {"ok": True}
 
@@ -2810,7 +2821,7 @@ async def webhook(secret: str, request: Request):
             await tg_send_message(
                 chat_id,
                 "Видео получил ✅\nТеперь напиши текстом, что должно происходить (или просто: Старт).",
-                reply_markup=_main_menu_for(user_id),
+                reply_markup=_help_menu_for(user_id),
             )
             return {"ok": True}
 
@@ -2845,7 +2856,7 @@ async def webhook(secret: str, request: Request):
             await tg_send_message(
                 chat_id,
                 "Видео получил ✅\nТеперь напиши текстом, что должно происходить (или просто: Старт).",
-                reply_markup=_main_menu_for(user_id),
+                reply_markup=_help_menu_for(user_id),
             )
             return {"ok": True}
         if file_id and mime.startswith("image/"):
@@ -2875,7 +2886,7 @@ async def webhook(secret: str, request: Request):
                         chat_id,
                         f"Фото получил ✅\nТеперь напиши текстом, что должно происходить ({quality.upper()}, {duration} сек)\n"
                         "Можно просто: Старт",
-                        reply_markup=_main_menu_for(user_id),
+                        reply_markup=_help_menu_for(user_id),
                     )
                     return {"ok": True}
 
@@ -2921,7 +2932,7 @@ async def webhook(secret: str, request: Request):
                     "• где находится человек (место/фон)\n"
                     "• стиль/настроение\n"
                     "• можно указать одежду/аксессуары\n",
-                    reply_markup=_main_menu_for(user_id),
+                    reply_markup=_help_menu_for(user_id),
                 )
                 return {"ok": True}
 
@@ -3051,7 +3062,7 @@ async def webhook(secret: str, request: Request):
                     f"Ошибка 2 фото: {e}\n"
                     "Если ошибка про 'image' / 'invalid' — возможно твой endpoint не поддерживает 2 изображения.\n"
                     "Тогда нужен endpoint с multi-image или другой провайдер.",
-                    reply_markup=_main_menu_for(user_id),
+                    reply_markup=_help_menu_for(user_id),
                 )
             finally:
                 # Сбрасываем режим, чтобы можно было сразу начать заново
