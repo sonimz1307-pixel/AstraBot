@@ -2226,7 +2226,6 @@ async def webhook(secret: str, request: Request):
                     "input": {
                         "gpt_description_prompt": str(udio_prompt or "").strip(),
                         "lyrics_type": "instrumental" if settings.get("make_instrumental") else "lyrics",
-                        "tags": settings.get("tags") or "",
                     },
                 }
             else:
