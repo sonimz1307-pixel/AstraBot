@@ -2233,7 +2233,7 @@ async def webhook(secret: str, request: Request):
                     "task_type": "generate_music",
                     "input": {
                         "gpt_description_prompt": udio_prompt,
-                        "lyrics_type": "instrumental" if settings.get("make_instrumental") else "lyrics",
+                        "lyrics_type": "instrumental" if settings.get("make_instrumental") else "generate",
                     },
                 }
             else:
