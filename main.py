@@ -4,6 +4,8 @@ import time
 import asyncio
 import re
 import json
+import logging
+import uuid
 from io import BytesIO
 from typing import Optional, Literal, Dict, Any, Tuple, List
 
@@ -59,6 +61,18 @@ PROGRESS_EXPECTED_SECONDS = float(os.getenv("PROGRESS_EXPECTED_SECONDS", "22")) 
 PROGRESS_UPDATE_EVERY = float(os.getenv("PROGRESS_UPDATE_EVERY", "2.0"))
 TELEGRAM_API_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 TELEGRAM_FILE_BASE = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}"
+
+# ---------------- Logging ----------------
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+logger = logging.getLogger("astrabot")
+
+def log_event(event: str, **fields):
+    # Structured logs to stdout (Render-friendly)
+    payload = {"event": event, "ts": int(time.time()), **fields}
+    try:
+        logger.info(json.dumps(payload, ensure_ascii=False))
+    except Exception:
+        logger.info("%s %s", event, fields)
 
 
 # ---------------- Supabase: user state (bot_user_state) ----------------
@@ -142,6 +156,14 @@ def _find_pack_by_tokens(tokens: int) -> Optional[Dict[str, int]]:
 
 def _topup_balance_inline_kb() -> dict:
     return {"inline_keyboard": [[{"text": "➕ Пополнить ⭐", "callback_data": "topup:menu"}]]}
+
+
+def _help_kb() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "🔄 Сбросить генерацию", "callback_data": "gen:reset"}],
+        ]
+    }
 
 def _topup_packs_kb() -> dict:
     # 2 кнопки в ряд
@@ -267,6 +289,25 @@ def _ensure_state(chat_id: int, user_id: int) -> Dict[str, Any]:
     STATE[key]["ts"] = _now()
     return STATE[key]
 
+
+
+def _music_clear(chat_id: int, user_id: int, *, reason: str = ""):
+    st = _ensure_state(chat_id, user_id)
+    # kill any ongoing loops logically
+    st["music_gen_id"] = uuid.uuid4().hex
+    st["music_generating"] = False
+    st["music_task_id"] = None
+    st.pop("music_settings", None)
+    st["ts"] = _now()
+    # also clear durable "waiting for text" state (if used)
+    try:
+        sb_clear_user_state(user_id)
+    except Exception:
+        pass
+    # back to chat mode
+    st["mode"] = "chat"
+    log_event("music_clear", user_id=user_id, reason=reason)
+
 # ---------------- AI chat memory helpers ----------------
 
 def _ai_hist_get(st: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -365,7 +406,7 @@ async def _ai_maybe_summarize(st: Dict[str, Any]):
     st["ai_ts"] = _now()
 
 
-def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photosession", "t2i", "two_photos", "kling_mc", "kling_i2v"]):
+def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photosession", "t2i", "two_photos", "kling_mc", "kling_i2v", "suno_music"]):
     st = _ensure_state(chat_id, user_id)
     st["mode"] = mode
     st["ts"] = _now()
@@ -446,7 +487,7 @@ async def piapi_poll_task(task_id: str, *, timeout_sec: int = 240, sleep_sec: fl
     while True:
         last = await piapi_get_task(task_id)
         status = ((last.get("data") or {}).get("status") or "").lower()
-        if status in ("completed", "failed"):
+        if status in ("completed","success","succeeded","done","failed","error","canceled","cancelled"):
             return last
         if time.time() - t0 > timeout_sec:
             raise TimeoutError(f"PiAPI task timeout after {timeout_sec}s (task_id={task_id}, status={status})")
@@ -2096,6 +2137,19 @@ async def webhook(secret: str, request: Request):
     # ✅ Telegram: текст может быть в caption
     incoming_text = (message.get("text") or message.get("caption") or "").strip()
 
+    # --- Panic reset commands ---
+    if incoming_text in ("/resetgen", "/reset_generation", "🔄 Сбросить генерацию"):
+        _music_clear(chat_id, user_id, reason="user_text_reset")
+        await tg_send_message(chat_id, "✅ Генерация сброшена. Можешь запускать заново.", reply_markup=_main_menu_for(user_id))
+        return {"ok": True}
+
+    # общий сброс режима
+    if incoming_text == "/reset":
+        _music_clear(chat_id, user_id, reason="user_reset")
+        _set_mode(chat_id, user_id, "chat")
+        await tg_send_message(chat_id, "✅ Режим сброшен.", reply_markup=_main_menu_for(user_id))
+        return {"ok": True}
+
     # ----- Supabase state resume (Music Future) -----
     # Если бот перезапустился, режим "ожидаем текст для музыки" берём из Supabase.
     if incoming_text and not (incoming_text.startswith("/") or incoming_text in ("⬅ Назад", "Назад")):
@@ -2211,25 +2265,48 @@ async def webhook(secret: str, request: Request):
             sb_clear_user_state(user_id)
 
             await tg_send_message(chat_id, "⏳ Запускаю генерацию музыки…")
+            # защита от дублей / зацикливания
+            if st.get("music_generating"):
+                await tg_send_message(
+                    chat_id,
+                    "⏳ Генерация уже идёт. Если зависло — нажми «🔄 Сбросить генерацию» (в Помощь) или команду /resetgen.",
+                    reply_markup=_main_menu_for(user_id),
+                )
+                return {"ok": True}
+
+            st["music_generating"] = True
+            st["music_gen_id"] = uuid.uuid4().hex
+            st["music_task_id"] = None
+            gen_id = st["music_gen_id"]
+
             try:
                 created = await piapi_create_task(payload_api)
                 task_id = ((created.get("data") or {}).get("task_id")) or ""
                 if not task_id:
                     raise RuntimeError(f"PiAPI did not return task_id: {created}")
 
+                st["music_task_id"] = task_id
+                log_event("music_task_created", user_id=user_id, task_id=task_id, gen_id=gen_id)
+
                 done = await piapi_poll_task(task_id, timeout_sec=300, sleep_sec=2.0)
                 data = done.get("data") or {}
                 status = (data.get("status") or "")
-                if str(status).lower() != "completed":
-                    err = (data.get("error") or {}).get("message") or "unknown error"
-                    await tg_send_message(chat_id, f"❌ Музыка не сгенерировалась: {status}\\n{err}")
+                status_l = str(status).lower().strip()
+
+                if status_l != "completed":
+                    err = (data.get("error") or {}).get("message") or (data.get("error") or {}).get("detail") or "unknown error"
+                    log_event("music_failed", user_id=user_id, task_id=task_id, gen_id=gen_id, status=status_l, err=err)
+                    await tg_send_message(chat_id, f"❌ Генерация не удалась: {status}
+{err}", reply_markup=_main_menu_for(user_id))
+                    _music_clear(chat_id, user_id, reason=f"status_{status_l}")
                     return {"ok": True}
 
                 out = data.get("output") or []
                 if isinstance(out, dict):
                     out = [out]
                 if not out:
-                    await tg_send_message(chat_id, "✅ Готово, но PiAPI не вернул output. Проверь task в кабинете.")
+                    await tg_send_message(chat_id, "✅ Готово, но PiAPI не вернул output. Проверь task в кабинете.", reply_markup=_main_menu_for(user_id))
+                    _music_clear(chat_id, user_id, reason="no_output")
                     return {"ok": True}
 
                 lines = ["✅ Музыка готова:"]
@@ -2244,10 +2321,16 @@ async def webhook(secret: str, request: Request):
                         lines.append(f"🎬 MP4: {video_url}")
                     if image_url:
                         lines.append(f"🖼 Обложка: {image_url}")
-                await tg_send_message(chat_id, "\n".join(lines), reply_markup=_main_menu_for(user_id))
+                await tg_send_message(chat_id, "
+".join(lines), reply_markup=_main_menu_for(user_id))
+                _music_clear(chat_id, user_id, reason="completed")
+                return {"ok": True}
+
             except Exception as e:
-                await tg_send_message(chat_id, f"❌ Ошибка PiAPI/Suno: {e}")
-            return {"ok": True}
+                log_event("music_exception", user_id=user_id, gen_id=gen_id, err=str(e))
+                await tg_send_message(chat_id, f"❌ Ошибка PiAPI/Suno: {e}", reply_markup=_main_menu_for(user_id))
+                _music_clear(chat_id, user_id, reason="exception")
+                return {"ok": True}
 
         # из WebApp у тебя сейчас прилетает примерно так: {"flow":"motion","mode":"pro"} у тебя сейчас прилетает примерно так: {"flow":"motion","mode":"pro"}
         flow = (payload.get("flow") or payload.get("gen_type") or payload.get("genType") or "").lower().strip()
@@ -2394,8 +2477,17 @@ async def webhook(secret: str, request: Request):
 
 
     
-    # ---- SUNO Music: ждём текст (описание или лирику) ----
+        # ---- SUNO Music: ждём текст (описание или лирику) ----
     if st.get("mode") == "suno_music" and incoming_text:
+        # защита от дублей / зацикливания
+        if st.get("music_generating"):
+            await tg_send_message(
+                chat_id,
+                "⏳ Генерация уже идёт. Если зависло — нажми «🔄 Сбросить генерацию» (в Помощь) или команду /resetgen.",
+                reply_markup=_main_menu_for(user_id),
+            )
+            return {"ok": True}
+
         settings = st.get("music_settings") or {
             "mv": "chirp-crow",
             "music_mode": "prompt",
@@ -2414,6 +2506,7 @@ async def webhook(secret: str, request: Request):
 
         st["music_settings"] = settings
         st["ts"] = _now()
+
         # текст получен — сбрасываем ожидание в Supabase
         sb_clear_user_state(user_id)
 
@@ -2435,6 +2528,12 @@ async def webhook(secret: str, request: Request):
             "config": {"service_mode": settings.get("service_mode") or "public"},
         }
 
+        # помечаем старт генерации (важно!)
+        st["music_generating"] = True
+        st["music_gen_id"] = uuid.uuid4().hex
+        st["music_task_id"] = None
+        gen_id = st["music_gen_id"]
+
         await tg_send_message(chat_id, "⏳ Запускаю генерацию музыки…")
         try:
             created = await piapi_create_task(payload_api)
@@ -2442,13 +2541,52 @@ async def webhook(secret: str, request: Request):
             if not task_id:
                 raise RuntimeError(f"PiAPI did not return task_id: {created}")
 
+            st["music_task_id"] = task_id
+            log_event("music_task_created", user_id=user_id, task_id=task_id, gen_id=gen_id)
+
             done = await piapi_poll_task(task_id, timeout_sec=300, sleep_sec=2.0)
             data = done.get("data") or {}
             status = (data.get("status") or "")
-            if str(status).lower() != "completed":
-                err = (data.get("error") or {}).get("message") or "unknown error"
-                await tg_send_message(chat_id, f"❌ Музыка не сгенерировалась: {status}\n{err}")
+            status_l = str(status).lower().strip()
+
+            if status_l != "completed":
+                err = (data.get("error") or {}).get("message") or (data.get("error") or {}).get("detail") or "unknown error"
+                log_event("music_failed", user_id=user_id, task_id=task_id, gen_id=gen_id, status=status_l, err=err)
+                await tg_send_message(chat_id, f"❌ Генерация не удалась: {status}
+{err}", reply_markup=_main_menu_for(user_id))
+                _music_clear(chat_id, user_id, reason=f"status_{status_l}")
                 return {"ok": True}
+
+            out = data.get("output") or []
+            if isinstance(out, dict):
+                out = [out]
+            if not out:
+                await tg_send_message(chat_id, "✅ Готово, но PiAPI не вернул output. Проверь task в кабинете.", reply_markup=_main_menu_for(user_id))
+                _music_clear(chat_id, user_id, reason="no_output")
+                return {"ok": True}
+
+            lines = ["✅ Музыка готова:"]
+            for i, item in enumerate(out[:2], start=1):
+                audio_url = item.get("audio_url") or ""
+                video_url = item.get("video_url") or ""
+                image_url = item.get("image_url") or ""
+                lines.append(f"#{i}")
+                if audio_url:
+                    lines.append(f"🎧 MP3: {audio_url}")
+                if video_url:
+                    lines.append(f"🎬 MP4: {video_url}")
+                if image_url:
+                    lines.append(f"🖼 Обложка: {image_url}")
+            await tg_send_message(chat_id, "
+".join(lines), reply_markup=_main_menu_for(user_id))
+            _music_clear(chat_id, user_id, reason="completed")
+            return {"ok": True}
+
+        except Exception as e:
+            log_event("music_exception", user_id=user_id, gen_id=gen_id, err=str(e))
+            await tg_send_message(chat_id, f"❌ Ошибка PiAPI/Suno: {e}", reply_markup=_main_menu_for(user_id))
+            _music_clear(chat_id, user_id, reason="exception")
+            return {"ok": True}
 
             out = data.get("output") or []
             if isinstance(out, dict):
@@ -2557,17 +2695,30 @@ async def webhook(secret: str, request: Request):
     if incoming_text == "Помощь":
         await tg_send_message(
             chat_id,
-            "• ИИ (чат): фото + подпись 'реши задачу' — решу.\n"
-            "• Фото/Афиши: фото → потом текст.\n"
-            "  — если просишь надпись/цену/афишу → сделаю афишу\n"
-            "  — если описываешь сцену / пишешь 'без текста' → сделаю обычный фото-эдит\n"
-            "  — в обычном фото-эдите бот автоматически ограничивает правку маской, чтобы фон не менялся\n"
-            "• Нейро фотосессии: фото → потом задача\n"
-            "• Текст→Картинка: без фото, просто описание\n"
-            "• 2 фото: фото1 → фото2 → потом текст, что сделать\n"
-            "• /reset — сбросить текущий режим\n",
+            "• ИИ (чат): фото + подпись 'реши задачу' — решу.
+"
+            "• Фото/Афиши: фото → потом текст.
+"
+            "  — если просишь надпись/цену/афишу → сделаю афишу
+"
+            "  — если описываешь сцену / пишешь 'без текста' → сделаю обычный фото-эдит
+"
+            "  — в обычном фото-эдите бот автоматически ограничивает правку маской, чтобы фон не менялся
+"
+            "• Нейро фотосессии: фото → потом задача
+"
+            "• Текст→Картинка: без фото, просто описание
+"
+            "• 2 фото: фото1 → фото2 → потом текст, что сделать
+"
+            "• /reset — сбросить текущий режим
+"
+            "• 🔄 Сбросить генерацию — аварийно остановить зависшую генерацию
+",
             reply_markup=_main_menu_for(user_id),
         )
+        # отдельной строкой даём кнопку сброса (inline)
+        await tg_send_message(chat_id, "Нужно экстренно остановить зависшую генерацию?", reply_markup=_help_kb())
         return {"ok": True}
 
     # ---------------- Фото (photo) ----------------
