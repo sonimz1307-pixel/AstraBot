@@ -2220,6 +2220,21 @@ async def webhook(secret: str, request: Request):
             # генерация стартует — ожидание текста больше не нужно
             sb_clear_user_state(user_id)
 
+            def _clear_music_ctx():
+                # Полный сброс музыкального контекста, чтобы не было автоповтора на любой текст/кнопку.
+                try:
+                    st.pop("music_settings", None)
+                except Exception:
+                    pass
+                try:
+                    _set_mode(chat_id, user_id, "chat")
+                except Exception:
+                    pass
+                try:
+                    sb_clear_user_state(user_id)
+                except Exception:
+                    pass
+
             await tg_send_message(chat_id, "⏳ Запускаю генерацию музыки…")
             try:
                 created = await piapi_create_task(payload_api)
@@ -2232,14 +2247,16 @@ async def webhook(secret: str, request: Request):
                 status = (data.get("status") or "")
                 if str(status).lower() != "completed":
                     err = (data.get("error") or {}).get("message") or "unknown error"
-                    await tg_send_message(chat_id, f"❌ Музыка не сгенерировалась: {status}\\n{err}")
+                    await tg_send_message(chat_id, f"❌ Музыка не сгенерировалась.\nСтатус: {status}\n{err}\n\nГенерация остановлена. Нажмите «Музыка будущего», чтобы попробовать снова.")
+                    _clear_music_ctx()
                     return {"ok": True}
 
                 out = data.get("output") or []
                 if isinstance(out, dict):
                     out = [out]
                 if not out:
-                    await tg_send_message(chat_id, "✅ Готово, но PiAPI не вернул output. Проверь task в кабинете.")
+                    await tg_send_message(chat_id, "✅ Готово, но PiAPI не вернул output. Я сбросил режим, попробуйте снова через «Музыка будущего».")
+                    _clear_music_ctx()
                     return {"ok": True}
 
                 lines = ["✅ Музыка готова:"]
@@ -2255,8 +2272,10 @@ async def webhook(secret: str, request: Request):
                     if image_url:
                         lines.append(f"🖼 Обложка: {image_url}")
                 await tg_send_message(chat_id, "\n".join(lines), reply_markup=_main_menu_for(user_id))
+                _clear_music_ctx()
             except Exception as e:
-                await tg_send_message(chat_id, f"❌ Ошибка PiAPI/Suno: {e}")
+                await tg_send_message(chat_id, f"❌ Ошибка PiAPI/Suno: {e}\n\nГенерация остановлена. Нажмите «Музыка будущего», чтобы попробовать снова.")
+                _clear_music_ctx()
             return {"ok": True}
 
         # из WebApp может прилетать примерно так: {"flow":"motion","mode":"pro"}
@@ -2494,6 +2513,7 @@ async def webhook(secret: str, request: Request):
                 if image_url:
                     lines.append(f"🖼 Обложка: {image_url}")
             await tg_send_message(chat_id, "\n".join(lines), reply_markup=_main_menu_for(user_id))
+            _clear_music_ctx()
         except Exception as e:
             await tg_send_message(chat_id, f"❌ Ошибка PiAPI/Suno: {e}", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
