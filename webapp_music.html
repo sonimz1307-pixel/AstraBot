@@ -307,9 +307,14 @@
         <div class="tab" id="tabLyrics" role="tab" aria-selected="false">📝 Текст</div>
       </div>
 
+      <div class="ok" id="udioNote" style="display:none">Udio использует только <b>Описание идеи</b>. Текст песни и теги в этом режиме не применяются.</div>
+
+      <div id="wrapTitle">
       <label for="title">Название (необязательно)</label>
       <input id="title" type="text" placeholder="Напр.: Музыка будущего"/>
+      </div>
 
+      <div id="wrapTags">
       <label for="tags">Теги (стиль/жанр)</label>
       <input id="tags" type="text" placeholder="Напр.: russian pop, upbeat, modern, catchy hook"/>
       <div class="hint">
@@ -319,6 +324,7 @@
 
       <div class="chips" id="moodChips">
         <div class="chip small" data-add="energetic">⚡ энергичное</div>
+      </div>
         <div class="chip small" data-add="calm">😌 спокойное</div>
         <div class="chip small" data-add="sad">💔 грустное</div>
         <div class="chip small" data-add="dark">🌑 тёмное</div>
@@ -355,6 +361,7 @@
         </div>
       </div>
 
+      <div id="wrapGuide">
       <details>
         <summary>Как получить «вау»-результат (кратко)</summary>
         <div class="dcontent">
@@ -367,6 +374,7 @@
           </div>
         </div>
       </details>
+      </div>
 
       <div class="actions">
         <button class="btn" id="btnClear" type="button">Очистить</button>
@@ -490,22 +498,41 @@
     // Tabs
     // -----------------------------
     let mode = "idea";
-    let ai = localStorage.getItem("music_ai") || "udio"; // idea | lyrics
+    let ai = localStorage.getItem("music_ai") || "suno"; // idea | lyrics
     const aiSuno = document.getElementById('aiSuno');
     const aiUdio = document.getElementById('aiUdio');
 
-    function setAI(v){
-      ai = v;
-      localStorage.setItem("music_ai", v);
-      aiSuno.classList.toggle('active', v === "suno");
-      aiUdio.classList.toggle('active', v === "udio");
-      aiSuno.setAttribute("aria-selected", v === "suno" ? "true" : "false");
-      aiUdio.setAttribute("aria-selected", v === "udio" ? "true" : "false");
-    }
+    function applyAiUI(){
+  const isUdio = (ai === "udio");
 
-    aiSuno.addEventListener('click', () => setAI("suno"));
-    aiUdio.addEventListener('click', () => setAI("udio"));
-    setAI(ai);
+  // Udio notice
+  const udioNote = document.getElementById("udioNote");
+  if (udioNote) udioNote.style.display = isUdio ? "block" : "none";
+
+  // Hide Suno-only blocks
+  const wrapTitle = document.getElementById("wrapTitle");
+  const wrapTags  = document.getElementById("wrapTags");
+  const wrapGuide = document.getElementById("wrapGuide");
+  if (wrapTitle) wrapTitle.style.display = isUdio ? "none" : "block";
+  if (wrapTags)  wrapTags.style.display  = isUdio ? "none" : "block";
+  if (wrapGuide) wrapGuide.style.display = isUdio ? "none" : "block";
+
+  // Tabs: in Udio only "idea"
+  tabLyrics.style.display = isUdio ? "none" : "block";
+  if (isUdio) setMode("idea");
+}
+
+function setAI(v){
+  ai = v;
+  localStorage.setItem("music_ai", v);
+  aiSuno.classList.toggle('active', v === "suno");
+  aiUdio.classList.toggle('active', v === "udio");
+  applyAiUI();
+}
+
+aiSuno.onclick = () => setAI("suno");
+aiUdio.onclick = () => setAI("udio");
+setAI(ai);
 
     const tabIdea = document.getElementById('tabIdea');
     const tabLyrics = document.getElementById('tabLyrics');
@@ -586,31 +613,34 @@
     // Build payload for bot
     // -----------------------------
     function buildPayload(){
-      const title = document.getElementById('title').value.trim();
-      const tags = tagsEl.value.trim();
-      const make_instrumental = document.getElementById('instr').checked;
-      const desc = document.getElementById('desc').value.trim();
-      const lyrics = document.getElementById('lyrics').value.trim();
+  const title = document.getElementById('title').value.trim();
+  const tags = tagsEl.value.trim();
+  const make_instrumental = document.getElementById('instr').checked;
+  const desc = document.getElementById('desc').value.trim();
+  const lyrics = document.getElementById('lyrics').value.trim();
 
-      const payload = {
-        feature: "music_future",
-        ai: ai, // "suno" | "udio"
-        mode: mode, // "idea" or "lyrics"
-        title: title || "",
-        tags: tags || "",
-        make_instrumental: !!make_instrumental
-      };
+  const isUdio = (ai === "udio");
+  const useMode = isUdio ? "idea" : mode; // Udio: только идея
 
-      // Suno-specific (не мешает, если бэк игнорирует)
-      if (ai === "suno") payload.mv = "chirp-crow";
+  const payload = {
+    feature: "music_future",
+    ai: ai,                 // "suno" | "udio"
+    mode: useMode,          // "idea" | "lyrics"
+    title: isUdio ? "" : (title || ""),
+    tags:  isUdio ? "" : (tags || ""),
+    make_instrumental: !!make_instrumental
+  };
 
-      if (mode === "idea") {
-        payload.gpt_description_prompt = desc || "";
-      } else {
-        payload.prompt = lyrics || "";
-      }
-      return payload;
-    }
+  if (useMode === "idea") {
+    // Udio/Suno idea prompt
+    payload.gpt_description_prompt = (desc || "").trim();
+  } else {
+    // Suno lyrics mode
+    payload.prompt = (lyrics || "").trim();
+  }
+
+  return payload;
+}
 
     // -----------------------------
     // Save -> sendData -> close
