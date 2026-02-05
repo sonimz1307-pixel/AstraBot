@@ -283,6 +283,13 @@
       cursor:pointer;
       font-weight:750;
     }
+
+    /* --- UI fix for Telegram WebApp (tabs click & layout) --- */
+    .tabs{ position:relative; z-index:20; }
+    #ideaBlock, #lyricsBlock, #wrapTitle, #wrapTags, .toggle, .actions, .footer-note, details{ position:relative; z-index:1; }
+    .tab{ pointer-events:auto; }
+    .hidden{ display:none !important; }
+
   </style>
 </head>
 
@@ -297,17 +304,20 @@
     </div>
 
     <div class="card">
-
-      <div class="tabs" role="tablist" aria-label="AI" style="margin-bottom:10px">
-        <div class="tab" id="aiSuno" role="tab" aria-selected="false">Suno</div>
-        <div class="tab active" id="aiUdio" role="tab" aria-selected="true">Udio</div>
+      <!-- AI selection (Suno / Udio) -->
+      <div class="tabs" id="aiTabs" role="tablist" aria-label="AI" style="margin-bottom:10px; position:relative; z-index:20;">
+        <div class="tab active" id="aiSuno" role="tab" aria-selected="true">Suno</div>
+        <div class="tab" id="aiUdio" role="tab" aria-selected="false">Udio</div>
       </div>
-      <div class="tabs" role="tablist" aria-label="Режим">
+
+      <div class="warn" id="aiNote" style="display:none; margin-top:10px;">
+        Udio использует только <b>описание идеи</b>. Текст песни будет сгенерирован автоматически.
+      </div>
+
+      <div class="tabs" role="tablist" aria-label="Режим" style="position:relative; z-index:20;">
         <div class="tab active" id="tabIdea" role="tab" aria-selected="true">✨ Идея</div>
         <div class="tab" id="tabLyrics" role="tab" aria-selected="false">📝 Текст</div>
       </div>
-
-      <div class="ok" id="udioNote" style="display:none">Udio использует только <b>Описание идеи</b>. Текст песни и теги в этом режиме не применяются.</div>
 
       <div id="wrapTitle">
       <label for="title">Название (необязательно)</label>
@@ -324,7 +334,6 @@
 
       <div class="chips" id="moodChips">
         <div class="chip small" data-add="energetic">⚡ энергичное</div>
-      </div>
         <div class="chip small" data-add="calm">😌 спокойное</div>
         <div class="chip small" data-add="sad">💔 грустное</div>
         <div class="chip small" data-add="dark">🌑 тёмное</div>
@@ -333,6 +342,7 @@
         <div class="chip small" data-add="female vocal">♀️ female vocal</div>
         <div class="chip small" data-add="male vocal">♂️ male vocal</div>
         <div class="chip small" data-add="duet">👫 duet</div>
+      </div>
       </div>
 
       <div class="toggle">
@@ -361,8 +371,7 @@
         </div>
       </div>
 
-      <div id="wrapGuide">
-      <details>
+      <details id="wrapGuide">
         <summary>Как получить «вау»-результат (кратко)</summary>
         <div class="dcontent">
           <b>1) Сначала теги.</b> 4–8 тегов — достаточно. Пример:
@@ -374,7 +383,6 @@
           </div>
         </div>
       </details>
-      </div>
 
       <div class="actions">
         <button class="btn" id="btnClear" type="button">Очистить</button>
@@ -495,45 +503,59 @@
     if (!tg) setTimeout(() => { tg = initTelegram(); }, 350);
 
     // -----------------------------
-    // Tabs
+    // AI selection (Suno / Udio)
     // -----------------------------
-    let mode = "idea";
-    let ai = localStorage.getItem("music_ai") || "suno"; // idea | lyrics
+    let ai = localStorage.getItem("music_ai") || "suno"; // default suno
     const aiSuno = document.getElementById('aiSuno');
     const aiUdio = document.getElementById('aiUdio');
+    const aiNote = document.getElementById('aiNote');
 
-    function applyAiUI(){
-  const isUdio = (ai === "udio");
+    const wrapTitle = document.getElementById('wrapTitle');
+    const wrapTags = document.getElementById('wrapTags');
+    const wrapGuide = document.getElementById('wrapGuide');
 
-  // Udio notice
-  const udioNote = document.getElementById("udioNote");
-  if (udioNote) udioNote.style.display = isUdio ? "block" : "none";
+    function forceReflow(){ document.body.offsetHeight; }
 
-  // Hide Suno-only blocks
-  const wrapTitle = document.getElementById("wrapTitle");
-  const wrapTags  = document.getElementById("wrapTags");
-  const wrapGuide = document.getElementById("wrapGuide");
-  if (wrapTitle) wrapTitle.style.display = isUdio ? "none" : "block";
-  if (wrapTags)  wrapTags.style.display  = isUdio ? "none" : "block";
-  if (wrapGuide) wrapGuide.style.display = isUdio ? "none" : "block";
+    function setAI(v){
+      ai = v;
+      localStorage.setItem("music_ai", v);
 
-  // Tabs: in Udio only "idea"
-  tabLyrics.style.display = isUdio ? "none" : "block";
-  if (isUdio) setMode("idea");
-}
+      const isSuno = (v === "suno");
+      aiSuno.classList.toggle('active', isSuno);
+      aiUdio.classList.toggle('active', !isSuno);
+      aiSuno.setAttribute('aria-selected', isSuno ? 'true' : 'false');
+      aiUdio.setAttribute('aria-selected', !isSuno ? 'true' : 'false');
 
-function setAI(v){
-  ai = v;
-  localStorage.setItem("music_ai", v);
-  aiSuno.classList.toggle('active', v === "suno");
-  aiUdio.classList.toggle('active', v === "udio");
-  applyAiUI();
-}
+      if (!isSuno){
+        wrapTitle.classList.add('hidden');
+        wrapTags.classList.add('hidden');
+        wrapGuide.classList.add('hidden');
 
-aiSuno.onclick = () => setAI("suno");
-aiUdio.onclick = () => setAI("udio");
-setAI(ai);
+        tabLyrics.classList.add('hidden');
+        setMode("idea");
+      try { document.body.offsetHeight; } catch(e) {}
+      requestAnimationFrame(() => { try { document.body.offsetHeight; } catch(e) {} });
+        aiNote.style.display = "block";
+      } else {
+        wrapTitle.classList.remove('hidden');
+        wrapTags.classList.remove('hidden');
+        wrapGuide.classList.remove('hidden');
 
+        tabLyrics.classList.remove('hidden');
+        aiNote.style.display = "none";
+      }
+      forceReflow();
+      requestAnimationFrame(forceReflow);
+    }
+
+    aiSuno.addEventListener('click', () => setAI("suno"));
+    aiUdio.addEventListener('click', () => setAI("udio"));
+
+
+    // -----------------------------
+    // Tabs
+    // -----------------------------
+    let mode = "idea"; // idea | lyrics
     const tabIdea = document.getElementById('tabIdea');
     const tabLyrics = document.getElementById('tabLyrics');
     const ideaBlock = document.getElementById('ideaBlock');
@@ -548,9 +570,15 @@ setAI(ai);
       tabLyrics.setAttribute('aria-selected', !isIdea ? 'true' : 'false');
       ideaBlock.style.display = isIdea ? 'block' : 'none';
       lyricsBlock.style.display = isIdea ? 'none' : 'block';
+      try { document.body.offsetHeight; } catch(e) {}
+      requestAnimationFrame(() => { try { document.body.offsetHeight; } catch(e) {} });
     }
     tabIdea.addEventListener('click', () => setMode("idea"));
     tabLyrics.addEventListener('click', () => setMode("lyrics"));
+
+    // Apply AI UI on load
+    setAI(ai);
+
 
     // -----------------------------
     // Chips -> add to tags
@@ -613,34 +641,28 @@ setAI(ai);
     // Build payload for bot
     // -----------------------------
     function buildPayload(){
-  const title = document.getElementById('title').value.trim();
-  const tags = tagsEl.value.trim();
-  const make_instrumental = document.getElementById('instr').checked;
-  const desc = document.getElementById('desc').value.trim();
-  const lyrics = document.getElementById('lyrics').value.trim();
+      const title = document.getElementById('title').value.trim();
+      const tags = tagsEl.value.trim();
+      const make_instrumental = document.getElementById('instr').checked;
+      const desc = document.getElementById('desc').value.trim();
+      const lyrics = document.getElementById('lyrics').value.trim();
 
-  const isUdio = (ai === "udio");
-  const useMode = isUdio ? "idea" : mode; // Udio: только идея
+      const payload = {
+        feature: "music_future",
+        ai: ai,                 // "suno" | "udio"
+        mode: mode,             // "idea" | "lyrics"
+        title: title || "",
+        tags: tags || "",
+        make_instrumental: !!make_instrumental
+      };
 
-  const payload = {
-    feature: "music_future",
-    ai: ai,                 // "suno" | "udio"
-    mode: useMode,          // "idea" | "lyrics"
-    title: isUdio ? "" : (title || ""),
-    tags:  isUdio ? "" : (tags || ""),
-    make_instrumental: !!make_instrumental
-  };
-
-  if (useMode === "idea") {
-    // Udio/Suno idea prompt
-    payload.gpt_description_prompt = (desc || "").trim();
-  } else {
-    // Suno lyrics mode
-    payload.prompt = (lyrics || "").trim();
-  }
-
-  return payload;
-}
+      if (mode === "idea") {
+        payload.gpt_description_prompt = desc || "";
+      } else {
+        payload.prompt = lyrics || "";
+      }
+      return payload;
+    }
 
     // -----------------------------
     // Save -> sendData -> close
