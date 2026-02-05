@@ -2296,8 +2296,7 @@ async def webhook(secret: str, request: Request):
                 if status_l != "completed":
                     err = (data.get("error") or {}).get("message") or (data.get("error") or {}).get("detail") or "unknown error"
                     log_event("music_failed", user_id=user_id, task_id=task_id, gen_id=gen_id, status=status_l, err=err)
-                    await tg_send_message(chat_id, f"❌ Генерация не удалась: {status}
-{err}", reply_markup=_main_menu_for(user_id))
+                    await tg_send_message(chat_id, f"❌ Генерация не удалась: {status}\n{err}", reply_markup=_main_menu_for(user_id))
                     _music_clear(chat_id, user_id, reason=f"status_{status_l}")
                     return {"ok": True}
 
