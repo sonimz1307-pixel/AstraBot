@@ -26,6 +26,7 @@ _SUNOAPI_CB_DEDUP_TTL_SEC = 600.0
 # ---------------- SunoAPI callback (required by SunoAPI.org) ----------------
 
 def _deep_pick_str(val) -> str:
+    """Return first non-empty string found in nested structures (best-effort)."""
     if not val:
         return ""
     if isinstance(val, str):
@@ -46,6 +47,7 @@ def _deep_pick_str(val) -> str:
                 return u
     return ""
 
+
 def _suno_sig(uid: int, chat_id: int) -> str:
     secret = (WEBHOOK_SECRET or "change_me").encode("utf-8")
     msg = f"{int(uid)}:{int(chat_id)}".encode("utf-8")
@@ -59,25 +61,33 @@ def _build_suno_callback_url(user_id: int, chat_id: int) -> str:
     return f"{base}/api/suno/callback?uid={int(user_id)}&chat={int(chat_id)}&sig={sig}"
 
 def _suno_extract_audio_url(payload: dict) -> str:
-    """Best-effort extraction of an audio URL from various callback payload shapes."""
+    """Best-effort extraction of an audio URL from various callback payload shapes.
+
+    ВАЖНО: возвращаем ТОЛЬКО реальные ссылки (http/https), чтобы не получить 'MP3: text'.
+    """
+    def _ok(u: str) -> str:
+        u = (u or "").strip()
+        return u if (u.startswith("http://") or u.startswith("https://")) else ""
+
     if not isinstance(payload, dict):
         return ""
 
-    # 1) top-level keys
-    for k in ("audio_url", "audioUrl", "song_url", "songUrl", "mp3_url", "mp3", "url"):
+    for k in ("audio_url", "audioUrl", "song_url", "songUrl", "mp3_url", "mp3", "url", "file_url", "fileUrl"):
         v = payload.get(k)
-        if isinstance(v, str) and v.strip():
-            return v.strip()
+        if isinstance(v, str):
+            u = _ok(v)
+            if u:
+                return u
 
     data = payload.get("data")
     if isinstance(data, dict):
-        # 2) data-level keys
-        for k in ("audio_url", "audioUrl", "song_url", "songUrl", "mp3_url", "mp3", "url"):
+        for k in ("audio_url", "audioUrl", "song_url", "songUrl", "mp3_url", "mp3", "url", "file_url", "fileUrl"):
             v = data.get(k)
-            if isinstance(v, str) and v.strip():
-                return v.strip()
+            if isinstance(v, str):
+                u = _ok(v)
+                if u:
+                    return u
 
-        # 3) SunoAPI.org record-info shape: data.response.data[*].audio_url
         resp = data.get("response")
         if isinstance(resp, dict):
             resp_data = resp.get("data")
@@ -86,25 +96,25 @@ def _suno_extract_audio_url(payload: dict) -> str:
                     if isinstance(item, dict):
                         for kk in ("audio_url", "audioUrl", "song_url", "songUrl", "mp3_url", "mp3", "url", "file_url", "fileUrl"):
                             vv = item.get(kk)
-                            if isinstance(vv, str) and vv.strip():
-                                return vv.strip()
-                        vv2 = _deep_pick_str(item)
+                            if isinstance(vv, str):
+                                u = _ok(vv)
+                                if u:
+                                    return u
+                        vv2 = _ok(_deep_pick_str(item))
                         if vv2:
                             return vv2
 
-        # 4) generic deep-pick from typical fields
         out = data.get("output") or data.get("outputs") or data.get("result")
-        u = _deep_pick_str(out)
+        u = _ok(_deep_pick_str(out))
         if u:
             return u
 
-        # 5) deep-pick everything in data as last resort
-        u2 = _deep_pick_str(data)
+        u2 = _ok(_deep_pick_str(data))
         if u2:
             return u2
 
     out2 = payload.get("output") or payload.get("outputs") or payload.get("result")
-    return _deep_pick_str(out2)
+    return _ok(_deep_pick_str(out2))
 
 
 @app.post("/api/suno/callback")
@@ -195,6 +205,61 @@ async def sunoapi_callback(request: Request):
                     pass
 
         return {"ok": True}
+
+
+    # ----- если callback пришёл только с taskId (без треков) — подтянем record-info -----
+    if not tracks and task_id:
+        try:
+            task_json = await sunoapi_get_task(task_id)
+            tracks = _sunoapi_extract_tracks(task_json)
+        except Exception as e:
+            tracks = []
+            try:
+                logging.warning("SUNOAPI callback: failed to fetch record-info for taskId=%s: %s", task_id, e)
+            except Exception:
+                pass
+
+        if tracks:
+            try:
+                await tg_send_message(chat_id, "✅ SunoAPI: музыка готова — отправляю треки…")
+            except Exception:
+                pass
+
+            for i, item in enumerate(tracks[:2], start=1):
+                if not isinstance(item, dict):
+                    continue
+                audio_url = (item.get("audio_url") or item.get("audioUrl") or item.get("song_url") or item.get("songUrl") or item.get("mp3") or item.get("mp3_url") or item.get("file_url") or item.get("fileUrl") or item.get("url") or "").strip()
+                if not (audio_url.startswith("http://") or audio_url.startswith("https://")):
+                    audio_url = ""
+
+                image_url = (item.get("image_url") or item.get("imageUrl") or item.get("cover") or item.get("cover_url") or item.get("image") or item.get("img") or "").strip()
+                if image_url and not (image_url.startswith("http://") or image_url.startswith("https://")):
+                    image_url = ""
+
+                title = (item.get("title") or "").strip()
+
+                caption = f"🎵 Трек #{i}" + (f" — {title}" if title else "")
+                if audio_url:
+                    try:
+                        await tg_send_audio_from_url(chat_id, audio_url, caption=caption, reply_markup=_main_menu_for(uid) if i == 1 else None)
+                    except Exception as e:
+                        try:
+                            await tg_send_message(chat_id, f"{caption}\n🎧 MP3: {audio_url}\n(не смог отправить файлом: {e})", reply_markup=_main_menu_for(uid) if i == 1 else None)
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        await tg_send_message(chat_id, f"⚠️ SunoAPI: трек #{i} без audio_url. Проверь логи.", reply_markup=_main_menu_for(uid) if i == 1 else None)
+                    except Exception:
+                        pass
+
+                if image_url:
+                    try:
+                        await tg_send_message(chat_id, f"🖼 Обложка: {image_url}")
+                    except Exception:
+                        pass
+
+            return {"ok": True}
 
     # ----- fallback: достаем хотя бы одну ссылку на MP3 -----
     audio_url = _suno_extract_audio_url(payload)
@@ -736,13 +801,61 @@ async def sunoapi_poll_task(task_id: str, *, timeout_sec: int | None = None, sle
         await asyncio.sleep(sleep_sec)
 
 def _sunoapi_extract_tracks(task_json: dict) -> list[dict]:
-    """Normalize SunoAPI task response to list of tracks with audio_url/image_url/title/duration."""
-    data = (task_json.get("data") or {})
-    resp = (data.get("response") or {})
-    resp_data = (resp.get("data") or [])
-    if isinstance(resp_data, list):
-        return [x for x in resp_data if isinstance(x, dict)]
-    return []
+    """Normalize SunoAPI response to list of track dicts (устойчивый парсер)."""
+
+    def has_audio_key(d: dict) -> bool:
+        for k in ("audio_url","audioUrl","song_url","songUrl","mp3","mp3_url","file_url","fileUrl","url"):
+            v = d.get(k)
+            if isinstance(v, str) and (v.startswith("http://") or v.startswith("https://")):
+                return True
+        return False
+
+    def pick_list(obj) -> list[dict]:
+        if isinstance(obj, list):
+            out = [x for x in obj if isinstance(x, dict)]
+            if out and any(has_audio_key(x) for x in out):
+                return out
+        return []
+
+    if not isinstance(task_json, dict):
+        return []
+
+    data = task_json.get("data")
+    if isinstance(data, dict):
+        resp = data.get("response")
+        if isinstance(resp, dict):
+            lst = pick_list(resp.get("data"))
+            if lst:
+                return lst
+
+        for key in ("data", "tracks", "results", "result", "output", "outputs"):
+            lst = pick_list(data.get(key))
+            if lst:
+                return lst
+
+    for key in ("data", "tracks", "results", "result", "output", "outputs"):
+        lst = pick_list(task_json.get(key))
+        if lst:
+            return lst
+
+    def walk(obj) -> list[dict]:
+        if isinstance(obj, dict):
+            for v in obj.values():
+                got = walk(v)
+                if got:
+                    return got
+        elif isinstance(obj, list):
+            lst = pick_list(obj)
+            if lst:
+                return lst
+            for v in obj:
+                got = walk(v)
+                if got:
+                    return got
+        return []
+
+    return walk(task_json) or []
+
 
 def _main_menu_keyboard(is_admin: bool = False) -> dict:
     rows = [
@@ -2710,8 +2823,8 @@ async def webhook(secret: str, request: Request):
                         title=title_local,
                         style=style_local,
                     )
-                    done_local = await sunoapi_poll_task(task_id_local, timeout_sec=SUNOAPI_POLL_TIMEOUT_SEC, sleep_sec=2.0)
-                    return ("sunoapi", done_local)
+                    # SunoAPI всегда дергает callback — не поллим, чтобы не было дублей и зависаний.
+                    return ("sunoapi", {"task_id": task_id_local})
 
                 primary = provider if provider in ("piapi", "sunoapi") else "piapi"
                 secondary = "sunoapi" if primary == "piapi" else "piapi"
@@ -2741,6 +2854,15 @@ async def webhook(secret: str, request: Request):
                             f"❌ Музыка не сгенерировалась (SunoAPI).\nСтатус: {status}\n{done.get('msg') or 'unknown error'}\n\n"
                             "Генерация остановлена. Нажмите «Музыка будущего», чтобы попробовать снова."
                         )
+                        _clear_music_ctx()
+                        return {"ok": True}
+
+                    # SunoAPI: мы не поллим, результат прилетит callback'ом.
+                    task_id_only = None
+                    if isinstance(done, dict):
+                        task_id_only = (done.get("task_id") or done.get("taskId") or "").strip()
+                    if task_id_only:
+                        await tg_send_message(chat_id, f"⏳ SunoAPI: задача создана (taskId={task_id_only}). Жду результат…")
                         _clear_music_ctx()
                         return {"ok": True}
 
