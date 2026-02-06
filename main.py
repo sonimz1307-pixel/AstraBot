@@ -18,6 +18,12 @@ from billing_db import ensure_user_row, get_balance, add_tokens
 
 app = FastAPI()
 
+APP_VERSION = "v5-callback-sig-logging"
+try:
+    UVICORN_LOGGER.info("BOOT: main.py %s loaded", APP_VERSION)
+except Exception:
+    pass
+
 
 # ---- logging (ensure INFO shows up in Render/Uvicorn logs) ----
 # Uvicorn config usually wires handlers for 'uvicorn.*' loggers.
@@ -159,7 +165,13 @@ async def sunoapi_callback(request: Request):
         return Response(status_code=400)
 
     sig = (qp.get("sig") or "").strip().lower()
-    if not uid or not chat_id or sig != _suno_sig(uid, chat_id):
+    expected_sig = _suno_sig(uid, chat_id) if uid and chat_id else ""
+    if not uid or not chat_id or sig != expected_sig:
+        # важно: если callback не проходит проверку, мы раньше молча возвращали 403, и ты не видел почему MP3 не прилетает
+        try:
+            UVICORN_LOGGER.warning("SUNOAPI CALLBACK REJECTED: uid=%s chat=%s sig=%s expected=%s qp=%s", uid, chat_id, sig, expected_sig, qp)
+        except Exception:
+            pass
         return Response(status_code=403)
 
     # payload может приходить несколько раз подряд — сразу делаем лог, но дальше защитимся от дублей
