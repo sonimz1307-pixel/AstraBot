@@ -434,6 +434,59 @@ async def piapi_get_task(task_id: str) -> dict:
         r.raise_for_status()
         return r.json()
 
+def _extract_music_media(item: Any) -> Dict[str, str]:
+    """Best-effort extraction of media URLs from PiAPI outputs across providers."""
+    def pick(d: Any, keys: List[str]) -> str:
+        if not isinstance(d, dict):
+            return ""
+        for k in keys:
+            v = d.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return ""
+
+    audio_keys = ["audio_url", "audioUrl", "audio", "mp3", "mp3_url", "song_url", "songUrl", "url", "track_url", "trackUrl"]
+    video_keys = ["video_url", "videoUrl", "video", "mp4", "mp4_url"]
+    image_keys = ["image_url", "imageUrl", "image", "cover_url", "coverUrl", "cover"]
+
+    if isinstance(item, str):
+        u = item.strip()
+        if u.startswith("http"):
+            return {"audio_url": u, "video_url": "", "image_url": ""}
+        return {"audio_url": "", "video_url": "", "image_url": ""}
+
+    if not isinstance(item, dict):
+        return {"audio_url": "", "video_url": "", "image_url": ""}
+
+    audio_url = pick(item, audio_keys)
+    video_url = pick(item, video_keys)
+    image_url = pick(item, image_keys)
+
+    # nested shapes
+    if not audio_url:
+        audio_url = pick(item.get("audio") if isinstance(item.get("audio"), dict) else item.get("result"), audio_keys)
+    if not audio_url:
+        audio_url = pick(item.get("output"), audio_keys)
+    if not audio_url and isinstance(item.get("clips"), list) and item["clips"]:
+        audio_url = _extract_music_media(item["clips"][0]).get("audio_url", "")
+
+    if not video_url:
+        video_url = pick(item.get("video") if isinstance(item.get("video"), dict) else item.get("result"), video_keys)
+    if not image_url:
+        image_url = pick(item.get("image") if isinstance(item.get("image"), dict) else item.get("result"), image_keys)
+
+    return {"audio_url": audio_url, "video_url": video_url, "image_url": image_url}
+
+
+async def _http_get_bytes(url: str, *, timeout_sec: int = 180) -> bytes:
+    if not url or not url.startswith("http"):
+        raise RuntimeError("Invalid URL for download")
+    async with httpx.AsyncClient(timeout=timeout_sec, follow_redirects=True) as client:
+        r = await client.get(url)
+        r.raise_for_status()
+        return r.content
+
+
 async def piapi_poll_task(task_id: str, *, timeout_sec: int = 240, sleep_sec: float = 2.0) -> dict:
     """
     Simple polling loop:
@@ -621,6 +674,47 @@ async def tg_send_photo_bytes(chat_id: int, image_bytes: bytes, caption: Optiona
         data["caption"] = caption
     async with httpx.AsyncClient(timeout=180) as client:
         await client.post(f"{TELEGRAM_API_BASE}/sendPhoto", data=data, files=files)
+
+
+async def tg_send_audio_bytes(
+    chat_id: int,
+    audio_bytes: bytes,
+    filename: str = "track.mp3",
+    caption: Optional[str] = None,
+    reply_markup: Optional[dict] = None,
+    title: Optional[str] = None,
+    performer: Optional[str] = None,
+):
+    """Send MP3 as Telegram Audio."""
+    if not TELEGRAM_BOT_TOKEN:
+        return
+    if not audio_bytes:
+        raise RuntimeError("Empty audio bytes for sendAudio")
+
+    if not filename.lower().endswith(".mp3"):
+        filename = f"{os.path.splitext(filename)[0]}.mp3"
+
+    files = {"audio": (filename, audio_bytes, "audio/mpeg")}
+    data = {"chat_id": str(chat_id)}
+    if caption:
+        data["caption"] = caption
+    if title:
+        data["title"] = title
+    if performer:
+        data["performer"] = performer
+    if reply_markup is not None:
+        data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+
+    async with httpx.AsyncClient(timeout=240) as client:
+        r = await client.post(f"{TELEGRAM_API_BASE}/sendAudio", data=data, files=files)
+
+    try:
+        j = r.json()
+        if isinstance(j, dict) and not j.get("ok", False):
+            raise RuntimeError(f"Telegram sendAudio error: {j}")
+    except Exception:
+        if r.status_code >= 400:
+            raise RuntimeError(f"Telegram sendAudio HTTP {r.status_code}: {r.text[:1200]}")
 
 
 async def tg_send_chat_action(chat_id: int, action: str = "typing"):
@@ -2287,18 +2381,40 @@ async def webhook(secret: str, request: Request):
                     return {"ok": True}
 
                 lines = ["✅ Музыка готова:"]
+                sent_any = False
+
                 for i, item in enumerate(out[:2], start=1):
-                    audio_url = item.get("audio_url") or item.get("audio") or item.get("url") or item.get("song_url") or item.get("songUrl") or ""
-                    video_url = item.get("video_url") or ""
-                    image_url = item.get("image_url") or ""
-                    lines.append(f"#{i}")
+                    media = _extract_music_media(item)
+                    audio_url = media.get("audio_url") or ""
+                    video_url = media.get("video_url") or ""
+                    image_url = media.get("image_url") or ""
+
                     if audio_url:
-                        lines.append(f"🎧 MP3: {audio_url}")
+                        try:
+                            audio_bytes = await _http_get_bytes(audio_url)
+                            await tg_send_audio_bytes(
+                                chat_id,
+                                audio_bytes,
+                                filename=f"music_{task_id}_{i}.mp3",
+                                caption=f"🎵 Трек #{i}",
+                            )
+                            sent_any = True
+                        except Exception as e:
+                            lines.append(f"#{i}")
+                            lines.append(f"🎧 MP3: {audio_url}")
+                            lines.append(f"(не удалось отправить файлом: {e})")
+                    else:
+                        lines.append(f"#{i}")
+
                     if video_url:
                         lines.append(f"🎬 MP4: {video_url}")
                     if image_url:
                         lines.append(f"🖼 Обложка: {image_url}")
-                await tg_send_message(chat_id, "\n".join(lines), reply_markup=_main_menu_for(user_id))
+
+                if not sent_any:
+                    await tg_send_message(chat_id, "\n".join(lines), reply_markup=_main_menu_for(user_id))
+                else:
+                    await tg_send_message(chat_id, "✅ Готово! Трек(и) отправлены сообщением ниже.", reply_markup=_main_menu_for(user_id))
                 _clear_music_ctx()
             except Exception as e:
                 await tg_send_message(chat_id, f"❌ Ошибка PiAPI (music): {e}\n\nГенерация остановлена. Нажмите «Музыка будущего», чтобы попробовать снова.")
