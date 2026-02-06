@@ -18,7 +18,7 @@ from billing_db import ensure_user_row, get_balance, add_tokens
 
 app = FastAPI()
 
-APP_VERSION = "v6-send-link-first-logs"
+APP_VERSION = "v7-fstring-fix"
 try:
     UVICORN_LOGGER.info("BOOT: main.py %s loaded", APP_VERSION)
 except Exception:
