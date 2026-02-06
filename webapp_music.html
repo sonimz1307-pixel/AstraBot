@@ -288,7 +288,29 @@
     .tabs{ position:relative; z-index:20; }
     #ideaBlock, #lyricsBlock, #wrapTitle, #wrapTags, .toggle, .actions, .footer-note, details{ position:relative; z-index:1; }
     .tab{ pointer-events:auto; }
-    .hidden{ display:none !important; }
+    
+.seg{
+  display:flex;
+  gap:10px;
+  margin-top:10px;
+  flex-wrap:wrap;
+}
+.segbtn{
+  flex:1 1 110px;
+  padding:12px 14px;
+  border-radius:14px;
+  border:1px solid rgba(255,255,255,.18);
+  background:rgba(255,255,255,.06);
+  color:#fff;
+  cursor:pointer;
+  font-weight:750;
+  transition:.15s;
+}
+.segbtn.active{
+  background:rgba(255,255,255,.18);
+  border-color:rgba(255,255,255,.35);
+}
+.hidden{ display:none !important; }
 
   </style>
 </head>
@@ -370,6 +392,19 @@
           <br/><b>Лучше пометки писать по-английски</b>: <code class="inline">[Verse]</code>, <code class="inline">[Chorus]</code>, <code class="inline">[Bridge]</code>.
         </div>
       </div>
+<div id="wrapProvider">
+  <label>Сервер генерации Suno</label>
+  <div class="seg" role="tablist" aria-label="Выбор сервера">
+    <button id="provSunoApi" class="segbtn" type="button" role="tab" aria-selected="true">SunoAPI</button>
+    <button id="provPiApi" class="segbtn" type="button" role="tab" aria-selected="false">PiAPI</button>
+    <button id="provAuto" class="segbtn" type="button" role="tab" aria-selected="false">Авто</button>
+  </div>
+  <div class="hint" style="margin-top:8px">
+    <b>SunoAPI</b> — основной и более стабильный для Suno. <b>PiAPI</b> — запасной. <b>Авто</b> — сначала SunoAPI, при ошибке пробует PiAPI.
+  </div>
+</div>
+
+
 
       <details id="wrapGuide">
         <summary>Как получить «вау»-результат (кратко)</summary>
@@ -506,6 +541,7 @@
     // AI selection (Suno / Udio)
     // -----------------------------
     let ai = localStorage.getItem("music_ai") || "suno"; // default suno
+    let provider = localStorage.getItem("music_provider") || "sunoapi"; // sunoapi | piapi | auto
     const aiSuno = document.getElementById('aiSuno');
     const aiUdio = document.getElementById('aiUdio');
     const aiNote = document.getElementById('aiNote');
@@ -514,9 +550,39 @@
     const wrapTags = document.getElementById('wrapTags');
     const wrapGuide = document.getElementById('wrapGuide');
 
+
+
+const wrapProvider = document.getElementById('wrapProvider');
+const provSunoApi = document.getElementById('provSunoApi');
+const provPiApi = document.getElementById('provPiApi');
+const provAuto = document.getElementById('provAuto');
+
     function forceReflow(){ document.body.offsetHeight; }
 
-    function setAI(v){
+    
+function setProvider(v){
+  provider = v;
+  localStorage.setItem("music_provider", v);
+
+  const isSunoApi = (v === "sunoapi");
+  const isPiApi = (v === "piapi");
+  const isAuto = (v === "auto");
+
+  provSunoApi.classList.toggle('active', isSunoApi);
+  provPiApi.classList.toggle('active', isPiApi);
+  provAuto.classList.toggle('active', isAuto);
+
+  provSunoApi.setAttribute('aria-selected', isSunoApi ? 'true' : 'false');
+  provPiApi.setAttribute('aria-selected', isPiApi ? 'true' : 'false');
+  provAuto.setAttribute('aria-selected', isAuto ? 'true' : 'false');
+  forceReflow();
+}
+
+provSunoApi.addEventListener('click', () => setProvider("sunoapi"));
+provPiApi.addEventListener('click', () => setProvider("piapi"));
+provAuto.addEventListener('click', () => setProvider("auto"));
+
+function setAI(v){
       ai = v;
       localStorage.setItem("music_ai", v);
 
@@ -527,6 +593,7 @@
       aiUdio.setAttribute('aria-selected', !isSuno ? 'true' : 'false');
 
       if (!isSuno){
+        wrapProvider.classList.add('hidden');
         wrapTitle.classList.add('hidden');
         wrapTags.classList.add('hidden');
         wrapGuide.classList.add('hidden');
@@ -537,6 +604,7 @@
       requestAnimationFrame(() => { try { document.body.offsetHeight; } catch(e) {} });
         aiNote.style.display = "block";
       } else {
+        wrapProvider.classList.remove('hidden');
         wrapTitle.classList.remove('hidden');
         wrapTags.classList.remove('hidden');
         wrapGuide.classList.remove('hidden');
@@ -580,6 +648,7 @@
     setAI(ai);
 
 
+    setProvider(provider);
     // -----------------------------
     // Chips -> add to tags
     // -----------------------------
@@ -653,7 +722,8 @@
         mode: mode,             // "idea" | "lyrics"
         title: title || "",
         tags: tags || "",
-        make_instrumental: !!make_instrumental
+        make_instrumental: !!make_instrumental,
+        provider: (ai === "suno" ? provider : "piapi")
       };
 
       if (mode === "idea") {
