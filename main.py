@@ -7,7 +7,6 @@ import json
 import hashlib
 import hmac
 import logging
-from sunoapi_client import SunoAPIClient, SunoAPIError
 from io import BytesIO
 from typing import Optional, Literal, Dict, Any, Tuple, List
 
@@ -18,6 +17,7 @@ from kling_flow import run_motion_control_from_bytes, run_image_to_video_from_by
 from billing_db import ensure_user_row, get_balance, add_tokens
 
 app = FastAPI()
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ---------------- SunoAPI callback (required by SunoAPI.org) ----------------
 
@@ -115,13 +115,13 @@ from fastapi.responses import HTMLResponse
 
 @app.get("/webapp/kling", response_class=HTMLResponse)
 async def webapp_kling():
-    with open("webapp_kling.html", "r", encoding="utf-8") as f:
+    with open(os.path.join(BASE_DIR, "webapp_kling.html"), "r", encoding="utf-8") as f:
         return f.read()
 
 
 @app.get("/webapp/music", response_class=HTMLResponse)
 async def webapp_music():
-    with open("webapp_music.html", "r", encoding="utf-8") as f:
+    with open(os.path.join(BASE_DIR, "webapp_music.html"), "r", encoding="utf-8") as f:
         return f.read()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -2425,6 +2425,24 @@ async def webhook(secret: str, request: Request):
             service_mode = str(payload.get("service_mode") or "public").strip()
             language = str(payload.get("language") or "").strip()
 
+            # выбор провайдера/сервера для Suno: "piapi" или "sunoapi"
+            provider_choice = str(
+                payload.get("provider")
+                or payload.get("server")
+                or payload.get("service")
+                or payload.get("api")
+                or payload.get("ai_provider")
+                or payload.get("aiProvider")
+                or provider_raw
+                or ""
+            ).lower().strip()
+            if provider_choice in ("suno-api", "suno_api", "suno api"):
+                provider_choice = "sunoapi"
+            if provider_choice not in ("piapi", "sunoapi"):
+                provider_choice = os.getenv("MUSIC_PROVIDER_DEFAULT", "piapi").lower().strip() or "piapi"
+                if provider_choice not in ("piapi", "sunoapi"):
+                    provider_choice = "piapi"
+
             # сохраняем настройки музыки
             st["music_settings"] = {
                 "mv": mv,
@@ -2437,6 +2455,7 @@ async def webhook(secret: str, request: Request):
                 "service_mode": service_mode,
                 "language": language,
                 "ai": (ai_raw or "suno"),
+                "provider": provider_choice,
             }
             st["ts"] = _now()
             _set_mode(chat_id, user_id, "suno_music")
@@ -2457,7 +2476,7 @@ async def webhook(secret: str, request: Request):
 • в режиме «Идея» — короткое описание песни (жанр/вайб/тема)
 • в режиме «Текст» — текст/лирику с пометками [Verse]/[Chorus]
 
-После этого я отправлю задачу в AI музыки (Suno/Udio) через PiAPI.""",
+После этого я отправлю задачу в AI музыки (Suno/Udio) через выбранный провайдер (PiAPI/SunoAPI).""",
                     reply_markup=_help_menu_for(user_id),
                 )
                 return {"ok": True}
