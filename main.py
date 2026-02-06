@@ -17,6 +17,15 @@ from kling_flow import run_motion_control_from_bytes, run_image_to_video_from_by
 from billing_db import ensure_user_row, get_balance, add_tokens
 
 app = FastAPI()
+
+
+# ---- logging (ensure INFO shows up in Render/Uvicorn logs) ----
+# Uvicorn config usually wires handlers for 'uvicorn.*' loggers.
+# Using uvicorn.error makes sure our logs are visible even if root logger is WARNING.
+UVICORN_LOGGER = logging.getLogger('uvicorn.error')
+if UVICORN_LOGGER.level > logging.INFO:
+    UVICORN_LOGGER.setLevel(logging.INFO)
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # предотвращаем дубли callback'ов от SunoAPI (иногда приходит несколько POST подряд)
@@ -155,10 +164,10 @@ async def sunoapi_callback(request: Request):
 
     # расширенное логирование: сырой payload + ключевые поля (нужно, чтобы видеть этап callbackType)
     try:
-        logging.info("SUNOAPI CALLBACK RAW: %s", json.dumps(payload, ensure_ascii=False)[:6000])
+        UVICORN_LOGGER.info("SUNOAPI CALLBACK RAW: %s", json.dumps(payload, ensure_ascii=False)[:6000])
     except Exception:
         try:
-            logging.info("SUNOAPI CALLBACK RAW(fallback): %s", str(payload)[:6000])
+            UVICORN_LOGGER.info("SUNOAPI CALLBACK RAW(fallback): %s", str(payload)[:6000])
         except Exception:
             pass
     
@@ -180,7 +189,7 @@ async def sunoapi_callback(request: Request):
                 first_keys = list(inner[0].keys())[:30]
                 first_audio = (inner[0].get("audio_url") or inner[0].get("audioUrl") or inner[0].get("url") or "")
     
-        logging.info(
+        UVICORN_LOGGER.info(
             "SUNOAPI CALLBACK PARSED: code=%s task_id=%s callbackType=%s inner=%s len=%s first_keys=%s first_audio=%s",
             payload.get("code"),
             (cb.get("taskId") or cb.get("task_id") or cb.get("id") or ""),
