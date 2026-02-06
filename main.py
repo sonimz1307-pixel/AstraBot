@@ -2890,9 +2890,8 @@ async def webhook(secret: str, request: Request):
 
                     out = _sunoapi_extract_tracks(done)
                     if not out:
-                        # Частый кейс SunoAPI: статус уже completed, но MP3-url появится только в callback.
-                        # Не сбрасываем контекст и не пугаем пользователя — просто ждём callbackType=complete.
-                        UVICORN_LOGGER.info("SUNOAPI POLL: completed but no tracks yet; waiting for callback")
+                        await tg_send_message(chat_id, "⏳ SunoAPI: задача завершена, но ссылки на треки ещё не пришли. Жду callback — как только будет MP3, отправлю сюда.")
+                        _clear_music_ctx()
                         return {"ok": True}
                 else:
                     data = done.get("data") or {}
