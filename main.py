@@ -18,7 +18,7 @@ from billing_db import ensure_user_row, get_balance, add_tokens
 
 app = FastAPI()
 
-APP_VERSION = "v5-callback-sig-logging"
+APP_VERSION = "v6-send-link-first-logs"
 try:
     UVICORN_LOGGER.info("BOOT: main.py %s loaded", APP_VERSION)
 except Exception:
@@ -310,21 +310,43 @@ async def sunoapi_callback(request: Request):
                 continue
             audio_url = _first_http_url(
                 item.get("audio_url"), item.get("audioUrl"), item.get("song_url"), item.get("songUrl"),
-                item.get("mp3_url"), item.get("mp3"), item.get("file_url"), item.get("fileUrl"), item.get("url")
+                item.get("mp3_url"), item.get("mp3"), item.get("file_url"), item.get("fileUrl"), item.get("url"),
+                item.get("source_audio_url"), item.get("sourceAudioUrl"), item.get("source_stream_audio_url"), item.get("sourceStreamAudioUrl"),
+                item.get("stream_audio_url"), item.get("streamAudioUrl")
             )
             image_url = (item.get("image_url") or item.get("imageUrl") or item.get("cover") or item.get("cover_url") or "").strip()
             title = (item.get("title") or "").strip()
 
             caption = f"🎵 Трек #{i}" + (f" — {title}" if title else "")
+
+            # 1) Сначала гарантированно отправляем ссылку (это всегда работает, даже если Telegram не примет файл по URL)
             if audio_url:
                 try:
-                    await tg_send_audio_from_url(chat_id, audio_url, caption=caption, reply_markup=_main_menu_for(uid) if i == 1 else None)
+                    UVICORN_LOGGER.info("SUNOAPI SEND: chat=%s track=%s url=%s", chat_id, i, audio_url)
+                except Exception:
+                    pass
+                try:
+                    await tg_send_message(chat_id, f"{caption}
+🎧 MP3: {audio_url}", reply_markup=_main_menu_for(uid) if i == 1 else None)
                 except Exception as e:
                     try:
-                        await tg_send_message(chat_id, f"{caption}\n🎧 MP3: {audio_url}\n(не смог отправить файлом: {e})", reply_markup=_main_menu_for(uid) if i == 1 else None)
+                        UVICORN_LOGGER.exception("SUNOAPI SEND_MESSAGE FAILED: chat=%s track=%s err=%s", chat_id, i, e)
+                    except Exception:
+                        pass
+
+                # 2) Затем пробуем отправить файлом (может не сработать из-за редиректов/контент-тайпа у хостинга)
+                try:
+                    await tg_send_audio_from_url(chat_id, audio_url, caption=caption, reply_markup=None)
+                except Exception as e:
+                    try:
+                        UVICORN_LOGGER.exception("SUNOAPI SEND_AUDIO FAILED: chat=%s track=%s err=%s", chat_id, i, e)
                     except Exception:
                         pass
             else:
+                try:
+                    UVICORN_LOGGER.warning("SUNOAPI: track without audio_url. keys=%s", list(item.keys())[:40])
+                except Exception:
+                    pass
                 try:
                     await tg_send_message(chat_id, f"⚠️ SunoAPI: трек #{i} без audio_url в callback. Проверь логи.", reply_markup=_main_menu_for(uid) if i == 1 else None)
                 except Exception:
