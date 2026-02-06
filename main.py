@@ -19,6 +19,10 @@ from billing_db import ensure_user_row, get_balance, add_tokens
 app = FastAPI()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# предотвращаем дубли callback'ов от SunoAPI (иногда приходит несколько POST подряд)
+_SUNOAPI_CB_DEDUP: dict[str, float] = {}
+_SUNOAPI_CB_DEDUP_TTL_SEC = 600.0
+
 # ---------------- SunoAPI callback (required by SunoAPI.org) ----------------
 
 def _deep_pick_str(val) -> str:
@@ -55,24 +59,53 @@ def _build_suno_callback_url(user_id: int, chat_id: int) -> str:
     return f"{base}/api/suno/callback?uid={int(user_id)}&chat={int(chat_id)}&sig={sig}"
 
 def _suno_extract_audio_url(payload: dict) -> str:
+    """Best-effort extraction of an audio URL from various callback payload shapes."""
     if not isinstance(payload, dict):
         return ""
-    for k in ("audio_url","audioUrl","song_url","songUrl","mp3_url","mp3","url"):
+
+    # 1) top-level keys
+    for k in ("audio_url", "audioUrl", "song_url", "songUrl", "mp3_url", "mp3", "url"):
         v = payload.get(k)
         if isinstance(v, str) and v.strip():
             return v.strip()
+
     data = payload.get("data")
     if isinstance(data, dict):
-        for k in ("audio_url","audioUrl","song_url","songUrl","mp3_url","mp3","url"):
+        # 2) data-level keys
+        for k in ("audio_url", "audioUrl", "song_url", "songUrl", "mp3_url", "mp3", "url"):
             v = data.get(k)
             if isinstance(v, str) and v.strip():
                 return v.strip()
+
+        # 3) SunoAPI.org record-info shape: data.response.data[*].audio_url
+        resp = data.get("response")
+        if isinstance(resp, dict):
+            resp_data = resp.get("data")
+            if isinstance(resp_data, list):
+                for item in resp_data:
+                    if isinstance(item, dict):
+                        for kk in ("audio_url", "audioUrl", "song_url", "songUrl", "mp3_url", "mp3", "url", "file_url", "fileUrl"):
+                            vv = item.get(kk)
+                            if isinstance(vv, str) and vv.strip():
+                                return vv.strip()
+                        vv2 = _deep_pick_str(item)
+                        if vv2:
+                            return vv2
+
+        # 4) generic deep-pick from typical fields
         out = data.get("output") or data.get("outputs") or data.get("result")
         u = _deep_pick_str(out)
         if u:
             return u
+
+        # 5) deep-pick everything in data as last resort
+        u2 = _deep_pick_str(data)
+        if u2:
+            return u2
+
     out2 = payload.get("output") or payload.get("outputs") or payload.get("result")
     return _deep_pick_str(out2)
+
 
 @app.post("/api/suno/callback")
 async def sunoapi_callback(request: Request):
@@ -87,29 +120,110 @@ async def sunoapi_callback(request: Request):
     if not uid or not chat_id or sig != _suno_sig(uid, chat_id):
         return Response(status_code=403)
 
-    payload = await request.json()
+    # payload может приходить несколько раз подряд — сразу делаем лог, но дальше защитимся от дублей
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+
     try:
         logging.info("SUNOAPI CALLBACK: %s", str(payload)[:3000])
     except Exception:
         pass
 
+    # ----- дедупликация -----
+    now_ts = time.time()
+    # чистим старые ключи
+    try:
+        for k, ts in list(_SUNOAPI_CB_DEDUP.items()):
+            if now_ts - ts > _SUNOAPI_CB_DEDUP_TTL_SEC:
+                _SUNOAPI_CB_DEDUP.pop(k, None)
+    except Exception:
+        pass
+
+    data = payload.get("data") if isinstance(payload, dict) else None
+    task_id = ""
+    if isinstance(data, dict):
+        task_id = (data.get("taskId") or data.get("task_id") or data.get("id") or "").strip()
+    dedup_key = task_id or _suno_extract_audio_url(payload)
+    if dedup_key:
+        ts0 = _SUNOAPI_CB_DEDUP.get(dedup_key)
+        if ts0 and (now_ts - ts0) < _SUNOAPI_CB_DEDUP_TTL_SEC:
+            return {"ok": True}
+        _SUNOAPI_CB_DEDUP[dedup_key] = now_ts
+
+    # ----- пытаемся достать треки из record-info формы (обычно именно так SunoAPI присылает callback) -----
+    tracks = []
+    try:
+        tracks = _sunoapi_extract_tracks(payload)
+    except Exception:
+        tracks = []
+
+    if tracks:
+        try:
+            await tg_send_message(chat_id, "✅ SunoAPI: музыка готова — отправляю треки…")
+        except Exception:
+            pass
+
+        # отправляем максимум 2 трека
+        for i, item in enumerate(tracks[:2], start=1):
+            if not isinstance(item, dict):
+                continue
+            audio_url = (item.get("audio_url") or item.get("audioUrl") or item.get("song_url") or item.get("songUrl") or item.get("mp3") or item.get("mp3_url") or "").strip()
+            image_url = (item.get("image_url") or item.get("imageUrl") or item.get("cover") or item.get("cover_url") or "").strip()
+            title = (item.get("title") or "").strip()
+
+            caption = f"🎵 Трек #{i}" + (f" — {title}" if title else "")
+            if audio_url:
+                try:
+                    await tg_send_audio_from_url(chat_id, audio_url, caption=caption, reply_markup=_main_menu_for(uid) if i == 1 else None)
+                except Exception as e:
+                    try:
+                        await tg_send_message(chat_id, f"{caption}\n🎧 MP3: {audio_url}\n(не смог отправить файлом: {e})", reply_markup=_main_menu_for(uid) if i == 1 else None)
+                    except Exception:
+                        pass
+            else:
+                try:
+                    await tg_send_message(chat_id, f"⚠️ SunoAPI: трек #{i} без audio_url в callback. Проверь логи.", reply_markup=_main_menu_for(uid) if i == 1 else None)
+                except Exception:
+                    pass
+
+            if image_url:
+                try:
+                    await tg_send_message(chat_id, f"🖼 Обложка: {image_url}")
+                except Exception:
+                    pass
+
+        return {"ok": True}
+
+    # ----- fallback: достаем хотя бы одну ссылку на MP3 -----
     audio_url = _suno_extract_audio_url(payload)
     if audio_url:
         try:
             await tg_send_message(chat_id, "✅ SunoAPI: трек готов, отправляю…")
-            await tg_send_audio_from_url(chat_id, audio_url, caption="🎵 Трек (SunoAPI)")
+            await tg_send_audio_from_url(chat_id, audio_url, caption="🎵 Трек (SunoAPI)", reply_markup=_main_menu_for(uid))
         except Exception as e:
             try:
-                await tg_send_message(chat_id, f"✅ SunoAPI: трек готов.\n🎧 MP3: {audio_url}\n(не смог отправить файлом: {e})")
+                await tg_send_message(chat_id, f"✅ SunoAPI: трек готов.\n🎧 MP3: {audio_url}\n(не смог отправить файлом: {e})", reply_markup=_main_menu_for(uid))
             except Exception:
                 pass
     else:
         try:
-            await tg_send_message(chat_id, "✅ SunoAPI: задача завершена, но ссылка на MP3 не найдена в callback. Проверь логи.")
+            await tg_send_message(chat_id, "✅ SunoAPI: callback пришёл, но ссылку на MP3/трек не удалось извлечь. Проверь логи callback.", reply_markup=_main_menu_for(uid))
         except Exception:
             pass
 
     return {"ok": True}
+
+
+# --- basic health endpoints (reduce noisy 404 in logs) ---
+@app.get("/")
+async def root_ok():
+    return {"ok": True}
+
+@app.get("/favicon.ico")
+async def favicon():
+    return Response(status_code=204)
 
 from fastapi.responses import HTMLResponse
 
