@@ -18,7 +18,7 @@ from billing_db import ensure_user_row, get_balance, add_tokens
 
 app = FastAPI()
 
-APP_VERSION = "v6-suno-tracks-extract-fix"
+APP_VERSION = "v7-suno-callback-dedup-fix"
 try:
     UVICORN_LOGGER.info("BOOT: main.py %s loaded", APP_VERSION)
 except Exception:
@@ -233,6 +233,11 @@ async def sunoapi_callback(request: Request):
         pass
 
     # ----- дедупликация -----
+    # ВАЖНО: SunoAPI может присылать несколько callback'ов с одним и тем же task_id:
+    #   1) callbackType=text (без MP3)
+    #   2) callbackType=complete (иногда тоже без MP3)
+    #   3) следующий complete уже с audio_url
+    # Поэтому НЕЛЬЗЯ дедупить просто по task_id — иначе мы «съедим» финальный callback с MP3.
     now_ts = time.time()
     # чистим старые ключи
     try:
@@ -242,18 +247,8 @@ async def sunoapi_callback(request: Request):
     except Exception:
         pass
 
-    data = payload.get("data") if isinstance(payload, dict) else None
-    task_id = ""
-    if isinstance(data, dict):
-        task_id = (data.get("taskId") or data.get("task_id") or data.get("id") or "").strip()
-    dedup_key = task_id or _suno_extract_audio_url(payload)
-    if dedup_key:
-        ts0 = _SUNOAPI_CB_DEDUP.get(dedup_key)
-        if ts0 and (now_ts - ts0) < _SUNOAPI_CB_DEDUP_TTL_SEC:
-            return {"ok": True}
-        _SUNOAPI_CB_DEDUP[dedup_key] = now_ts
-
-    # ----- определяем стадию callback (callbackType) -----
+    # task_id будет разобран ниже (после определения callbackType и списка треков)
+# ----- определяем стадию callback (callbackType) -----
     cb = payload.get("data") if isinstance(payload, dict) else {}
     cb_type = ""
     task_id = ""
@@ -318,7 +313,37 @@ async def sunoapi_callback(request: Request):
                     await tg_send_message(chat_id, "⏳ SunoAPI: генерация в процессе. Жду финальный callback с MP3…")
                 except Exception:
                     pass
+
         return {"ok": True}
+
+    # ----- дедупликация отправки MP3 -----
+    # Дедупаем ТОЛЬКО по фактическим audio_url (а не по task_id),
+    # чтобы не «съедать» поздний callback, где MP3 появляется после первого complete.
+    audio_fps: list[str] = []
+    try:
+        for it in (tracks[:2] if isinstance(tracks, list) else []):
+            if isinstance(it, dict):
+                u = _first_http_url(
+                    it.get("audio_url"), it.get("audioUrl"),
+                    it.get("stream_audio_url"), it.get("streamAudioUrl"),
+                    it.get("source_audio_url"), it.get("sourceAudioUrl"),
+                    it.get("source_stream_audio_url"), it.get("sourceStreamAudioUrl"),
+                    it.get("song_url"), it.get("songUrl"),
+                    it.get("mp3_url"), it.get("mp3"),
+                    it.get("file_url"), it.get("fileUrl"),
+                    it.get("url"),
+                )
+                if u:
+                    audio_fps.append(u)
+    except Exception:
+        audio_fps = []
+
+    if task_id and audio_fps:
+        dedup_key2 = f"{task_id}:" + "|".join(audio_fps)
+        ts0 = _SUNOAPI_CB_DEDUP.get(dedup_key2)
+        if ts0 and (now_ts - ts0) < _SUNOAPI_CB_DEDUP_TTL_SEC:
+            return {"ok": True}
+        _SUNOAPI_CB_DEDUP[dedup_key2] = now_ts
 
 
     if tracks:
