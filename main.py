@@ -688,7 +688,7 @@ async def _piapi_resolve_and_download(file_ref: str) -> tuple[Optional[bytes], O
         except Exception:
             return None, ref, None
 
-    headers = {"X-API-Key": PIAPI_API_KEY} if PIAPI_API_KEY else {}
+    headers = {"x-api-key": PIAPI_API_KEY, "X-API-Key": PIAPI_API_KEY} if PIAPI_API_KEY else {}
     candidates = [
         f"{PIAPI_BASE_URL}/api/v1/file/{ref}",
         f"{PIAPI_BASE_URL}/api/v1/files/{ref}",
@@ -787,6 +787,8 @@ async def tg_send_audio_from_url(
 
     except Exception:
         await tg_send_message(chat_id, f"🎧 MP3: {url}", reply_markup=reply_markup)
+
+
 
 
 async def tg_send_chat_action(chat_id: int, action: str = "typing"):
