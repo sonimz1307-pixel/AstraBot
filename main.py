@@ -18,7 +18,7 @@ from billing_db import ensure_user_row, get_balance, add_tokens
 
 app = FastAPI()
 
-APP_VERSION = "v7-fstring-fix"
+APP_VERSION = "v5-callback-sig-logging"
 try:
     UVICORN_LOGGER.info("BOOT: main.py %s loaded", APP_VERSION)
 except Exception:
@@ -57,7 +57,7 @@ def _deep_pick_str(val) -> str:
             if u:
                 return u
     if isinstance(val, dict):
-        for k in ("url","audio_url","audioUrl","song_url","songUrl","mp3","mp3_url","file","file_url","fileUrl"):
+        for k in ("url","audio_url","audioUrl","source_audio_url","sourceAudioUrl","source_stream_audio_url","sourceStreamAudioUrl","stream_audio_url","streamAudioUrl","song_url","songUrl","mp3","mp3_url","file","file_url","fileUrl"):
             v = val.get(k)
             if isinstance(v, str) and v.strip():
                 return v.strip()
@@ -108,7 +108,7 @@ def _suno_extract_audio_url(payload: dict) -> str:
         return ""
 
     # 1) top-level keys
-    for k in ("audio_url", "audioUrl", "song_url", "songUrl", "mp3_url", "mp3", "file_url", "fileUrl", "url"):
+    for k in ("audio_url", "audioUrl", "source_audio_url", "sourceAudioUrl", "source_stream_audio_url", "sourceStreamAudioUrl", "stream_audio_url", "streamAudioUrl", "song_url", "songUrl", "mp3_url", "mp3", "file_url", "fileUrl", "url"):
         u = pick(payload.get(k))
         if u:
             return u
@@ -116,7 +116,7 @@ def _suno_extract_audio_url(payload: dict) -> str:
     data = payload.get("data")
     if isinstance(data, dict):
         # 2) data-level keys
-        for k in ("audio_url", "audioUrl", "song_url", "songUrl", "mp3_url", "mp3", "file_url", "fileUrl", "url"):
+        for k in ("audio_url", "audioUrl", "source_audio_url", "sourceAudioUrl", "source_stream_audio_url", "sourceStreamAudioUrl", "stream_audio_url", "streamAudioUrl", "song_url", "songUrl", "mp3_url", "mp3", "file_url", "fileUrl", "url"):
             u = pick(data.get(k))
             if u:
                 return u
@@ -309,44 +309,28 @@ async def sunoapi_callback(request: Request):
             if not isinstance(item, dict):
                 continue
             audio_url = _first_http_url(
-                item.get("audio_url"), item.get("audioUrl"), item.get("song_url"), item.get("songUrl"),
-                item.get("mp3_url"), item.get("mp3"), item.get("file_url"), item.get("fileUrl"), item.get("url"),
-                item.get("source_audio_url"), item.get("sourceAudioUrl"), item.get("source_stream_audio_url"), item.get("sourceStreamAudioUrl"),
-                item.get("stream_audio_url"), item.get("streamAudioUrl")
+                item.get("audio_url"), item.get("audioUrl"),
+                item.get("source_audio_url"), item.get("sourceAudioUrl"),
+                item.get("source_stream_audio_url"), item.get("sourceStreamAudioUrl"),
+                item.get("stream_audio_url"), item.get("streamAudioUrl"),
+                item.get("song_url"), item.get("songUrl"),
+                item.get("mp3_url"), item.get("mp3"),
+                item.get("file_url"), item.get("fileUrl"),
+                item.get("url")
             )
             image_url = (item.get("image_url") or item.get("imageUrl") or item.get("cover") or item.get("cover_url") or "").strip()
             title = (item.get("title") or "").strip()
 
             caption = f"🎵 Трек #{i}" + (f" — {title}" if title else "")
-
-            # 1) Сначала гарантированно отправляем ссылку (это всегда работает, даже если Telegram не примет файл по URL)
             if audio_url:
                 try:
-                    UVICORN_LOGGER.info("SUNOAPI SEND: chat=%s track=%s url=%s", chat_id, i, audio_url)
-                except Exception:
-                    pass
-                try:
-                    await tg_send_message(chat_id, f"{caption}
-🎧 MP3: {audio_url}", reply_markup=_main_menu_for(uid) if i == 1 else None)
+                    await tg_send_audio_from_url(chat_id, audio_url, caption=caption, reply_markup=_main_menu_for(uid) if i == 1 else None)
                 except Exception as e:
                     try:
-                        UVICORN_LOGGER.exception("SUNOAPI SEND_MESSAGE FAILED: chat=%s track=%s err=%s", chat_id, i, e)
-                    except Exception:
-                        pass
-
-                # 2) Затем пробуем отправить файлом (может не сработать из-за редиректов/контент-тайпа у хостинга)
-                try:
-                    await tg_send_audio_from_url(chat_id, audio_url, caption=caption, reply_markup=None)
-                except Exception as e:
-                    try:
-                        UVICORN_LOGGER.exception("SUNOAPI SEND_AUDIO FAILED: chat=%s track=%s err=%s", chat_id, i, e)
+                        await tg_send_message(chat_id, f"{caption}\n🎧 MP3: {audio_url}\n(не смог отправить файлом: {e})", reply_markup=_main_menu_for(uid) if i == 1 else None)
                     except Exception:
                         pass
             else:
-                try:
-                    UVICORN_LOGGER.warning("SUNOAPI: track without audio_url. keys=%s", list(item.keys())[:40])
-                except Exception:
-                    pass
                 try:
                     await tg_send_message(chat_id, f"⚠️ SunoAPI: трек #{i} без audio_url в callback. Проверь логи.", reply_markup=_main_menu_for(uid) if i == 1 else None)
                 except Exception:
@@ -453,7 +437,7 @@ def _sunoapi_extract_tracks(payload: dict) -> List[dict]:
                 return [x for x in inner2 if isinstance(x, dict)]
 
     # 3) fallback: scan payload for first list of dicts containing audio_url-like keys
-    AUDIO_KEYS = ("audio_url","audioUrl","stream_audio_url","streamAudioUrl","source_audio_url","sourceAudioUrl","mp3_url","mp3","url","file_url","fileUrl")
+    AUDIO_KEYS = ("audio_url","audioUrl","stream_audio_url","streamAudioUrl","source_audio_url","sourceAudioUrl","source_stream_audio_url","sourceStreamAudioUrl","mp3_url","mp3","url","file_url","fileUrl")
 
     def _scan(obj):
         if isinstance(obj, dict):
@@ -1202,7 +1186,11 @@ async def tg_send_audio_from_url(
         except Exception:
             # иногда Telegram может отвергнуть как audio — отправим как документ
             await tg_send_document_bytes(chat_id, content, filename="track.mp3", mime="audio/mpeg", caption=caption, reply_markup=reply_markup)
-    except Exception:
+    except Exception as e:
+        try:
+            UVICORN_LOGGER.exception("tg_send_audio_from_url failed: %s", e)
+        except Exception:
+            pass
         await tg_send_message(chat_id, f"🎧 MP3: {url}", reply_markup=reply_markup)
 
 
