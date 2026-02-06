@@ -665,24 +665,126 @@ async def tg_send_document_bytes(
         await client.post(f"{TELEGRAM_API_BASE}/sendDocument", data=data, files=files)
 
 
+def _is_http_url(s: str) -> bool:
+    s = (s or "").strip().lower()
+    return s.startswith("http://") or s.startswith("https://")
+
+
+async def _piapi_resolve_and_download(file_ref: str) -> tuple[Optional[bytes], Optional[str], Optional[str]]:
+    """
+    PiAPI иногда возвращает не публичный URL, а file_id (например: '1dafc...').
+    Пробуем несколько стандартных эндпоинтов PiAPI и/или вытащить URL из JSON.
+    Возвращает (bytes, resolved_url, content_type).
+    """
+    ref = (file_ref or "").strip()
+    if not ref:
+        return None, None, None
+
+    # Уже ссылка — просто скачиваем
+    if _is_http_url(ref):
+        try:
+            b = await http_download_bytes(ref, timeout=180)
+            return b, ref, "audio/mpeg"
+        except Exception:
+            return None, ref, None
+
+    headers = {"X-API-Key": PIAPI_API_KEY} if PIAPI_API_KEY else {}
+    candidates = [
+        f"{PIAPI_BASE_URL}/api/v1/file/{ref}",
+        f"{PIAPI_BASE_URL}/api/v1/files/{ref}",
+        f"{PIAPI_BASE_URL}/api/v1/file/{ref}/download",
+        f"{PIAPI_BASE_URL}/api/v1/files/{ref}/download",
+    ]
+
+    async with httpx.AsyncClient(timeout=180) as client:
+        for u in candidates:
+            try:
+                r = await client.get(u, headers=headers)
+            except Exception:
+                continue
+
+            # 200 + бинарник
+            if r.status_code == 200 and r.content:
+                ct = (r.headers.get("content-type") or "").lower()
+                # если вдруг прилетел JSON с ссылкой — распарсим
+                if "application/json" in ct:
+                    try:
+                        j = r.json()
+                        # варианты расположения url
+                        for k in ("url", "audio_url", "audioUrl", "download_url", "downloadUrl"):
+                            v = j.get(k) if isinstance(j, dict) else None
+                            if isinstance(v, str) and v.strip():
+                                try:
+                                    b = await http_download_bytes(v.strip(), timeout=180)
+                                    return b, v.strip(), "audio/mpeg"
+                                except Exception:
+                                    return None, v.strip(), None
+                        data = j.get("data") if isinstance(j, dict) else None
+                        if isinstance(data, dict):
+                            for k in ("url", "audio_url", "download_url"):
+                                v = data.get(k)
+                                if isinstance(v, str) and v.strip():
+                                    try:
+                                        b = await http_download_bytes(v.strip(), timeout=180)
+                                        return b, v.strip(), "audio/mpeg"
+                                    except Exception:
+                                        return None, v.strip(), None
+                    except Exception:
+                        pass
+
+                # иначе считаем, что это файл
+                return r.content, u, (r.headers.get("content-type") or "application/octet-stream")
+
+            # иногда PiAPI отдаёт редирект на CDN
+            if r.status_code in (301, 302, 303, 307, 308):
+                loc = r.headers.get("location")
+                if loc and _is_http_url(loc):
+                    try:
+                        b = await http_download_bytes(loc, timeout=180)
+                        return b, loc, "audio/mpeg"
+                    except Exception:
+                        return None, loc, None
+
+    return None, None, None
+
+
 async def tg_send_audio_from_url(
     chat_id: int,
     url: str,
     caption: Optional[str] = None,
     reply_markup: Optional[dict] = None,
 ):
-    """Скачивает MP3 по ссылке и отправляет файлом. Если слишком большой — шлёт ссылку."""
+    """
+    Отправляет MP3 как audio-сообщение (плеер).
+    Поддерживает:
+      - прямой URL (http/https)
+      - PiAPI file_id (когда вместо URL приходит строка-идентификатор)
+    Если файл слишком большой или не удаётся скачать — отправляем кликабельную ссылку/идентификатор.
+    """
     try:
-        content = await http_download_bytes(url, timeout=180)
-        # лимит Bot API на загрузку файлов обычно 50MB; оставим запас
-        if len(content) > 48 * 1024 * 1024:
-            await tg_send_message(chat_id, f"🎧 MP3: {url}", reply_markup=reply_markup)
+        content, resolved_url, ct = await _piapi_resolve_and_download(url)
+        if not content:
+            # не удалось скачать — покажем то, что есть
+            if _is_http_url(resolved_url or url):
+                await tg_send_message(chat_id, f"🎧 MP3: {resolved_url or url}", reply_markup=reply_markup)
+            else:
+                await tg_send_message(chat_id, f"🎧 MP3 file_id: {url}", reply_markup=reply_markup)
             return
+
+        # лимит Bot API на загрузку файлов (обычно 50MB); оставим запас
+        if len(content) > 48 * 1024 * 1024:
+            if resolved_url and _is_http_url(resolved_url):
+                await tg_send_message(chat_id, f"🎧 MP3: {resolved_url}", reply_markup=reply_markup)
+            else:
+                await tg_send_message(chat_id, f"🎧 MP3 file_id: {url}", reply_markup=reply_markup)
+            return
+
         try:
             await tg_send_audio_bytes(chat_id, content, filename="track.mp3", caption=caption, reply_markup=reply_markup)
         except Exception:
-            # иногда Telegram может отвергнуть как audio — отправим как документ
-            await tg_send_document_bytes(chat_id, content, filename="track.mp3", mime="audio/mpeg", caption=caption, reply_markup=reply_markup)
+            # если Telegram отверг как audio — отправим как document
+            await tg_send_document_bytes(chat_id, content, filename="track.mp3", mime=(ct or "audio/mpeg"), caption=caption, reply_markup=reply_markup)
+
     except Exception:
         await tg_send_message(chat_id, f"🎧 MP3: {url}", reply_markup=reply_markup)
 
