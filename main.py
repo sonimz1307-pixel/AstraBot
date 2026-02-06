@@ -451,6 +451,81 @@ async def piapi_poll_task(task_id: str, *, timeout_sec: int = 240, sleep_sec: fl
         if time.time() - t0 > timeout_sec:
             raise TimeoutError(f"PiAPI task timeout after {timeout_sec}s (task_id={task_id}, status={status})")
         await asyncio.sleep(sleep_sec)
+
+# ---------------- SunoAPI.org (alternative Suno aggregator) ----------------
+SUNOAPI_API_KEY = os.getenv("SUNOAPI_API_KEY", "").strip()
+SUNOAPI_BASE_URL = os.getenv("SUNOAPI_BASE_URL", "https://api.sunoapi.org/api/v1").rstrip("/")
+SUNOAPI_CALLBACK_URL = os.getenv("SUNOAPI_CALLBACK_URL", "").strip()  # optional; if empty we'll just poll
+SUNOAPI_POLL_TIMEOUT_SEC = int(os.getenv("SUNOAPI_POLL_TIMEOUT_SEC", "600"))
+
+async def sunoapi_generate_task(*, prompt: str, custom_mode: bool, instrumental: bool, model: str,
+                               title: str = "", style: str = "") -> str:
+    """Create generation task on SunoAPI.org and return taskId."""
+    if not SUNOAPI_API_KEY:
+        raise RuntimeError("SUNOAPI_API_KEY is empty. Set it in Render env vars.")
+    url = f"{SUNOAPI_BASE_URL}/generate"
+    payload = {
+        "prompt": prompt,
+        "customMode": bool(custom_mode),
+        "instrumental": bool(instrumental),
+        "model": model,
+    }
+    # In customMode, docs require title+style; we pass if provided
+    if title:
+        payload["title"] = title
+    if style:
+        payload["style"] = style
+    if SUNOAPI_CALLBACK_URL:
+        payload["callBackUrl"] = SUNOAPI_CALLBACK_URL
+
+    headers = {"Authorization": f"Bearer {SUNOAPI_API_KEY}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(url, headers=headers, json=payload)
+        r.raise_for_status()
+        js = r.json()
+    if js.get("code") != 200:
+        raise RuntimeError(f"SunoAPI generate failed: {js}")
+    task_id = (((js.get("data") or {}) .get("taskId")) or "").strip()
+    if not task_id:
+        raise RuntimeError(f"SunoAPI did not return taskId: {js}")
+    return task_id
+
+async def sunoapi_get_task(task_id: str) -> dict:
+    if not SUNOAPI_API_KEY:
+        raise RuntimeError("SUNOAPI_API_KEY is empty. Set it in Render env vars.")
+    url = f"{SUNOAPI_BASE_URL}/generate/record-info"
+    headers = {"Authorization": f"Bearer {SUNOAPI_API_KEY}"}
+    params = {"taskId": task_id}
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.get(url, headers=headers, params=params)
+        r.raise_for_status()
+        return r.json()
+
+async def sunoapi_poll_task(task_id: str, *, timeout_sec: int | None = None, sleep_sec: float = 2.0) -> dict:
+    """Poll SunoAPI record-info until SUCCESS/FAILED."""
+    if timeout_sec is None:
+        timeout_sec = SUNOAPI_POLL_TIMEOUT_SEC
+    t0 = time.time()
+    last = None
+    while True:
+        last = await sunoapi_get_task(task_id)
+        data = last.get("data") or {}
+        status = str(data.get("status") or "").upper().strip()
+        if status in ("SUCCESS", "FAILED", "ERROR"):
+            return last
+        if time.time() - t0 > timeout_sec:
+            raise TimeoutError(f"SunoAPI task timeout after {timeout_sec}s (taskId={task_id}, status={status})")
+        await asyncio.sleep(sleep_sec)
+
+def _sunoapi_extract_tracks(task_json: dict) -> list[dict]:
+    """Normalize SunoAPI task response to list of tracks with audio_url/image_url/title/duration."""
+    data = (task_json.get("data") or {})
+    resp = (data.get("response") or {})
+    resp_data = (resp.get("data") or [])
+    if isinstance(resp_data, list):
+        return [x for x in resp_data if isinstance(x, dict)]
+    return []
+
 def _main_menu_keyboard(is_admin: bool = False) -> dict:
     rows = [
         [{"text": "ИИ (чат)"}, {"text": "Фото будущего"}],
@@ -1972,6 +2047,27 @@ def health():
     return {"status": "ok"}
 
 
+
+@app.post("/sunoapi/callback")
+async def sunoapi_callback(req: Request):
+    """Optional callback endpoint for SunoAPI.org.
+    If you set SUNOAPI_CALLBACK_URL to point here, SunoAPI will POST results.
+    We keep this endpoint lightweight; the bot currently uses polling by default.
+    """
+    try:
+        payload = await req.json()
+    except Exception:
+        payload = {}
+    # For safety, you can protect it with a secret query param if you want.
+    # Example: https://your-server/sunoapi/callback?secret=...
+    secret = (req.query_params.get("secret") or "").strip()
+    expected = os.getenv("SUNOAPI_CALLBACK_SECRET", "").strip()
+    if expected and secret != expected:
+        return Response("forbidden", status_code=403)
+    print("SunoAPI callback received:", payload if isinstance(payload, dict) else str(type(payload)))
+    return {"ok": True}
+
+
 @app.post("/webhook/{secret}")
 async def webhook(secret: str, request: Request):
     if secret != WEBHOOK_SECRET:
@@ -2331,29 +2427,107 @@ async def webhook(secret: str, request: Request):
 
             await tg_send_message(chat_id, "⏳ Запускаю генерацию музыки…")
             try:
-                created = await piapi_create_task(payload_api)
-                task_id = ((created.get("data") or {}).get("task_id")) or ""
-                if not task_id:
-                    raise RuntimeError(f"PiAPI did not return task_id: {created}")
+                # provider selection:
+                # - "piapi" (default): current path
+                # - "sunoapi": alternative Suno aggregator (docs.sunoapi.org)
+                provider = str(settings.get("provider") or settings.get("api") or settings.get("ai_provider") or settings.get("aiProvider") or "").lower().strip()
+                if not provider:
+                    provider = os.getenv("MUSIC_PROVIDER_DEFAULT", "piapi").lower().strip()
 
-                done = await piapi_poll_task(task_id, timeout_sec=300, sleep_sec=2.0)
-                data = done.get("data") or {}
-                status = (data.get("status") or "")
-                if str(status).lower() != "completed":
-                    err = (data.get("error") or {}).get("message") or "unknown error"
-                    await tg_send_message(chat_id, f"❌ Музыка не сгенерировалась.\nСтатус: {status}\n{err}\n\nГенерация остановлена. Нажмите «Музыка будущего», чтобы попробовать снова.")
-                    _clear_music_ctx()
-                    return {"ok": True}
+                # Udio is only available through PiAPI in this build
+                if ai_choice == "udio":
+                    provider = "piapi"
 
-                out = data.get("output") or []
-                if isinstance(out, dict):
-                    out = [out]
-                if not out:
-                    await tg_send_message(chat_id, "✅ Готово, но PiAPI не вернул output. Я сбросил режим, попробуйте снова через «Музыка будущего».")
-                    _clear_music_ctx()
-                    return {"ok": True}
+                async def _run_piapi():
+                    created_local = await piapi_create_task(payload_api)
+                    task_id_local = ((created_local.get("data") or {}).get("task_id")) or ""
+                    if not task_id_local:
+                        raise RuntimeError(f"PiAPI did not return task_id: {created_local}")
+                    done_local = await piapi_poll_task(task_id_local, timeout_sec=300, sleep_sec=2.0)
+                    return ("piapi", done_local)
 
-                                # Отправка результата: стараемся отправить MP3 файлом (плеер), а не только ссылкой.
+                async def _run_sunoapi():
+                    # Map our settings -> SunoAPI.org request
+                    prompt_text = (settings.get("gpt_description_prompt") or "").strip() if settings.get("music_mode") == "prompt" else (settings.get("prompt") or "").strip()
+                    if not prompt_text:
+                        prompt_text = "A modern catchy song with clear structure and strong hook"
+                    mv_local = str(settings.get("mv") or "").lower().strip()
+                    model_enum = "V4_5ALL"
+                    if "v5" in mv_local:
+                        model_enum = "V5"
+                    elif "v4_5" in mv_local or "v4.5" in mv_local or "v4-5" in mv_local:
+                        model_enum = "V4_5ALL"
+                    elif "v4" in mv_local:
+                        model_enum = "V4"
+                    custom_mode = bool(settings.get("music_mode") != "prompt")
+                    instrumental = bool(settings.get("make_instrumental"))
+                    title_local = (settings.get("title") or "").strip()
+                    style_local = (settings.get("tags") or "").strip()
+                    task_id_local = await sunoapi_generate_task(
+                        prompt=prompt_text,
+                        custom_mode=custom_mode,
+                        instrumental=instrumental,
+                        model=model_enum,
+                        title=title_local,
+                        style=style_local,
+                    )
+                    done_local = await sunoapi_poll_task(task_id_local, timeout_sec=SUNOAPI_POLL_TIMEOUT_SEC, sleep_sec=2.0)
+                    return ("sunoapi", done_local)
+
+                primary = provider if provider in ("piapi", "sunoapi") else "piapi"
+                secondary = "sunoapi" if primary == "piapi" else "piapi"
+
+                try:
+                    if primary == "sunoapi":
+                        source, done = await _run_sunoapi()
+                    else:
+                        source, done = await _run_piapi()
+                except Exception as e_primary:
+                    can_fallback = (secondary == "sunoapi" and bool(SUNOAPI_API_KEY)) or (secondary == "piapi" and bool(PIAPI_API_KEY))
+                    if not can_fallback:
+                        raise
+                    await tg_send_message(chat_id, f"⚠️ Основной провайдер ({primary}) упал: {e_primary}\nПробую запасной ({secondary})…")
+                    if secondary == "sunoapi":
+                        source, done = await _run_sunoapi()
+                    else:
+                        source, done = await _run_piapi()
+
+# Normalize result for both providers
+                if source == "sunoapi":
+                    data = done.get("data") or {}
+                    status = str(data.get("status") or "").upper().strip()
+                    if status not in ("SUCCESS",):
+                        await tg_send_message(
+                            chat_id,
+                            f"❌ Музыка не сгенерировалась (SunoAPI).\nСтатус: {status}\n{done.get('msg') or 'unknown error'}\n\n"
+                            "Генерация остановлена. Нажмите «Музыка будущего», чтобы попробовать снова."
+                        )
+                        _clear_music_ctx()
+                        return {"ok": True}
+
+                    out = _sunoapi_extract_tracks(done)
+                    if not out:
+                        await tg_send_message(chat_id, "✅ Готово, но SunoAPI не вернул треки. Я сбросил режим, попробуйте снова через «Музыка будущего».")
+                        _clear_music_ctx()
+                        return {"ok": True}
+                else:
+                    data = done.get("data") or {}
+                    status = (data.get("status") or "")
+                    if str(status).lower() != "completed":
+                        err = (data.get("error") or {}).get("message") or "unknown error"
+                        await tg_send_message(chat_id, f"❌ Музыка не сгенерировалась.\nСтатус: {status}\n{err}\n\nГенерация остановлена. Нажмите «Музыка будущего», чтобы попробовать снова.")
+                        _clear_music_ctx()
+                        return {"ok": True}
+
+                    out = data.get("output") or []
+                    if isinstance(out, dict):
+                        out = [out]
+                    if not out:
+                        await tg_send_message(chat_id, "✅ Готово, но PiAPI не вернул output. Я сбросил режим, попробуйте снова через «Музыка будущего».")
+                        _clear_music_ctx()
+                        return {"ok": True}
+
+                # Отправка результата: стараемся отправить MP3 файлом (плеер), а не только ссылкой.
                 def _pick_first_url(val) -> str:
                     if not val:
                         return ""
@@ -2632,25 +2806,85 @@ async def webhook(secret: str, request: Request):
 
         await tg_send_message(chat_id, "⏳ Запускаю генерацию музыки…")
         try:
-            created = await piapi_create_task(payload_api)
-            task_id = ((created.get("data") or {}).get("task_id")) or ""
-            if not task_id:
-                raise RuntimeError(f"PiAPI did not return task_id: {created}")
+            provider = str(settings.get("provider") or settings.get("api") or settings.get("ai_provider") or settings.get("aiProvider") or "").lower().strip()
+            if not provider:
+                provider = os.getenv("MUSIC_PROVIDER_DEFAULT", "piapi").lower().strip()
 
-            done = await piapi_poll_task(task_id, timeout_sec=300, sleep_sec=2.0)
-            data = done.get("data") or {}
-            status = (data.get("status") or "")
-            if str(status).lower() != "completed":
-                err = (data.get("error") or {}).get("message") or "unknown error"
-                await tg_send_message(chat_id, f"❌ Музыка не сгенерировалась: {status}\n{err}")
-                return {"ok": True}
+            async def _run_piapi():
+                created_local = await piapi_create_task(payload_api)
+                task_id_local = ((created_local.get("data") or {}).get("task_id")) or ""
+                if not task_id_local:
+                    raise RuntimeError(f"PiAPI did not return task_id: {created_local}")
+                done_local = await piapi_poll_task(task_id_local, timeout_sec=300, sleep_sec=2.0)
+                return ("piapi", done_local)
 
-            out = data.get("output") or []
-            if isinstance(out, dict):
-                out = [out]
-            if not out:
-                await tg_send_message(chat_id, "✅ Готово, но PiAPI не вернул output. Проверь task в кабинете.")
-                return {"ok": True}
+            async def _run_sunoapi():
+                prompt_text = (input_block.get("gpt_description_prompt") or input_block.get("prompt") or "").strip()
+                if not prompt_text:
+                    prompt_text = "A modern catchy song with clear structure and strong hook"
+                mv_local = str(input_block.get("mv") or "").lower().strip()
+                model_enum = "V4_5ALL"
+                if "v5" in mv_local:
+                    model_enum = "V5"
+                elif "v4" in mv_local and "v4_5" not in mv_local:
+                    model_enum = "V4"
+                custom_mode = bool((settings.get("music_mode") or "").lower().strip() == "custom")
+                instrumental = bool(input_block.get("make_instrumental"))
+                title_local = (input_block.get("title") or "").strip()
+                style_local = (input_block.get("tags") or "").strip()
+                task_id_local = await sunoapi_generate_task(
+                    prompt=prompt_text,
+                    custom_mode=custom_mode,
+                    instrumental=instrumental,
+                    model=model_enum,
+                    title=title_local,
+                    style=style_local,
+                )
+                done_local = await sunoapi_poll_task(task_id_local, timeout_sec=SUNOAPI_POLL_TIMEOUT_SEC, sleep_sec=2.0)
+                return ("sunoapi", done_local)
+
+            primary = provider if provider in ("piapi", "sunoapi") else "piapi"
+            secondary = "sunoapi" if primary == "piapi" else "piapi"
+
+            try:
+                if primary == "sunoapi":
+                    source, done = await _run_sunoapi()
+                else:
+                    source, done = await _run_piapi()
+            except Exception as e_primary:
+                can_fallback = (secondary == "sunoapi" and bool(SUNOAPI_API_KEY)) or (secondary == "piapi" and bool(PIAPI_API_KEY))
+                if not can_fallback:
+                    raise
+                await tg_send_message(chat_id, f"⚠️ Основной провайдер ({primary}) упал: {e_primary}\nПробую запасной ({secondary})…")
+                if secondary == "sunoapi":
+                    source, done = await _run_sunoapi()
+                else:
+                    source, done = await _run_piapi()
+
+            if source == "sunoapi":
+                data = done.get("data") or {}
+                status = str(data.get("status") or "").upper().strip()
+                if status not in ("SUCCESS",):
+                    await tg_send_message(chat_id, f"❌ Музыка не сгенерировалась (SunoAPI): {status}\n{done.get('msg') or 'unknown error'}")
+                    return {"ok": True}
+                out = _sunoapi_extract_tracks(done)
+                if not out:
+                    await tg_send_message(chat_id, "✅ Готово, но SunoAPI не вернул треки. Проверь task в кабинете.")
+                    return {"ok": True}
+            else:
+                data = done.get("data") or {}
+                status = (data.get("status") or "")
+                if str(status).lower() != "completed":
+                    err = (data.get("error") or {}).get("message") or "unknown error"
+                    await tg_send_message(chat_id, f"❌ Музыка не сгенерировалась: {status}\n{err}")
+                    return {"ok": True}
+
+                out = data.get("output") or []
+                if isinstance(out, dict):
+                    out = [out]
+                if not out:
+                    await tg_send_message(chat_id, "✅ Готово, но PiAPI не вернул output. Проверь task в кабинете.")
+                    return {"ok": True}
 
             lines = ["✅ Музыка готова:"]
             for i, item in enumerate(out[:2], start=1):
