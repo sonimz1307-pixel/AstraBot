@@ -384,6 +384,68 @@ ADMIN_IDS = set(
     if x.strip().isdigit()
 )
 
+def _sunoapi_extract_tracks(payload: dict) -> List[dict]:
+    """Extract list of track dicts from SunoAPI callback payload.
+
+    Typical SunoAPI callback (as in your Render logs) looks like:
+      { "code":200, "data": { "callbackType":"complete", "task_id":"...", "data":[{...track...},{...}] } }
+
+    But sometimes it can be nested like:
+      payload["data"]["response"]["data"]  or  payload["data"]["response"]["data"]["data"]
+
+    Returns a list of dicts (each dict is one track item). Empty list means "no tracks found".
+    """
+    if not isinstance(payload, dict):
+        return []
+
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return []
+
+    # 1) common: data.data is list of tracks
+    inner = data.get("data")
+    if isinstance(inner, list):
+        return [x for x in inner if isinstance(x, dict)]
+
+    # 2) sometimes: data.response.data is list/dict
+    resp = data.get("response")
+    if isinstance(resp, dict):
+        rdata = resp.get("data")
+        if isinstance(rdata, list):
+            return [x for x in rdata if isinstance(x, dict)]
+        if isinstance(rdata, dict):
+            inner2 = rdata.get("data")
+            if isinstance(inner2, list):
+                return [x for x in inner2 if isinstance(x, dict)]
+
+    # 3) fallback: scan payload for first list of dicts containing audio_url-like keys
+    AUDIO_KEYS = ("audio_url","audioUrl","stream_audio_url","streamAudioUrl","source_audio_url","sourceAudioUrl","mp3_url","mp3","url","file_url","fileUrl")
+
+    def _scan(obj):
+        if isinstance(obj, dict):
+            # If this dict itself looks like a track item, return it
+            if any(k in obj for k in AUDIO_KEYS):
+                return [obj]
+            for v in obj.values():
+                res = _scan(v)
+                if res:
+                    return res
+        elif isinstance(obj, list):
+            if obj and all(isinstance(x, dict) for x in obj):
+                if any(any(k in x for k in AUDIO_KEYS) for x in obj):
+                    return obj
+            for v in obj:
+                res = _scan(v)
+                if res:
+                    return res
+        return []
+
+    found = _scan(payload)
+    if isinstance(found, list):
+        return [x for x in found if isinstance(x, dict)]
+    return []
+
+
 def _is_admin(user_id: int) -> bool:
     return int(user_id) in ADMIN_IDS
 
