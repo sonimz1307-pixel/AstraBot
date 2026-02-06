@@ -153,8 +153,43 @@ async def sunoapi_callback(request: Request):
     except Exception:
         payload = {}
 
+    # расширенное логирование: сырой payload + ключевые поля (нужно, чтобы видеть этап callbackType)
     try:
-        logging.info("SUNOAPI CALLBACK: %s", str(payload)[:3000])
+        logging.info("SUNOAPI CALLBACK RAW: %s", json.dumps(payload, ensure_ascii=False)[:6000])
+    except Exception:
+        try:
+            logging.info("SUNOAPI CALLBACK RAW(fallback): %s", str(payload)[:6000])
+        except Exception:
+            pass
+    
+    # аккуратно распарсим ключевые поля (не меняем поведение)
+    try:
+        cb = payload.get("data") if isinstance(payload, dict) else {}
+        cb_type = ""
+        if isinstance(cb, dict):
+            cb_type = (cb.get("callbackType") or cb.get("callback_type") or cb.get("type") or "").strip()
+        inner = cb.get("data") if isinstance(cb, dict) else None
+    
+        inner_kind = type(inner).__name__
+        inner_len = len(inner) if isinstance(inner, list) else (len(inner.keys()) if isinstance(inner, dict) else 0)
+    
+        first_keys = []
+        first_audio = ""
+        if isinstance(inner, list) and inner:
+            if isinstance(inner[0], dict):
+                first_keys = list(inner[0].keys())[:30]
+                first_audio = (inner[0].get("audio_url") or inner[0].get("audioUrl") or inner[0].get("url") or "")
+    
+        logging.info(
+            "SUNOAPI CALLBACK PARSED: code=%s task_id=%s callbackType=%s inner=%s len=%s first_keys=%s first_audio=%s",
+            payload.get("code"),
+            (cb.get("taskId") or cb.get("task_id") or cb.get("id") or ""),
+            cb_type,
+            inner_kind,
+            inner_len,
+            first_keys,
+            (first_audio or "")[:300],
+        )
     except Exception:
         pass
 
@@ -186,27 +221,6 @@ async def sunoapi_callback(request: Request):
     except Exception:
         tracks = []
 
-
-    # ----- если callback пришёл без response.data, но есть taskId — подтянем record-info сами -----
-    if (not tracks) and task_id:
-        for _ in range(3):
-            try:
-                record = await sunoapi_get_task(task_id)
-                # Иногда record-info ещё не успел наполниться — попробуем несколько раз
-                tracks = _sunoapi_extract_tracks(record)
-                if tracks:
-                    payload = record
-                    break
-                # если треки не нашли, но в record-info уже есть прямая ссылка на аудио — обновим payload и выйдем
-                if _suno_extract_audio_url(record):
-                    payload = record
-                    break
-            except Exception as e:
-                try:
-                    logging.exception("SUNOAPI CALLBACK: record-info fetch failed: %s", e)
-                except Exception:
-                    pass
-            await asyncio.sleep(2)
     if tracks:
         try:
             await tg_send_message(chat_id, "✅ SunoAPI: музыка готова — отправляю треки…")
