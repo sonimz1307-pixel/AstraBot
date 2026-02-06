@@ -3093,8 +3093,6 @@ async def webhook(secret: str, request: Request):
                     extra_lines = []
                     if video_url:
                         extra_lines.append(f"🎬 MP4: {video_url}")
-                    if image_url:
-                        extra_lines.append(f"🖼 Обложка: {image_url}")
                     if extra_lines:
                         await tg_send_message(chat_id, "\n".join(extra_lines), reply_markup=None)
                 _clear_music_ctx()
@@ -3397,8 +3395,6 @@ async def webhook(secret: str, request: Request):
                     lines.append(f"🎧 MP3: {audio_url}")
                 if video_url:
                     lines.append(f"🎬 MP4: {video_url}")
-                if image_url:
-                    lines.append(f"🖼 Обложка: {image_url}")
             await tg_send_message(chat_id, "\n".join(lines), reply_markup=_main_menu_for(user_id))
             _clear_music_ctx()
         except Exception as e:
