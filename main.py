@@ -378,12 +378,6 @@ async def sunoapi_callback(request: Request):
                 except Exception:
                     pass
 
-            if image_url:
-                try:
-                    await tg_send_message(chat_id, f"🖼 Обложка: {image_url}")
-                except Exception:
-                    pass
-
         return {"ok": True}
 
     # ----- fallback: достаем хотя бы одну ссылку на MP3 -----
