@@ -32,6 +32,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _SUNOAPI_CB_DEDUP: dict[str, float] = {}
 _SUNOAPI_CB_DEDUP_TTL_SEC = 600.0
 
+# уведомления по стадиям (чтобы не спамить пользователя)
+_SUNOAPI_TASK_NOTIFIED: dict[str, set[str]] = {}
+_SUNOAPI_TASK_NOTIFIED_TTL_SEC = 3600.0
+_SUNOAPI_TASK_NOTIFIED_TS: dict[str, float] = {}
+
+
 # ---------------- SunoAPI callback (required by SunoAPI.org) ----------------
 
 def _deep_pick_str(val) -> str:
@@ -223,12 +229,62 @@ async def sunoapi_callback(request: Request):
             return {"ok": True}
         _SUNOAPI_CB_DEDUP[dedup_key] = now_ts
 
+    # ----- определяем стадию callback (callbackType) -----
+    cb = payload.get("data") if isinstance(payload, dict) else {}
+    cb_type = ""
+    task_id = ""
+    if isinstance(cb, dict):
+        cb_type = (cb.get("callbackType") or cb.get("callback_type") or cb.get("type") or "").strip().lower()
+        task_id = (cb.get("task_id") or cb.get("taskId") or cb.get("id") or "").strip()
+
+    # чистим старые уведомления
+    try:
+        for k, ts in list(_SUNOAPI_TASK_NOTIFIED_TS.items()):
+            if (now_ts - ts) > _SUNOAPI_TASK_NOTIFIED_TTL_SEC:
+                _SUNOAPI_TASK_NOTIFIED_TS.pop(k, None)
+                _SUNOAPI_TASK_NOTIFIED.pop(k, None)
+    except Exception:
+        pass
+
+    # хелпер: уведомить 1 раз на стадию
+    def _notify_once(stage: str) -> bool:
+        if not task_id:
+            return False
+        st = _SUNOAPI_TASK_NOTIFIED.get(task_id)
+        if st is None:
+            st = set()
+            _SUNOAPI_TASK_NOTIFIED[task_id] = st
+        if stage in st:
+            return False
+        st.add(stage)
+        _SUNOAPI_TASK_NOTIFIED_TS[task_id] = now_ts
+        return True
+
     # ----- пытаемся достать треки из record-info формы (обычно именно так SunoAPI присылает callback) -----
     tracks = []
     try:
         tracks = _sunoapi_extract_tracks(payload)
     except Exception:
         tracks = []
+
+    # ----- если это промежуточный callback (например, text), не ругаемся на отсутствие MP3 -----
+    # По факту у тебя приходит сначала callbackType=text с пустым audio_url, потом callbackType=complete с mp3.
+    if cb_type and cb_type not in ("complete", "success", "succeed", "finished", "done"):
+        # сообщим один раз, что ждём MP3 (чтобы пользователь понимал, что всё ок)
+        if cb_type in ("text", "lyrics"):
+            if _notify_once("text"):
+                try:
+                    await tg_send_message(chat_id, "✅ SunoAPI: текст готов. Жду callback с MP3 — как только будет трек, отправлю сюда.")
+                except Exception:
+                    pass
+        else:
+            if _notify_once(cb_type):
+                try:
+                    await tg_send_message(chat_id, "⏳ SunoAPI: генерация в процессе. Жду финальный callback с MP3…")
+                except Exception:
+                    pass
+        return {"ok": True}
+
 
     if tracks:
         try:
@@ -283,7 +339,7 @@ async def sunoapi_callback(request: Request):
                 pass
     else:
         try:
-            await tg_send_message(chat_id, "✅ SunoAPI: callback пришёл, но ссылку на MP3/трек не удалось извлечь. Проверь логи callback.", reply_markup=_main_menu_for(uid))
+            await tg_send_message(chat_id, f"⚠️ SunoAPI: callbackType={cb_type or '?'} task={task_id or '?'} — MP3/ссылку извлечь не удалось. Проверь логи callback.", reply_markup=_main_menu_for(uid))
         except Exception:
             pass
 
