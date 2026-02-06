@@ -186,6 +186,27 @@ async def sunoapi_callback(request: Request):
     except Exception:
         tracks = []
 
+
+    # ----- если callback пришёл без response.data, но есть taskId — подтянем record-info сами -----
+    if (not tracks) and task_id:
+        for _ in range(3):
+            try:
+                record = await sunoapi_get_task(task_id)
+                # Иногда record-info ещё не успел наполниться — попробуем несколько раз
+                tracks = _sunoapi_extract_tracks(record)
+                if tracks:
+                    payload = record
+                    break
+                # если треки не нашли, но в record-info уже есть прямая ссылка на аудио — обновим payload и выйдем
+                if _suno_extract_audio_url(record):
+                    payload = record
+                    break
+            except Exception as e:
+                try:
+                    logging.exception("SUNOAPI CALLBACK: record-info fetch failed: %s", e)
+                except Exception:
+                    pass
+            await asyncio.sleep(2)
     if tracks:
         try:
             await tg_send_message(chat_id, "✅ SunoAPI: музыка готова — отправляю треки…")
