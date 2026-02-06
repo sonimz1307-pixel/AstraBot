@@ -556,10 +556,14 @@ async def piapi_poll_task(task_id: str, *, timeout_sec: int = 240, sleep_sec: fl
 # ---------------- SunoAPI.org (alternative Suno aggregator) ----------------
 SUNOAPI_API_KEY = os.getenv("SUNOAPI_API_KEY", "").strip()
 SUNOAPI_BASE_URL = os.getenv("SUNOAPI_BASE_URL", "https://api.sunoapi.org/api/v1").rstrip("/")
+# Normalize if user set SUNOAPI_BASE_URL without /api/v1
+if SUNOAPI_BASE_URL.rstrip("/") == "https://api.sunoapi.org":
+    SUNOAPI_BASE_URL = "https://api.sunoapi.org/api/v1"
 SUNOAPI_CALLBACK_URL = os.getenv("SUNOAPI_CALLBACK_URL", "").strip()  # optional; if empty we'll just poll
 SUNOAPI_POLL_TIMEOUT_SEC = int(os.getenv("SUNOAPI_POLL_TIMEOUT_SEC", "600"))
 
 async def sunoapi_generate_task(*, prompt: str, custom_mode: bool, instrumental: bool, model: str,
+                               user_id: int, chat_id: int,
                                title: str = "", style: str = "") -> str:
     """Create generation task on SunoAPI.org and return taskId."""
     if not SUNOAPI_API_KEY:
@@ -576,9 +580,8 @@ async def sunoapi_generate_task(*, prompt: str, custom_mode: bool, instrumental:
         payload["title"] = title
     if style:
         payload["style"] = style
-    if SUNOAPI_CALLBACK_URL:
-        payload["callBackUrl"] = SUNOAPI_CALLBACK_URL
-
+    # SunoAPI requires callBackUrl. Prefer explicit env override; otherwise build dynamic callback URL.
+    payload["callBackUrl"] = SUNOAPI_CALLBACK_URL or _build_suno_callback_url(int(user_id), int(chat_id))
     headers = {"Authorization": f"Bearer {SUNOAPI_API_KEY}", "Content-Type": "application/json"}
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(url, headers=headers, json=payload)
@@ -2588,6 +2591,8 @@ async def webhook(secret: str, request: Request):
                         custom_mode=custom_mode,
                         instrumental=instrumental,
                         model=model_enum,
+                        user_id=user_id,
+                        chat_id=chat_id,
                         title=title_local,
                         style=style_local,
                     )
@@ -2957,6 +2962,8 @@ async def webhook(secret: str, request: Request):
                     custom_mode=custom_mode,
                     instrumental=instrumental,
                     model=model_enum,
+                    user_id=user_id,
+                    chat_id=chat_id,
                     title=title_local,
                     style=style_local,
                 )
