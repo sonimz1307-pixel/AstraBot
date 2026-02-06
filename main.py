@@ -18,7 +18,7 @@ from billing_db import ensure_user_row, get_balance, add_tokens
 
 app = FastAPI()
 
-APP_VERSION = "v5-callback-sig-logging"
+APP_VERSION = "v6-suno-tracks-extract-fix"
 try:
     UVICORN_LOGGER.info("BOOT: main.py %s loaded", APP_VERSION)
 except Exception:
@@ -57,7 +57,7 @@ def _deep_pick_str(val) -> str:
             if u:
                 return u
     if isinstance(val, dict):
-        for k in ("url","audio_url","audioUrl","source_audio_url","sourceAudioUrl","source_stream_audio_url","sourceStreamAudioUrl","stream_audio_url","streamAudioUrl","song_url","songUrl","mp3","mp3_url","file","file_url","fileUrl"):
+        for k in ("url","audio_url","audioUrl","song_url","songUrl","mp3","mp3_url","file","file_url","fileUrl"):
             v = val.get(k)
             if isinstance(v, str) and v.strip():
                 return v.strip()
@@ -108,7 +108,7 @@ def _suno_extract_audio_url(payload: dict) -> str:
         return ""
 
     # 1) top-level keys
-    for k in ("audio_url", "audioUrl", "source_audio_url", "sourceAudioUrl", "source_stream_audio_url", "sourceStreamAudioUrl", "stream_audio_url", "streamAudioUrl", "song_url", "songUrl", "mp3_url", "mp3", "file_url", "fileUrl", "url"):
+    for k in ("audio_url", "audioUrl", "song_url", "songUrl", "mp3_url", "mp3", "file_url", "fileUrl", "url"):
         u = pick(payload.get(k))
         if u:
             return u
@@ -116,11 +116,23 @@ def _suno_extract_audio_url(payload: dict) -> str:
     data = payload.get("data")
     if isinstance(data, dict):
         # 2) data-level keys
-        for k in ("audio_url", "audioUrl", "source_audio_url", "sourceAudioUrl", "source_stream_audio_url", "sourceStreamAudioUrl", "stream_audio_url", "streamAudioUrl", "song_url", "songUrl", "mp3_url", "mp3", "file_url", "fileUrl", "url"):
+        for k in ("audio_url", "audioUrl", "song_url", "songUrl", "mp3_url", "mp3", "file_url", "fileUrl", "url"):
             u = pick(data.get(k))
             if u:
                 return u
 
+        # 2.5) SunoAPI callback typical shape: payload.data.data[*].audio_url
+        inner = data.get("data")
+        if isinstance(inner, list):
+            for item in inner:
+                if isinstance(item, dict):
+                    for kk in ("audio_url", "audioUrl", "stream_audio_url", "streamAudioUrl", "source_audio_url", "sourceAudioUrl",
+                               "song_url", "songUrl", "mp3_url", "mp3", "file_url", "fileUrl", "url"):
+                        u = pick(item.get(kk))
+                        if u:
+                            return u
+
+        # 3) SunoAPI.org record-info shape: data.response.data[*].audio_url
         # 3) SunoAPI.org record-info shape: data.response.data[*].audio_url
         resp = data.get("response")
         if isinstance(resp, dict):
@@ -272,12 +284,23 @@ async def sunoapi_callback(request: Request):
         _SUNOAPI_TASK_NOTIFIED_TS[task_id] = now_ts
         return True
 
-    # ----- пытаемся достать треки из record-info формы (обычно именно так SunoAPI присылает callback) -----
+    # ----- достаем треки СТРОГО из реального callback SunoAPI: payload["data"]["data"] (list) -----
     tracks = []
     try:
-        tracks = _sunoapi_extract_tracks(payload)
+        inner_items = cb.get("data") if isinstance(cb, dict) else None
+        if isinstance(inner_items, list):
+            for it in inner_items:
+                if isinstance(it, dict):
+                    tracks.append(it)
     except Exception:
         tracks = []
+
+    # если почему-то не нашли (редкие нестандартные формы) — пробуем общий парсер
+    if not tracks:
+        try:
+            tracks = _sunoapi_extract_tracks(payload)
+        except Exception:
+            tracks = []
 
     # ----- если это промежуточный callback (например, text), не ругаемся на отсутствие MP3 -----
     # По факту у тебя приходит сначала callbackType=text с пустым audio_url, потом callbackType=complete с mp3.
@@ -309,14 +332,8 @@ async def sunoapi_callback(request: Request):
             if not isinstance(item, dict):
                 continue
             audio_url = _first_http_url(
-                item.get("audio_url"), item.get("audioUrl"),
-                item.get("source_audio_url"), item.get("sourceAudioUrl"),
-                item.get("source_stream_audio_url"), item.get("sourceStreamAudioUrl"),
-                item.get("stream_audio_url"), item.get("streamAudioUrl"),
-                item.get("song_url"), item.get("songUrl"),
-                item.get("mp3_url"), item.get("mp3"),
-                item.get("file_url"), item.get("fileUrl"),
-                item.get("url")
+                item.get("audio_url"), item.get("audioUrl"), item.get("song_url"), item.get("songUrl"),
+                item.get("mp3_url"), item.get("mp3"), item.get("file_url"), item.get("fileUrl"), item.get("url")
             )
             image_url = (item.get("image_url") or item.get("imageUrl") or item.get("cover") or item.get("cover_url") or "").strip()
             title = (item.get("title") or "").strip()
@@ -437,7 +454,7 @@ def _sunoapi_extract_tracks(payload: dict) -> List[dict]:
                 return [x for x in inner2 if isinstance(x, dict)]
 
     # 3) fallback: scan payload for first list of dicts containing audio_url-like keys
-    AUDIO_KEYS = ("audio_url","audioUrl","stream_audio_url","streamAudioUrl","source_audio_url","sourceAudioUrl","source_stream_audio_url","sourceStreamAudioUrl","mp3_url","mp3","url","file_url","fileUrl")
+    AUDIO_KEYS = ("audio_url","audioUrl","stream_audio_url","streamAudioUrl","source_audio_url","sourceAudioUrl","mp3_url","mp3","url","file_url","fileUrl")
 
     def _scan(obj):
         if isinstance(obj, dict):
@@ -1186,11 +1203,7 @@ async def tg_send_audio_from_url(
         except Exception:
             # иногда Telegram может отвергнуть как audio — отправим как документ
             await tg_send_document_bytes(chat_id, content, filename="track.mp3", mime="audio/mpeg", caption=caption, reply_markup=reply_markup)
-    except Exception as e:
-        try:
-            UVICORN_LOGGER.exception("tg_send_audio_from_url failed: %s", e)
-        except Exception:
-            pass
+    except Exception:
         await tg_send_message(chat_id, f"🎧 MP3: {url}", reply_markup=reply_markup)
 
 
