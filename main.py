@@ -1001,10 +1001,11 @@ def _sunoapi_extract_tracks(task_json: dict) -> list[dict]:
 def _main_menu_keyboard(is_admin: bool = False) -> dict:
     rows = [
         [{"text": "ИИ (чат)"}, {"text": "Фото будущего"}],
-        [{"text": "🎬 Видео будущего", "web_app": {"url": WEBAPP_KLING_URL}}],
-        [{"text": "🎵 Музыка будущего", "web_app": {"url": WEBAPP_MUSIC_URL}}],
-        [{"text": "💰 Баланс"}],
-        [{"text": "Помощь"}],
+        [
+            {"text": "🎬 Видео будущего", "web_app": {"url": WEBAPP_KLING_URL}},
+            {"text": "🎵 Музыка будущего", "web_app": {"url": WEBAPP_MUSIC_URL}},
+        ],
+        [{"text": "💰 Баланс"}, {"text": "Помощь"}],
     ]
     if is_admin:
         rows.append([{"text": "📊 Статистика"}])
