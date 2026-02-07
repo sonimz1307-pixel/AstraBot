@@ -2591,7 +2591,7 @@ async def webhook(secret: str, request: Request):
             if data == "topup:menu":
                 await tg_send_message(
                     chat_id,
-                    "💳 Пополнение баланса — выбери пакет токенов:",
+                    "💳 Пополнение баланса сервиса — выбери пакет:",
                     reply_markup=_topup_packs_kb(),
                 )
                 return {"ok": True}
