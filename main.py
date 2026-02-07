@@ -2607,8 +2607,8 @@ async def webhook(secret: str, request: Request):
                     return {"ok": True}
 
                 stars = int(pack["stars"])
-                title = f"Пополнение: {tokens} токенов"
-                description = f"{tokens} токенов • {stars}⭐"
+                title = f"Пополнение баланса (≈{int(round(stars * 1.82))}₽): {tokens} токенов"
+                description = f"{tokens} токенов • {stars}⭐ (≈{int(round(stars * 1.82))}₽)"
                 payload = f"stars_topup:{tokens}:{user_id}"
 
                 await tg_send_stars_invoice(chat_id, title, description, payload, stars)
