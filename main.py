@@ -615,7 +615,10 @@ def _topup_packs_kb() -> dict:
     for p in TOPUP_PACKS:
         tokens = int(p["tokens"])
         stars = int(p["stars"])
-        btns.append({"text": f"{tokens} токенов • {stars}⭐", "callback_data": f"topup:pack:{tokens}"})
+        btns.append({
+            "text": f"≈{int(round(stars * 1.82))}₽ • {tokens} токенов • {stars}⭐",
+            "callback_data": f"topup:pack:{tokens}"
+        })
 
     def chunk(items, n=2):
         return [items[i:i+n] for i in range(0, len(items), n)]
