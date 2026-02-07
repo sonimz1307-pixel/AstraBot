@@ -208,8 +208,8 @@
 
       <!-- ✅ Подсказка по списанию токенов -->
       <div class="hint" id="tokenRateHint">
-        Standard — <b>1 сек = 1 токен</b><br>
-        Pro — 1 сек = 2 токена
+        Standard — <b>1 сек = 1 токен (≈9–10 ₽)</b><br>
+        Pro — 1 сек = 2 токена (≈18–20 ₽)
       </div>
     </div>
 
@@ -257,9 +257,9 @@
       if (!el) return;
 
       if (mode === 'pro'){
-        el.innerHTML = 'Standard — 1 сек = 1 токен<br>Pro — <b>1 сек = 2 токена</b>';
+        el.innerHTML = 'Standard — 1 сек = 1 токен (≈9–10 ₽)<br>Pro — <b>1 сек = 2 токена (≈18–20 ₽)</b>';
       } else {
-        el.innerHTML = 'Standard — <b>1 сек = 1 токен</b><br>Pro — 1 сек = 2 токена';
+        el.innerHTML = 'Standard — <b>1 сек = 1 токен (≈9–10 ₽)</b><br>Pro — 1 сек = 2 токена (≈18–20 ₽)';
       }
     }
     qsa('input[name="mode"]').forEach(el => el.addEventListener('change', updateTokenRateHint));
