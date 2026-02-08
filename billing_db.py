@@ -72,6 +72,20 @@ def get_balance(telegram_user_id: int) -> int:
         return 0
 
 
+
+def ledger_ref_exists(*, reason: str, ref_id: str) -> bool:
+    """Проверка идемпотентности: есть ли уже запись в bot_balance_ledger по (reason, ref_id)."""
+    _require_client()
+    r = (
+        supabase.table("bot_balance_ledger")
+        .select("id")
+        .eq("reason", str(reason))
+        .eq("ref_id", str(ref_id))
+        .limit(1)
+        .execute()
+    )
+    return bool(getattr(r, "data", None))
+
 def add_tokens(
     telegram_user_id: int,
     delta_tokens: int,
