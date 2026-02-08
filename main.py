@@ -16,6 +16,7 @@ from db_supabase import track_user_activity, get_basic_stats, supabase as sb
 from kling_flow import run_motion_control_from_bytes, run_image_to_video_from_bytes
 from billing_db import ensure_user_row, get_balance, add_tokens
 from nano_banana import run_nano_banana
+from yookassa_flow import create_yookassa_payment
 
 app = FastAPI()
 
@@ -583,6 +584,38 @@ def sb_clear_user_state(user_id: int):
         ).execute()
     except Exception:
         pass
+
+
+# ---------------- Supabase: user email for YooKassa receipts (bot_user_contacts) ----------------
+# Таблица: bot_user_contacts(telegram_user_id bigint PK, email text, updated_at timestamptz default now()).
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]{2,}$", re.IGNORECASE)
+
+def sb_get_user_email(user_id: int) -> str:
+    if sb is None:
+        return ""
+    try:
+        r = sb.table("bot_user_contacts").select("email").eq("telegram_user_id", int(user_id)).limit(1).execute()
+        if r.data:
+            em = str((r.data[0] or {}).get("email") or "").strip()
+            return em
+    except Exception:
+        pass
+    return ""
+
+def sb_set_user_email(user_id: int, email: str) -> bool:
+    email = (email or "").strip().lower()
+    if not email or not _EMAIL_RE.match(email):
+        return False
+    if sb is None:
+        return False
+    try:
+        sb.table("bot_user_contacts").upsert(
+            {"telegram_user_id": int(user_id), "email": email},
+            on_conflict="telegram_user_id",
+        ).execute()
+        return True
+    except Exception:
+        return False
 
 # ---------------- Stars top-up (XTR) ----------------
 # Токены — внутренняя логика.
@@ -2770,13 +2803,27 @@ async def webhook(secret: str, request: Request):
 
                 if _yookassa_enabled():
                     try:
-                        pay = await yookassa_create_payment(
+                        # Для сервиса «Чеки от ЮKassa» часто обязателен email покупателя.
+                        email = sb_get_user_email(user_id)
+                        if not email:
+                            # Запоминаем выбранный пакет и просим email (переживает рестарт Render)
+                            sb_set_user_state(user_id, "yk_wait_email", {"tokens": int(tokens), "amount_rub": int(amount_rub), "title": title})
+                            await tg_send_message(
+                                chat_id,
+                                "📧 Для оплаты через ЮKassa мне нужен email для чека.\n"
+                                "Пришли email одним сообщением (пример: name@gmail.com).\n\n"
+                                "После этого я сразу пришлю кнопку оплаты.",
+                                reply_markup=_help_menu_for(user_id),
+                            )
+                            return {"ok": True}
+
+                        payment_id, url = await create_yookassa_payment(
                             amount_rub=amount_rub,
                             description=title,
                             user_id=user_id,
                             tokens=tokens,
+                            customer_email=email,
                         )
-                        url = _yk_extract_confirmation_url(pay)
                         if not url:
                             raise RuntimeError("no confirmation_url from YooKassa")
                         await tg_send_message(
@@ -2785,8 +2832,7 @@ async def webhook(secret: str, request: Request):
                             reply_markup={"inline_keyboard": [[{"text": f"Оплатить {amount_rub}₽", "url": url}]]},
                         )
                     except Exception as e:
-                        # fallback to Stars invoice (if you still use Stars)
-                        await tg_send_message(chat_id, f"Не смог создать платёж ЮKassa: {e}\nПопробуй ещё раз или оплати ⭐.", reply_markup=_topup_packs_kb())
+                        await tg_send_message(chat_id, f"Не смог создать платёж ЮKassa: {e}\nПопробуй ещё раз.", reply_markup=_topup_packs_kb())
                     return {"ok": True}
 
                 # fallback (Telegram Stars)
@@ -2921,6 +2967,41 @@ async def webhook(secret: str, request: Request):
         if sb_state == "music_wait_text" and isinstance(sb_payload, dict) and sb_payload:
             st["music_settings"] = sb_payload
             _set_mode(chat_id, user_id, "suno_music")
+
+    # ----- Supabase state resume (YooKassa: wait for email) -----
+    # Если пользователь выбрал пакет и у нас нет email для чека — просим email и продолжаем оплату после ввода.
+    if incoming_text and not (incoming_text.startswith("/") or incoming_text in ("⬅ Назад", "Назад")):
+        sb_state, sb_payload = sb_get_user_state(user_id)
+        if sb_state == "yk_wait_email" and isinstance(sb_payload, dict):
+            email = (incoming_text or "").strip().lower()
+            if sb_set_user_email(user_id, email):
+                # очищаем state и создаём платёж сразу
+                try:
+                    tokens = int(sb_payload.get("tokens") or 0)
+                    amount_rub = int(sb_payload.get("amount_rub") or 0)
+                    title = str(sb_payload.get("title") or f"Пополнение баланса: {tokens} токенов")
+                    sb_clear_user_state(user_id)
+
+                    payment_id, url = await create_yookassa_payment(
+                        amount_rub=amount_rub,
+                        description=title,
+                        user_id=user_id,
+                        tokens=tokens,
+                        customer_email=email,
+                    )
+                    await tg_send_message(
+                        chat_id,
+                        f"💳 Оплата через ЮKassa\nСумма: {amount_rub}₽\nПакет: {tokens} токенов\n\nНажми кнопку ниже, чтобы оплатить (карта / СБП):",
+                        reply_markup={"inline_keyboard": [[{"text": f"Оплатить {amount_rub}₽", "url": url}]]},
+                    )
+                except Exception as e:
+                    await tg_send_message(chat_id, f"Не смог создать платёж ЮKassa: {e}\nПопробуй ещё раз: «Баланс» → «Пополнить».", reply_markup=_help_menu_for(user_id))
+                return {"ok": True}
+            else:
+                await tg_send_message(chat_id, "Не похоже на email 😅\nПришли корректный email одним сообщением (пример: name@gmail.com).")
+                return {"ok": True}
+
+
 
     # ----- WebApp data (Kling settings) -----
     web_app_data = message.get("web_app_data") or {}
