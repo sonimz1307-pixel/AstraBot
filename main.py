@@ -471,7 +471,7 @@ async def yookassa_webhook(request: Request):
 
     return {"ok": True}
 
-y 404 in logs) ---
+# --- basic health endpoints (reduce noisy 404 in logs) ---
 @app.get("/")
 async def root_ok():
     return {"ok": True}
