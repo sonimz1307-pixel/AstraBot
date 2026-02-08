@@ -426,6 +426,18 @@ async def webapp_music():
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 WEBAPP_KLING_URL = os.getenv("WEBAPP_KLING_URL", "https://astrabot-tchj.onrender.com/webapp/kling")
 WEBAPP_MUSIC_URL = os.getenv("WEBAPP_MUSIC_URL", "https://astrabot-tchj.onrender.com/webapp/music")
+# --- YooKassa (cards/SBP) ---
+YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "").strip()
+YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "").strip()
+# Return URL after payment on YooKassa hosted page (can be any page; Telegram will still show the success in browser)
+YOOKASSA_RETURN_URL = os.getenv("YOOKASSA_RETURN_URL", WEBAPP_MUSIC_URL).strip()
+# Optional: explicit webhook URL (if empty, you can set it in YooKassa cabinet; if set, it will be passed to create-payment)
+YOOKASSA_WEBHOOK_URL = os.getenv("YOOKASSA_WEBHOOK_URL", "").strip()
+# Optional: simple protection for /yookassa/webhook (send as header 'Authorization: Bearer <token>' or 'X-Webhook-Token')
+YOOKASSA_WEBHOOK_TOKEN = os.getenv("YOOKASSA_WEBHOOK_TOKEN", "").strip()
+
+def _yookassa_enabled() -> bool:
+    return bool(YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY)
 PIAPI_API_KEY = os.getenv("PIAPI_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change_me")
@@ -650,6 +662,58 @@ async def tg_send_stars_invoice(chat_id: int, title: str, description: str, payl
             j = {}
         if not isinstance(j, dict) or not j.get("ok"):
             raise RuntimeError(f"sendInvoice failed: {r.status_code} {r.text[:800]}")
+
+# --- YooKassa helpers (payments in RUB: cards + SBP on hosted checkout) ---
+_YK_PROCESSED: Dict[str, float] = {}  # payment_id -> ts
+
+def _yk_cleanup_processed(now_ts: Optional[float] = None, ttl_seconds: int = 7 * 24 * 3600) -> None:
+    now = float(now_ts or time.time())
+    dead = [pid for pid, ts in _YK_PROCESSED.items() if (now - float(ts)) > ttl_seconds]
+    for pid in dead:
+        _YK_PROCESSED.pop(pid, None)
+
+async def yookassa_create_payment(*, amount_rub: int, description: str, user_id: int, tokens: int) -> Dict[str, Any]:
+    """
+    Creates a YooKassa payment with redirect confirmation.
+    User will choose a payment method on YooKassa page (cards / SBP if enabled in your shop).
+    """
+    if amount_rub <= 0:
+        raise ValueError("amount_rub must be > 0")
+
+    # Idempotence-Key protects against double create on retries
+    idem_key = hashlib.sha256(f"{user_id}:{tokens}:{amount_rub}:{time.time_ns()}".encode("utf-8")).hexdigest()
+
+    body: Dict[str, Any] = {
+        "amount": {"value": f"{amount_rub:.2f}", "currency": "RUB"},
+        "confirmation": {"type": "redirect", "return_url": YOOKASSA_RETURN_URL or WEBAPP_MUSIC_URL},
+        "capture": True,
+        "description": description[:128],
+        "metadata": {"user_id": str(user_id), "tokens": str(tokens), "amount_rub": str(amount_rub)},
+    }
+    if YOOKASSA_WEBHOOK_URL:
+        body["notification_url"] = YOOKASSA_WEBHOOK_URL
+
+    auth = (YOOKASSA_SHOP_ID, YOOKASSA_SECRET_KEY)
+    headers = {"Idempotence-Key": idem_key}
+
+    async with httpx.AsyncClient(timeout=25) as client:
+        r = await client.post("https://api.yookassa.ru/v3/payments", json=body, auth=auth, headers=headers)
+        try:
+            j = r.json()
+        except Exception:
+            j = {}
+        if r.status_code >= 300:
+            raise RuntimeError(f"YooKassa create payment failed: {r.status_code} {r.text[:800]}")
+        if not isinstance(j, dict):
+            raise RuntimeError("YooKassa create payment: bad JSON")
+        return j
+
+def _yk_extract_confirmation_url(payment_json: Dict[str, Any]) -> str:
+    conf = (payment_json.get("confirmation") or {}) if isinstance(payment_json, dict) else {}
+    url = (conf.get("confirmation_url") or "").strip()
+    return url
+
+
 
 
 # ---------------- In-memory state ----------------
@@ -2548,6 +2612,88 @@ async def sunoapi_callback(req: Request):
     return {"ok": True}
 
 
+@app.post("/yookassa/webhook")
+async def yookassa_webhook(request: Request):
+    """
+    YooKassa payment notifications.
+    Expected event: payment.succeeded (we also accept generic objects with status=succeeded).
+    """
+    # Optional simple token check (recommended)
+    if YOOKASSA_WEBHOOK_TOKEN:
+        auth = (request.headers.get("authorization") or "").strip()
+        token = (request.headers.get("x-webhook-token") or "").strip()
+        ok = False
+        if auth.lower().startswith("bearer "):
+            ok = auth.split(" ", 1)[1].strip() == YOOKASSA_WEBHOOK_TOKEN
+        if token and token == YOOKASSA_WEBHOOK_TOKEN:
+            ok = True
+        if not ok:
+            return Response(status_code=401, content="unauthorized")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+
+    event = (payload.get("event") or payload.get("type") or "").strip()
+    obj = payload.get("object") if isinstance(payload, dict) else None
+    if not isinstance(obj, dict):
+        return {"ok": True}
+
+    status = (obj.get("status") or "").strip()
+    payment_id = (obj.get("id") or "").strip()
+
+    # We process only succeeded payments
+    if status != "succeeded" and event != "payment.succeeded":
+        return {"ok": True}
+
+    if not payment_id:
+        return {"ok": True}
+
+    _yk_cleanup_processed()
+    if payment_id in _YK_PROCESSED:
+        return {"ok": True}
+    _YK_PROCESSED[payment_id] = time.time()
+
+    md = obj.get("metadata") or {}
+    try:
+        uid = int(md.get("user_id") or 0)
+        tokens = int(md.get("tokens") or 0)
+    except Exception:
+        uid = 0
+        tokens = 0
+
+    # If metadata missing, do nothing (to avoid giving tokens to wrong user)
+    if uid <= 0 or tokens <= 0:
+        if ADMIN_IDS:
+            try:
+                admin_id = next(iter(ADMIN_IDS))
+                await tg_send_message(admin_id, f"⚠️ YooKassa webhook: no metadata user_id/tokens. payment_id={payment_id} payload={json.dumps(payload)[:1500]}")
+            except Exception:
+                pass
+        return {"ok": True}
+
+    try:
+        ensure_user_row(uid)
+        add_tokens(
+            uid,
+            tokens,
+            reason="yookassa_topup",
+            meta={"payment_id": payment_id, "event": event, "status": status, "metadata": md},
+        )
+        bal = int(get_balance(uid) or 0)
+        # Notify user
+        await tg_send_message(uid, f"✅ Оплата ЮKassa прошла!\\nНачислено: +{tokens} токенов\\nБаланс: {bal}", reply_markup=_help_menu_for(uid))
+    except Exception as e:
+        if ADMIN_IDS:
+            try:
+                admin_id = next(iter(ADMIN_IDS))
+                await tg_send_message(admin_id, f"❌ YooKassa начисление упало: {e}\\nuser={uid} payment_id={payment_id}")
+            except Exception:
+                pass
+
+    return {"ok": True}
+
 @app.post("/webhook/{secret}")
 async def webhook(secret: str, request: Request):
     if secret != WEBHOOK_SECRET:
@@ -2618,11 +2764,34 @@ async def webhook(secret: str, request: Request):
                     return {"ok": True}
 
                 stars = int(pack["stars"])
-                title = f"Пополнение баланса (≈{int(round(stars * 1.82))}₽): {tokens} токенов"
-                description = f"{tokens} токенов • {stars}⭐ (≈{int(round(stars * 1.82))}₽)"
-                payload = f"stars_topup:{tokens}:{user_id}"
+                amount_rub = int(round(stars * 1.82))
+                title = f"Пополнение баланса: {tokens} токенов"
+                description = f"{tokens} токенов • {amount_rub}₽ (оплата картой/СБП)"
 
-                await tg_send_stars_invoice(chat_id, title, description, payload, stars)
+                if _yookassa_enabled():
+                    try:
+                        pay = await yookassa_create_payment(
+                            amount_rub=amount_rub,
+                            description=title,
+                            user_id=user_id,
+                            tokens=tokens,
+                        )
+                        url = _yk_extract_confirmation_url(pay)
+                        if not url:
+                            raise RuntimeError("no confirmation_url from YooKassa")
+                        await tg_send_message(
+                            chat_id,
+                            f"💳 Оплата через ЮKassa\nСумма: {amount_rub}₽\nПакет: {tokens} токенов\n\nНажми кнопку ниже, чтобы оплатить (карта / СБП):",
+                            reply_markup={"inline_keyboard": [[{"text": f"Оплатить {amount_rub}₽", "url": url}]]},
+                        )
+                    except Exception as e:
+                        # fallback to Stars invoice (if you still use Stars)
+                        await tg_send_message(chat_id, f"Не смог создать платёж ЮKassa: {e}\nПопробуй ещё раз или оплати ⭐.", reply_markup=_topup_packs_kb())
+                    return {"ok": True}
+
+                # fallback (Telegram Stars)
+                payload = f"stars_topup:{tokens}:{user_id}"
+                await tg_send_stars_invoice(chat_id, title, f"{tokens} токенов • {stars}⭐ (≈{amount_rub}₽)", payload, stars)
                 return {"ok": True}
 
             # Unknown topup callback: ignore silently
