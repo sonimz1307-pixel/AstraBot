@@ -81,12 +81,15 @@ async def _upload_to_replicate_files(
 ) -> str:
     """Upload image bytes to Replicate Files API and return a public URL (replicate.delivery/...).
 
-    NOTE:
-    - Replicate Files API is picky about multipart payload; we also set a reasonable mime-type.
-    - On errors, we raise with response body to make debugging easier.
+    Replicate HTTP API (files.create) expects multipart field name `content`.
+    Reference: Replicate HTTP API docs (files.create).
     """
+    if not image_bytes:
+        raise RuntimeError("Replicate Files: empty image bytes")
+
     url = "https://api.replicate.com/v1/files"
     headers = {
+        # Replicate docs historically show "Token", but Bearer is also accepted for API calls.
         "Authorization": f"Bearer {REPLICATE_API_TOKEN}",
         "Accept": "application/json",
     }
@@ -95,11 +98,11 @@ async def _upload_to_replicate_files(
     if not filename:
         filename = f"input.{ext}"
 
-    files = {"file": (filename, image_bytes, mime)}
+    # IMPORTANT: field name must be 'content' (not 'file')
+    files = {"content": (filename, image_bytes, mime)}
 
     r = await client.post(url, headers=headers, files=files)
     if r.status_code >= 400:
-        # show error body (often contains validation details)
         raise RuntimeError(f"Replicate Files API error {r.status_code}: {r.text}")
 
     data = r.json()
