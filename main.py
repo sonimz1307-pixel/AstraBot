@@ -15,6 +15,7 @@ from fastapi import FastAPI, Request, Response
 from db_supabase import track_user_activity, get_basic_stats, supabase as sb
 from kling_flow import run_motion_control_from_bytes, run_image_to_video_from_bytes
 from billing_db import ensure_user_row, get_balance, add_tokens
+from nano_banana import run_nano_banana
 
 app = FastAPI()
 
@@ -834,7 +835,7 @@ async def _ai_maybe_summarize(st: Dict[str, Any]):
     st["ai_ts"] = _now()
 
 
-def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photosession", "t2i", "two_photos", "kling_mc", "kling_i2v", "suno_music"]):
+def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photosession", "t2i", "two_photos", "nano_banana", "kling_mc", "kling_i2v", "suno_music"]):
     st = _ensure_state(chat_id, user_id)
     st["mode"] = mode
     st["ts"] = _now()
@@ -861,12 +862,18 @@ def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photo
             "photo2_file_id": None,
         }
 
+
+    elif mode == "nano_banana":
+        # Nano Banana (Replicate): image editing
+        st["nano_banana"] = {"step": "need_photo", "photo_bytes": None}
+
     else:
         # chat
         st.pop("poster", None)
         st.pop("photosession", None)
         st.pop("t2i", None)
         st.pop("two_photos", None)
+        st.pop("nano_banana", None)
 
 
 
@@ -1038,7 +1045,7 @@ def _photo_future_menu_keyboard() -> dict:
     return {
         "keyboard": [
             [{"text": "Фото/Афиши"}, {"text": "Нейро фотосессии"}],
-            [{"text": "2 фото"}],
+            [{"text": "2 фото"}, {"text": "🍌 Nano Banana"}],
             [{"text": "⬅ Назад"}],
         ],
         "resize_keyboard": True,
@@ -3464,6 +3471,19 @@ async def webhook(secret: str, request: Request):
         return {"ok": True}
 
 
+
+    if incoming_text in ("🍌 Nano Banana", "Nano Banana"):
+        _set_mode(chat_id, user_id, "nano_banana")
+        await tg_send_message(
+            chat_id,
+            "🍌 Nano Banana — редактирование фото (платно).\n\n"
+            "1) Пришли фото.\n"
+            "2) Потом одним сообщением напиши что изменить (стиль/фон/детали).\n\n"
+            "Стоимость: 1 токен за результат.",
+            reply_markup=_photo_future_menu_keyboard(),
+        )
+        return {"ok": True}
+
     if incoming_text == "2 фото":
         _set_mode(chat_id, user_id, "two_photos")
         await tg_send_message(
@@ -3527,7 +3547,24 @@ async def webhook(secret: str, request: Request):
         
         
         
-        # ---- KLING Image → Video: step=need_image ----
+        
+        # ---- NANO BANANA: ждём фото ----
+        if st.get("mode") == "nano_banana":
+            nb = st.get("nano_banana") or {}
+            step = (nb.get("step") or "need_photo")
+            if step == "need_photo":
+                nb["photo_bytes"] = img_bytes
+                nb["step"] = "need_prompt"
+                st["nano_banana"] = nb
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    "Фото принял ✅\nТеперь напиши одним сообщением, что изменить (фон/стиль/детали).\n\nСтоимость: 1 токен.",
+                    reply_markup=_photo_future_menu_keyboard(),
+                )
+                return {"ok": True}
+
+# ---- KLING Image → Video: step=need_image ----
         if st.get("mode") == "kling_i2v":
             ki = st.get("kling_i2v") or {}
             step = (ki.get("step") or "need_image")
@@ -3639,6 +3676,55 @@ async def webhook(secret: str, request: Request):
                 "• можно указать одежду/аксессуары\n",
                 reply_markup=_help_menu_for(user_id),
             )
+            return {"ok": True}
+
+
+        # ---- NANO BANANA: запуск по тексту ----
+        if st.get("mode") == "nano_banana":
+            nb = st.get("nano_banana") or {}
+            step = (nb.get("step") or "need_photo")
+
+            if step != "need_prompt":
+                await tg_send_message(chat_id, "Сначала пришли ФОТО для Nano Banana.", reply_markup=_photo_future_menu_keyboard())
+                return {"ok": True}
+
+            src_bytes = nb.get("photo_bytes")
+            if not src_bytes:
+                await tg_send_message(chat_id, "Не хватает фото. Открой «Фото будущего» → «🍌 Nano Banana» и пришли фото заново.", reply_markup=_photo_future_menu_keyboard())
+                return {"ok": True}
+
+            user_prompt = (incoming_text or "").strip()
+            if not user_prompt:
+                await tg_send_message(chat_id, "Напиши текстом, что изменить (фон/стиль/детали).", reply_markup=_photo_future_menu_keyboard())
+                return {"ok": True}
+
+            # Биллинг: 1 генерация = 1 токен
+            ensure_user_row(user_id)
+            bal = int(get_balance(user_id) or 0)
+            if bal < 1:
+                await tg_send_message(chat_id, "Недостаточно токенов 😕\nНужно: 1 токен для Nano Banana.", reply_markup=_topup_packs_kb())
+                return {"ok": True}
+
+            # списываем токен ДО запроса
+            add_tokens(user_id, -1, reason="nano_banana")
+
+            await tg_send_message(chat_id, "🍌 Генерирую…", reply_markup=_photo_future_menu_keyboard())
+
+            try:
+                out_bytes, ext = await run_nano_banana(src_bytes, user_prompt, output_format="jpg")
+                await tg_send_photo_bytes(chat_id, out_bytes, caption="🍌 Nano Banana — готово")
+            except Exception as e:
+                # возврат токена при ошибке
+                try:
+                    add_tokens(user_id, 1, reason="nano_banana_refund")
+                except Exception:
+                    pass
+                await tg_send_message(chat_id, f"Ошибка Nano Banana: {e}", reply_markup=_photo_future_menu_keyboard())
+                return {"ok": True}
+
+            # reset state
+            st["nano_banana"] = {"step": "need_photo", "photo_bytes": None}
+            st["ts"] = _now()
             return {"ok": True}
 
         # VISUAL mode
@@ -3780,7 +3866,24 @@ async def webhook(secret: str, request: Request):
                 return {"ok": True}
 
 
-            # ---- KLING Image → Video: accept start image as document ----
+            
+        # ---- NANO BANANA: ждём фото ----
+        if st.get("mode") == "nano_banana":
+            nb = st.get("nano_banana") or {}
+            step = (nb.get("step") or "need_photo")
+            if step == "need_photo":
+                nb["photo_bytes"] = img_bytes
+                nb["step"] = "need_prompt"
+                st["nano_banana"] = nb
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    "Фото принял ✅\nТеперь напиши одним сообщением, что изменить (фон/стиль/детали).\n\nСтоимость: 1 токен.",
+                    reply_markup=_photo_future_menu_keyboard(),
+                )
+                return {"ok": True}
+
+# ---- KLING Image → Video: accept start image as document ----
             if st.get("mode") == "kling_i2v":
                 ki = st.get("kling_i2v") or {}
                 step = (ki.get("step") or "need_image")
