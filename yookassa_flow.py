@@ -8,8 +8,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import httpx
 
-
-YOOKASSA_FLOW_VERSION = "2026-02-08_no_customer_email_patent6"
+YOOKASSA_FLOW_VERSION = "2026-02-08_require_email_bot_storage"
 
 YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "").strip()
 YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "").strip()
@@ -48,6 +47,7 @@ async def create_yookassa_payment(
     description: str,
     user_id: int,
     tokens: int,
+    customer_email: Optional[str] = None,
     idempotence_key: Optional[str] = None,
     return_url: Optional[str] = None,
 ) -> Tuple[str, str]:
@@ -56,8 +56,8 @@ async def create_yookassa_payment(
     Возвращает: (payment_id, confirmation_url)
 
     КЛЮЧЕВОЕ:
-    - Не передаём receipt.customer.email, чтобы ЮKassa могла запросить email на своей странице оплаты
-      (если в ЛК включено "Запрашивать email у покупателя").
+    - Передаём receipt + receipt.customer.email (берём из Supabase),
+      чтобы сервис «Чеки от ЮKassa» мог сформировать и отправить чек.
     """
     _require_creds()
 
@@ -68,6 +68,10 @@ async def create_yookassa_payment(
     idem = (idempotence_key or str(uuid.uuid4())).strip()
     tax_code = _tax_system_code()
 
+    email = (customer_email or "").strip().lower()
+    if not email:
+        raise ValueError("customer_email is required for receipts")
+
     body: Dict[str, Any] = {
         "amount": {"value": f"{rub:.2f}", "currency": "RUB"},
         "confirmation": {
@@ -75,14 +79,14 @@ async def create_yookassa_payment(
             "return_url": (return_url or YOOKASSA_RETURN_URL or "https://t.me"),
         },
         "capture": True,
-        "description": description,
+        "description": description[:128],
         "metadata": {
-            "telegram_user_id": int(user_id),
+            "user_id": int(user_id),  # важно: main.py ждёт metadata.user_id / tokens
             "tokens": int(tokens),
         },
         "receipt": {
             "tax_system_code": tax_code,  # патент = 6
-            # customer НЕ передаём специально (пусть ЮKassa запросит email у покупателя на оплате)
+            "customer": {"email": email},
             "items": [
                 {
                     "description": f"{int(tokens)} токенов NeiroAstra",
@@ -102,7 +106,6 @@ async def create_yookassa_payment(
         "Content-Type": "application/json",
     }
 
-    # --- DEBUG LOGS (очень важно сейчас) ---
     print("YOOKASSA_FLOW_VERSION =", YOOKASSA_FLOW_VERSION)
     print("YOOKASSA REQUEST BODY (short) =", {
         "amount": body.get("amount"),
@@ -130,22 +133,3 @@ async def create_yookassa_payment(
         raise RuntimeError(f"YooKassa response missing id/url: {j}")
 
     return payment_id, confirmation_url
-
-
-def parse_webhook(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Нормализуем webhook от ЮKassa.
-    """
-    event = (payload.get("event") or "").strip()
-    obj = payload.get("object") or {}
-    payment_id = (obj.get("id") or "").strip()
-    status = (obj.get("status") or "").strip()
-    metadata = obj.get("metadata") or {}
-
-    return {
-        "event": event,
-        "payment_id": payment_id,
-        "status": status,
-        "metadata": metadata,
-        "raw": payload,
-    }
