@@ -8,36 +8,38 @@ from typing import Any, Dict, Optional, Tuple
 
 import httpx
 
+
+YOOKASSA_FLOW_VERSION = "2026-02-08_no_customer_email_patent6"
+
 YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "").strip()
 YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "").strip()
 YOOKASSA_RETURN_URL = os.getenv("YOOKASSA_RETURN_URL", "").strip()
-
-# Для чеков: система налогообложения (1..6). У тебя ПАТЕНТ => 6.
-# Можно задать в Render: YOOKASSA_TAX_SYSTEM_CODE=6
-def _tax_system_code() -> int:
-    raw = (os.getenv("YOOKASSA_TAX_SYSTEM_CODE") or "").strip()
-    if not raw:
-        return 6  # патент по умолчанию
-    try:
-        code = int(raw)
-    except ValueError as e:
-        raise RuntimeError("YOOKASSA_TAX_SYSTEM_CODE must be integer 1..6") from e
-    if code < 1 or code > 6:
-        raise RuntimeError("YOOKASSA_TAX_SYSTEM_CODE must be in range 1..6")
-    return code
-
 
 YOOKASSA_API_BASE = "https://api.yookassa.ru/v3"
 
 
 def _basic_auth_header(shop_id: str, secret_key: str) -> str:
-    token = base64.b64encode(f"{shop_id}:{secret_key}".encode()).decode()
+    token = base64.b64encode(f"{shop_id}:{secret_key}".encode("utf-8")).decode("ascii")
     return f"Basic {token}"
 
 
-def _require_creds():
+def _require_creds() -> None:
     if not YOOKASSA_SHOP_ID or not YOOKASSA_SECRET_KEY:
-        raise RuntimeError("YOOKASSA creds missing")
+        raise RuntimeError("YOOKASSA_SHOP_ID / YOOKASSA_SECRET_KEY not set")
+
+
+def _tax_system_code() -> int:
+    """
+    У тебя патент => 6.
+    Можно переопределить в Render ENV: YOOKASSA_TAX_SYSTEM_CODE=6
+    """
+    raw = (os.getenv("YOOKASSA_TAX_SYSTEM_CODE") or "").strip()
+    if not raw:
+        return 6
+    code = int(raw)
+    if code < 1 or code > 6:
+        raise RuntimeError("YOOKASSA_TAX_SYSTEM_CODE must be in range 1..6")
+    return code
 
 
 async def create_yookassa_payment(
@@ -47,49 +49,50 @@ async def create_yookassa_payment(
     user_id: int,
     tokens: int,
     idempotence_key: Optional[str] = None,
+    return_url: Optional[str] = None,
 ) -> Tuple[str, str]:
+    """
+    Создаёт платёж в ЮKassa (redirect).
+    Возвращает: (payment_id, confirmation_url)
 
+    КЛЮЧЕВОЕ:
+    - Не передаём receipt.customer.email, чтобы ЮKassa могла запросить email на своей странице оплаты
+      (если в ЛК включено "Запрашивать email у покупателя").
+    """
     _require_creds()
 
     rub = int(amount_rub)
     if rub <= 0:
         raise ValueError("amount_rub must be > 0")
 
-    idem = idempotence_key or str(uuid.uuid4())
-    email = f"user{user_id}@example.com"
-    tax_code = _tax_system_code()  # 6 = патент
+    idem = (idempotence_key or str(uuid.uuid4())).strip()
+    tax_code = _tax_system_code()
 
-    payload: Dict[str, Any] = {
-        "amount": {
-            "value": f"{rub:.2f}",
-            "currency": "RUB",
-        },
+    body: Dict[str, Any] = {
+        "amount": {"value": f"{rub:.2f}", "currency": "RUB"},
         "confirmation": {
             "type": "redirect",
-            "return_url": YOOKASSA_RETURN_URL or "https://t.me",
+            "return_url": (return_url or YOOKASSA_RETURN_URL or "https://t.me"),
         },
         "capture": True,
         "description": description,
+        "metadata": {
+            "telegram_user_id": int(user_id),
+            "tokens": int(tokens),
+        },
         "receipt": {
-            "tax_system_code": tax_code,
-            "customer": {"email": email},
+            "tax_system_code": tax_code,  # патент = 6
+            # customer НЕ передаём специально (пусть ЮKassa запросит email у покупателя на оплате)
             "items": [
                 {
-                    "description": f"{tokens} токенов NeiroAstra",
+                    "description": f"{int(tokens)} токенов NeiroAstra",
                     "quantity": 1.0,
-                    "amount": {
-                        "value": f"{rub:.2f}",
-                        "currency": "RUB",
-                    },
-                    "vat_code": 1,
-                    "payment_mode": "full_prepayment",
+                    "amount": {"value": f"{rub:.2f}", "currency": "RUB"},
+                    "vat_code": 1,  # без НДС
+                    "payment_mode": "full_payment",
                     "payment_subject": "service",
                 }
             ],
-        },
-        "metadata": {
-            "telegram_user_id": user_id,
-            "tokens": tokens,
         },
     }
 
@@ -99,18 +102,50 @@ async def create_yookassa_payment(
         "Content-Type": "application/json",
     }
 
+    # --- DEBUG LOGS (очень важно сейчас) ---
+    print("YOOKASSA_FLOW_VERSION =", YOOKASSA_FLOW_VERSION)
+    print("YOOKASSA REQUEST BODY (short) =", {
+        "amount": body.get("amount"),
+        "confirmation": body.get("confirmation"),
+        "capture": body.get("capture"),
+        "description": body.get("description"),
+        "receipt": body.get("receipt"),
+        "metadata": body.get("metadata"),
+    })
+
     async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.post(
-            f"{YOOKASSA_API_BASE}/payments",
-            json=payload,
-            headers=headers,
-        )
+        r = await client.post(f"{YOOKASSA_API_BASE}/payments", json=body, headers=headers)
 
         if r.status_code >= 300:
-            raise RuntimeError(
-                f"YooKassa create payment failed: {r.status_code} {r.text}"
-            )
+            print("YOOKASSA ERROR FULL =", r.text)
+            raise RuntimeError(f"YooKassa create payment failed: {r.status_code} {r.text}")
 
-        data = r.json()
+        j = r.json()
 
-    return data["id"], data["confirmation"]["confirmation_url"]
+    payment_id = (j.get("id") or "").strip()
+    conf = j.get("confirmation") or {}
+    confirmation_url = (conf.get("confirmation_url") or "").strip()
+
+    if not payment_id or not confirmation_url:
+        raise RuntimeError(f"YooKassa response missing id/url: {j}")
+
+    return payment_id, confirmation_url
+
+
+def parse_webhook(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Нормализуем webhook от ЮKassa.
+    """
+    event = (payload.get("event") or "").strip()
+    obj = payload.get("object") or {}
+    payment_id = (obj.get("id") or "").strip()
+    status = (obj.get("status") or "").strip()
+    metadata = obj.get("metadata") or {}
+
+    return {
+        "event": event,
+        "payment_id": payment_id,
+        "status": status,
+        "metadata": metadata,
+        "raw": payload,
+    }
