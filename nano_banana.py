@@ -23,6 +23,19 @@ def _normalize_output_format(fmt: Optional[str]) -> Optional[str]:
     return fmt
 
 
+def _detect_image_mime_and_ext(image_bytes: bytes) -> Tuple[str, str]:
+    """Best-effort detect mime/ext from magic bytes."""
+    b = image_bytes or b""
+    if b.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png", "png"
+    if b[:3] == b"\xff\xd8\xff":
+        return "image/jpeg", "jpg"
+    if b.startswith(b"RIFF") and b[8:12] == b"WEBP":
+        return "image/webp", "webp"
+    # fallback
+    return "application/octet-stream", "jpg"
+
+
 def _pick_output_url(output: Any) -> Optional[str]:
     if isinstance(output, str) and output.startswith("http"):
         return output
@@ -64,22 +77,32 @@ async def _upload_to_replicate_files(
     client: httpx.AsyncClient,
     image_bytes: bytes,
     *,
-    filename: str = "input.jpg",
+    filename: Optional[str] = None,
 ) -> str:
-    """
-    Upload image bytes to Replicate Files API and return a public URL (replicate.delivery/...).
+    """Upload image bytes to Replicate Files API and return a public URL (replicate.delivery/...).
+
+    NOTE:
+    - Replicate Files API is picky about multipart payload; we also set a reasonable mime-type.
+    - On errors, we raise with response body to make debugging easier.
     """
     url = "https://api.replicate.com/v1/files"
-    headers = {"Authorization": f"Bearer {REPLICATE_API_TOKEN}"}
+    headers = {
+        "Authorization": f"Bearer {REPLICATE_API_TOKEN}",
+        "Accept": "application/json",
+    }
 
-    # multipart upload
-    files = {"file": (filename, image_bytes, "application/octet-stream")}
+    mime, ext = _detect_image_mime_and_ext(image_bytes)
+    if not filename:
+        filename = f"input.{ext}"
+
+    files = {"file": (filename, image_bytes, mime)}
 
     r = await client.post(url, headers=headers, files=files)
-    r.raise_for_status()
-    data = r.json()
+    if r.status_code >= 400:
+        # show error body (often contains validation details)
+        raise RuntimeError(f"Replicate Files API error {r.status_code}: {r.text}")
 
-    # Replicate returns urls.get for files
+    data = r.json()
     uploaded_url = (data.get("urls") or {}).get("get")
     if not uploaded_url:
         raise RuntimeError(f"Replicate Files: unexpected response: {data}")
@@ -94,51 +117,85 @@ async def run_nano_banana(
     output_format: Optional[str] = "jpg",
     timeout_sec: float = REPLICATE_TIMEOUT_SEC,
 ) -> Tuple[bytes, str]:
-    """
-    Google Nano Banana via Replicate:
-    - uploads image to Replicate Files API
-    - calls /v1/models/{owner}/{model}/predictions
-    - polls until succeeded
+    """Google Nano Banana via Replicate.
+
+    Flow:
+    1) upload image to Replicate Files API -> get replicate.delivery URL
+    2) create prediction at /v1/models/{owner}/{model}/predictions
+    3) poll prediction until succeeded/failed/canceled
     Returns (edited_image_bytes, ext).
+
+    This function is defensive:
+    - if model schema changes, it retries a couple of input variants on 422.
+    - error messages include response body, so you can quickly see what Replicate ожидает.
     """
     if not REPLICATE_API_TOKEN:
         raise RuntimeError("REPLICATE_API_TOKEN is not set")
 
     out_fmt = _normalize_output_format(output_format) or "jpg"
     owner, model_name = _split_owner_model(REPLICATE_MODEL)
-
-    # model-specific endpoint (ВАЖНО для nano-banana)
     pred_url = f"https://api.replicate.com/v1/models/{owner}/{model_name}/predictions"
 
     headers_json = {
         "Authorization": f"Bearer {REPLICATE_API_TOKEN}",
         "Content-Type": "application/json",
+        "Accept": "application/json",
     }
 
     async with httpx.AsyncClient(timeout=timeout_sec) as client:
-        # 1) upload file -> get replicate.delivery URL
         uploaded_url = await _upload_to_replicate_files(client, image_bytes)
 
-        # 2) create prediction with correct schema
-        payload = {
-            "input": {
-                "prompt": prompt,
-                "image_input": [{"value": uploaded_url}],
-                "aspect_ratio": "match_input_image",
-                "output_format": out_fmt,
-            }
-        }
+        # Several schema variants (Replicate models sometimes change field shapes).
+        # 1) as shown in Replicate UI for google/nano-banana (image_input as list of objects with value)
+        payloads = [
+            {
+                "input": {
+                    "prompt": prompt,
+                    "image_input": [{"value": uploaded_url}],
+                    "aspect_ratio": "match_input_image",
+                    "output_format": out_fmt,
+                }
+            },
+            # 2) image_input as plain string
+            {
+                "input": {
+                    "prompt": prompt,
+                    "image_input": uploaded_url,
+                    "aspect_ratio": "match_input_image",
+                    "output_format": out_fmt,
+                }
+            },
+            # 3) sometimes field name is "image" instead of "image_input"
+            {
+                "input": {
+                    "prompt": prompt,
+                    "image": uploaded_url,
+                    "aspect_ratio": "match_input_image",
+                    "output_format": out_fmt,
+                }
+            },
+        ]
 
-        r = await client.post(pred_url, headers=headers_json, json=payload)
-        # Если тут 422 — значит схема/ключи не совпали, но для nano-banana это корректно.
-        r.raise_for_status()
-        data = r.json()
+        last_err: Optional[str] = None
+        data = None
+
+        for payload in payloads:
+            r = await client.post(pred_url, headers=headers_json, json=payload)
+            if r.status_code == 422:
+                last_err = r.text
+                continue
+            if r.status_code >= 400:
+                raise RuntimeError(f"Replicate create prediction error {r.status_code}: {r.text}")
+            data = r.json()
+            break
+
+        if data is None:
+            raise RuntimeError(f"Replicate: 422 Unprocessable Entity for all payload variants. Last response: {last_err}")
 
         get_url = (data.get("urls") or {}).get("get") or data.get("url")
         if not get_url:
             raise RuntimeError(f"Replicate: unexpected response: {data}")
 
-        # 3) poll
         t0 = time.time()
         last = data
         while True:
@@ -148,8 +205,9 @@ async def run_nano_banana(
             if time.time() - t0 > timeout_sec:
                 raise TimeoutError("Replicate: timeout waiting for prediction")
 
-            rr = await client.get(get_url, headers={"Authorization": f"Bearer {REPLICATE_API_TOKEN}"})
-            rr.raise_for_status()
+            rr = await client.get(get_url, headers={"Authorization": f"Bearer {REPLICATE_API_TOKEN}", "Accept": "application/json"})
+            if rr.status_code >= 400:
+                raise RuntimeError(f"Replicate poll error {rr.status_code}: {rr.text}")
             last = rr.json()
             await asyncio.sleep(0.8)
 
@@ -161,7 +219,8 @@ async def run_nano_banana(
             raise RuntimeError(f"Replicate: succeeded but no output url: {last}")
 
         img = await client.get(out_url)
-        img.raise_for_status()
+        if img.status_code >= 400:
+            raise RuntimeError(f"Replicate output download error {img.status_code}: {img.text}")
 
         ext = out_fmt or _ext_from_url(out_url) or "jpg"
         return img.content, ext
