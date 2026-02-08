@@ -38,6 +38,8 @@ async def create_yookassa_payment(
     """
     Создаёт платёж в ЮKassa (redirect flow).
     Возвращает: (payment_id, confirmation_url)
+
+    Важно: если в ЮKassa включены чеки (54-ФЗ), необходимо передавать receipt.
     """
     _require_creds()
 
@@ -47,6 +49,7 @@ async def create_yookassa_payment(
 
     idem = (idempotence_key or str(uuid.uuid4())).strip()
 
+    # ✅ Добавили receipt, чтобы не было 400: "Receipt is missing or illegal"
     body: Dict[str, Any] = {
         "amount": {"value": f"{rub:.2f}", "currency": "RUB"},
         "confirmation": {
@@ -55,6 +58,22 @@ async def create_yookassa_payment(
         },
         "capture": True,
         "description": description,
+        "receipt": {
+            "customer": {
+                # Технический email допустим, если пользователь не вводит email.
+                "email": f"user{user_id}@neiroastra.ai"
+            },
+            "items": [
+                {
+                    "description": f"{int(tokens)} токенов NeiroAstra",
+                    "quantity": "1.00",
+                    "amount": {"value": f"{rub:.2f}", "currency": "RUB"},
+                    "vat_code": 1,  # 1 = без НДС
+                    "payment_mode": "full_payment",
+                    "payment_subject": "service",
+                }
+            ],
+        },
         "metadata": {
             "telegram_user_id": int(user_id),
             "tokens": int(tokens),
@@ -70,6 +89,7 @@ async def create_yookassa_payment(
     async with httpx.AsyncClient(timeout=20) as client:
         r = await client.post(f"{YOOKASSA_API_BASE}/payments", json=body, headers=headers)
         if r.status_code >= 300:
+            # оставляем как было, чтобы ты видел текст ошибки ЮKassa
             raise RuntimeError(f"YooKassa create payment failed: {r.status_code} {r.text[:800]}")
         j = r.json()
 
