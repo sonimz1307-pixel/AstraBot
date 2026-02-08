@@ -3,7 +3,7 @@ import os
 import time
 import base64
 import asyncio
-from typing import Optional, Any
+from typing import Optional, Any, Tuple
 
 import httpx
 
@@ -21,6 +21,16 @@ def _guess_mime(image_bytes: bytes) -> str:
     if b[:4] == b"RIFF" and b[8:12] == b"WEBP":
         return "image/webp"
     return "application/octet-stream"
+
+
+def _guess_ext_from_mime(mime: str) -> str:
+    if mime == "image/png":
+        return "png"
+    if mime == "image/jpeg":
+        return "jpg"
+    if mime == "image/webp":
+        return "webp"
+    return "bin"
 
 
 def _data_url_from_bytes(image_bytes: bytes) -> str:
@@ -49,29 +59,71 @@ def _pick_output_url(output: Any) -> Optional[str]:
     return None
 
 
+def _ext_from_url(url: str) -> Optional[str]:
+    u = (url or "").lower()
+    for ext in ("png", "jpg", "jpeg", "webp"):
+        if f".{ext}" in u:
+            return "jpg" if ext == "jpeg" else ext
+    return None
+
+
+def _convert_image_bytes(image_bytes: bytes, out_format: str) -> bytes:
+    """
+    Convert image bytes to out_format using Pillow if available.
+    If Pillow isn't installed or conversion fails, returns original bytes.
+    """
+    out_format = (out_format or "").lower().strip()
+    if not out_format:
+        return image_bytes
+
+    fmt_map = {"jpg": "JPEG", "jpeg": "JPEG", "png": "PNG", "webp": "WEBP"}
+    pil_fmt = fmt_map.get(out_format)
+    if not pil_fmt:
+        return image_bytes
+
+    try:
+        from io import BytesIO
+        from PIL import Image
+
+        im = Image.open(BytesIO(image_bytes))
+        # JPEG doesn't support alpha
+        if pil_fmt == "JPEG" and im.mode in ("RGBA", "LA"):
+            bg = Image.new("RGB", im.size, (255, 255, 255))
+            bg.paste(im, mask=im.split()[-1])
+            im = bg
+        elif pil_fmt == "JPEG" and im.mode != "RGB":
+            im = im.convert("RGB")
+
+        buf = BytesIO()
+        im.save(buf, format=pil_fmt, quality=95)
+        return buf.getvalue()
+    except Exception:
+        return image_bytes
+
+
 async def run_nano_banana(
     image_bytes: bytes,
     prompt: str,
     *,
+    output_format: Optional[str] = None,
     timeout_sec: float = REPLICATE_TIMEOUT_SEC,
-) -> bytes:
+) -> Tuple[bytes, str]:
     """
-    Sends image+prompt to Replicate nano-banana and returns edited image bytes.
+    Sends image+prompt to Replicate nano-banana and returns (edited image bytes, ext).
+    output_format: optional ("jpg"/"png"/"webp"). If specified, tries to convert locally.
     """
     if not REPLICATE_API_TOKEN:
         raise RuntimeError("REPLICATE_API_TOKEN is not set")
 
-    # Replicate predictions endpoint
     pred_url = "https://api.replicate.com/v1/predictions"
     headers = {
         "Authorization": f"Bearer {REPLICATE_API_TOKEN}",
         "Content-Type": "application/json",
     }
 
-    # NOTE: model schema can differ; this is a safe generic payload for many image-edit models.
     payload = {
-        "version": None,  # optional; if you use version-based calls, set it here
-        "model": REPLICATE_MODEL,  # many wrappers accept model, some accept version only
+        "version": None,
+        "model": REPLICATE_MODEL,
         "input": {
             "image": _data_url_from_bytes(image_bytes),
             "prompt": prompt,
@@ -83,7 +135,6 @@ async def run_nano_banana(
         r.raise_for_status()
         data = r.json()
 
-        # If Replicate returns direct urls in "urls.get"
         get_url = (data.get("urls") or {}).get("get") or data.get("url")
         if not get_url:
             raise RuntimeError(f"Replicate: unexpected response: {data}")
@@ -101,7 +152,6 @@ async def run_nano_banana(
             rr = await client.get(get_url, headers={"Authorization": f"Bearer {REPLICATE_API_TOKEN}"})
             rr.raise_for_status()
             last = rr.json()
-
             await asyncio.sleep(0.8)
 
         if (last.get("status") or "").lower() != "succeeded":
@@ -113,4 +163,13 @@ async def run_nano_banana(
 
         img = await client.get(out_url)
         img.raise_for_status()
-        return img.content
+        out_bytes = img.content
+
+        # ext from output_format OR URL OR headers OR bytes sniff
+        if output_format:
+            out_bytes = _convert_image_bytes(out_bytes, output_format)
+            ext = output_format.lower().replace("jpeg", "jpg")
+        else:
+            ext = _ext_from_url(out_url) or _ext_from_url(img.headers.get("content-type", "")) or _guess_ext_from_mime(_guess_mime(out_bytes))
+
+        return out_bytes, ext
