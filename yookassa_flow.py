@@ -40,6 +40,7 @@ async def create_yookassa_payment(
     Возвращает: (payment_id, confirmation_url)
 
     Важно: если в ЮKassa включены чеки (54-ФЗ), необходимо передавать receipt.
+    ЮKassa доставляет чек только на email.
     """
     _require_creds()
 
@@ -49,8 +50,8 @@ async def create_yookassa_payment(
 
     idem = (idempotence_key or str(uuid.uuid4())).strip()
 
-    # Receipt: ЮKassa доставляет чек только на email.
-    # Чтобы не собирать email у пользователя, используем технический валидный email.
+    # ЮKassa требует email для чека (SMS недоступна).
+    # Если ты не собираешь email у пользователя — используем технический валидный email.
     technical_email = f"user{int(user_id)}@example.com"
 
     body: Dict[str, Any] = {
@@ -61,10 +62,6 @@ async def create_yookassa_payment(
         },
         "capture": True,
         "description": description,
-        "metadata": {
-            "telegram_user_id": int(user_id),
-            "tokens": int(tokens),
-        },
         "receipt": {
             "customer": {
                 "email": technical_email,
@@ -72,7 +69,7 @@ async def create_yookassa_payment(
             "items": [
                 {
                     "description": f"{int(tokens)} токенов NeiroAstra",
-                    # В доке ЮKassa quantity — числовое значение (например 1.000)
+                    # В API ЮKassa quantity — число (пример в доке: 1.000)
                     "quantity": 1.0,
                     "amount": {"value": f"{rub:.2f}", "currency": "RUB"},
                     "vat_code": 1,  # 1 = без НДС
@@ -80,9 +77,13 @@ async def create_yookassa_payment(
                     "payment_subject": "service",
                 }
             ],
-            # Часто требуется/рекомендуется в чеке для интернет-расчётов
-            "internet": "true",
-            "timezone": 2,
+            # Для интернет-расчётов. Важно: boolean, не строка.
+            "internet": True,
+            # timezone намеренно НЕ передаём (часто именно он делает receipt "illegal" при несовпадении настроек магазина)
+        },
+        "metadata": {
+            "telegram_user_id": int(user_id),
+            "tokens": int(tokens),
         },
     }
 
@@ -95,6 +96,7 @@ async def create_yookassa_payment(
     async with httpx.AsyncClient(timeout=20) as client:
         r = await client.post(f"{YOOKASSA_API_BASE}/payments", json=body, headers=headers)
         if r.status_code >= 300:
+            # оставляем как было, чтобы ты видел текст ошибки ЮKassa
             raise RuntimeError(f"YooKassa create payment failed: {r.status_code} {r.text[:800]}")
         j = r.json()
 
