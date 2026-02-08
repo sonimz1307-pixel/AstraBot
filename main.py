@@ -1007,7 +1007,7 @@ def _sunoapi_extract_tracks(task_json: dict) -> list[dict]:
 
 def _main_menu_keyboard(is_admin: bool = False) -> dict:
     rows = [
-        [{"text": "ИИ (чат)"}, {"text": "Фото будущего"}],
+        [{"text": "🧠 ИИ (чат)"}, {"text": "📸 Фото будущего"}],
         [
             {"text": "🎬 Видео будущего", "web_app": {"url": WEBAPP_KLING_URL}},
             {"text": "🎵 Музыка будущего", "web_app": {"url": WEBAPP_MUSIC_URL}},
@@ -1044,8 +1044,8 @@ def _photo_future_menu_keyboard() -> dict:
     """Подменю «Фото будущего» (объединяет фото-режимы в одну кнопку на главном экране)."""
     return {
         "keyboard": [
-            [{"text": "Фото/Афиши"}, {"text": "Нейро фотосессии"}],
-            [{"text": "2 фото"}, {"text": "🍌 Nano Banana"}],
+            [{"text": "🖼️ Фото/Афиши"}, {"text": "✨ Нейро фотосессии"}],
+            [{"text": "🧩 2 фото"}, {"text": "🍌 Nano Banana"}],
             [{"text": "⬅ Назад"}],
         ],
         "resize_keyboard": True,
@@ -3431,7 +3431,7 @@ async def webhook(secret: str, request: Request):
         )
         return {"ok": True}
 
-    if incoming_text == "Фото будущего":
+    if incoming_text in ("Фото будущего", "📸 Фото будущего"):
         # Подменю: объединённая точка входа в фото-режимы
         await tg_send_message(
             chat_id,
@@ -3440,13 +3440,13 @@ async def webhook(secret: str, request: Request):
         )
         return {"ok": True}
 
-    if incoming_text == "ИИ (чат)":
+    if incoming_text in ("ИИ (чат)", "🧠 ИИ (чат)"):
         _set_mode(chat_id, user_id, "chat")
         await tg_send_message(chat_id, "Ок. Режим «ИИ (чат)».", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
 
 
-    if incoming_text == "Нейро фотосессии":
+    if incoming_text in ("Нейро фотосессии", "✨ Нейро фотосессии"):
         _set_mode(chat_id, user_id, "photosession")
         await tg_send_message(
             chat_id,
@@ -3457,7 +3457,7 @@ async def webhook(secret: str, request: Request):
             reply_markup=_help_menu_for(user_id),
         )
         return {"ok": True}
-    if incoming_text == "Фото/Афиши":
+    if incoming_text in ("Фото/Афиши", "🖼️ Фото/Афиши"):
         _set_mode(chat_id, user_id, "poster")
         await tg_send_message(
             chat_id,
@@ -3484,7 +3484,7 @@ async def webhook(secret: str, request: Request):
         )
         return {"ok": True}
 
-    if incoming_text == "2 фото":
+    if incoming_text in ("2 фото", "🧩 2 фото"):
         _set_mode(chat_id, user_id, "two_photos")
         await tg_send_message(
             chat_id,
