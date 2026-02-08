@@ -13,9 +13,8 @@ from typing import Optional, Literal, Dict, Any, Tuple, List
 import httpx
 from fastapi import FastAPI, Request, Response
 from db_supabase import track_user_activity, get_basic_stats, supabase as sb
-from kling_flow import run_motion_control_from_bytes, run_image
-from yookassa_flow import create_yookassa_payment, parse_webhook
-from billing_db import ensure_user_row, get_balance, add_tokens, ledger_ref_exists
+from kling_flow import run_motion_control_from_bytes, run_image_to_video_from_bytes
+from billing_db import ensure_user_row, get_balance, add_tokens
 from nano_banana import run_nano_banana
 
 app = FastAPI()
@@ -402,75 +401,6 @@ async def sunoapi_callback(request: Request):
     return {"ok": True}
 
 
-# --- basic health endpoints (reduce nois
-
-# ---------------- ЮKassa webhook ----------------
-@app.post("/api/yookassa/webhook")
-async def yookassa_webhook(request: Request):
-    """
-    ЮKassa шлёт сюда события payment.succeeded.
-    Защита: query ?secret=...
-    """
-    secret = (request.query_params.get("secret") or "").strip()
-    if not YOOKASSA_WEBHOOK_SECRET or secret != YOOKASSA_WEBHOOK_SECRET:
-        return Response(status_code=403)
-
-    try:
-        payload = await request.json()
-    except Exception:
-        return Response(status_code=400)
-
-    info = parse_webhook(payload if isinstance(payload, dict) else {})
-    event = info.get("event") or ""
-    payment_id = info.get("payment_id") or ""
-    status = info.get("status") or ""
-    meta = info.get("metadata") or {}
-
-    print("YOOKASSA_WEBHOOK:", {"event": event, "status": status, "payment_id": payment_id, "meta": meta})
-
-    # начисляем только на succeeded
-    if event != "payment.succeeded" or status != "succeeded" or not payment_id:
-        return {"ok": True}
-
-    try:
-        uid = int(meta.get("telegram_user_id") or 0)
-        tokens = int(meta.get("tokens") or 0)
-    except Exception:
-        uid = 0
-        tokens = 0
-
-    if uid <= 0 or tokens <= 0:
-        return {"ok": True}
-
-    # идемпотентность: если уже начисляли по этому payment_id — выходим
-    try:
-        if ledger_ref_exists(reason="yookassa_topup", ref_id=payment_id):
-            return {"ok": True}
-    except Exception as e:
-        # если Supabase временно недоступен — лучше не начислять повторно
-        print("YOOKASSA_IDEMPOTENCY_CHECK_ERROR:", str(e))
-        return {"ok": True}
-
-    try:
-        add_tokens(
-            uid,
-            tokens,
-            reason="yookassa_topup",
-            ref_id=payment_id,
-            meta={"provider": "yookassa", "payment_id": payment_id},
-        )
-    except Exception as e:
-        print("YOOKASSA_ADD_TOKENS_ERROR:", str(e))
-        return {"ok": True}
-
-    # уведомим пользователя (в Telegram)
-    try:
-        await tg_send_message(int(uid), f"✅ Платёж получен. Начислил {tokens} токенов. Спасибо! 🎉")
-    except Exception:
-        pass
-
-    return {"ok": True}
-
 # --- basic health endpoints (reduce noisy 404 in logs) ---
 @app.get("/")
 async def root_ok():
@@ -499,7 +429,6 @@ WEBAPP_MUSIC_URL = os.getenv("WEBAPP_MUSIC_URL", "https://astrabot-tchj.onrender
 PIAPI_API_KEY = os.getenv("PIAPI_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change_me")
-YOOKASSA_WEBHOOK_SECRET = os.getenv("YOOKASSA_WEBHOOK_SECRET", "").strip()
 
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 SUNOAPI_ENABLED = os.getenv("SUNOAPI_ENABLED", "true").lower() in ("1","true","yes","y","on")
@@ -661,12 +590,13 @@ def sb_clear_user_state(user_id: int):
 # ₽ — расчётная стоимость в рублях
 # Токены — внутренняя единица сервиса
 TOPUP_PACKS = [
-    {"tokens": 18,  "stars": 99,   "rub": 180},
-    {"tokens": 36,  "stars": 199,  "rub": 362},
-    {"tokens": 72,  "stars": 399,  "rub": 726},
-    {"tokens": 160, "stars": 799,  "rub": 1454},
-    {"tokens": 303, "stars": 1499, "rub": 2728},
+    {"tokens": 18,  "stars": 99},
+    {"tokens": 36,  "stars": 199},
+    {"tokens": 72,  "stars": 399},
+    {"tokens": 160, "stars": 799},
+    {"tokens": 303, "stars": 1499},
 ]
+
 def _find_pack_by_tokens(tokens: int) -> Optional[Dict[str, int]]:
     try:
         t = int(tokens)
@@ -686,9 +616,8 @@ def _topup_packs_kb() -> dict:
     for p in TOPUP_PACKS:
         tokens = int(p["tokens"])
         stars = int(p["stars"])
-        rub = int(p.get("rub") or 0)
         btns.append({
-            "text": f"{rub}₽ • {tokens} токенов • {stars}⭐",
+            "text": f"≈{int(round(stars * 1.82))}₽ • {tokens} токенов • {stars}⭐",
             "callback_data": f"topup:pack:{tokens}"
         })
 
@@ -2689,34 +2618,11 @@ async def webhook(secret: str, request: Request):
                     return {"ok": True}
 
                 stars = int(pack["stars"])
-                rub = int(pack.get("rub") or 0)
-                title = f"Пополнение баланса ({rub}₽): {tokens} токенов"
-                description = f"{tokens} токенов • {stars}⭐ ({rub}₽)"
+                title = f"Пополнение баланса (≈{int(round(stars * 1.82))}₽): {tokens} токенов"
+                description = f"{tokens} токенов • {stars}⭐ (≈{int(round(stars * 1.82))}₽)"
                 payload = f"stars_topup:{tokens}:{user_id}"
 
                 await tg_send_stars_invoice(chat_id, title, description, payload, stars)
-
-                # Доп. способ оплаты: ЮKassa (СБП/карта) — ссылка на оплату
-                try:
-                    payment_id, pay_url = await create_yookassa_payment(
-                        amount_rub=rub,
-                        description=f"Пополнение баланса: {tokens} токенов",
-                        user_id=user_id,
-                        tokens=tokens,
-                    )
-                    await tg_send_message(
-                        chat_id,
-                        f"💳 Или оплатить через ЮKassa ({rub}₽) — карта/СБП:",
-                        reply_markup={
-                            "inline_keyboard": [[
-                                {"text": f"💳 Оплатить {rub}₽ (ЮKassa)", "url": pay_url}
-                            ]]
-                        },
-                    )
-                except Exception as e:
-                    # если ЮKassa не настроена/упала — Stars всё равно работает
-                    print("YOOKASSA_CREATE_PAYMENT_ERROR:", str(e))
-
                 return {"ok": True}
 
             # Unknown topup callback: ignore silently
