@@ -2744,50 +2744,6 @@ async def webhook(secret: str, request: Request):
     # ✅ Telegram: текст может быть в caption
     incoming_text = (message.get("text") or message.get("caption") or "").strip()
 
-    # ---- Priority: if we are waiting for Nano Banana prompt, handle BEFORE any chat/menus ----
-    # This prevents accidental fallthrough into AI chat when user should be in image-edit flow.
-    try:
-        nb_st = st.get("nano_banana") if isinstance(st, dict) else None
-        if st.get("mode") == "nano_banana" and isinstance(nb_st, dict) and (nb_st.get("step") == "need_prompt"):
-            # ignore commands like /reset (handled later), but any normal text should trigger generation
-            if incoming_text and not incoming_text.startswith("/"):
-                # (Logic below is duplicated from the main Nano Banana text block, but kept here for priority.)
-                ensure_user_row(user_id)
-                bal = int(get_balance(user_id) or 0)
-                if bal < 1:
-                    await tg_send_message(chat_id, "Недостаточно токенов 😕\nНужно: 1 токен для Nano Banana.", reply_markup=_topup_packs_kb())
-                    return {"ok": True}
-
-                src_bytes = nb_st.get("photo_bytes")
-                if not src_bytes:
-                    await tg_send_message(chat_id, "Не хватает фото. Открой «Фото будущего» → «🍌 Nano Banana» и пришли фото заново.", reply_markup=_photo_future_menu_keyboard())
-                    return {"ok": True}
-
-                user_prompt = incoming_text.strip()
-                # списываем токен ДО запроса
-                add_tokens(user_id, -1, reason="nano_banana")
-
-                await tg_send_message(chat_id, "🍌 Генерирую…", reply_markup=_photo_future_menu_keyboard())
-                try:
-                    out_bytes, ext = await run_nano_banana(src_bytes, user_prompt, output_format="jpg")
-                    await tg_send_photo_bytes(chat_id, out_bytes, caption="🍌 Nano Banana — готово")
-                except Exception as e:
-                    # возврат токена при ошибке
-                    try:
-                        add_tokens(user_id, 1, reason="nano_banana_refund")
-                    except Exception:
-                        pass
-                    await tg_send_message(chat_id, f"Ошибка Nano Banana: {e}", reply_markup=_photo_future_menu_keyboard())
-                    return {"ok": True}
-
-                # reset nano banana state
-                st["nano_banana"] = {"step": "need_photo", "photo_bytes": None}
-                st["ts"] = _now()
-                return {"ok": True}
-    except Exception:
-        # do not break main handler
-        pass
-
 
     # ----- Supabase state resume (Music Future) -----
     # Если бот перезапустился, режим "ожидаем текст для музыки" берём из Supabase.
@@ -3726,52 +3682,62 @@ async def webhook(secret: str, request: Request):
 
         # ---- NANO BANANA: запуск по тексту ----
         if st.get("mode") == "nano_banana":
-            nb = st.get("nano_banana") or {}
-            step = (nb.get("step") or "need_photo")
+            # ВАЖНО: когда ждём prompt, кнопки меню/Назад не должны считаться промптом.
+            nav_text = (incoming_text or "").strip()
+            if nav_text in ("⬅ Назад", "Назад", "Фото/Афиши", "Нейро фотосессии", "2 фото", "🍌 Nano Banana") or nav_text.startswith("/"):
+                # даём обработчикам ниже отработать навигацию
+                pass
+            else:
+                nb = st.get("nano_banana") or {}
+                step = (nb.get("step") or "need_photo")
 
-            if step != "need_prompt":
-                await tg_send_message(chat_id, "Сначала пришли ФОТО для Nano Banana.", reply_markup=_photo_future_menu_keyboard())
-                return {"ok": True}
+                if step != "need_prompt":
+                    await tg_send_message(chat_id, "Сначала пришли ФОТО для Nano Banana.", reply_markup=_photo_future_menu_keyboard())
+                    return {"ok": True}
 
-            src_bytes = nb.get("photo_bytes")
-            if not src_bytes:
-                await tg_send_message(chat_id, "Не хватает фото. Открой «Фото будущего» → «🍌 Nano Banana» и пришли фото заново.", reply_markup=_photo_future_menu_keyboard())
-                return {"ok": True}
+                src_bytes = nb.get("photo_bytes")
+                if not src_bytes:
+                    await tg_send_message(chat_id, "Не хватает фото. Открой «Фото будущего» → «🍌 Nano Banana» и пришли фото заново.", reply_markup=_photo_future_menu_keyboard())
+                    return {"ok": True}
 
-            user_prompt = (incoming_text or "").strip()
-            if not user_prompt:
-                await tg_send_message(chat_id, "Напиши текстом, что изменить (фон/стиль/детали).", reply_markup=_photo_future_menu_keyboard())
-                return {"ok": True}
+                user_prompt = nav_text
+                if not user_prompt:
+                    await tg_send_message(chat_id, "Напиши текстом, что изменить (фон/стиль/детали).", reply_markup=_photo_future_menu_keyboard())
+                    return {"ok": True}
 
-            # Биллинг: 1 генерация = 1 токен
-            ensure_user_row(user_id)
-            bal = int(get_balance(user_id) or 0)
-            if bal < 1:
-                await tg_send_message(chat_id, "Недостаточно токенов 😕\nНужно: 1 токен для Nano Banana.", reply_markup=_topup_packs_kb())
-                return {"ok": True}
+                # Биллинг: 1 генерация = 1 токен
+                ensure_user_row(user_id)
+                bal = int(get_balance(user_id) or 0)
+                if bal < 1:
+                    await tg_send_message(chat_id, "Недостаточно токенов 😕\nНужно: 1 токен для Nano Banana.", reply_markup=_topup_packs_kb())
+                    return {"ok": True}
 
-            # списываем токен ДО запроса
-            add_tokens(user_id, -1, reason="nano_banana")
+                # списываем токен ДО запроса
+                add_tokens(user_id, -1, reason="nano_banana")
 
-            await tg_send_message(chat_id, "🍌 Генерирую…", reply_markup=_photo_future_menu_keyboard())
+                await tg_send_message(chat_id, "🍌 Генерирую…", reply_markup=_photo_future_menu_keyboard())
 
-            try:
-                out_bytes, ext = await run_nano_banana(src_bytes, user_prompt, output_format="jpg")
-                await tg_send_photo_bytes(chat_id, out_bytes, caption="🍌 Nano Banana — готово")
-            except Exception as e:
-                # возврат токена при ошибке
                 try:
-                    add_tokens(user_id, 1, reason="nano_banana_refund")
-                except Exception:
-                    pass
-                await tg_send_message(chat_id, f"Ошибка Nano Banana: {e}", reply_markup=_photo_future_menu_keyboard())
+                    out_bytes, ext = await run_nano_banana(src_bytes, user_prompt, output_format="jpg")
+                    await tg_send_photo_bytes(chat_id, out_bytes, caption="🍌 Nano Banana — готово")
+                except Exception as e:
+                    # возврат токена при ошибке
+                    try:
+                        add_tokens(user_id, 1, reason="nano_banana_refund")
+                    except Exception:
+                        pass
+                    # НЕ сбрасываем фото: пользователь может просто поменять текст и повторить
+                    await tg_send_message(
+                        chat_id,
+                        f"Ошибка Nano Banana: {e}",
+                        reply_markup=_photo_future_menu_keyboard(),
+                    )
+                    return {"ok": True}
+
+                # reset state (после успеха)
+                st["nano_banana"] = {"step": "need_photo", "photo_bytes": None}
+                st["ts"] = _now()
                 return {"ok": True}
-
-            # reset state
-            st["nano_banana"] = {"step": "need_photo", "photo_bytes": None}
-            st["ts"] = _now()
-            return {"ok": True}
-
         # VISUAL mode
         if st.get("mode") == "poster":
             # Выбор света для афиши (работает в любом шаге режима «Фото/Афиши»)
