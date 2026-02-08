@@ -2644,7 +2644,7 @@ async def sunoapi_callback(req: Request):
     print("SunoAPI callback received:", payload if isinstance(payload, dict) else str(type(payload)))
     return {"ok": True}
 
-
+@app.post("/api/yookassa/webhook")
 @app.post("/yookassa/webhook")
 async def yookassa_webhook(request: Request):
     """
