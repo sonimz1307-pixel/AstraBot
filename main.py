@@ -2810,7 +2810,7 @@ async def webhook(secret: str, request: Request):
                             sb_set_user_state(user_id, "yk_wait_email", {"tokens": int(tokens), "amount_rub": int(amount_rub), "title": title})
                             await tg_send_message(
                                 chat_id,
-                                "📧 Для оплаты через ЮKassa мне нужен email для чека.\n"
+                                "📧 Для оплаты мне нужен email для чека.\n"
                                 "Пришли email одним сообщением (пример: name@gmail.com).\n\n"
                                 "После этого я сразу пришлю кнопку оплаты.",
                                 reply_markup=_help_menu_for(user_id),
