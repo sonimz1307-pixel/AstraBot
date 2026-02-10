@@ -437,6 +437,12 @@ async def run_veo_image_to_video(
         close_session = True
 
     try:
+        # 🔍 DEBUG — что реально пришло в veo_flow
+        print("VEO image_url =", image_url)
+        print("VEO image_bytes len =", (len(image_bytes) if image_bytes else None))
+        print("VEO last_frame_bytes len =", (len(last_frame_bytes) if last_frame_bytes else None))
+        print("VEO reference_images_bytes lens =",
+              ([len(b) for b in reference_images_bytes] if reference_images_bytes else None))
         if not image_url:
             if not image_bytes:
                 raise ValueError("Either image_url or image_bytes must be provided")
