@@ -60,6 +60,7 @@
       text-transform: uppercase;
     }
 
+    /* Segmented controls */
     .seg{
       display:grid;
       grid-template-columns: 1fr 1fr;
@@ -95,6 +96,7 @@
       display:flex; gap:10px; flex-wrap:wrap;
     }
 
+    /* Select */
     select{
       width:100%;
       padding: 12px 12px;
@@ -114,6 +116,7 @@
       line-height: 1.35;
     }
 
+    /* Toggle */
     .toggle{
       display:flex;
       align-items:center;
@@ -154,6 +157,7 @@
       margin-top: 6px;
     }
 
+    /* Advanced details */
     details.adv{
       margin-top:10px;
       border:1px dashed rgba(170,190,255,.22);
@@ -168,7 +172,9 @@
       list-style:none;
     }
     details.adv summary::-webkit-details-marker{ display:none; }
+    .adv .hint{ margin-top: 8px; }
 
+    /* Bottom action bar */
     .bar{
       position: fixed;
       left:0; right:0; bottom:0;
@@ -188,6 +194,12 @@
       color: #071022;
       background: linear-gradient(180deg, var(--accent), var(--accent2));
       box-shadow: 0 14px 28px rgba(31,111,235,.18);
+      transition: transform .06s ease, filter .15s ease;
+    }
+    .btn:active{ transform: scale(.99); }
+    .btn[disabled]{
+      filter: grayscale(.4) brightness(.8);
+      cursor:not-allowed;
     }
 
     .toast{
@@ -204,9 +216,10 @@
 
     .debug{
       margin-top:10px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
       font-size: 12px;
       color: rgba(180,200,255,.85);
+      opacity:.9;
       display:none;
       word-break: break-word;
     }
@@ -215,99 +228,365 @@
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
-<div class="wrap">
-  <div class="title">
-    🎬 Видео будущего — настройки
-    <span class="badge" id="platformBadge">WebApp</span>
-    <span class="badge" id="providerBadge">Kling</span>
-  </div>
-
-  <div class="card">
-    <h3>Провайдер</h3>
-    <div class="seg">
-      <input id="provider_kling" type="radio" name="provider" value="kling" checked>
-      <label for="provider_kling"><span class="name">Kling</span></label>
-
-      <input id="provider_veo" type="radio" name="provider" value="veo">
-      <label for="provider_veo"><span class="name">Veo</span></label>
+  <div class="wrap">
+    <div class="title">
+      🎬 Видео будущего — настройки
+      <span class="badge" id="platformBadge">WebApp</span>
+      <span class="badge" id="providerBadge">Kling</span>
     </div>
-  </div>
 
-  <div id="klingBlock">
+    <!-- Provider switch Kling / Veo -->
     <div class="card">
-      <h3>Тип генерации</h3>
-      <div class="seg">
-        <input id="flow_motion" type="radio" name="flow" value="motion" checked>
-        <label for="flow_motion"><span class="name">Motion Control</span></label>
+      <h3>Провайдер</h3>
+      <div class="seg" role="radiogroup" aria-label="Провайдер">
+        <input id="provider_kling" type="radio" name="provider" value="kling" checked>
+        <label for="provider_kling">
+          <span class="name">Kling</span>
+          <span class="desc">Motion Control / Image → Video</span>
+        </label>
 
-        <input id="flow_i2v" type="radio" name="flow" value="i2v">
-        <label for="flow_i2v"><span class="name">Image → Video</span></label>
+        <input id="provider_veo" type="radio" name="provider" value="veo">
+        <label for="provider_veo">
+          <span class="name">Veo</span>
+          <span class="desc">Text → Video / Image → Video</span>
+        </label>
+      </div>
+      <div class="hint">Выбери провайдера, затем настройки и нажми “Сохранить”.</div>
+    </div>
+
+    <!-- ===================== KLING BLOCK ===================== -->
+    <div id="klingBlock">
+      <div class="card">
+        <h3>Тип генерации</h3>
+        <div class="seg" role="radiogroup" aria-label="Тип генерации">
+          <input id="flow_motion" type="radio" name="flow" value="motion" checked>
+          <label for="flow_motion">
+            <span class="name">Motion Control</span>
+            <span class="desc">Фото + видео 3–10 сек</span>
+          </label>
+
+          <input id="flow_i2v" type="radio" name="flow" value="i2v">
+          <label for="flow_i2v">
+            <span class="name">Image → Video</span>
+            <span class="desc">Только фото</span>
+          </label>
+        </div>
+        <div class="hint">Для Motion Control длительность задаётся референс-видео (3–30 сек).</div>
+      </div>
+
+      <div class="card">
+        <h3>Качество</h3>
+        <div class="seg" role="radiogroup" aria-label="Качество">
+          <input id="mode_std" type="radio" name="mode" value="std" checked>
+          <label for="mode_std">
+            <span class="name">Standard</span>
+            <span class="desc">Быстрее / дешевле</span>
+          </label>
+
+          <input id="mode_pro" type="radio" name="mode" value="pro">
+          <label for="mode_pro">
+            <span class="name">Pro</span>
+            <span class="desc">Лучше качество</span>
+          </label>
+        </div>
+
+        <div class="hint" id="tokenRateHint">
+          Standard — <b>1 сек = 1 токен (≈9–10 ₽)</b><br>
+          Pro — 1 сек = 2 токена (≈18–20 ₽)
+        </div>
+      </div>
+
+      <div class="card" id="durationCard" style="display:none;">
+        <h3>Длительность</h3>
+        <select id="duration" aria-label="Длительность">
+          <option value="5">5 секунд</option>
+          <option value="10">10 секунд</option>
+        </select>
+        <div class="hint">Длительность применяется только для Image → Video.</div>
       </div>
     </div>
 
-    <div class="card">
-      <h3>Качество</h3>
-      <div class="seg">
-        <input id="mode_std" type="radio" name="mode" value="std" checked>
-        <label for="mode_std"><span class="name">Standard</span></label>
+    <!-- ===================== VEO BLOCK ===================== -->
+    <div id="veoBlock" style="display:none;">
+      <div class="card">
+        <h3>Модель Veo</h3>
+        <div class="seg" role="radiogroup" aria-label="Модель Veo">
+          <input id="veo_fast" type="radio" name="veo_model" value="fast" checked>
+          <label for="veo_fast">
+            <span class="name">Veo Fast</span>
+            <span class="desc">720p / дешевле</span>
+          </label>
 
-        <input id="mode_pro" type="radio" name="mode" value="pro">
-        <label for="mode_pro"><span class="name">Pro</span></label>
+          <input id="veo_pro" type="radio" name="veo_model" value="pro">
+          <label for="veo_pro">
+            <span class="name">Veo 3.1</span>
+            <span class="desc">1080p / quality</span>
+          </label>
+        </div>
+        <div class="hint" id="veoPriceHint">
+          Fast: без звука $0.10/сек, со звуком $0.15/сек. 720p фикс.
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Режим</h3>
+        <div class="seg" role="radiogroup" aria-label="Режим Veo">
+          <input id="veo_flow_text" type="radio" name="veo_flow" value="text" checked>
+          <label for="veo_flow_text">
+            <span class="name">Text → Video</span>
+            <span class="desc">Только промпт</span>
+          </label>
+
+          <input id="veo_flow_image" type="radio" name="veo_flow" value="image">
+          <label for="veo_flow_image">
+            <span class="name">Image → Video</span>
+            <span class="desc">Фото + промпт</span>
+          </label>
+        </div>
+        <div class="hint">Промпт ты введёшь в боте, WebApp сейчас задаёт только параметры.</div>
+      </div>
+
+      <div class="card">
+        <h3>Параметры</h3>
+
+        <div class="row">
+          <select id="veo_duration" aria-label="Длительность">
+            <option value="4">4 секунды</option>
+            <option value="6">6 секунд</option>
+            <option value="8" selected>8 секунд</option>
+          </select>
+
+          <select id="veo_aspect" aria-label="Формат">
+            <option value="16:9">16:9</option>
+            <option value="9:16">9:16 (Reels)</option>
+          </select>
+        </div>
+
+        <div class="toggle">
+          <div class="left">
+            <div class="tname">Генерировать звук</div>
+            <div class="tdesc">Дороже, но “как ролик”</div>
+          </div>
+          <input id="veo_audio" type="checkbox" />
+        </div>
+
+        <details class="adv" id="veoAdvDetails">
+          <summary>Доп. настройки (только Veo 3.1)</summary>
+          <div class="hint" id="veoAdvHint">
+            Эти опции доступны только в Veo 3.1. Выбери Veo 3.1 сверху.
+          </div>
+
+          <div class="toggle">
+            <div class="left">
+              <div class="tname">Last frame (финальный кадр)</div>
+              <div class="tdesc">Попросим в боте 2-ю картинку</div>
+            </div>
+            <input id="veo_use_last_frame" type="checkbox" disabled />
+          </div>
+
+          <div class="toggle">
+            <div class="left">
+              <div class="tname">Reference images (до 4)</div>
+              <div class="tdesc">Попросим в боте 0–4 референса</div>
+            </div>
+            <input id="veo_use_refs" type="checkbox" disabled />
+          </div>
+
+          <div class="disabled-note" id="veoProOnlyNote">Доступно только в Veo 3.1</div>
+        </details>
       </div>
     </div>
 
-    <div class="card" id="durationCard" style="display:none;">
-      <h3>Длительность</h3>
-      <select id="duration">
-        <option value="5">5 секунд</option>
-        <option value="10">10 секунд</option>
-      </select>
+    <div class="debug" id="debug"></div>
+  </div>
+
+  <div class="bar">
+    <div class="inner">
+      <button class="btn" id="saveBtn">Сохранить и вернуться в бот</button>
+      <div class="toast" id="toast">Готово ✅ Если окно не закрылось — закрой его крестиком (×).</div>
     </div>
   </div>
 
-  <div class="debug" id="debug"></div>
-</div>
+  <script>
+    const qs = (s) => document.querySelector(s);
+    const qsa = (s) => Array.from(document.querySelectorAll(s));
+    const debugEl = qs('#debug');
+    const toastEl = qs('#toast');
 
-<div class="bar">
-  <div class="inner">
-    <button class="btn" id="saveBtn">Сохранить и вернуться в бот</button>
-    <div class="toast" id="toast">Готово ✅</div>
-  </div>
-</div>
+    const DEBUG = new URLSearchParams(location.search).get('debug') === '1';
 
-<script>
-const qs = s => document.querySelector(s);
-const tg = window.Telegram?.WebApp || null;
+    function getProvider(){ return qs('input[name="provider"]:checked').value; }
 
-function getProvider(){ return qs('input[name="provider"]:checked').value; }
-function getFlow(){ return qs('input[name="flow"]:checked').value; }
-function getMode(){ return qs('input[name="mode"]:checked').value; }
+    // Kling getters
+    function getFlow(){ return qs('input[name="flow"]:checked').value; }
+    function getMode(){ return qs('input[name="mode"]:checked').value; }
 
-qs('#saveBtn').addEventListener('click', () => {
-  const provider = getProvider();
-  let payload = null;
+    // Veo getters
+    function getVeoModel(){ return qs('input[name="veo_model"]:checked').value; } // fast|pro
+    function getVeoFlow(){ return qs('input[name="veo_flow"]:checked').value; }   // text|image
 
-  if (provider === 'kling'){
-    const flow = getFlow();
-    const mode = getMode();
-
-    payload = {
-      type: "kling_settings",
-      provider: "kling",
-      flow,
-      mode
-    };
-
-    if (flow === 'i2v'){
-      payload.duration = parseInt(qs('#duration').value, 10);
+    function updateKlingUI(){
+      const flow = getFlow();
+      qs('#durationCard').style.display = (flow === 'i2v') ? 'block' : 'none';
     }
-  }
 
-  if (tg){
-    tg.sendData(JSON.stringify(payload));
-    setTimeout(() => tg.close(), 150);
-  }
-});
-</script>
+    function updateTokenRateHint(){
+      const mode = getMode();
+      const el = qs('#tokenRateHint');
+      if (!el) return;
+
+      if (mode === 'pro'){
+        el.innerHTML = 'Standard — 1 сек = 1 токен (≈9–10 ₽)<br>Pro — <b>1 сек = 2 токена (≈18–20 ₽)</b>';
+      } else {
+        el.innerHTML = 'Standard — <b>1 сек = 1 токен (≈9–10 ₽)</b><br>Pro — 1 сек = 2 токена (≈18–20 ₽)';
+      }
+    }
+
+    function updateVeoPriceHint(){
+      const model = getVeoModel();
+      const el = qs('#veoPriceHint');
+      if (!el) return;
+
+      if (model === 'pro'){
+        el.innerHTML = 'Veo 3.1: без звука <b>$0.20/сек</b>, со звуком <b>$0.40/сек</b>. Режим 1080p.';
+      } else {
+        el.innerHTML = 'Fast: без звука <b>$0.10/сек</b>, со звуком <b>$0.15/сек</b>. 720p фикс.';
+      }
+    }
+
+    function setVeoAdvancedEnabled(isPro){
+      const lf = qs('#veo_use_last_frame');
+      const refs = qs('#veo_use_refs');
+      const note = qs('#veoProOnlyNote');
+      const advHint = qs('#veoAdvHint');
+      const advDetails = qs('#veoAdvDetails');
+
+      lf.disabled = !isPro;
+      refs.disabled = !isPro;
+
+      if (!isPro){
+        lf.checked = false;
+        refs.checked = false;
+
+        note.style.display = 'block';
+        advHint.textContent = 'Эти опции доступны только в Veo 3.1. Выбери Veo 3.1 сверху.';
+        advDetails.open = false;
+      } else {
+        note.style.display = 'none';
+        advHint.textContent = 'Опции Veo 3.1: last_frame и reference_images.';
+      }
+    }
+
+    function updateProviderUI(){
+      const provider = getProvider();
+      qs('#klingBlock').style.display = (provider === 'kling') ? 'block' : 'none';
+      qs('#veoBlock').style.display   = (provider === 'veo')   ? 'block' : 'none';
+      qs('#providerBadge').textContent = (provider === 'kling') ? 'Kling' : 'Veo';
+
+      if (provider === 'kling'){
+        updateKlingUI();
+      } else {
+        const isPro = (getVeoModel() === 'pro');
+        setVeoAdvancedEnabled(isPro);
+      }
+    }
+
+    // Events
+    qsa('input[name="provider"]').forEach(el => el.addEventListener('change', updateProviderUI));
+    qsa('input[name="flow"]').forEach(el => el.addEventListener('change', updateKlingUI));
+    qsa('input[name="mode"]').forEach(el => el.addEventListener('change', updateTokenRateHint));
+    qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () => {
+      updateVeoPriceHint();
+      setVeoAdvancedEnabled(getVeoModel() === 'pro');
+    }));
+
+    // Init
+    updateProviderUI();
+    updateTokenRateHint();
+    updateVeoPriceHint();
+    setVeoAdvancedEnabled(getVeoModel() === 'pro');
+
+    // Telegram init (safe)
+    const tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
+    const platformBadge = qs('#platformBadge');
+
+    if (tg){
+      try{
+        tg.ready();
+        tg.expand();
+        platformBadge.textContent = (tg.platform || 'telegram') + (tg.version ? (' v' + tg.version) : '');
+      }catch(e){}
+    } else {
+      platformBadge.textContent = 'browser';
+    }
+
+    function showDebug(payload){
+      if (!DEBUG) return;
+      debugEl.classList.add('show');
+      debugEl.textContent = 'DEBUG payload: ' + JSON.stringify(payload);
+    }
+
+    function showToast(){
+      toastEl.classList.add('show');
+      setTimeout(() => toastEl.classList.remove('show'), 6000);
+    }
+
+    qs('#saveBtn').addEventListener('click', () => {
+      const provider = getProvider();
+      let payload = null;
+
+      if (provider === 'kling'){
+        const flow = getFlow();
+        const mode = getMode();
+
+        // ✅ FIX: добавили provider:"kling", остальное оставили как было
+        payload = { type: "kling_settings", provider: "kling", flow, mode };
+
+        if (flow === 'i2v'){
+          payload.duration = parseInt(qs('#duration').value, 10);
+        }
+      } else {
+        const veo_model = getVeoModel(); // fast|pro
+        const flow = getVeoFlow();       // text|image
+        const duration = parseInt(qs('#veo_duration').value, 10);
+        const aspect_ratio = qs('#veo_aspect').value;
+        const generate_audio = !!qs('#veo_audio').checked;
+
+        const isPro = (veo_model === 'pro');
+        const use_last_frame = isPro && !!qs('#veo_use_last_frame').checked;
+        const use_refs = isPro && !!qs('#veo_use_refs').checked;
+
+        payload = {
+          type: "veo_settings",
+          provider: "veo",
+          veo_model,
+          flow,                 // text|image
+          duration,
+          aspect_ratio,
+          generate_audio,
+
+          // флаги: бот попросит нужные картинки
+          use_last_frame,
+          use_reference_images: use_refs,
+
+          // resolution зашиваем
+          resolution: isPro ? '1080p' : '720p'
+        };
+      }
+
+      showDebug(payload);
+
+      if (tg){
+        try{ tg.sendData(JSON.stringify(payload)); }catch(e){}
+
+        setTimeout(() => {
+          try{ tg.close(); }catch(e){}
+          showToast();
+        }, 150);
+      } else {
+        showToast();
+      }
+    });
+  </script>
 </body>
 </html>
