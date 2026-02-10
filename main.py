@@ -47,6 +47,40 @@ _SUNOAPI_TASK_NOTIFIED_TTL_SEC = 3600.0
 _SUNOAPI_TASK_NOTIFIED_TS: dict[str, float] = {}
 
 
+
+
+# ---------------- Replicate Files upload helper ----------------
+async def _replicate_upload_bytes(
+    data: bytes,
+    *,
+    filename: str = "image.jpg",
+    content_type: str = "image/jpeg",
+    timeout_sec: float = 60.0,
+) -> str:
+    """Uploads bytes to Replicate Files API and returns a downloadable URL."""
+    token = (os.getenv("REPLICATE_API_TOKEN") or os.getenv("REPLICATE_TOKEN") or "").strip()
+    if not token:
+        raise RuntimeError("REPLICATE_API_TOKEN env is missing")
+
+    headers = {"Authorization": f"Token {token}"}
+    files = {"file": (filename, data, content_type)}
+
+    async with httpx.AsyncClient(timeout=timeout_sec) as client:
+        r = await client.post("https://api.replicate.com/v1/files", headers=headers, files=files)
+    if r.status_code >= 400:
+        # Replicate returns JSON like {"detail": "..."} on error
+        try:
+            j = r.json()
+        except Exception:
+            j = {"detail": r.text}
+        raise RuntimeError(f"Replicate Files API error {r.status_code}: {j}")
+
+    j = r.json()
+    url = (j.get("urls") or {}).get("download") or (j.get("urls") or {}).get("get") or ""
+    if not url:
+        raise RuntimeError(f"Replicate Files API: missing file URL in response: {j}")
+    return url
+
 # ---------------- SunoAPI callback (required by SunoAPI.org) ----------------
 
 def _deep_pick_str(val) -> str:
@@ -3944,19 +3978,40 @@ async def webhook(secret: str, request: Request):
 
             await tg_send_message(chat_id, "⏳ Генерирую видео (Veo)…", reply_markup=_help_menu_for(user_id))
             try:
-                video_url = await run_veo_image_to_video(
-                    user_id=int(user_id),
-                    model=model_slug,
-                    image_bytes=image_bytes,
-                    prompt=incoming_text,
-                    duration=duration,
-                    resolution=resolution,
-                    aspect_ratio=aspect_ratio,
-                    generate_audio=generate_audio,
-                    negative_prompt=None,
-                    reference_images_bytes=ref_bytes if ref_bytes else None,
-                    last_frame_bytes=last_frame_bytes if last_frame_bytes else None,
-                )
+
+# Upload images to Replicate Files API to obtain URLs acceptable by Veo models
+image_url = await _replicate_upload_bytes(image_bytes, filename="veo_start.jpg", content_type="image/jpeg")
+last_frame_url = None
+if last_frame_bytes:
+    last_frame_url = await _replicate_upload_bytes(last_frame_bytes, filename="veo_last.jpg", content_type="image/jpeg")
+
+reference_images = None
+if ref_bytes:
+    reference_images = []
+    for k, b in enumerate(ref_bytes[:4]):  # Veo PRO supports up to 4 reference images
+        try:
+            reference_images.append(
+                await _replicate_upload_bytes(b, filename=f"veo_ref_{k+1}.jpg", content_type="image/jpeg")
+            )
+        except Exception:
+            # if one ref upload fails, just skip it
+            pass
+    if not reference_images:
+        reference_images = None
+
+video_url = await run_veo_image_to_video(
+    user_id=int(user_id),
+    model=model_slug,
+    image_url=image_url,
+    prompt=incoming_text,
+    duration=duration,
+    resolution=resolution,
+    aspect_ratio=aspect_ratio,
+    generate_audio=generate_audio,
+    negative_prompt=None,
+    reference_images=reference_images,
+    last_frame_url=last_frame_url,
+)
             except Exception as e:
                 await tg_send_message(chat_id, f"❌ Ошибка Veo: {e}", reply_markup=_help_menu_for(user_id))
                 return {"ok": True}
