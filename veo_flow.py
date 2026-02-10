@@ -41,7 +41,7 @@ async def _replicate_upload_bytes(
 
     try:
         form = aiohttp.FormData()
-        form.add_field("file", data, filename=filename, content_type=content_type)
+        form.add_field("content", data, filename=filename, content_type=content_type)
 
         headers = {"Authorization": f"Bearer {REPLICATE_API_TOKEN}"}
 
