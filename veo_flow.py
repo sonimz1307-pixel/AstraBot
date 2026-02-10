@@ -429,71 +429,71 @@ async def run_veo_image_to_video(
     _ = negative_prompt
 
 
-# ---- Resolve inputs: bytes -> upload to Replicate Files API ----
-session_to_use = session
-close_session = False
-if session_to_use is None:
-    session_to_use = aiohttp.ClientSession()
-    close_session = True
+    # ---- Resolve inputs: bytes -> upload to Replicate Files API ----
+    session_to_use = session
+    close_session = False
+    if session_to_use is None:
+        session_to_use = aiohttp.ClientSession()
+        close_session = True
 
-try:
-    if not image_url:
-        if not image_bytes:
-            raise ValueError("Either image_url or image_bytes must be provided")
-        image_url = await _replicate_upload_bytes(
-            image_bytes,
-            filename="veo_start.jpg",
-            content_type="image/jpeg",
-            session=session_to_use,
-        )
-
-    if (not last_frame_url) and last_frame_bytes:
-        last_frame_url = await _replicate_upload_bytes(
-            last_frame_bytes,
-            filename="veo_last_frame.jpg",
-            content_type="image/jpeg",
-            session=session_to_use,
-        )
-
-    if (not reference_images) and reference_images_bytes:
-        uploaded: List[str] = []
-        for i, b in enumerate(reference_images_bytes):
-            uploaded.append(
-                await _replicate_upload_bytes(
-                    b,
-                    filename=f"veo_ref_{i+1}.jpg",
-                    content_type="image/jpeg",
-                    session=session_to_use,
-                )
+    try:
+        if not image_url:
+            if not image_bytes:
+                raise ValueError("Either image_url or image_bytes must be provided")
+            image_url = await _replicate_upload_bytes(
+                image_bytes,
+                filename="veo_start.jpg",
+                content_type="image/jpeg",
+                session=session_to_use,
             )
-        reference_images = uploaded
 
-    chosen_tier = _tier_from_params(tier, model)
+        if (not last_frame_url) and last_frame_bytes:
+            last_frame_url = await _replicate_upload_bytes(
+                last_frame_bytes,
+                filename="veo_last_frame.jpg",
+                content_type="image/jpeg",
+                session=session_to_use,
+            )
 
-    if chosen_tier == "pro":
-        return await run_veo_31(
+        if (not reference_images) and reference_images_bytes:
+            uploaded: List[str] = []
+            for i, b in enumerate(reference_images_bytes):
+                uploaded.append(
+                    await _replicate_upload_bytes(
+                        b,
+                        filename=f"veo_ref_{i+1}.jpg",
+                        content_type="image/jpeg",
+                        session=session_to_use,
+                    )
+                )
+            reference_images = uploaded
+
+        chosen_tier = _tier_from_params(tier, model)
+
+        if chosen_tier == "pro":
+            return await run_veo_31(
+                prompt=prompt,
+                mode="image",
+                image_url=image_url,
+                last_frame_url=last_frame_url,
+                reference_images=reference_images,
+                duration=duration,
+                resolution=resolution,
+                aspect_ratio=aspect_ratio,
+                generate_audio=generate_audio,
+                session=session_to_use,
+            )
+
+        return await run_veo_fast(
             prompt=prompt,
             mode="image",
             image_url=image_url,
-            last_frame_url=last_frame_url,
-            reference_images=reference_images,
             duration=duration,
-            resolution=resolution,
             aspect_ratio=aspect_ratio,
             generate_audio=generate_audio,
             session=session_to_use,
         )
-
-    return await run_veo_fast(
-        prompt=prompt,
-        mode="image",
-        image_url=image_url,
-        duration=duration,
-        aspect_ratio=aspect_ratio,
-        generate_audio=generate_audio,
-        session=session_to_use,
-    )
-finally:
-    if close_session:
-        await session_to_use.close()
+    finally:
+        if close_session:
+            await session_to_use.close()
 
