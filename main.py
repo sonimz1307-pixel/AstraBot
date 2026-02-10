@@ -4098,6 +4098,35 @@ async def webhook(secret: str, request: Request):
             return {"ok": True}
 
 
+
+# ---- VEO Image → Video: step=need_image ----
+        if st.get("mode") == "veo_i2v":
+            vi = st.get("veo_i2v") or {}
+            step = (vi.get("step") or "need_image")
+
+            if step == "need_image":
+                vi["image_bytes"] = img_bytes
+                vi["step"] = "need_prompt"
+                st["veo_i2v"] = vi
+                st["ts"] = _now()
+
+                await tg_send_message(
+                    chat_id,
+                    "Фото получил ✅ Теперь напиши ТЕКСТОМ, что должно происходить в видео.\n"
+                    "Пример: «Камера плавно приближается, лёгкое движение волос, реализм».",
+                    reply_markup=_help_menu_for(user_id),
+                )
+                return {"ok": True}
+
+            # если прислал ещё фото, но мы уже ждём текст
+            await tg_send_message(
+                chat_id,
+                "Фото уже есть ✅ Теперь жду ТЕКСТ.",
+                reply_markup=_help_menu_for(user_id),
+            )
+            return {"ok": True}
+
+
 # ---- KLING Motion Control: step=need_avatar ----
         if st.get("mode") == "kling_mc":
             km = st.get("kling_mc") or {}
@@ -4225,32 +4254,6 @@ async def webhook(secret: str, request: Request):
                 _ai_hist_add(st, "assistant", answer)
             await tg_send_message(chat_id, answer, reply_markup=_main_menu_for(user_id))
             return {"ok": True}
-            # --- VEO Image -> Video ---
-            if st.get("mode") == "veo_i2v":
-                vi = st.get("veo_i2v") or {}
-                step = (vi.get("step") or "need_image")
-
-                if step == "need_image":
-                    vi["image_bytes"] = img_bytes
-                    vi["step"] = "need_prompt"
-                    st["veo_i2v"] = vi
-                    st["ts"] = _now()
-
-                    await tg_send_message(
-                        chat_id,
-                        "Фото получил ✅ Теперь напиши ТЕКСТОМ, что должно происходить в видео.\n"
-                        "Пример: «Камера плавно приближается, лёгкое движение волос, реализм».",
-                        reply_markup=_help_menu_for(user_id),
-                    )
-                    return {"ok": True}
-
-                # если прислал ещё фото, но мы уже ждём текст
-                await tg_send_message(
-                    chat_id,
-                    "Фото уже есть ✅ Теперь жду ТЕКСТ.",
-                    reply_markup=_help_menu_for(user_id),
-                )
-                return {"ok": True}
         await tg_send_message(chat_id, "Фото получил. Анализирую...", reply_markup=_main_menu_for(user_id))
         prompt = incoming_text if incoming_text else VISION_DEFAULT_USER_PROMPT
         answer = await openai_chat_answer(
