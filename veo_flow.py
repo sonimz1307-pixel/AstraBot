@@ -10,6 +10,61 @@ from replicate_http import (
     wait_for_result_url,
 )
 
+
+# ============================================================
+# Replicate Files API upload helpers
+# ============================================================
+
+REPLICATE_API_TOKEN = (os.getenv("REPLICATE_API_TOKEN") or os.getenv("REPLICATE_TOKEN") or "").strip()
+REPLICATE_FILES_ENDPOINT = "https://api.replicate.com/v1/files"
+
+
+class ReplicateUploadError(RuntimeError):
+    pass
+
+
+async def _replicate_upload_bytes(
+    data: bytes,
+    *,
+    filename: str,
+    content_type: str,
+    session: Optional[aiohttp.ClientSession] = None,
+) -> str:
+    """Upload bytes to Replicate Files API and return a public download URL."""
+    if not REPLICATE_API_TOKEN:
+        raise ReplicateUploadError("REPLICATE_API_TOKEN is not set")
+
+    close_session = False
+    if session is None:
+        session = aiohttp.ClientSession()
+        close_session = True
+
+    try:
+        form = aiohttp.FormData()
+        form.add_field("file", data, filename=filename, content_type=content_type)
+
+        headers = {"Authorization": f"Bearer {REPLICATE_API_TOKEN}"}
+
+        async with session.post(REPLICATE_FILES_ENDPOINT, data=form, headers=headers) as resp:
+            text = await resp.text()
+            if resp.status >= 400:
+                raise ReplicateUploadError(f"Replicate files upload failed: HTTP {resp.status} {text}")
+
+            try:
+                js = await resp.json()
+            except Exception:
+                raise ReplicateUploadError(f"Replicate files upload returned non-JSON: {text}")
+
+            urls = js.get("urls") or {}
+            download_url = urls.get("download") or urls.get("get")
+            if not download_url:
+                raise ReplicateUploadError(f"Replicate files upload response missing urls.download: {js}")
+
+            return str(download_url)
+    finally:
+        if close_session:
+            await session.close()
+
 # ============================================================
 # Replicate model slugs
 # ============================================================
@@ -350,7 +405,9 @@ async def run_veo_image_to_video(
     *,
     user_id: int,  # <-- ВАЖНО: main передаёт user_id
     model: str = "fast",
-    image_url: str,
+    # Можно передать либо URL, либо bytes (bytes будут загружены в Replicate Files API внутри этого модуля)
+    image_url: Optional[str] = None,
+    image_bytes: Optional[bytes] = None,
     prompt: str,
     duration: int = 8,
     resolution: str = "1080p",
@@ -359,7 +416,9 @@ async def run_veo_image_to_video(
     negative_prompt: Optional[str] = None,  # сейчас не используем, но не падаем
     tier: Optional[str] = None,             # поддержка старого интерфейса
     last_frame_url: Optional[str] = None,
+    last_frame_bytes: Optional[bytes] = None,
     reference_images: Optional[List[str]] = None,
+    reference_images_bytes: Optional[List[bytes]] = None,
     session: Optional[aiohttp.ClientSession] = None,
     **_ignore: Any,
 ) -> str:
@@ -368,6 +427,46 @@ async def run_veo_image_to_video(
     """
     _ = user_id
     _ = negative_prompt
+
+
+# ---- Resolve inputs: bytes -> upload to Replicate Files API ----
+session_to_use = session
+close_session = False
+if session_to_use is None:
+    session_to_use = aiohttp.ClientSession()
+    close_session = True
+
+try:
+    if not image_url:
+        if not image_bytes:
+            raise ValueError("Either image_url or image_bytes must be provided")
+        image_url = await _replicate_upload_bytes(
+            image_bytes,
+            filename="veo_start.jpg",
+            content_type="image/jpeg",
+            session=session_to_use,
+        )
+
+    if (not last_frame_url) and last_frame_bytes:
+        last_frame_url = await _replicate_upload_bytes(
+            last_frame_bytes,
+            filename="veo_last_frame.jpg",
+            content_type="image/jpeg",
+            session=session_to_use,
+        )
+
+    if (not reference_images) and reference_images_bytes:
+        uploaded: List[str] = []
+        for i, b in enumerate(reference_images_bytes):
+            uploaded.append(
+                await _replicate_upload_bytes(
+                    b,
+                    filename=f"veo_ref_{i+1}.jpg",
+                    content_type="image/jpeg",
+                    session=session_to_use,
+                )
+            )
+        reference_images = uploaded
 
     chosen_tier = _tier_from_params(tier, model)
 
@@ -382,7 +481,7 @@ async def run_veo_image_to_video(
             resolution=resolution,
             aspect_ratio=aspect_ratio,
             generate_audio=generate_audio,
-            session=session,
+            session=session_to_use,
         )
 
     return await run_veo_fast(
@@ -392,5 +491,9 @@ async def run_veo_image_to_video(
         duration=duration,
         aspect_ratio=aspect_ratio,
         generate_audio=generate_audio,
-        session=session,
+        session=session_to_use,
     )
+finally:
+    if close_session:
+        await session_to_use.close()
+
