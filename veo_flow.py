@@ -185,6 +185,7 @@ async def run_veo_fast(
 ) -> str:
     """
     google/veo-3-fast
+    FAST: resolution fixed at 720p.
     """
     inp = _build_input_fast(
         prompt=prompt,
@@ -236,6 +237,7 @@ async def run_veo_31(
 ) -> str:
     """
     google/veo-3.1
+    PRO: supports 720p/1080p, reference_images (0..4), last_frame (requires image).
     """
     inp = _build_input_pro(
         prompt=prompt,
@@ -276,24 +278,53 @@ async def run_veo_31(
 
 
 # ============================================================
-# COMPAT LAYER — то, что ждёт main.py
+# COMPAT LAYER — то, что вызывает main.py
 # ============================================================
+
+def _tier_from_params(tier: Optional[str], model: Optional[str]) -> Tier:
+    """
+    Определяем fast/pro по тому, что обычно приходит из main/webapp.
+    Поддерживаем:
+      - tier="fast|pro"
+      - model="fast|pro" или "veo-3-fast" / "veo-3.1" / "google/veo-3.1"
+    """
+    t = (tier or "").strip().lower()
+    if t in ("pro", "premium", "31", "3.1"):
+        return "pro"
+    if t in ("fast", "std", "standard", "3", "3-fast"):
+        return "fast"
+
+    m = (model or "").strip().lower()
+    if "3.1" in m or m.endswith("pro") or "veo-3.1" in m:
+        return "pro"
+    return "fast"
+
 
 async def run_veo_text_to_video(
     *,
+    user_id: int,  # <-- ВАЖНО: main передаёт user_id
+    model: str = "fast",
     prompt: str,
-    tier: Tier = "fast",
     duration: int = 8,
+    resolution: str = "1080p",
     aspect_ratio: str = "16:9",
     generate_audio: bool = False,
-    resolution: str = "1080p",
-    reference_images: Optional[List[str]] = None,
+    negative_prompt: Optional[str] = None,  # сейчас не используем, но не падаем
+    tier: Optional[str] = None,             # поддержка старого интерфейса
+    reference_images: Optional[List[str]] = None,  # если main вдруг пошлёт URL-ы
     session: Optional[aiohttp.ClientSession] = None,
+    **_ignore: Any,  # <-- чтобы больше никогда не падало на лишних kwargs
 ) -> str:
     """
-    Text → Video
+    Text → Video (совместимо с main.py)
+    Для твоего теста (Veo fast, text->video) — сработает сразу.
     """
-    if tier == "pro":
+    _ = user_id  # пока не нужен (нужен будет для загрузки refs/lastframe по bytes, если добавим позже)
+
+    chosen_tier = _tier_from_params(tier, model)
+
+    if chosen_tier == "pro":
+        # PRO: можно передавать reference_images как URL (если main даст)
         return await run_veo_31(
             prompt=prompt,
             mode="text",
@@ -317,21 +348,30 @@ async def run_veo_text_to_video(
 
 async def run_veo_image_to_video(
     *,
-    prompt: str,
+    user_id: int,  # <-- ВАЖНО: main передаёт user_id
+    model: str = "fast",
     image_url: str,
-    tier: Tier = "fast",
+    prompt: str,
     duration: int = 8,
+    resolution: str = "1080p",
     aspect_ratio: str = "16:9",
     generate_audio: bool = False,
-    resolution: str = "1080p",
+    negative_prompt: Optional[str] = None,  # сейчас не используем, но не падаем
+    tier: Optional[str] = None,             # поддержка старого интерфейса
     last_frame_url: Optional[str] = None,
     reference_images: Optional[List[str]] = None,
     session: Optional[aiohttp.ClientSession] = None,
+    **_ignore: Any,
 ) -> str:
     """
-    Image → Video
+    Image → Video (совместимо с main.py)
     """
-    if tier == "pro":
+    _ = user_id
+    _ = negative_prompt
+
+    chosen_tier = _tier_from_params(tier, model)
+
+    if chosen_tier == "pro":
         return await run_veo_31(
             prompt=prompt,
             mode="image",
