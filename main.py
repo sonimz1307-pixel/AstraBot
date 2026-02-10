@@ -14,6 +14,7 @@ import httpx
 from fastapi import FastAPI, Request, Response
 from db_supabase import track_user_activity, get_basic_stats, supabase as sb
 from kling_flow import run_motion_control_from_bytes, run_image_to_video_from_bytes
+from veo_flow import run_veo_text_to_video, run_veo_image_to_video
 from billing_db import ensure_user_row, get_balance, add_tokens
 from nano_banana import run_nano_banana
 from yookassa_flow import create_yookassa_payment
@@ -932,7 +933,7 @@ async def _ai_maybe_summarize(st: Dict[str, Any]):
     st["ai_ts"] = _now()
 
 
-def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photosession", "t2i", "two_photos", "nano_banana", "kling_mc", "kling_i2v", "suno_music"]):
+def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photosession", "t2i", "two_photos", "nano_banana", "kling_mc", "kling_i2v", "suno_music", "veo_t2v", "veo_i2v"]):
     st = _ensure_state(chat_id, user_id)
     st["mode"] = mode
     st["ts"] = _now()
@@ -964,6 +965,19 @@ def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photo
         # Nano Banana (Replicate): image editing
         st["nano_banana"] = {"step": "need_photo", "photo_bytes": None}
 
+    elif mode == "veo_t2v":
+        st["veo_t2v"] = {"step": "need_prompt"}
+
+    elif mode == "veo_i2v":
+        st["veo_i2v"] = {
+            "step": "need_image",
+            "image_bytes": None,
+            "last_frame_bytes": None,
+            "reference_images_bytes": [],
+            "prompt": None,
+        }
+
+
     else:
         # chat
         st.pop("poster", None)
@@ -971,6 +985,8 @@ def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photo
         st.pop("t2i", None)
         st.pop("two_photos", None)
         st.pop("nano_banana", None)
+        st.pop("veo_t2v", None)
+        st.pop("veo_i2v", None)
 
 
 
@@ -1497,6 +1513,26 @@ async def tg_download_file_bytes(file_path: str) -> bytes:
         r = await client.get(url)
     r.raise_for_status()
     return r.content
+
+
+def tg_build_file_url(file_path: str) -> str:
+    """Public URL for Telegram file (for services that can fetch by URL)."""
+    return f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
+
+
+async def tg_send_video_url(chat_id: int, video_url: str, caption: str | None = None, reply_markup: dict | None = None):
+    """Send video by URL (Telegram will fetch). Falls back to text with link if fails."""
+    if not TELEGRAM_BOT_TOKEN:
+        return
+    payload = {"chat_id": chat_id, "video": video_url}
+    if caption:
+        payload["caption"] = caption
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(f"{TELEGRAM_API_BASE}/sendVideo", json=payload)
+    if r.status_code >= 400:
+        await tg_send_message(chat_id, f"✅ Готово! Видео: {video_url}", reply_markup=reply_markup)
 
 
 async def http_download_bytes(url: str, timeout: float = 180) -> bytes:
@@ -3129,6 +3165,100 @@ async def webhook(secret: str, request: Request):
                 )
                 return {"ok": True}
 
+        # ----- WebApp data (Veo settings) -----
+        # Expected (from our WebApp): {type:"veo_settings", provider:"veo", veo_model:"fast|pro", flow:"text|image",
+        # duration, aspect_ratio, generate_audio, resolution, use_last_frame, use_reference_images}
+        is_veo = (
+            (str(payload.get("type") or "").lower().strip() == "veo_settings")
+            or (provider_raw == "veo")
+            or (feature_raw in ("video_future", "video"))
+        ) and (str(payload.get("provider") or provider_raw or "").lower().strip() == "veo")
+
+        if is_veo:
+            veo_model = str(payload.get("veo_model") or payload.get("model") or "fast").lower().strip()
+            if veo_model not in ("fast", "pro", "veo-3.1", "3.1"):
+                veo_model = "fast"
+            # map aliases
+            if veo_model in ("veo-3.1", "3.1"):
+                veo_model = "pro"
+
+            flow = str(payload.get("flow") or "text").lower().strip()
+            if flow not in ("text", "image"):
+                flow = "text"
+
+            try:
+                duration = int(payload.get("duration") or 8)
+            except Exception:
+                duration = 8
+            if duration not in (4, 6, 8):
+                duration = 8
+
+            aspect_ratio = str(payload.get("aspect_ratio") or "16:9").strip()
+            if aspect_ratio not in ("16:9", "9:16"):
+                aspect_ratio = "16:9"
+
+            generate_audio = bool(payload.get("generate_audio"))
+
+            # FAST фикс 720p, PRO 1080p
+            resolution = str(payload.get("resolution") or ("1080p" if veo_model == "pro" else "720p")).lower().strip()
+            if veo_model == "pro":
+                resolution = "1080p"
+            else:
+                resolution = "720p"
+
+            use_last_frame = bool(payload.get("use_last_frame")) if veo_model == "pro" else False
+            use_reference_images = bool(payload.get("use_reference_images")) if veo_model == "pro" else False
+
+            st["veo_settings"] = {
+                "model": ("veo-3.1" if veo_model == "pro" else "veo-3-fast"),
+                "veo_model": veo_model,
+                "flow": flow,
+                "duration": duration,
+                "aspect_ratio": aspect_ratio,
+                "resolution": resolution,
+                "generate_audio": generate_audio,
+                "use_last_frame": use_last_frame,
+                "use_reference_images": use_reference_images,
+            }
+            st["ts"] = _now()
+
+            if flow == "text":
+                _set_mode(chat_id, user_id, "veo_t2v")
+                st["veo_t2v"] = {"step": "need_prompt"}
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    """✅ Настройки Veo сохранены.
+
+Теперь пришли ТЕКСТ (промпт), что должно быть в видео.
+Пример: «Кот в скафандре идёт по Марсу, кинематографично». """,
+                    reply_markup=_help_menu_for(user_id),
+                )
+                return {"ok": True}
+            else:
+                _set_mode(chat_id, user_id, "veo_i2v")
+                st["veo_i2v"] = {
+                    "step": "need_image",
+                    "image_bytes": None,
+                    "last_frame_bytes": None,
+                    "reference_images_bytes": [],
+                    "prompt": None,
+                }
+                st["ts"] = _now()
+                extra = []
+                if use_last_frame:
+                    extra.append("• last frame (финальный кадр)")
+                if use_reference_images:
+                    extra.append("• референсы (до 4)")
+                extra_txt = ("\nДополнительно понадобится: " + ", ".join(extra)) if extra else ""
+                await tg_send_message(
+                    chat_id,
+                    "✅ Настройки Veo сохранены (Image → Video).\n\nШаг 1) Пришли СТАРТОВОЕ фото (кадр 1)." + extra_txt,
+                    reply_markup=_help_menu_for(user_id),
+                )
+                return {"ok": True}
+
+
             # сформировать payload для PiAPI и запустить
             input_block = {
                 "mv": settings["mv"],
@@ -3739,6 +3869,110 @@ async def webhook(secret: str, request: Request):
         )
         return {"ok": True}
 
+
+    # ---- VEO Text→Video: ждём промпт ----
+    if st.get("mode") == "veo_t2v" and incoming_text:
+        settings = st.get("veo_settings") or {}
+        veo_model = (settings.get("veo_model") or "fast")
+        model_slug = "veo-3.1" if veo_model == "pro" else "veo-3-fast"
+
+        duration = int(settings.get("duration") or 8)
+        resolution = str(settings.get("resolution") or ("1080p" if veo_model == "pro" else "720p"))
+        aspect_ratio = str(settings.get("aspect_ratio") or "16:9")
+        generate_audio = bool(settings.get("generate_audio"))
+
+        await tg_send_message(chat_id, "⏳ Генерирую видео (Veo)…", reply_markup=_help_menu_for(user_id))
+
+        try:
+            video_url = await run_veo_text_to_video(
+                user_id=int(user_id),
+                model=model_slug,
+                prompt=incoming_text,
+                duration=duration,
+                resolution=resolution,
+                aspect_ratio=aspect_ratio,
+                generate_audio=generate_audio,
+                negative_prompt=None,
+                reference_images_bytes=None,
+            )
+        except Exception as e:
+            await tg_send_message(chat_id, f"❌ Ошибка Veo: {e}", reply_markup=_help_menu_for(user_id))
+            return {"ok": True}
+
+        try:
+            await tg_send_video_url(chat_id, video_url, caption="✅ Готово! (Veo)")
+        except Exception:
+            await tg_send_message(chat_id, f"✅ Готово! Видео: {video_url}", reply_markup=_help_menu_for(user_id))
+
+        _set_mode(chat_id, user_id, "chat")
+        st.pop("veo_t2v", None)
+        st.pop("veo_settings", None)
+        st["ts"] = _now()
+        sb_clear_user_state(user_id)
+        await tg_send_message(chat_id, "Главное меню.", reply_markup=_main_menu_for(user_id))
+        return {"ok": True}
+
+    # ---- VEO Image→Video: если мы в шаге референсов, можно написать 'Готово' ----
+    if st.get("mode") == "veo_i2v" and incoming_text:
+        vi = st.get("veo_i2v") or {}
+        step = (vi.get("step") or "need_image")
+        if step == "need_refs" and incoming_text.strip().lower() in ("готово", "done", "старт", "start"):
+            vi["step"] = "need_prompt"
+            st["veo_i2v"] = vi
+            st["ts"] = _now()
+            await tg_send_message(chat_id, "Ок ✅ Теперь пришли ТЕКСТ (промпт) для видео.", reply_markup=_help_menu_for(user_id))
+            return {"ok": True}
+        if step == "need_prompt":
+            settings = st.get("veo_settings") or {}
+            veo_model = (settings.get("veo_model") or "fast")
+            model_slug = "veo-3.1" if veo_model == "pro" else "veo-3-fast"
+
+            duration = int(settings.get("duration") or 8)
+            resolution = str(settings.get("resolution") or ("1080p" if veo_model == "pro" else "720p"))
+            aspect_ratio = str(settings.get("aspect_ratio") or "16:9")
+            generate_audio = bool(settings.get("generate_audio"))
+
+            image_bytes = vi.get("image_bytes")
+            if not image_bytes:
+                await tg_send_message(chat_id, "Сначала пришли стартовое фото.", reply_markup=_help_menu_for(user_id))
+                return {"ok": True}
+
+            last_frame_bytes = vi.get("last_frame_bytes")
+            ref_bytes = vi.get("reference_images_bytes") or []
+            if not isinstance(ref_bytes, list):
+                ref_bytes = []
+
+            await tg_send_message(chat_id, "⏳ Генерирую видео (Veo)…", reply_markup=_help_menu_for(user_id))
+            try:
+                video_url = await run_veo_image_to_video(
+                    user_id=int(user_id),
+                    model=model_slug,
+                    image_bytes=image_bytes,
+                    prompt=incoming_text,
+                    duration=duration,
+                    resolution=resolution,
+                    aspect_ratio=aspect_ratio,
+                    generate_audio=generate_audio,
+                    negative_prompt=None,
+                    reference_images_bytes=ref_bytes if ref_bytes else None,
+                    last_frame_bytes=last_frame_bytes if last_frame_bytes else None,
+                )
+            except Exception as e:
+                await tg_send_message(chat_id, f"❌ Ошибка Veo: {e}", reply_markup=_help_menu_for(user_id))
+                return {"ok": True}
+
+            try:
+                await tg_send_video_url(chat_id, video_url, caption="✅ Готово! (Veo)")
+            except Exception:
+                await tg_send_message(chat_id, f"✅ Готово! Видео: {video_url}", reply_markup=_help_menu_for(user_id))
+
+            _set_mode(chat_id, user_id, "chat")
+            st.pop("veo_i2v", None)
+            st.pop("veo_settings", None)
+            st["ts"] = _now()
+            sb_clear_user_state(user_id)
+            await tg_send_message(chat_id, "Главное меню.", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
 
 
     if incoming_text in ("🍌 Nano Banana", "Nano Banana"):
