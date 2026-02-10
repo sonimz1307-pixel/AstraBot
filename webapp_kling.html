@@ -147,6 +147,15 @@
       width: 22px; height: 22px;
       accent-color: var(--accent);
     }
+    .toggle input[type="checkbox"][disabled]{
+      opacity: .35;
+      cursor: not-allowed;
+    }
+    .disabled-note{
+      font-size: 11px;
+      color: rgba(190,205,240,.75);
+      margin-top: 6px;
+    }
 
     /* Advanced details */
     details.adv{
@@ -226,7 +235,7 @@
       <span class="badge" id="providerBadge">Kling</span>
     </div>
 
-    <!-- ✅ NEW: Provider switch Kling / Veo -->
+    <!-- Provider switch Kling / Veo -->
     <div class="card">
       <h3>Провайдер</h3>
       <div class="seg" role="radiogroup" aria-label="Провайдер">
@@ -281,7 +290,6 @@
           </label>
         </div>
 
-        <!-- ✅ Подсказка по списанию токенов -->
         <div class="hint" id="tokenRateHint">
           Standard — <b>1 сек = 1 токен (≈9–10 ₽)</b><br>
           Pro — 1 сек = 2 токена (≈18–20 ₽)
@@ -362,10 +370,10 @@
           <input id="veo_audio" type="checkbox" />
         </div>
 
-        <details class="adv">
-          <summary>Доп. настройки (PRO)</summary>
-          <div class="hint">
-            Эти опции будут доступны в PRO (Veo 3.1). В FAST они игнорируются.
+        <details class="adv" id="veoAdvDetails">
+          <summary>Доп. настройки (только Veo 3.1)</summary>
+          <div class="hint" id="veoAdvHint">
+            Эти опции доступны только в Veo 3.1. Выбери Veo 3.1 сверху.
           </div>
 
           <div class="toggle">
@@ -373,7 +381,7 @@
               <div class="tname">Last frame (финальный кадр)</div>
               <div class="tdesc">Попросим в боте 2-ю картинку</div>
             </div>
-            <input id="veo_use_last_frame" type="checkbox" />
+            <input id="veo_use_last_frame" type="checkbox" disabled />
           </div>
 
           <div class="toggle">
@@ -381,8 +389,10 @@
               <div class="tname">Reference images (до 4)</div>
               <div class="tdesc">Попросим в боте 0–4 референса</div>
             </div>
-            <input id="veo_use_refs" type="checkbox" />
+            <input id="veo_use_refs" type="checkbox" disabled />
           </div>
+
+          <div class="disabled-note" id="veoProOnlyNote">Доступно только в Veo 3.1</div>
         </details>
       </div>
     </div>
@@ -407,7 +417,7 @@
 
     function getProvider(){ return qs('input[name="provider"]:checked').value; }
 
-    // Kling getters (as-is)
+    // Kling getters
     function getFlow(){ return qs('input[name="flow"]:checked').value; }
     function getMode(){ return qs('input[name="mode"]:checked').value; }
 
@@ -415,30 +425,11 @@
     function getVeoModel(){ return qs('input[name="veo_model"]:checked').value; } // fast|pro
     function getVeoFlow(){ return qs('input[name="veo_flow"]:checked').value; }   // text|image
 
-    function updateUI(){
-      const provider = getProvider();
-
-      // show/hide blocks
-      qs('#klingBlock').style.display = (provider === 'kling') ? 'block' : 'none';
-      qs('#veoBlock').style.display   = (provider === 'veo')   ? 'block' : 'none';
-
-      // update provider badge
-      qs('#providerBadge').textContent = (provider === 'kling') ? 'Kling' : 'Veo';
-
-      // Kling duration card
-      if (provider === 'kling'){
-        const flow = getFlow();
-        qs('#durationCard').style.display = (flow === 'i2v') ? 'block' : 'none';
-      }
+    function updateKlingUI(){
+      const flow = getFlow();
+      qs('#durationCard').style.display = (flow === 'i2v') ? 'block' : 'none';
     }
 
-    // Kling UI events
-    qsa('input[name="flow"]').forEach(el => el.addEventListener('change', updateUI));
-
-    // Provider switch
-    qsa('input[name="provider"]').forEach(el => el.addEventListener('change', updateUI));
-
-    // Token hint update (Kling)
     function updateTokenRateHint(){
       const mode = getMode();
       const el = qs('#tokenRateHint');
@@ -450,9 +441,7 @@
         el.innerHTML = 'Standard — <b>1 сек = 1 токен (≈9–10 ₽)</b><br>Pro — 1 сек = 2 токена (≈18–20 ₽)';
       }
     }
-    qsa('input[name="mode"]').forEach(el => el.addEventListener('change', updateTokenRateHint));
 
-    // Veo pricing hint update
     function updateVeoPriceHint(){
       const model = getVeoModel();
       const el = qs('#veoPriceHint');
@@ -464,11 +453,60 @@
         el.innerHTML = 'Fast: без звука <b>$0.10/сек</b>, со звуком <b>$0.15/сек</b>. 720p фикс.';
       }
     }
-    qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', updateVeoPriceHint));
 
-    updateUI();
+    function setVeoAdvancedEnabled(isPro){
+      const lf = qs('#veo_use_last_frame');
+      const refs = qs('#veo_use_refs');
+      const note = qs('#veoProOnlyNote');
+      const advHint = qs('#veoAdvHint');
+      const advDetails = qs('#veoAdvDetails');
+
+      lf.disabled = !isPro;
+      refs.disabled = !isPro;
+
+      if (!isPro){
+        // сброс галочек, чтобы в payload не уезжало "true" из старого выбора
+        lf.checked = false;
+        refs.checked = false;
+
+        note.style.display = 'block';
+        advHint.textContent = 'Эти опции доступны только в Veo 3.1. Выбери Veo 3.1 сверху.';
+        // можно сворачивать advanced при уходе в fast
+        advDetails.open = false;
+      } else {
+        note.style.display = 'none';
+        advHint.textContent = 'Опции Veo 3.1: last_frame и reference_images.';
+      }
+    }
+
+    function updateProviderUI(){
+      const provider = getProvider();
+      qs('#klingBlock').style.display = (provider === 'kling') ? 'block' : 'none';
+      qs('#veoBlock').style.display   = (provider === 'veo')   ? 'block' : 'none';
+      qs('#providerBadge').textContent = (provider === 'kling') ? 'Kling' : 'Veo';
+
+      if (provider === 'kling'){
+        updateKlingUI();
+      } else {
+        const isPro = (getVeoModel() === 'pro');
+        setVeoAdvancedEnabled(isPro);
+      }
+    }
+
+    // Events
+    qsa('input[name="provider"]').forEach(el => el.addEventListener('change', updateProviderUI));
+    qsa('input[name="flow"]').forEach(el => el.addEventListener('change', updateKlingUI));
+    qsa('input[name="mode"]').forEach(el => el.addEventListener('change', updateTokenRateHint));
+    qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () => {
+      updateVeoPriceHint();
+      setVeoAdvancedEnabled(getVeoModel() === 'pro');
+    }));
+
+    // Init
+    updateProviderUI();
     updateTokenRateHint();
     updateVeoPriceHint();
+    setVeoAdvancedEnabled(getVeoModel() === 'pro');
 
     // Telegram init (safe)
     const tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
@@ -503,7 +541,7 @@
         const flow = getFlow();
         const mode = getMode();
 
-        // ✅ backward-compatible payload (как было)
+        // backward-compatible payload (как было)
         payload = { type: "kling_settings", flow, mode };
 
         if (flow === 'i2v'){
@@ -516,8 +554,9 @@
         const aspect_ratio = qs('#veo_aspect').value;
         const generate_audio = !!qs('#veo_audio').checked;
 
-        const use_last_frame = !!qs('#veo_use_last_frame').checked;
-        const use_refs = !!qs('#veo_use_refs').checked;
+        const isPro = (veo_model === 'pro');
+        const use_last_frame = isPro && !!qs('#veo_use_last_frame').checked;
+        const use_refs = isPro && !!qs('#veo_use_refs').checked;
 
         payload = {
           type: "veo_settings",
@@ -533,16 +572,14 @@
           use_reference_images: use_refs,
 
           // resolution зашиваем
-          resolution: (veo_model === 'pro') ? '1080p' : '720p'
+          resolution: isPro ? '1080p' : '720p'
         };
       }
 
       showDebug(payload);
 
       if (tg){
-        try{
-          tg.sendData(JSON.stringify(payload));
-        }catch(e){}
+        try{ tg.sendData(JSON.stringify(payload)); }catch(e){}
 
         setTimeout(() => {
           try{ tg.close(); }catch(e){}
