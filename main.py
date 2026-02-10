@@ -4099,7 +4099,7 @@ async def webhook(secret: str, request: Request):
 
 
 
-# ---- VEO Image → Video: step=need_image ----
+        # ---- VEO Image → Video: step=need_image ----
         if st.get("mode") == "veo_i2v":
             vi = st.get("veo_i2v") or {}
             step = (vi.get("step") or "need_image")
@@ -4118,7 +4118,6 @@ async def webhook(secret: str, request: Request):
                 )
                 return {"ok": True}
 
-            # если прислал ещё фото, но мы уже ждём текст
             await tg_send_message(
                 chat_id,
                 "Фото уже есть ✅ Теперь жду ТЕКСТ.",
@@ -4254,7 +4253,7 @@ async def webhook(secret: str, request: Request):
                 _ai_hist_add(st, "assistant", answer)
             await tg_send_message(chat_id, answer, reply_markup=_main_menu_for(user_id))
             return {"ok": True}
-        await tg_send_message(chat_id, "Фото получил. Анализирую...", reply_markup=_main_menu_for(user_id))
+            await tg_send_message(chat_id, "Фото получил. Анализирую...", reply_markup=_main_menu_for(user_id))
         prompt = incoming_text if incoming_text else VISION_DEFAULT_USER_PROMPT
         answer = await openai_chat_answer(
             user_text=prompt,
