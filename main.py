@@ -1264,13 +1264,21 @@ async def tg_send_message(chat_id: int, text: str, reply_markup: Optional[dict] 
         await client.post(f"{TELEGRAM_API_BASE}/sendMessage", json=payload)
 
 
-async def tg_send_photo_bytes(chat_id: int, image_bytes: bytes, caption: Optional[str] = None):
+async def tg_send_photo_bytes(
+    chat_id: int,
+    image_bytes: bytes,
+    caption: Optional[str] = None,
+    reply_markup: Optional[dict] = None,
+):
     if not TELEGRAM_BOT_TOKEN:
         return
     files = {"photo": ("image.png", image_bytes, "image/png")}
     data = {"chat_id": str(chat_id)}
     if caption:
         data["caption"] = caption
+    if reply_markup is not None:
+        data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+
     async with httpx.AsyncClient(timeout=180) as client:
         await client.post(f"{TELEGRAM_API_BASE}/sendPhoto", data=data, files=files)
 
@@ -1351,7 +1359,12 @@ async def tg_send_chat_action(chat_id: int, action: str = "typing"):
         await client.post(f"{TELEGRAM_API_BASE}/sendChatAction", json=payload)
 
 
-async def tg_send_photo_bytes_return_message_id(chat_id: int, image_bytes: bytes, caption: Optional[str] = None, reply_markup: Optional[dict] = None) -> Optional[int]:
+async def tg_send_photo_bytes_return_message_id(
+    chat_id: int,
+    image_bytes: bytes,
+    caption: Optional[str] = None,
+    reply_markup: Optional[dict] = None,
+) -> Optional[int]:
     """
     sendPhoto, но возвращает message_id (нужен для editMessageCaption/editMessageMedia).
     """
@@ -1361,8 +1374,12 @@ async def tg_send_photo_bytes_return_message_id(chat_id: int, image_bytes: bytes
     data = {"chat_id": str(chat_id)}
     if caption:
         data["caption"] = caption
+    if reply_markup is not None:
+        data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+
     async with httpx.AsyncClient(timeout=180) as client:
         r = await client.post(f"{TELEGRAM_API_BASE}/sendPhoto", data=data, files=files)
+
     try:
         j = r.json()
         if isinstance(j, dict) and j.get("ok") and j.get("result") and j["result"].get("message_id") is not None:
@@ -1370,6 +1387,7 @@ async def tg_send_photo_bytes_return_message_id(chat_id: int, image_bytes: bytes
     except Exception:
         pass
     return None
+
 
 
 async def tg_edit_message_caption(chat_id: int, message_id: int, caption: str):
@@ -4261,11 +4279,48 @@ async def webhook(secret: str, request: Request):
                     # если billing_db принимает только int
                     add_tokens(user_id, -int(cost), reason="nano_banana")
 
-                await tg_send_message(chat_id, "🍌 Генерирую…", reply_markup=_photo_future_menu_keyboard())
+                # Placeholder + кнопка "Скачать оригинал"
+                placeholder = _make_blur_placeholder(src_bytes)
+                token = _dl_init_slot(chat_id, user_id)
+                msg_id = await tg_send_photo_bytes_return_message_id(
+                    chat_id,
+                    placeholder,
+                    caption="🍌 Nano Banana — генерирую…",
+                    reply_markup=_dl_keyboard(token),
+                )
 
                 try:
                     out_bytes, ext = await run_nano_banana(src_bytes, user_prompt, output_format="jpg")
-                    await tg_send_photo_bytes(chat_id, out_bytes, caption="🍌 Nano Banana — готово")
+
+                    # сохраняем оригинал для скачивания (отдадим как document без сжатия)
+                    _dl_set_bytes(chat_id, user_id, token, out_bytes)
+
+                    # пытаемся заменить placeholder на результат в том же сообщении
+                    if msg_id is not None:
+                        try:
+                            await tg_edit_message_media_photo(
+                                chat_id,
+                                msg_id,
+                                out_bytes,
+                                caption="🍌 Nano Banana — готово",
+                                reply_markup=_dl_keyboard(token),
+                            )
+                        except Exception:
+                            # если edit не сработал — отправим отдельным фото с кнопкой
+                            await tg_send_photo_bytes(
+                                chat_id,
+                                out_bytes,
+                                caption="🍌 Nano Banana — готово",
+                                reply_markup=_dl_keyboard(token),
+                            )
+                    else:
+                        await tg_send_photo_bytes(
+                            chat_id,
+                            out_bytes,
+                            caption="🍌 Nano Banana — готово",
+                            reply_markup=_dl_keyboard(token),
+                        )
+
                 except Exception as e:
                     # возврат токена при ошибке
                     try:
