@@ -3100,6 +3100,17 @@ async def webhook(secret: str, request: Request):
     # ✅ Telegram: текст может быть в caption
     incoming_text = (message.get("text") or message.get("caption") or "").strip()
 
+    # Execution guard: while a long generation is running, ignore accidental navigation/button texts
+    # so they do not get interpreted as prompts and start a second generation.
+    if _busy_is_active(int(user_id)) and _is_nav_or_menu_text(incoming_text):
+        kind = _busy_kind(int(user_id)) or "генерация"
+        await tg_send_message(
+            chat_id,
+            f"⏳ Сейчас выполняется: {kind}. Я не запускаю новую генерацию от кнопок/навигации. Дождись завершения (или /reset).",
+            reply_markup=_main_menu_for(user_id),
+        )
+        return {"ok": True}
+
 
     # ----- Supabase state resume (Music Future) -----
     # Если бот перезапустился, режим "ожидаем текст для музыки" берём из Supabase.
@@ -4679,6 +4690,7 @@ async def webhook(secret: str, request: Request):
                 )
 
                 try:
+                    _busy_start(int(user_id), "Nano Banana")
                     out_bytes, ext = await run_nano_banana(src_bytes, user_prompt, output_format="jpg")
 
                     # сохраняем оригинал для скачивания (отдадим как document без сжатия)
@@ -4725,9 +4737,11 @@ async def webhook(secret: str, request: Request):
                         f"Ошибка Nano Banana: {e}",
                         reply_markup=_photo_future_menu_keyboard(),
                     )
+                    _busy_end(int(user_id))
                     return {"ok": True}
 
                 # reset state (после успеха)
+                _busy_end(int(user_id))
                 st["nano_banana"] = {"step": "need_photo", "photo_bytes": None}
                 st["ts"] = _now()
                 return {"ok": True}
@@ -4774,6 +4788,8 @@ async def webhook(secret: str, request: Request):
 
                 _sent_via_edit = False
 
+                _busy_start(int(user_id), "2 фото")
+
                 out_bytes = await ark_edit_image(
                     source_image_bytes=tp.get("photo1_bytes") or b"",
                     prompt=prompt,
@@ -4817,6 +4833,7 @@ async def webhook(secret: str, request: Request):
                     reply_markup=_help_menu_for(user_id),
                 )
             finally:
+                _busy_end(int(user_id))
                 # Сбрасываем режим, чтобы можно было сразу начать заново
                 _set_mode(chat_id, user_id, "two_photos")
                 st["ts"] = _now()
@@ -4851,6 +4868,8 @@ async def webhook(secret: str, request: Request):
 
             await tg_send_message(chat_id, f"🎬 Генерирую видео ({duration} сек, {kling_mode.upper()})…", reply_markup=_main_menu_for(user_id))
 
+            _busy_start(int(user_id), "Kling I2V")
+
             try:
                 out_url = await run_image_to_video_from_bytes(
                     user_id=user_id,
@@ -4866,6 +4885,7 @@ async def webhook(secret: str, request: Request):
             finally:
                 st["kling_i2v"] = {"step": "need_image", "image_bytes": None, "duration": duration}
                 _set_mode(chat_id, user_id, "chat")
+                _busy_end(int(user_id))
 
             return {"ok": True}
 
@@ -4890,6 +4910,8 @@ async def webhook(secret: str, request: Request):
 
             await tg_send_message(chat_id, "🎬 Генерирую видео (обычно 3–7 минут)…", reply_markup=_main_menu_for(user_id))
 
+            _busy_start(int(user_id), "Kling Motion")
+
             try:
                 # настройки Kling из WebApp (если нет — дефолт std)
                 ks = st.get("kling_settings") or {}
@@ -4912,6 +4934,7 @@ async def webhook(secret: str, request: Request):
             finally:
                 st["kling_mc"] = {"step": "need_avatar", "avatar_bytes": None, "video_bytes": None}
                 _set_mode(chat_id, user_id, "chat")
+                _busy_end(int(user_id))
 
             return {"ok": True}
 
@@ -4940,6 +4963,7 @@ async def webhook(secret: str, request: Request):
                 await tg_send_chat_action(chat_id, "upload_photo")
 
             try:
+                _busy_start(int(user_id), "Seedream T2I")
                 img_bytes = await ark_text_to_image(prompt=user_prompt, size=ARK_SIZE_DEFAULT)
 
                 _dl_set_bytes(chat_id, user_id, token, img_bytes)
@@ -4968,6 +4992,7 @@ async def webhook(secret: str, request: Request):
                         pass
                 await tg_send_message(chat_id, f"Ошибка T2I: {e}", reply_markup=_main_menu_for(user_id))
             finally:
+                _busy_end(int(user_id))
                 # остаёмся в режиме t2i, чтобы можно было генерировать дальше без повторного выбора
                 st["t2i"] = {"step": "need_prompt"}
                 st["ts"] = _now()
@@ -5009,6 +5034,7 @@ async def webhook(secret: str, request: Request):
 
             _sent_via_edit = False
             try:
+                _busy_start(int(user_id), "Seedream фотосессия")
                 photo_file_id = ps.get("photo_file_id")
                 source_url = None
                 if photo_file_id:
@@ -5050,6 +5076,7 @@ async def webhook(secret: str, request: Request):
                 # остаёмся в режиме, чтобы пользователь мог попробовать ещё раз
                 st["photosession"] = {"step": "need_photo", "photo_bytes": None}
                 st["ts"] = _now()
+                _busy_end(int(user_id))
                 return {"ok": True}
 
             if not _sent_via_edit:
@@ -5104,6 +5131,7 @@ async def webhook(secret: str, request: Request):
                         await tg_send_chat_action(chat_id, "upload_photo")
 
                     try:
+                        _busy_start(int(user_id), "Афиша")
                         spec = await openai_extract_poster_spec(incoming_text)
                         poster_prompt = _poster_prompt_art_director(spec, light=(poster.get("light") or "bright"))
                         out_bytes = await openai_edit_image(
@@ -5132,6 +5160,7 @@ async def webhook(secret: str, request: Request):
 
                     except Exception as e:
                         stop.set()
+                        _busy_end(int(user_id))
                         if prog_task:
                             try:
                                 await prog_task
@@ -5200,6 +5229,7 @@ async def webhook(secret: str, request: Request):
                             await tg_send_message(chat_id, f"Не получилось сгенерировать картинку: {e}")
 
                 # reset
+                _busy_end(int(user_id))
                 st["poster"] = {"step": "need_photo", "photo_bytes": None, "light": "bright"}
                 st["ts"] = _now()
                 return {"ok": True}
