@@ -69,375 +69,309 @@
     .seg.cols3{
       grid-template-columns: 1fr 1fr 1fr;
     }
-    .seg input{ display:none; }
     .seg label{
-      cursor:pointer;
-      user-select:none;
-      background: rgba(255,255,255,.03);
-      border:1px solid var(--stroke);
-      border-radius: 14px;
-      padding: 12px 12px;
-      display:flex;
-      flex-direction:column;
-      gap:4px;
-      transition: transform .06s ease, border-color .15s ease, background .15s ease, box-shadow .15s ease;
-    }
-    .seg label:active{ transform: scale(.99); }
-    .seg .name{ font-weight:800; font-size:15px; }
-    .seg .desc{ font-size:12px; color: var(--muted); line-height:1.25; }
-
-    .seg input:checked + label{
-      border-color: rgba(46,166,255,.55);
-      background: linear-gradient(180deg, rgba(46,166,255,.18), rgba(31,111,235,.10));
-      box-shadow: 0 10px 22px rgba(46,166,255,.12);
-    }
-
-    .row{
-      display:flex; gap:10px; flex-wrap:wrap;
-    }
-
-    /* Select */
-    select{
-      width:100%;
-      padding: 12px 12px;
-      border-radius: 14px;
-      border:1px solid var(--stroke);
-      background: rgba(0,0,0,.18);
-      color: var(--text);
-      outline:none;
-      font-size: 15px;
-    }
-    select:focus{ border-color: rgba(46,166,255,.55); }
-
-    .hint{
-      margin-top: 8px;
-      font-size: 12px;
-      color: var(--muted);
-      line-height: 1.35;
-    }
-
-    /* Toggle */
-    .toggle{
       display:flex;
       align-items:center;
-      justify-content: space-between;
-      gap:12px;
+      justify-content:center;
+      gap:8px;
       padding: 10px 12px;
       border-radius: 14px;
       border:1px solid var(--stroke);
-      background: rgba(255,255,255,.03);
+      background: rgba(255,255,255,.02);
+      cursor:pointer;
+      user-select:none;
+      transition:.15s ease;
+      font-weight:700;
+    }
+    .seg input{ display:none; }
+    .seg input:checked + span{
+      background: rgba(46,166,255,.15);
+      border:1px solid rgba(46,166,255,.55);
+      box-shadow: 0 8px 18px rgba(46,166,255,.15);
+    }
+    .seg span{
+      display:flex; align-items:center; justify-content:center;
+      width:100%;
+      padding: 10px 12px;
+      border-radius: 14px;
+      border:1px solid transparent;
+    }
+
+    .hint{
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.35;
+    }
+    .hint b{ color: var(--text); }
+
+    .row{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
       margin-top: 10px;
     }
-    .toggle .tname{
-      font-weight:800;
-      font-size: 14px;
+
+    .select{
+      width: 140px;
+      background: rgba(255,255,255,.03);
+      border:1px solid var(--stroke);
+      border-radius: 12px;
+      padding: 10px 10px;
+      color: var(--text);
+      outline:none;
+      font-weight:700;
     }
-    .toggle .tdesc{
-      font-size: 12px;
+
+    .small{
+      font-size:12px;
       color: var(--muted);
-      margin-top: 2px;
-      line-height: 1.25;
-    }
-    .toggle .left{
-      display:flex;
-      flex-direction:column;
-      gap:2px;
-    }
-    .toggle input[type="checkbox"]{
-      width: 22px; height: 22px;
-      accent-color: var(--accent);
-    }
-    .toggle input[type="checkbox"][disabled]{
-      opacity: .35;
-      cursor: not-allowed;
-    }
-    .disabled-note{
-      font-size: 11px;
-      color: rgba(190,205,240,.75);
-      margin-top: 6px;
     }
 
-    /* Advanced details */
-    details.adv{
-      margin-top:10px;
-      border:1px dashed rgba(170,190,255,.22);
-      border-radius: 14px;
-      padding: 10px 12px;
-      background: rgba(0,0,0,.12);
+    .divider{
+      height:1px;
+      background: rgba(170,190,255,.12);
+      margin: 12px 0;
     }
-    details.adv summary{
-      cursor:pointer;
-      font-weight:800;
-      color: rgba(200,220,255,.95);
-      list-style:none;
-    }
-    details.adv summary::-webkit-details-marker{ display:none; }
-    .adv .hint{ margin-top: 8px; }
 
-    /* Bottom action bar */
+    /* Sticky bottom bar */
     .bar{
       position: fixed;
       left:0; right:0; bottom:0;
-      padding: 12px 14px calc(12px + env(safe-area-inset-bottom));
-      background: linear-gradient(180deg, rgba(6,11,22,0), rgba(6,11,22,.88) 25%, rgba(6,11,22,.96));
+      padding: 12px 14px 14px;
+      background: linear-gradient(180deg, rgba(6,11,22,0), rgba(6,11,22,.95) 35%, rgba(6,11,22,1));
       backdrop-filter: blur(10px);
     }
-    .bar .inner{ max-width: 520px; margin:0 auto; }
+    .bar .inner{
+      max-width: 520px;
+      margin: 0 auto;
+      display:flex;
+      gap:10px;
+      align-items:center;
+    }
     .btn{
-      width:100%;
-      border:0;
+      width: 100%;
+      background: linear-gradient(180deg, rgba(46,166,255,.98), rgba(31,111,235,.98));
+      border:none;
       border-radius: 16px;
       padding: 14px 14px;
-      font-weight: 900;
-      font-size: 16px;
+      color:white;
+      font-weight:900;
+      font-size: 15px;
+      letter-spacing: .2px;
       cursor:pointer;
-      color: #071022;
-      background: linear-gradient(180deg, var(--accent), var(--accent2));
-      box-shadow: 0 14px 28px rgba(31,111,235,.18);
-      transition: transform .06s ease, filter .15s ease;
+      box-shadow: 0 12px 24px rgba(31,111,235,.28);
     }
-    .btn:active{ transform: scale(.99); }
-    .btn[disabled]{
-      filter: grayscale(.4) brightness(.8);
-      cursor:not-allowed;
-    }
+    .btn:active{ transform: translateY(1px); }
 
     .toast{
-      margin-top:10px;
-      padding: 10px 12px;
-      border-radius: 14px;
-      border:1px solid var(--stroke);
-      background: rgba(255,255,255,.03);
+      display:none;
       color: var(--muted);
       font-size: 12px;
-      display:none;
+      line-height: 1.25;
     }
     .toast.show{ display:block; }
 
     .debug{
-      margin-top:10px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-      font-size: 12px;
-      color: rgba(180,200,255,.85);
-      opacity:.9;
       display:none;
+      margin-top: 10px;
+      font-size: 12px;
+      color: #a9c8ff;
+      white-space: pre-wrap;
       word-break: break-word;
+      padding: 10px;
+      border-radius: 14px;
+      border: 1px dashed rgba(46,166,255,.35);
+      background: rgba(46,166,255,.06);
     }
     .debug.show{ display:block; }
 
-    /* ===================== Provider image buttons (NEW) ===================== */
-    .seg.providerSeg{
-      grid-template-columns: 1fr 1fr;
-    }
-
-    .seg.providerSeg label{
-      padding: 0;
-      height: 112px;              /* высота верхних карточек */
+    details.adv{
+      margin-top: 10px;
+      border: 1px solid rgba(170,190,255,.14);
       border-radius: 14px;
-      overflow: hidden;
-      position: relative;
+      padding: 10px 12px;
       background: rgba(255,255,255,.02);
     }
-
-    .seg.providerSeg label .pimg{
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      display: block;
-      transform: scale(1.02);
-      filter: saturate(1.05);
-    }
-
-    .seg.providerSeg label .poverlay{
-      position: absolute;
-      inset: 0;
-      background: linear-gradient(180deg, rgba(0,0,0,.08), rgba(0,0,0,.38) 70%, rgba(0,0,0,.50));
-    }
-
-    .seg.providerSeg label .ptxt{
-      position: absolute;
-      left: 12px;
-      bottom: 10px;
-      right: 12px;
-      display: flex;
-      align-items: baseline;
-      justify-content: space-between;
-      gap: 10px;
-    }
-
-    .seg.providerSeg label .pname{
-      font-weight: 900;
-      font-size: 16px;
-      letter-spacing: .2px;
-      text-shadow: 0 6px 18px rgba(0,0,0,.55);
+    details.adv > summary{
+      cursor:pointer;
+      font-weight: 800;
       color: var(--text);
+      list-style:none;
+      outline:none;
+    }
+    details.adv > summary::-webkit-details-marker{ display:none; }
+
+    .toggle{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      padding: 10px 0;
+      border-top: 1px solid rgba(170,190,255,.10);
+    }
+    .toggle:first-of-type{ border-top:none; }
+    .toggle .left{
+      display:flex;
+      flex-direction:column;
+      gap:3px;
+    }
+    .toggle .tname{
+      font-weight: 800;
+      font-size: 13px;
+    }
+    .toggle .tdesc{
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .toggle input{
+      width: 44px;
+      height: 24px;
+      accent-color: var(--accent);
     }
 
-    .seg.providerSeg label .pnote{
-      font-size: 11px;
-      color: rgba(220,235,255,.9);
-      padding: 4px 8px;
-      border-radius: 999px;
-      border: 1px solid rgba(170,190,255,.20);
-      background: rgba(0,0,0,.22);
-      backdrop-filter: blur(6px);
-      text-shadow: 0 6px 18px rgba(0,0,0,.35);
-    }
-
-    .seg.providerSeg input:checked + label{
-      border-color: rgba(46,166,255,.55);
-      background: linear-gradient(180deg, rgba(46,166,255,.18), rgba(31,111,235,.10));
-      box-shadow: 0 10px 22px rgba(46,166,255,.12);
-    }
-
-    .seg.providerSeg label:hover{
-      filter: brightness(1.05);
+    .disabled-note{
+      margin-top: 10px;
+      font-size: 12px;
+      color: rgba(255,255,255,.78);
+      background: rgba(255,77,77,.10);
+      border: 1px solid rgba(255,77,77,.22);
+      padding: 10px 12px;
+      border-radius: 14px;
+      display:none;
     }
   </style>
+
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
+
 <body>
   <div class="wrap">
-   
-    <!-- Provider switch Kling / Veo 3 -->
+
+    <!-- (Если хочешь вернуть заголовок с бейджами — можешь раскомментировать)
+    <div class="title">
+      🎬 Видео будущего — настройки
+      <span class="badge" id="platformBadge">WebApp</span>
+      <span class="badge" id="providerBadge">Kling</span>
+    </div>
+    -->
+
+    <!-- Provider -->
     <div class="card">
       <h3>Провайдер</h3>
-      <div class="seg providerSeg" role="radiogroup" aria-label="Провайдер">
-        <input id="provider_kling" type="radio" name="provider" value="kling" checked>
-        <label for="provider_kling" aria-label="Kling">
-          <img class="pimg" src="/static/img/providers/kling.png" alt="Kling">
-          <div class="poverlay"></div>
-          <div class="ptxt">
-            <div class="pname">Kling</div>
-          </div>
+      <div class="seg">
+        <label>
+          <input type="radio" name="provider" value="kling" checked />
+          <span>Kling</span>
         </label>
-
-        <input id="provider_veo" type="radio" name="provider" value="veo">
-        <label for="provider_veo" aria-label="Veo 3">
-          <img class="pimg" src="/static/img/providers/veo3.png" alt="Veo 3">
-          <div class="poverlay"></div>
-          <div class="ptxt">
-            <div class="pname">Veo 3</div>
-            <div class="pnote">не работает</div>
-          </div>
+        <label>
+          <input type="radio" name="provider" value="veo" />
+          <span>Veo 3</span>
         </label>
       </div>
-      <div class="hint">Выбери провайдера, затем настройки и нажми “Сохранить”.</div>
+      <div class="hint" style="margin-top:10px;">
+        Выбери провайдера сверху. Ниже появятся настройки под выбранный режим.
+      </div>
     </div>
 
-    <!-- ===================== KLING BLOCK ===================== -->
+    <!-- Kling -->
     <div id="klingBlock">
       <div class="card">
-        <h3>Тип генерации</h3>
-        <div class="seg" role="radiogroup" aria-label="Тип генерации">
-          <input id="flow_motion" type="radio" name="flow" value="motion" checked>
-          <label for="flow_motion">
-            <span class="name">Motion Control</span>
-            <span class="desc">Фото + видео 3–10 сек</span>
+        <h3>Kling — режим</h3>
+        <div class="seg">
+          <label>
+            <input type="radio" name="flow" value="motion" checked />
+            <span>Motion Control</span>
           </label>
-
-          <input id="flow_i2v" type="radio" name="flow" value="i2v">
-          <label for="flow_i2v">
-            <span class="name">Image → Video</span>
-            <span class="desc">Только фото</span>
-          </label>
-        </div>
-        <div class="hint">Для Motion Control длительность задаётся референс-видео (3–30 сек).</div>
-      </div>
-
-      <div class="card">
-        <h3>Качество</h3>
-        <div class="seg" role="radiogroup" aria-label="Качество">
-          <input id="mode_std" type="radio" name="mode" value="std" checked>
-          <label for="mode_std">
-            <span class="name">Standard</span>
-            <span class="desc">Быстрее / дешевле</span>
-          </label>
-
-          <input id="mode_pro" type="radio" name="mode" value="pro">
-          <label for="mode_pro">
-            <span class="name">Pro</span>
-            <span class="desc">Лучше качество</span>
+          <label>
+            <input type="radio" name="flow" value="i2v" />
+            <span>Image → Video</span>
           </label>
         </div>
 
-        <div class="hint" id="tokenRateHint">
-          Standard — <b>1 сек = 1 токен (≈9–10 ₽)</b><br>
-          Pro — 1 сек = 2 токена (≈18–20 ₽)
-        </div>
-      </div>
+        <div class="divider"></div>
 
-      <div class="card" id="durationCard" style="display:none;">
-        <h3>Длительность</h3>
-        <select id="duration" aria-label="Длительность">
-          <option value="5">5 секунд</option>
-          <option value="10">10 секунд</option>
-        </select>
-        <div class="hint">Длительность применяется только для Image → Video.</div>
+        <h3>Kling — качество</h3>
+        <div class="seg">
+          <label>
+            <input type="radio" name="mode" value="std" checked />
+            <span>STD</span>
+          </label>
+          <label>
+            <input type="radio" name="mode" value="pro" />
+            <span>PRO</span>
+          </label>
+        </div>
+
+        <div class="hint" id="tokenRateHint" style="margin-top:10px;"></div>
+
+        <div class="card" id="durationCard" style="display:none; margin-top:10px;">
+          <h3>Длительность (только I2V)</h3>
+          <div class="row">
+            <div class="hint">Сколько секунд генерировать</div>
+            <select class="select" id="duration">
+              <option value="4">4 сек</option>
+              <option value="6">6 сек</option>
+              <option value="8" selected>8 сек</option>
+            </select>
+          </div>
+        </div>
       </div>
     </div>
 
-    <!-- ===================== VEO BLOCK ===================== -->
+    <!-- Veo -->
     <div id="veoBlock" style="display:none;">
       <div class="card">
-        <h3>Модель Veo</h3>
-        <div class="seg" role="radiogroup" aria-label="Модель Veo">
-          <input id="veo_fast" type="radio" name="veo_model" value="fast" checked>
-          <label for="veo_fast">
-            <span class="name">Veo Fast</span>
-            <span class="desc">720p / дешевле</span>
+        <h3>Veo — версия</h3>
+        <div class="seg">
+          <label>
+            <input type="radio" name="veo_model" value="fast" checked />
+            <span>Fast</span>
           </label>
-
-          <input id="veo_pro" type="radio" name="veo_model" value="pro">
-          <label for="veo_pro">
-            <span class="name">Veo 3.1</span>
-            <span class="desc">1080p / quality</span>
+          <label>
+            <input type="radio" name="veo_model" value="pro" />
+            <span>Veo 3.1</span>
           </label>
         </div>
-        <div class="hint" id="veoPriceHint">
-          Fast: без звука $0.10/сек, со звуком $0.15/сек. 720p фикс.
-        </div>
-      </div>
 
-      <div class="card">
-        <h3>Режим</h3>
-        <div class="seg" role="radiogroup" aria-label="Режим Veo">
-          <input id="veo_flow_text" type="radio" name="veo_flow" value="text" checked>
-          <label for="veo_flow_text">
-            <span class="name">Text → Video</span>
-            <span class="desc">Только промпт</span>
+        <div class="hint" id="veoPriceHint" style="margin-top:10px;"></div>
+
+        <div class="divider"></div>
+
+        <h3>Veo — тип генерации</h3>
+        <div class="seg">
+          <label>
+            <input type="radio" name="veo_flow" value="text" checked />
+            <span>Text → Video</span>
           </label>
-
-          <input id="veo_flow_image" type="radio" name="veo_flow" value="image">
-          <label for="veo_flow_image">
-            <span class="name">Image → Video</span>
-            <span class="desc">Фото + промпт</span>
+          <label>
+            <input type="radio" name="veo_flow" value="image" />
+            <span>Image → Video</span>
           </label>
         </div>
-        <div class="hint">Промпт ты введёшь в боте, WebApp сейчас задаёт только параметры.</div>
-      </div>
 
-      <div class="card">
+        <div class="divider"></div>
+
         <h3>Параметры</h3>
+        <div class="row">
+          <div class="hint">Длительность</div>
+          <select class="select" id="veo_duration">
+            <option value="4">4 сек</option>
+            <option value="6">6 сек</option>
+            <option value="8" selected>8 сек</option>
+          </select>
+        </div>
 
         <div class="row">
-          <select id="veo_duration" aria-label="Длительность">
-            <option value="4">4 секунды</option>
-            <option value="6">6 секунд</option>
-            <option value="8" selected>8 секунд</option>
-          </select>
-
-          <select id="veo_aspect" aria-label="Формат">
-            <option value="16:9">16:9</option>
-            <option value="9:16">9:16 (Reels)</option>
+          <div class="hint">Соотношение сторон</div>
+          <select class="select" id="veo_aspect">
+            <option value="16:9" selected>16:9</option>
+            <option value="9:16">9:16</option>
           </select>
         </div>
 
-        <div class="toggle">
-          <div class="left">
-            <div class="tname">Генерировать звук</div>
-            <div class="tdesc">Дороже, но “как ролик”</div>
-          </div>
+        <div class="row">
+          <div class="hint">Генерировать звук</div>
           <input id="veo_audio" type="checkbox" />
         </div>
 
@@ -473,7 +407,7 @@
 
   <div class="bar">
     <div class="inner">
-      <button class="btn" id="saveBtn">Сохранить и вернуться в бот</button>
+      <button class="btn" id="saveBtn" type="button">Сохранить и вернуться в бот</button>
       <div class="toast" id="toast">Готово ✅ Если окно не закрылось — закрой его крестиком (×).</div>
     </div>
   </div>
@@ -498,7 +432,8 @@
 
     function updateKlingUI(){
       const flow = getFlow();
-      qs('#durationCard').style.display = (flow === 'i2v') ? 'block' : 'none';
+      const durationCard = qs('#durationCard');
+      if (durationCard) durationCard.style.display = (flow === 'i2v') ? 'block' : 'none';
     }
 
     function updateTokenRateHint(){
@@ -532,27 +467,33 @@
       const advHint = qs('#veoAdvHint');
       const advDetails = qs('#veoAdvDetails');
 
-      lf.disabled = !isPro;
-      refs.disabled = !isPro;
+      if (lf) lf.disabled = !isPro;
+      if (refs) refs.disabled = !isPro;
 
       if (!isPro){
-        lf.checked = false;
-        refs.checked = false;
+        if (lf) lf.checked = false;
+        if (refs) refs.checked = false;
 
-        note.style.display = 'block';
-        advHint.textContent = 'Эти опции доступны только в Veo 3.1. Выбери Veo 3.1 сверху.';
-        advDetails.open = false;
+        if (note) note.style.display = 'block';
+        if (advHint) advHint.textContent = 'Эти опции доступны только в Veo 3.1. Выбери Veo 3.1 сверху.';
+        if (advDetails) advDetails.open = false;
       } else {
-        note.style.display = 'none';
-        advHint.textContent = 'Опции Veo 3.1: last_frame и reference_images.';
+        if (note) note.style.display = 'none';
+        if (advHint) advHint.textContent = 'Опции Veo 3.1: last_frame и reference_images.';
       }
     }
 
     function updateProviderUI(){
       const provider = getProvider();
-      qs('#klingBlock').style.display = (provider === 'kling') ? 'block' : 'none';
-      qs('#veoBlock').style.display   = (provider === 'veo')   ? 'block' : 'none';
-      qs('#providerBadge').textContent = (provider === 'kling') ? 'Kling' : 'Veo';
+      const klingBlock = qs('#klingBlock');
+      const veoBlock = qs('#veoBlock');
+
+      if (klingBlock) klingBlock.style.display = (provider === 'kling') ? 'block' : 'none';
+      if (veoBlock) veoBlock.style.display   = (provider === 'veo')   ? 'block' : 'none';
+
+      // ✅ SAFE: бейдж мог быть удалён из HTML
+      const pb = qs('#providerBadge');
+      if (pb) pb.textContent = (provider === 'kling') ? 'Kling' : 'Veo';
 
       if (provider === 'kling'){
         updateKlingUI();
@@ -585,79 +526,82 @@
       try{
         tg.ready();
         tg.expand();
-        platformBadge.textContent = (tg.platform || 'telegram') + (tg.version ? (' v' + tg.version) : '');
+        if (platformBadge){
+          platformBadge.textContent = (tg.platform || 'telegram') + (tg.version ? (' v' + tg.version) : '');
+        }
       }catch(e){}
     } else {
-      platformBadge.textContent = 'browser';
+      if (platformBadge) platformBadge.textContent = 'browser';
     }
 
     function showDebug(payload){
       if (!DEBUG) return;
+      if (!debugEl) return;
       debugEl.classList.add('show');
       debugEl.textContent = 'DEBUG payload: ' + JSON.stringify(payload);
     }
 
     function showToast(){
+      if (!toastEl) return;
       toastEl.classList.add('show');
       setTimeout(() => toastEl.classList.remove('show'), 6000);
     }
 
-    qs('#saveBtn').addEventListener('click', () => {
-      const provider = getProvider();
-      let payload = null;
+    const saveBtn = qs('#saveBtn');
+    if (saveBtn){
+      saveBtn.addEventListener('click', () => {
+        const provider = getProvider();
+        let payload = null;
 
-      if (provider === 'kling'){
-        const flow = getFlow();
-        const mode = getMode();
+        if (provider === 'kling'){
+          const flow = getFlow();
+          const mode = getMode();
 
-        // ✅ FIX: добавили provider:"kling", остальное оставили как было
-        payload = { type: "kling_settings", provider: "kling", flow, mode };
+          payload = { type: "kling_settings", provider: "kling", flow, mode };
 
-        if (flow === 'i2v'){
-          payload.duration = parseInt(qs('#duration').value, 10);
+          if (flow === 'i2v'){
+            const durEl = qs('#duration');
+            payload.duration = durEl ? parseInt(durEl.value, 10) : 8;
+          }
+        } else {
+          const veo_model = getVeoModel(); // fast|pro
+          const flow = getVeoFlow();       // text|image
+          const duration = parseInt((qs('#veo_duration')?.value || "8"), 10);
+          const aspect_ratio = (qs('#veo_aspect')?.value || "16:9");
+          const generate_audio = !!qs('#veo_audio')?.checked;
+
+          const isPro = (veo_model === 'pro');
+          const use_last_frame = isPro && !!qs('#veo_use_last_frame')?.checked;
+          const use_refs = isPro && !!qs('#veo_use_refs')?.checked;
+
+          payload = {
+            type: "veo_settings",
+            provider: "veo",
+            veo_model,
+            flow,
+            duration,
+            aspect_ratio,
+            generate_audio,
+            use_last_frame,
+            use_reference_images: use_refs,
+            resolution: isPro ? '1080p' : '720p'
+          };
         }
-      } else {
-        const veo_model = getVeoModel(); // fast|pro
-        const flow = getVeoFlow();       // text|image
-        const duration = parseInt(qs('#veo_duration').value, 10);
-        const aspect_ratio = qs('#veo_aspect').value;
-        const generate_audio = !!qs('#veo_audio').checked;
 
-        const isPro = (veo_model === 'pro');
-        const use_last_frame = isPro && !!qs('#veo_use_last_frame').checked;
-        const use_refs = isPro && !!qs('#veo_use_refs').checked;
+        showDebug(payload);
 
-        payload = {
-          type: "veo_settings",
-          provider: "veo",
-          veo_model,
-          flow,                 // text|image
-          duration,
-          aspect_ratio,
-          generate_audio,
+        if (tg){
+          try{ tg.sendData(JSON.stringify(payload)); }catch(e){}
 
-          // флаги: бот попросит нужные картинки
-          use_last_frame,
-          use_reference_images: use_refs,
-
-          // resolution зашиваем
-          resolution: isPro ? '1080p' : '720p'
-        };
-      }
-
-      showDebug(payload);
-
-      if (tg){
-        try{ tg.sendData(JSON.stringify(payload)); }catch(e){}
-
-        setTimeout(() => {
-          try{ tg.close(); }catch(e){}
+          setTimeout(() => {
+            try{ tg.close(); }catch(e){}
+            showToast();
+          }, 150);
+        } else {
           showToast();
-        }, 150);
-      } else {
-        showToast();
-      }
-    });
+        }
+      });
+    }
   </script>
 </body>
 </html>
