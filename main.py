@@ -5454,6 +5454,7 @@ async def webhook(secret: str, request: Request):
 
             if not _sent_via_edit:
                 await tg_send_photo_bytes(chat_id, out_bytes, caption="Готово. Если нужно ещё — пришли новое фото.")
+            _busy_end(int(user_id))  # ← ДОБАВИТЬ ЭТУ СТРОКУ
             st["photosession"] = {"step": "need_photo", "photo_bytes": None}
             st["ts"] = _now()
             return {"ok": True}
