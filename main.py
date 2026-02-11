@@ -3176,6 +3176,11 @@ async def webhook(secret: str, request: Request):
         feature_raw = (payload.get("feature") or "").lower().strip()
         model_raw = (payload.get("model") or "").lower().strip()
         provider_raw = (payload.get("provider") or "").lower().strip()
+        # 🔒 Жёсткий маркер: если WebApp прислал music_settings — это точно музыка
+        if str(payload.get("type") or "").lower().strip() == "music_settings":
+            feature_raw = "music_future"
+            flow_raw = "music"
+            task_type_raw = "music"
 
         ai_raw = (payload.get("ai") or payload.get("ai_provider") or payload.get("aiProvider") or "").lower().strip()
 
