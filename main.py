@@ -12,6 +12,7 @@ from typing import Optional, Literal, Dict, Any, Tuple, List
 
 import httpx
 from fastapi import FastAPI, Request, Response
+from fastapi.staticfiles import StaticFiles
 from db_supabase import track_user_activity, get_basic_stats, supabase as sb
 from kling_flow import run_motion_control_from_bytes, run_image_to_video_from_bytes
 from veo_flow import run_veo_text_to_video, run_veo_image_to_video
