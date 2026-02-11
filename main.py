@@ -3249,6 +3249,8 @@ async def webhook(secret: str, request: Request):
             }
             st["ts"] = _now()
             _set_mode(chat_id, user_id, "suno_music")
+            # ⛔ важное: останавливаем обработку, чтобы payload не дошёл до Kling
+            return {"ok": True}
 
             # если промпт/лирика уже пришли из WebApp — можно стартовать сразу
             settings = st["music_settings"]
