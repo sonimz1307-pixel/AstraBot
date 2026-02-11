@@ -47,6 +47,93 @@ _SUNOAPI_TASK_NOTIFIED_TTL_SEC = 3600.0
 _SUNOAPI_TASK_NOTIFIED_TS: dict[str, float] = {}
 
 
+# ---------------- Per-user busy lock (prevents double-charging on concurrent updates) ----------------
+# Telegram can deliver multiple updates while a long generation is running (ASGI concurrency).
+# We keep a lightweight in-memory "busy" flag per user with TTL to avoid duplicate launches.
+_USER_BUSY: dict[int, dict[str, Any]] = {}
+_USER_BUSY_TTL_SEC_DEFAULT = 20 * 60  # 20 minutes
+
+
+def _busy_is_active(user_id: int) -> bool:
+    try:
+        uid = int(user_id)
+    except Exception:
+        return False
+    rec = _USER_BUSY.get(uid)
+    if not rec:
+        return False
+    until = float(rec.get("until_ts") or 0.0)
+    if until and until > time.time():
+        return True
+    # expired -> cleanup
+    _USER_BUSY.pop(uid, None)
+    return False
+
+
+def _busy_kind(user_id: int) -> str:
+    try:
+        uid = int(user_id)
+    except Exception:
+        return ""
+    rec = _USER_BUSY.get(uid) or {}
+    return str(rec.get("kind") or "").strip()
+
+
+def _busy_start(user_id: int, kind: str, ttl_sec: int = _USER_BUSY_TTL_SEC_DEFAULT) -> None:
+    try:
+        uid = int(user_id)
+    except Exception:
+        return
+    _USER_BUSY[uid] = {
+        "kind": str(kind or "task"),
+        "started_ts": time.time(),
+        "until_ts": time.time() + max(60, int(ttl_sec)),
+    }
+
+
+def _busy_end(user_id: int) -> None:
+    try:
+        uid = int(user_id)
+    except Exception:
+        return
+    _USER_BUSY.pop(uid, None)
+
+
+def _normalize_btn_text(t: str) -> str:
+    t = (t or "").strip()
+    # remove leading emojis/checkmarks/spaces
+    t = t.replace("✅", "").replace("☑️", "").replace("✔️", "").strip()
+    return t
+
+
+def _is_nav_or_menu_text(t: str) -> bool:
+    """
+    True if the incoming text looks like a navigation/menu command (not a prompt).
+    We use it to prevent accidental launches when the user taps buttons during VEO flow.
+    """
+    s = _normalize_btn_text(t).lower()
+    if not s:
+        return False
+    # common nav / menu buttons
+    nav = {
+        "наз", "назад", "в меню", "главное меню", "меню", "start", "/start",
+        "помощь", "help", "/help",
+        "сброс", "reset", "/reset", "отмена", "cancel", "/cancel",
+        "ии", "ии чат", "чат", "ai chat", "chatgpt", "gpt",
+        "профиль", "баланс", "тарифы", "оплата", "пополнить",
+        "фото", "картинка", "изображение", "видео", "видео будущего", "музыка",
+    }
+    if s in nav:
+        return True
+    # buttons with emojis often include these words
+    markers = [
+        "назад", "меню", "помощ", "ии", "чат", "баланс", "пополн", "тариф", "оплат",
+        "фото", "видео", "музы", "сгенер", "генерац",
+    ]
+    return any(m in s for m in markers)
+
+
+
 # ---------------- SunoAPI callback (required by SunoAPI.org) ----------------
 
 def _deep_pick_str(val) -> str:
@@ -3658,6 +3745,8 @@ async def webhook(secret: str, request: Request):
         # чистим in-memory state
         st.clear()
         st.update({"mode": "chat", "ts": _now(), "poster": {}, "dl": {}})
+        # снимаем busy-lock (если зависла генерация)
+        _busy_end(int(user_id))
         # чистим Supabase FSM (например music_wait_text)
         try:
             sb_clear_user_state(user_id)
@@ -3872,6 +3961,22 @@ async def webhook(secret: str, request: Request):
 
     # ---- VEO Text→Video: ждём промпт ----
     if st.get("mode") == "veo_t2v" and incoming_text:
+        # Если пользователь нажал кнопку меню/навигации — НЕ считаем это промптом
+        if _is_nav_or_menu_text(incoming_text):
+            _set_mode(chat_id, user_id, "chat")
+            st.pop("veo_t2v", None)
+            st.pop("veo_settings", None)
+            st["ts"] = _now()
+            sb_clear_user_state(user_id)
+            await tg_send_message(chat_id, "Ок. Вышел из Veo. Главное меню.", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+
+        # Блокируем параллельные запуски (двойные списания), пока Veo ещё считается/отправляется
+        if _busy_is_active(int(user_id)):
+            kind = _busy_kind(int(user_id)) or "генерация"
+            await tg_send_message(chat_id, f"⏳ Сейчас выполняется: {kind}. Дождись завершения (или /reset).", reply_markup=_help_menu_for(user_id))
+            return {"ok": True}
+
         settings = st.get("veo_settings") or {}
         veo_model = (settings.get("veo_model") or "fast")
         model_slug = "veo-3.1" if veo_model == "pro" else "veo-3-fast"
@@ -3882,27 +3987,30 @@ async def webhook(secret: str, request: Request):
         generate_audio = bool(settings.get("generate_audio"))
 
         await tg_send_message(chat_id, "⏳ Генерирую видео (Veo)…", reply_markup=_help_menu_for(user_id))
-
+        _busy_start(int(user_id), "Veo видео")
         try:
-            video_url = await run_veo_text_to_video(
-                user_id=int(user_id),
-                model=model_slug,
-                prompt=incoming_text,
-                duration=duration,
-                resolution=resolution,
-                aspect_ratio=aspect_ratio,
-                generate_audio=generate_audio,
-                negative_prompt=None,
-                reference_images_bytes=None,
-            )
-        except Exception as e:
-            await tg_send_message(chat_id, f"❌ Ошибка Veo: {e}", reply_markup=_help_menu_for(user_id))
-            return {"ok": True}
+            try:
+                video_url = await run_veo_text_to_video(
+                    user_id=int(user_id),
+                    model=model_slug,
+                    prompt=incoming_text,
+                    duration=duration,
+                    resolution=resolution,
+                    aspect_ratio=aspect_ratio,
+                    generate_audio=generate_audio,
+                    negative_prompt=None,
+                    reference_images_bytes=None,
+                )
+            except Exception as e:
+                await tg_send_message(chat_id, f"❌ Ошибка Veo: {e}", reply_markup=_help_menu_for(user_id))
+                return {"ok": True}
 
-        try:
-            await tg_send_video_url(chat_id, video_url, caption="✅ Готово! (Veo)")
-        except Exception:
-            await tg_send_message(chat_id, f"✅ Готово! Видео: {video_url}", reply_markup=_help_menu_for(user_id))
+            try:
+                await tg_send_video_url(chat_id, video_url, caption="✅ Готово! (Veo)")
+            except Exception:
+                await tg_send_message(chat_id, f"✅ Готово! Видео: {video_url}", reply_markup=_help_menu_for(user_id))
+        finally:
+            _busy_end(int(user_id))
 
         _set_mode(chat_id, user_id, "chat")
         st.pop("veo_t2v", None)
@@ -3914,6 +4022,22 @@ async def webhook(secret: str, request: Request):
 
     # ---- VEO Image→Video: если мы в шаге референсов, можно написать 'Готово' ----
     if st.get("mode") == "veo_i2v" and incoming_text:
+        # Если пользователь нажал кнопку меню/навигации — НЕ считаем это промптом/командой для Veo
+        if _is_nav_or_menu_text(incoming_text):
+            _set_mode(chat_id, user_id, "chat")
+            st.pop("veo_i2v", None)
+            st.pop("veo_settings", None)
+            st["ts"] = _now()
+            sb_clear_user_state(user_id)
+            await tg_send_message(chat_id, "Ок. Вышел из Veo. Главное меню.", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+
+        # Блокируем параллельные запуски (двойные списания)
+        if _busy_is_active(int(user_id)):
+            kind = _busy_kind(int(user_id)) or "генерация"
+            await tg_send_message(chat_id, f"⏳ Сейчас выполняется: {kind}. Дождись завершения (или /reset).", reply_markup=_help_menu_for(user_id))
+            return {"ok": True}
+
         vi = st.get("veo_i2v") or {}
         step = (vi.get("step") or "need_image")
         if step == "need_refs" and incoming_text.strip().lower() in ("готово", "done", "старт", "start"):
@@ -3941,30 +4065,34 @@ async def webhook(secret: str, request: Request):
             ref_bytes = vi.get("reference_images_bytes") or []
             if not isinstance(ref_bytes, list):
                 ref_bytes = []
-
             await tg_send_message(chat_id, "⏳ Генерирую видео (Veo)…", reply_markup=_help_menu_for(user_id))
-            try:
-                video_url = await run_veo_image_to_video(
-                    user_id=int(user_id),
-                    model=model_slug,
-                    image_bytes=image_bytes,
-                    prompt=incoming_text,
-                    duration=duration,
-                    resolution=resolution,
-                    aspect_ratio=aspect_ratio,
-                    generate_audio=generate_audio,
-                    negative_prompt=None,
-                    reference_images_bytes=ref_bytes if ref_bytes else None,
-                    last_frame_bytes=last_frame_bytes if last_frame_bytes else None,
-                )
-            except Exception as e:
-                await tg_send_message(chat_id, f"❌ Ошибка Veo: {e}", reply_markup=_help_menu_for(user_id))
-                return {"ok": True}
 
+            _busy_start(int(user_id), "Veo видео")
             try:
-                await tg_send_video_url(chat_id, video_url, caption="✅ Готово! (Veo)")
-            except Exception:
-                await tg_send_message(chat_id, f"✅ Готово! Видео: {video_url}", reply_markup=_help_menu_for(user_id))
+                try:
+                    video_url = await run_veo_image_to_video(
+                        user_id=int(user_id),
+                        model=model_slug,
+                        image_bytes=image_bytes,
+                        prompt=incoming_text,
+                        duration=duration,
+                        resolution=resolution,
+                        aspect_ratio=aspect_ratio,
+                        generate_audio=generate_audio,
+                        negative_prompt=None,
+                        reference_images_bytes=ref_bytes if ref_bytes else None,
+                        last_frame_bytes=last_frame_bytes if last_frame_bytes else None,
+                    )
+                except Exception as e:
+                    await tg_send_message(chat_id, f"❌ Ошибка Veo: {e}", reply_markup=_help_menu_for(user_id))
+                    return {"ok": True}
+
+                try:
+                    await tg_send_video_url(chat_id, video_url, caption="✅ Готово! (Veo)")
+                except Exception:
+                    await tg_send_message(chat_id, f"✅ Готово! Видео: {video_url}", reply_markup=_help_menu_for(user_id))
+            finally:
+                _busy_end(int(user_id))
 
             _set_mode(chat_id, user_id, "chat")
             st.pop("veo_i2v", None)
