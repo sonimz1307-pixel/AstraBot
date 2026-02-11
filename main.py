@@ -3997,7 +3997,9 @@ async def webhook(secret: str, request: Request):
         aspect_ratio = str(settings.get("aspect_ratio") or "16:9")
         generate_audio = bool(settings.get("generate_audio"))
 
-        await tg_send_message(chat_id, "⏳ Генерирую видео (Veo)…", reply_markup=_help_menu_for(user_id))
+        info = f"⏳ Генерирую видео (Veo {'3.1' if veo_model == 'pro' else 'Fast'} | {resolution} | {duration}s | {aspect_ratio} | звук: {'да' if generate_audio else 'нет'})"
+
+        await tg_send_message(chat_id, info, reply_markup=_help_menu_for(user_id))
         _busy_start(int(user_id), "Veo видео")
         try:
             try:
@@ -4076,8 +4078,8 @@ async def webhook(secret: str, request: Request):
             ref_bytes = vi.get("reference_images_bytes") or []
             if not isinstance(ref_bytes, list):
                 ref_bytes = []
-            await tg_send_message(chat_id, "⏳ Генерирую видео (Veo)…", reply_markup=_help_menu_for(user_id))
-
+            info = f"⏳ Генерирую видео (Veo {'3.1' if veo_model == 'pro' else 'Fast'} | {resolution} | {duration}s | {aspect_ratio} | звук: {'да' if generate_audio else 'нет'})"
+            await tg_send_message(chat_id, info, reply_markup=_help_menu_for(user_id))
             _busy_start(int(user_id), "Veo видео")
             try:
                 try:
@@ -4238,17 +4240,47 @@ async def webhook(secret: str, request: Request):
 
 
 
-        # ---- VEO Image → Video: step=need_image ----
+        # ---- VEO Image → Video: шаги need_image / need_last_frame / need_refs ----
         if st.get("mode") == "veo_i2v":
             vi = st.get("veo_i2v") or {}
             step = (vi.get("step") or "need_image")
 
+            settings = st.get("veo_settings") or {}
+            use_last_frame = bool(settings.get("use_last_frame"))
+            use_reference_images = bool(settings.get("use_reference_images"))
+
+            # 1) Стартовое фото
             if step == "need_image":
                 vi["image_bytes"] = img_bytes
+
+                # Далее: last_frame -> refs -> prompt
+                if use_last_frame:
+                    vi["step"] = "need_last_frame"
+                    st["veo_i2v"] = vi
+                    st["ts"] = _now()
+                    await tg_send_message(
+                        chat_id,
+                        "Стартовое фото получил ✅\nТеперь пришли ФИНАЛЬНЫЙ кадр (last frame) — ещё одно фото.\n"
+                        "Если last frame не нужен — нажми /reset и выключи опцию в WebApp.",
+                        reply_markup=_help_menu_for(user_id),
+                    )
+                    return {"ok": True}
+
+                if use_reference_images:
+                    vi["step"] = "need_refs"
+                    st["veo_i2v"] = vi
+                    st["ts"] = _now()
+                    await tg_send_message(
+                        chat_id,
+                        "Стартовое фото получил ✅\nТеперь пришли референсы (до 4 фото).\n"
+                        "Когда закончишь — напиши «Готово».",
+                        reply_markup=_help_menu_for(user_id),
+                    )
+                    return {"ok": True}
+
                 vi["step"] = "need_prompt"
                 st["veo_i2v"] = vi
                 st["ts"] = _now()
-
                 await tg_send_message(
                     chat_id,
                     "Фото получил ✅ Теперь напиши ТЕКСТОМ, что должно происходить в видео.\n"
@@ -4256,6 +4288,67 @@ async def webhook(secret: str, request: Request):
                     reply_markup=_help_menu_for(user_id),
                 )
                 return {"ok": True}
+
+            # 2) Last frame (финальный кадр)
+            if step == "need_last_frame":
+                vi["last_frame_bytes"] = img_bytes
+
+                if use_reference_images:
+                    vi["step"] = "need_refs"
+                    st["veo_i2v"] = vi
+                    st["ts"] = _now()
+                    await tg_send_message(
+                        chat_id,
+                        "Last frame получил ✅\nТеперь пришли референсы (до 4 фото).\n"
+                        "Когда закончишь — напиши «Готово».",
+                        reply_markup=_help_menu_for(user_id),
+                    )
+                    return {"ok": True}
+
+                vi["step"] = "need_prompt"
+                st["veo_i2v"] = vi
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    "Last frame получил ✅\nТеперь пришли ТЕКСТ (промпт) для видео.",
+                    reply_markup=_help_menu_for(user_id),
+                )
+                return {"ok": True}
+
+            # 3) Reference images (до 4)
+            if step == "need_refs":
+                refs = vi.get("reference_images_bytes") or []
+                if not isinstance(refs, list):
+                    refs = []
+
+                if len(refs) >= 4:
+                    await tg_send_message(
+                        chat_id,
+                        "Референсов уже 4/4 ✅\nНапиши «Готово», чтобы перейти к промпту.",
+                        reply_markup=_help_menu_for(user_id),
+                    )
+                    return {"ok": True}
+
+                refs.append(img_bytes)
+                vi["reference_images_bytes"] = refs
+                vi["step"] = "need_refs"
+                st["veo_i2v"] = vi
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    f"Референс принят ✅ ({len(refs)}/4)\n"
+                    "Пришли ещё референс или напиши «Готово».",
+                    reply_markup=_help_menu_for(user_id),
+                )
+                return {"ok": True}
+
+            # если прислал фото в неправильном шаге
+            await tg_send_message(
+                chat_id,
+                "Фото уже есть ✅ Сейчас жду ТЕКСТ (или «Готово» в шаге референсов).",
+                reply_markup=_help_menu_for(user_id),
+            )
+            return {"ok": True}
 
             await tg_send_message(
                 chat_id,
