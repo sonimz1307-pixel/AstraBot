@@ -21,6 +21,8 @@ from nano_banana import run_nano_banana
 from yookassa_flow import create_yookassa_payment
 
 app = FastAPI()
+# --- static files (/static/...) ---
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 APP_VERSION = "v7-suno-callback-dedup-fix"
 try:
