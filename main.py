@@ -3270,9 +3270,265 @@ async def webhook(secret: str, request: Request):
                     reply_markup=_help_menu_for(user_id),
                 )
                 return {"ok": True}
-            # ✅ Музыка обработана, не даём payload уйти дальше в Veo/Kling
+
+            # сформировать payload для PiAPI и запустить
+            input_block = {
+                "mv": settings["mv"],
+                "title": settings["title"],
+                "tags": settings["tags"],
+                "make_instrumental": settings["make_instrumental"],
+            }
+            if settings["music_mode"] == "prompt":
+                input_block["gpt_description_prompt"] = settings["gpt_description_prompt"]
+            else:
+                input_block["prompt"] = settings["prompt"]
+
+            ai_choice = str((settings.get("ai") or "suno")).lower().strip()
+            if ai_choice not in ("suno", "udio"):
+                ai_choice = "suno"
+
+            if ai_choice == "udio":
+                # PiAPI Udio-like (music-u): используем ТОЛЬКО идею (gpt_description_prompt).
+                # Не доверяем music_mode: в стейте мог остаться "custom" от прошлых запусков,
+                # а у Udio текста песни в WebApp нет -> иначе улетит пустота и PiAPI часто отвечает 500.
+                udio_prompt = (
+                    (settings.get("gpt_description_prompt") or "").strip()
+                    or (settings.get("prompt") or "").strip()
+                )
+                if not udio_prompt:
+                    udio_prompt = "Modern atmospheric music with emotional melody"
+
+                payload_api = {
+                    "model": "music-u",
+                    "task_type": "generate_music",
+                    "input": {
+                        "gpt_description_prompt": udio_prompt,
+                        "lyrics_type": "instrumental" if settings.get("make_instrumental") else "generate",
+                    },
+                    # ВАЖНО: для music-u лучше явно ставить public, иначе PiAPI часто возвращает только file_id,
+                    # и тогда нужно отдельное скачивание файла.
+                    "config": {"service_mode": (settings.get("service_mode") or "public")},
+                }
+            else:
+                payload_api = {
+                    "model": "suno",
+                    "task_type": "music",
+                    "input": input_block,
+                    "config": {"service_mode": settings["service_mode"]},
+                }
+
+            # генерация стартует — ожидание текста больше не нужно
+            sb_clear_user_state(user_id)
+
+            def _clear_music_ctx():
+                # Полный сброс музыкального контекста, чтобы не было автоповтора на любой текст/кнопку.
+                try:
+                    st.pop("music_settings", None)
+                except Exception:
+                    pass
+                try:
+                    _set_mode(chat_id, user_id, "chat")
+                except Exception:
+                    pass
+                try:
+                    sb_clear_user_state(user_id)
+                except Exception:
+                    pass
+
+            await tg_send_message(chat_id, "⏳ Запускаю генерацию музыки…")
+            try:
+                # provider selection:
+                # - "piapi" (default): current path
+                # - "sunoapi": alternative Suno aggregator (docs.sunoapi.org)
+                provider = str(settings.get("provider") or settings.get("api") or settings.get("ai_provider") or settings.get("aiProvider") or "").lower().strip()
+                if not provider:
+                    provider = os.getenv("MUSIC_PROVIDER_DEFAULT", "piapi").lower().strip()
+
+                # Udio is only available through PiAPI in this build
+                if ai_choice == "udio":
+                    provider = "piapi"
+
+                async def _run_piapi():
+                    created_local = await piapi_create_task(payload_api)
+                    task_id_local = ((created_local.get("data") or {}).get("task_id")) or ""
+                    if not task_id_local:
+                        raise RuntimeError(f"PiAPI did not return task_id: {created_local}")
+                    done_local = await piapi_poll_task(task_id_local, timeout_sec=300, sleep_sec=2.0)
+                    return ("piapi", done_local)
+
+                async def _run_sunoapi():
+                    # Map our settings -> SunoAPI.org request
+                    prompt_text = (settings.get("gpt_description_prompt") or "").strip() if settings.get("music_mode") == "prompt" else (settings.get("prompt") or "").strip()
+                    if not prompt_text:
+                        prompt_text = "A modern catchy song with clear structure and strong hook"
+                    mv_local = str(settings.get("mv") or "").lower().strip()
+                    model_enum = "V4_5ALL"
+                    if "v5" in mv_local:
+                        model_enum = "V5"
+                    elif "v4_5" in mv_local or "v4.5" in mv_local or "v4-5" in mv_local:
+                        model_enum = "V4_5ALL"
+                    elif "v4" in mv_local:
+                        model_enum = "V4"
+                    custom_mode = bool(settings.get("music_mode") != "prompt")
+                    instrumental = bool(settings.get("make_instrumental"))
+                    title_local = (settings.get("title") or "").strip()
+                    style_local = (settings.get("tags") or "").strip()
+                    task_id_local = await sunoapi_generate_task(
+                        prompt=prompt_text,
+                        custom_mode=custom_mode,
+                        instrumental=instrumental,
+                        model=model_enum,
+                        user_id=user_id,
+                        chat_id=chat_id,
+                        title=title_local,
+                        style=style_local,
+                    )
+                    done_local = await sunoapi_poll_task(task_id_local, timeout_sec=SUNOAPI_POLL_TIMEOUT_SEC, sleep_sec=2.0)
+                    return ("sunoapi", done_local)
+
+                # provider может быть: 'sunoapi', 'piapi', 'auto'
+                provider_norm = provider if provider in ("piapi", "sunoapi", "auto") else "auto"
+                default_primary = os.getenv("MUSIC_PROVIDER_DEFAULT", "piapi").lower().strip()
+                if default_primary not in ("piapi", "sunoapi"):
+                    default_primary = "piapi"
+                primary = (default_primary if provider_norm == "auto" else provider_norm)
+                secondary = ("sunoapi" if primary == "piapi" else "piapi")
+
+                try:
+                    if primary == "sunoapi":
+                        source, done = await _run_sunoapi()
+                    else:
+                        source, done = await _run_piapi()
+                except Exception as e_primary:
+                    # fallback допускаем ТОЛЬКО в режиме auto
+                    if provider_norm != "auto":
+                        await tg_send_message(chat_id, f"❌ Провайдер {primary} вернул ошибку: {e_primary}")
+                        _clear_music_ctx()
+                        return {"ok": True}
+
+                    can_fallback = (secondary == "sunoapi" and bool(SUNOAPI_API_KEY)) or (secondary == "piapi" and bool(PIAPI_API_KEY))
+                    if not can_fallback:
+                        await tg_send_message(chat_id, f"❌ Провайдер {primary} упал, а запасной {secondary} недоступен: {e_primary}")
+                        _clear_music_ctx()
+                        return {"ok": True}
+
+                    await tg_send_message(chat_id, f"⚠️ Основной провайдер ({primary}) упал: {e_primary}\nПробую запасной ({secondary})…")
+                    if secondary == "sunoapi":
+                        source, done = await _run_sunoapi()
+                    else:
+                        source, done = await _run_piapi()
+
+# Normalize result for both providers
+                if source == "sunoapi":
+                    data = done.get("data") or {}
+                    status = str(data.get("status") or "").upper().strip()
+                    if status not in ("SUCCESS",):
+                        await tg_send_message(
+                            chat_id,
+                            f"❌ Музыка не сгенерировалась (SunoAPI).\nСтатус: {status}\n{done.get('msg') or 'unknown error'}\n\n"
+                            "Генерация остановлена. Нажмите «Музыка будущего», чтобы попробовать снова."
+                        )
+                        _clear_music_ctx()
+                        return {"ok": True}
+
+                    out = _sunoapi_extract_tracks(done)
+                    if not out:
+                        await tg_send_message(chat_id, "⏳ SunoAPI: задача завершена, но ссылки на треки ещё не пришли. Жду callback — как только будет MP3, отправлю сюда.")
+                        _clear_music_ctx()
+                        return {"ok": True}
+                else:
+                    data = done.get("data") or {}
+                    status = (data.get("status") or "")
+                    if str(status).lower() != "completed":
+                        err = (data.get("error") or {}).get("message") or "unknown error"
+                        await tg_send_message(chat_id, f"❌ Музыка не сгенерировалась.\nСтатус: {status}\n{err}\n\nГенерация остановлена. Нажмите «Музыка будущего», чтобы попробовать снова.")
+                        _clear_music_ctx()
+                        return {"ok": True}
+
+                    out = data.get("output") or []
+                    if isinstance(out, dict):
+                        out = [out]
+                    if not out:
+                        await tg_send_message(chat_id, "✅ Готово, но PiAPI не вернул output. Я сбросил режим, попробуйте снова через «Музыка будущего».")
+                        _clear_music_ctx()
+                        return {"ok": True}
+
+                # Отправка результата: стараемся отправить MP3 файлом (плеер), а не только ссылкой.
+                def _pick_first_url(val) -> str:
+                    if not val:
+                        return ""
+                    if isinstance(val, str):
+                        return val
+                    if isinstance(val, dict):
+                        for k in ("url", "audio_url", "audioUrl", "song_url", "songUrl", "mp3", "mp3_url"):
+                            v = val.get(k)
+                            if isinstance(v, str) and v.strip():
+                                return v.strip()
+                        # иногда лежит глубже
+                        for v in val.values():
+                            u = _pick_first_url(v)
+                            if u:
+                                return u
+                    if isinstance(val, list):
+                        for x in val:
+                            u = _pick_first_url(x)
+                            if u:
+                                return u
+                    return ""
+
+                def _extract_audio_url(item: dict) -> str:
+                    if not isinstance(item, dict):
+                        return ""
+                    # прямые варианты
+                    for k in ("audio_url", "audioUrl", "song_url", "songUrl", "url"):
+                        v = item.get(k)
+                        if isinstance(v, str) and v.strip():
+                            return v.strip()
+                    # часто audio = {"url": ...} или audio = [...]
+                    u = _pick_first_url(item.get("audio"))
+                    if u:
+                        return u
+                    # иногда ключи во множественном числе
+                    for k in ("audio_urls", "audios", "urls", "songs"):
+                        u = _pick_first_url(item.get(k))
+                        if u:
+                            return u
+                    return ""
+
+                await tg_send_message(chat_id, "✅ Музыка готова:", reply_markup=None)
+
+                # Отправляем максимум 2 трека, чтобы не спамить.
+                for i, item in enumerate(out[:2], start=1):
+                    audio_url = _extract_audio_url(item)
+                    video_url = _pick_first_url(item.get("video_url") or item.get("video") or item.get("mp4") or item.get("videoUrl"))
+                    image_url = _pick_first_url(item.get("image_url") or item.get("image") or item.get("cover") or item.get("imageUrl"))
+
+                    if audio_url:
+                        # Кнопки меню повесим на первый отправленный трек/сообщение
+                        markup = _main_menu_for(user_id) if i == 1 else None
+                        await tg_send_audio_from_url(
+                            chat_id,
+                            audio_url,
+                            caption=f"🎵 Трек #{i}",
+                            reply_markup=markup,
+                        )
+                    else:
+                        # Если PiAPI не дал ссылку — покажем, что пришло (коротко)
+                        keys = ", ".join(list(item.keys())[:15]) if isinstance(item, dict) else str(type(item))
+                        await tg_send_message(chat_id, f"⚠️ Трек #{i}: PiAPI не вернул ссылку на MP3. Поля: {keys}", reply_markup=_main_menu_for(user_id) if i == 1 else None)
+
+                    extra_lines = []
+                    if video_url:
+                        extra_lines.append(f"🎬 MP4: {video_url}")
+                    if extra_lines:
+                        await tg_send_message(chat_id, "\n".join(extra_lines), reply_markup=None)
+                _clear_music_ctx()
+            except Exception as e:
+                await tg_send_message(chat_id, f"❌ Ошибка PiAPI (music): {e}\n\nГенерация остановлена. Нажмите «Музыка будущего», чтобы попробовать снова.")
+                _clear_music_ctx()
             return {"ok": True}
 
+        
 
         # ----- WebApp data (Veo settings) -----
         # Expected (from our WebApp): {type:"veo_settings", provider:"veo", veo_model:"fast|pro", flow:"text|image",
@@ -3798,7 +4054,20 @@ async def webhook(secret: str, request: Request):
             "language": "",
         }
 
-        # принимаем текст и кладём в нужное поле
+                # "Старт" должен быть триггером, а не текстом песни.
+        _lc = (incoming_text or "").strip().lower()
+        if _lc in ("старт", "start", "go", "запуск"):
+            _existing = (settings.get("prompt") or "").strip() if (settings.get("music_mode") or "").lower().strip() == "custom" else (settings.get("gpt_description_prompt") or "").strip()
+            if not _existing:
+                await tg_send_message(
+                    chat_id,
+                    "❗️Сначала задай идею/текст в «Музыка будущего» (WebApp), затем напиши «Старт».",
+                    reply_markup=_help_menu_for(user_id),
+                )
+                return {"ok": True}
+            incoming_text = _existing
+
+# принимаем текст и кладём в нужное поле
         if (settings.get("music_mode") or "").lower().strip() == "custom":
             settings["prompt"] = incoming_text
         else:
