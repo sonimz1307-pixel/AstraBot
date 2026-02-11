@@ -3249,8 +3249,6 @@ async def webhook(secret: str, request: Request):
             }
             st["ts"] = _now()
             _set_mode(chat_id, user_id, "suno_music")
-            # ⛔ важное: останавливаем обработку, чтобы payload не дошёл до Kling
-            return {"ok": True}
 
             # если промпт/лирика уже пришли из WebApp — можно стартовать сразу
             settings = st["music_settings"]
@@ -3272,6 +3270,9 @@ async def webhook(secret: str, request: Request):
                     reply_markup=_help_menu_for(user_id),
                 )
                 return {"ok": True}
+            # ✅ Музыка обработана, не даём payload уйти дальше в Veo/Kling
+            return {"ok": True}
+
 
         # ----- WebApp data (Veo settings) -----
         # Expected (from our WebApp): {type:"veo_settings", provider:"veo", veo_model:"fast|pro", flow:"text|image",
