@@ -3818,6 +3818,37 @@ async def webhook(secret: str, request: Request):
             "input": input_block,
             "config": {"service_mode": settings.get("service_mode") or "public"},
         }
+        
+        # ===== SUNO BILLING (2 tokens per generation) =====
+        SUNO_COST = 2
+
+        try:
+            bal = int(get_balance(user_id) or 0)
+        except Exception:
+            bal = 0
+
+        if bal < SUNO_COST:
+            await tg_send_message(
+                chat_id,
+                f"❌ Недостаточно токенов.\nНужно: {SUNO_COST}\nБаланс: {bal}",
+                reply_markup=_topup_balance_inline_kb(),
+            )
+            return {"ok": True}
+
+        job_id = str(uuid4())
+
+        try:
+            add_tokens(
+                user_id,
+                -SUNO_COST,
+                reason="suno_generation",
+                ref_id=job_id,
+                meta={"provider": provider},
+            )
+        except Exception as e:
+            await tg_send_message(chat_id, f"❌ Ошибка списания токенов: {e}")
+            return {"ok": True}
+        # ===== END SUNO BILLING =====
 
         await tg_send_message(chat_id, "⏳ Запускаю генерацию музыки…")
         try:
@@ -3916,6 +3947,20 @@ async def webhook(secret: str, request: Request):
             await tg_send_message(chat_id, "\n".join(lines), reply_markup=_main_menu_for(user_id))
             _clear_music_ctx()
         except Exception as e:
+            
+            # ===== SUNO REFUND =====
+            try:
+                add_tokens(
+                    user_id,
+                    +SUNO_COST,
+                    reason="suno_refund",
+                    ref_id=job_id,
+                    meta={"error": str(e)[:300]},
+                )
+            except Exception:
+                pass
+            # ===== END SUNO REFUND =====
+            
             await tg_send_message(chat_id, f"❌ Ошибка PiAPI/Suno: {e}", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
     if incoming_text in ("💰 Баланс", "Баланс", "💰Баланс"):
