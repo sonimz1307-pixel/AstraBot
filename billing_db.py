@@ -230,3 +230,33 @@ def rollback_kling_job(job_id: str, *, error: str) -> None:
         meta={"error": (error or "")[:300]},
         ref_id=jid,
     )
+    # === SUNO BILLING ===
+
+SUNO_GENERATION_COST = 2  # фиксировано
+
+
+def charge_suno_generation(telegram_user_id: int, *, ref_id: str) -> None:
+    """
+    Списывает 2 токена за генерацию Suno.
+    """
+    add_tokens(
+        telegram_user_id,
+        -SUNO_GENERATION_COST,
+        reason="suno_generation",
+        ref_id=ref_id,
+        meta={"cost": SUNO_GENERATION_COST},
+    )
+
+
+def refund_suno_generation(telegram_user_id: int, *, ref_id: str, error: str = "") -> None:
+    """
+    Возвращает токены при ошибке Suno.
+    """
+    add_tokens(
+        telegram_user_id,
+        +SUNO_GENERATION_COST,
+        reason="suno_refund",
+        ref_id=ref_id,
+        meta={"error": (error or "")[:300]},
+    )
+
