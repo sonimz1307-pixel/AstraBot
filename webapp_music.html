@@ -717,6 +717,7 @@ function setAI(v){
       const lyrics = document.getElementById('lyrics').value.trim();
 
       const payload = {
+        type: "music_settings",
         feature: "music_future",
         ai: ai,                 // "suno" | "udio"
         mode: mode,             // "idea" | "lyrics"
