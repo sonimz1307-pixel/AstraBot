@@ -4359,7 +4359,7 @@ async def webhook(secret: str, request: Request):
         await tg_send_message(chat_id, "Главное меню.", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
 
-    # ---- VEO Image→Video: если мы в шаге референсов, можно написать 'Готово' ----
+       # ---- VEO Image→Video: если мы в шаге референсов, можно написать 'Готово' ----
     if st.get("mode") == "veo_i2v" and incoming_text:
         # Если пользователь нажал кнопку меню/навигации — НЕ считаем это промптом/командой для Veo
         if _is_nav_or_menu_text(incoming_text):
@@ -4374,17 +4374,23 @@ async def webhook(secret: str, request: Request):
         # Блокируем параллельные запуски (двойные списания)
         if _busy_is_active(int(user_id)):
             kind = _busy_kind(int(user_id)) or "генерация"
-            await tg_send_message(chat_id, f"⏳ Сейчас выполняется: {kind}. Дождись завершения (или /reset).", reply_markup=_help_menu_for(user_id))
+            await tg_send_message(
+                chat_id,
+                f"⏳ Сейчас выполняется: {kind}. Дождись завершения (или /reset).",
+                reply_markup=_help_menu_for(user_id),
+            )
             return {"ok": True}
 
         vi = st.get("veo_i2v") or {}
         step = (vi.get("step") or "need_image")
+
         if step == "need_refs" and incoming_text.strip().lower() in ("готово", "done", "старт", "start"):
             vi["step"] = "need_prompt"
             st["veo_i2v"] = vi
             st["ts"] = _now()
             await tg_send_message(chat_id, "Ок ✅ Теперь пришли ТЕКСТ (промпт) для видео.", reply_markup=_help_menu_for(user_id))
             return {"ok": True}
+
         if step == "need_prompt":
             settings = st.get("veo_settings") or {}
             veo_model = (settings.get("veo_model") or "fast")
@@ -4404,10 +4410,52 @@ async def webhook(secret: str, request: Request):
             ref_bytes = vi.get("reference_images_bytes") or []
             if not isinstance(ref_bytes, list):
                 ref_bytes = []
-            info = f"⏳ Генерирую видео (Veo {'3.1' if veo_model == 'pro' else 'Fast'} | {resolution} | {duration}s | {aspect_ratio} | звук: {'да' if generate_audio else 'нет'})"
-            await tg_send_message(chat_id, info, reply_markup=_help_menu_for(user_id))
+
+            # ---- VEO BILLING (Image→Video) ----
             _busy_start(int(user_id), "Veo видео")
             try:
+                # Баланс + списание
+                try:
+                    ensure_user_row(user_id)
+                    bal = int(get_balance(user_id) or 0)
+                except Exception:
+                    bal = 0
+
+                ch = calc_veo_charge(
+                    veo_model=veo_model,
+                    model_slug=model_slug,
+                    generate_audio=generate_audio,
+                    duration_sec=duration,
+                )
+
+                if bal < ch.total_tokens:
+                    await tg_send_message(
+                        chat_id,
+                        f"❌ Недостаточно токенов.\nНужно: {ch.total_tokens}\nБаланс: {bal}\n\n{format_veo_charge_line(ch)}",
+                        reply_markup=_topup_balance_inline_kb(),
+                    )
+                    return {"ok": True}
+
+                add_tokens(
+                    user_id,
+                    -ch.total_tokens,
+                    reason="veo_video",
+                    meta={
+                        "tier": ch.tier,
+                        "generate_audio": ch.generate_audio,
+                        "duration": ch.duration_sec,
+                        "tokens_per_sec": ch.tokens_per_sec,
+                        "total_tokens": ch.total_tokens,
+                        "flow": "i2v",
+                    },
+                )
+
+                info = (
+                    f"⏳ Генерирую видео (Veo {'3.1' if veo_model == 'pro' else 'Fast'} | "
+                    f"{resolution} | {duration}s | {aspect_ratio} | звук: {'да' if generate_audio else 'нет'})"
+                )
+                await tg_send_message(chat_id, info, reply_markup=_help_menu_for(user_id))
+
                 try:
                     video_url = await run_veo_image_to_video(
                         user_id=int(user_id),
@@ -4430,6 +4478,7 @@ async def webhook(secret: str, request: Request):
                     await tg_send_video_url(chat_id, video_url, caption="✅ Готово! (Veo)")
                 except Exception:
                     await tg_send_message(chat_id, f"✅ Готово! Видео: {video_url}", reply_markup=_help_menu_for(user_id))
+
             finally:
                 _busy_end(int(user_id))
 
@@ -4440,6 +4489,7 @@ async def webhook(secret: str, request: Request):
             sb_clear_user_state(user_id)
             await tg_send_message(chat_id, "Главное меню.", reply_markup=_main_menu_for(user_id))
             return {"ok": True}
+
 
 
     if incoming_text in ("🍌 Nano Banana", "Nano Banana"):
