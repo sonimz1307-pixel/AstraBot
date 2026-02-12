@@ -320,7 +320,7 @@
           <div class="poverlay"></div>
           <div class="ptxt">
             <div class="pname">Veo 3</div>
-            <div class="pnote">не работает</div>
+            <div class="pnote">Работает</div>
           </div>
         </label>
       </div>
@@ -397,7 +397,7 @@
           </label>
         </div>
         <div class="hint" id="veoPriceHint">
-          Fast: без звука $0.10/сек, со звуком $0.15/сек. 720p фикс.
+          Fast: без звука 1 токен 1сек, со звуком 2 токена 1сек.
         </div>
       </div>
 
@@ -459,8 +459,8 @@
 
           <div class="toggle">
             <div class="left">
-              <div class="tname">Reference images (до 4)</div>
-              <div class="tdesc">Попросим в боте 0–4 референса</div>
+              <div class="tname">Reference images (до 3)</div>
+              <div class="tdesc">Попросим в боте 0–3 референса</div>
             </div>
             <input id="veo_use_refs" type="checkbox" disabled />
           </div>
@@ -522,9 +522,9 @@
       if (!el) return;
 
       if (model === 'pro'){
-        el.innerHTML = 'Veo 3.1: без звука <b>$0.20/сек</b>, со звуком <b>$0.40/сек</b>. Режим 1080p.';
+        el.innerHTML = 'Veo 3.1: без звука <b>2 токена 1сек</b>, со звуком <b>3 токена 1сек</b>. Режим 1080p.';
       } else {
-        el.innerHTML = 'Fast: без звука <b>$0.10/сек</b>, со звуком <b>$0.15/сек</b>. 720p фикс.';
+        el.innerHTML = 'Fast: без звука <b>1 токен 1сек</b>, со звуком <b>2 токена 1сек</b>. 720p фикс.';
       }
     }
 
