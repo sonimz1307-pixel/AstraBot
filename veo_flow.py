@@ -1,94 +1,35 @@
+# veo_flow.py (PIAPI-only)
 import os
+import time
 from typing import Any, Dict, List, Optional, Literal
 
 import aiohttp
 
-from replicate_http import (
-    ReplicateHTTPError,
-    post_prediction,
-    get_prediction_get_url,
-    wait_for_result_url,
-)
+from kling_flow import upload_bytes_to_supabase  # у тебя уже есть и работает :contentReference[oaicite:3]{index=3}
+from piapi_veo import PiAPIError, piapi_run_and_wait_for_url
 
 
 # ============================================================
-# Replicate Files API upload helpers
-# ============================================================
-
-REPLICATE_API_TOKEN = (os.getenv("REPLICATE_API_TOKEN") or os.getenv("REPLICATE_TOKEN") or "").strip()
-REPLICATE_FILES_ENDPOINT = "https://api.replicate.com/v1/files"
-
-
-class ReplicateUploadError(RuntimeError):
-    pass
-
-
-async def _replicate_upload_bytes(
-    data: bytes,
-    *,
-    filename: str,
-    content_type: str,
-    session: Optional[aiohttp.ClientSession] = None,
-) -> str:
-    """Upload bytes to Replicate Files API and return a public download URL."""
-    if not REPLICATE_API_TOKEN:
-        raise ReplicateUploadError("REPLICATE_API_TOKEN is not set")
-
-    close_session = False
-    if session is None:
-        session = aiohttp.ClientSession()
-        close_session = True
-
-    try:
-        form = aiohttp.FormData()
-        form.add_field("content", data, filename=filename, content_type=content_type)
-
-        headers = {"Authorization": f"Bearer {REPLICATE_API_TOKEN}"}
-
-        async with session.post(REPLICATE_FILES_ENDPOINT, data=form, headers=headers) as resp:
-            text = await resp.text()
-            if resp.status >= 400:
-                raise ReplicateUploadError(f"Replicate files upload failed: HTTP {resp.status} {text}")
-
-            try:
-                js = await resp.json()
-            except Exception:
-                raise ReplicateUploadError(f"Replicate files upload returned non-JSON: {text}")
-
-            urls = js.get("urls") or {}
-            download_url = urls.get("download") or urls.get("get")
-            if not download_url:
-                raise ReplicateUploadError(f"Replicate files upload response missing urls.download: {js}")
-
-            return str(download_url)
-    finally:
-        if close_session:
-            await session.close()
-
-# ============================================================
-# Replicate model slugs
-# ============================================================
-
-REPLICATE_VEO_FAST_MODEL = (os.getenv("REPLICATE_VEO_FAST_MODEL") or "google/veo-3-fast").strip()
-REPLICATE_VEO_31_MODEL = (os.getenv("REPLICATE_VEO_31_MODEL") or "google/veo-3.1").strip()
-
-# ============================================================
-# MVP limits (зафиксированы)
+# Limits (фиксируем как в WebApp/main)
 # ============================================================
 
 VEO_ALLOWED_DURATIONS = (4, 6, 8)
 VEO_ALLOWED_ASPECT_RATIOS = ("16:9", "9:16")
-
-VEO_FAST_RESOLUTION = "720p"
 VEO_PRO_ALLOWED_RESOLUTIONS = ("720p", "1080p")
 
-# Polling
-VEO_MAX_WAIT_SECONDS = int(os.getenv("VEO_MAX_WAIT", os.getenv("REPLICATE_MAX_WAIT", "900")))
-VEO_POLL_INTERVAL_SECONDS = float(os.getenv("VEO_POLL_INTERVAL", os.getenv("REPLICATE_POLL_INTERVAL", "2.0")))
+# PiAPI polling
+VEO_MAX_WAIT_SECONDS = int(os.getenv("VEO_MAX_WAIT", os.getenv("PIAPI_MAX_WAIT", "900")))
+VEO_POLL_INTERVAL_SECONDS = float(os.getenv("VEO_POLL_INTERVAL", os.getenv("PIAPI_POLL_INTERVAL", "2.0")))
 
-# ============================================================
-# Types
-# ============================================================
+# PiAPI task types mapping
+# fast в твоём UI -> veo3.1-video-fast
+# pro  в твоём UI -> veo3.1-video
+PIAPI_TASK_TYPE_FAST = (os.getenv("PIAPI_VEO_FAST_TASK_TYPE") or "veo3.1-video-fast").strip()
+PIAPI_TASK_TYPE_PRO = (os.getenv("PIAPI_VEO_PRO_TASK_TYPE") or "veo3.1-video").strip()
+
+# Storage paths
+VEO_BUCKET_PREFIX = (os.getenv("VEO_BUCKET_PREFIX") or "veo_inputs").strip()
+
 
 Tier = Literal["fast", "pro"]
 Mode = Literal["text", "image"]
@@ -98,27 +39,13 @@ class VeoFlowError(RuntimeError):
     pass
 
 
-# ============================================================
-# Validators
-# ============================================================
-
-def _validate_common(
-    *,
-    duration: int,
-    aspect_ratio: str,
-    generate_audio: bool,
-) -> None:
+def _validate_common(*, duration: int, aspect_ratio: str, generate_audio: bool) -> None:
     if duration not in VEO_ALLOWED_DURATIONS:
         raise VeoFlowError(f"Invalid duration={duration}. Allowed: {VEO_ALLOWED_DURATIONS}")
     if aspect_ratio not in VEO_ALLOWED_ASPECT_RATIOS:
         raise VeoFlowError(f"Invalid aspect_ratio={aspect_ratio}. Allowed: {VEO_ALLOWED_ASPECT_RATIOS}")
     if not isinstance(generate_audio, bool):
         raise VeoFlowError("generate_audio must be boolean")
-
-
-def _validate_fast(*, resolution: str) -> None:
-    if resolution != VEO_FAST_RESOLUTION:
-        raise VeoFlowError(f"FAST resolution must be {VEO_FAST_RESOLUTION}")
 
 
 def _validate_pro(
@@ -131,218 +58,23 @@ def _validate_pro(
     if resolution not in VEO_PRO_ALLOWED_RESOLUTIONS:
         raise VeoFlowError(f"PRO resolution must be one of {VEO_PRO_ALLOWED_RESOLUTIONS}")
 
+    # В PiAPI reference_image_urls: 1..3 (а не 4)
     if reference_images:
         if not isinstance(reference_images, list):
             raise VeoFlowError("reference_images must be a list")
-        if len(reference_images) > 4:
-            raise VeoFlowError("reference_images max is 4")
+        if len(reference_images) > 3:
+            # безопасно обрежем до 3, чтобы не падать
+            del reference_images[3:]
         for u in reference_images:
             if not isinstance(u, str) or not u.strip():
                 raise VeoFlowError("reference_images must contain non-empty strings")
 
+    # tail image (last frame) — можно только если есть стартовый кадр
     if last_frame_url and not image_url:
         raise VeoFlowError("last_frame requires image (start frame)")
 
 
-# ============================================================
-# Input builders
-# ============================================================
-
-def _build_input_fast(
-    *,
-    prompt: str,
-    mode: Mode,
-    image_url: Optional[str],
-    duration: int,
-    aspect_ratio: str,
-    generate_audio: bool,
-) -> Dict[str, Any]:
-    if not prompt or not isinstance(prompt, str):
-        raise VeoFlowError("prompt is required and must be a string")
-
-    _validate_common(duration=duration, aspect_ratio=aspect_ratio, generate_audio=generate_audio)
-    _validate_fast(resolution=VEO_FAST_RESOLUTION)
-
-    inp: Dict[str, Any] = {
-        "prompt": prompt,
-        "duration": duration,
-        "resolution": VEO_FAST_RESOLUTION,
-        "aspect_ratio": aspect_ratio,
-        "generate_audio": generate_audio,
-    }
-
-    if mode == "image":
-        if not image_url:
-            raise VeoFlowError("image_url is required for image mode")
-        inp["image"] = image_url
-
-    return inp
-
-
-def _build_input_pro(
-    *,
-    prompt: str,
-    mode: Mode,
-    image_url: Optional[str],
-    last_frame_url: Optional[str],
-    reference_images: Optional[List[str]],
-    duration: int,
-    resolution: str,
-    aspect_ratio: str,
-    generate_audio: bool,
-) -> Dict[str, Any]:
-    if not prompt or not isinstance(prompt, str):
-        raise VeoFlowError("prompt is required and must be a string")
-
-    _validate_common(duration=duration, aspect_ratio=aspect_ratio, generate_audio=generate_audio)
-    _validate_pro(
-        resolution=resolution,
-        reference_images=reference_images,
-        image_url=image_url,
-        last_frame_url=last_frame_url,
-    )
-
-    inp: Dict[str, Any] = {
-        "prompt": prompt,
-        "duration": duration,
-        "resolution": resolution,
-        "aspect_ratio": aspect_ratio,
-        "generate_audio": generate_audio,
-    }
-
-    if mode == "image":
-        if not image_url:
-            raise VeoFlowError("image_url is required for image mode")
-        inp["image"] = image_url
-
-    if reference_images:
-        inp["reference_images"] = reference_images
-
-    if last_frame_url:
-        inp["last_frame"] = last_frame_url
-
-    return inp
-
-
-# ============================================================
-# Low-level runners
-# ============================================================
-
-async def run_veo_fast(
-    *,
-    prompt: str,
-    mode: Mode,
-    image_url: Optional[str] = None,
-    duration: int = 8,
-    aspect_ratio: str = "16:9",
-    generate_audio: bool = False,
-    session: Optional[aiohttp.ClientSession] = None,
-) -> str:
-    """
-    google/veo-3-fast
-    FAST: resolution fixed at 720p.
-    """
-    inp = _build_input_fast(
-        prompt=prompt,
-        mode=mode,
-        image_url=image_url,
-        duration=duration,
-        aspect_ratio=aspect_ratio,
-        generate_audio=generate_audio,
-    )
-
-    payload = {"input": inp}
-
-    close_session = False
-    if session is None:
-        session = aiohttp.ClientSession()
-        close_session = True
-
-    try:
-        pred = await post_prediction(session, REPLICATE_VEO_FAST_MODEL, payload)
-        get_url = get_prediction_get_url(pred)
-        if not get_url:
-            raise VeoFlowError(f"Replicate returned no urls.get: {pred}")
-
-        return await wait_for_result_url(
-            session,
-            get_url,
-            max_wait_seconds=VEO_MAX_WAIT_SECONDS,
-            poll_interval_seconds=VEO_POLL_INTERVAL_SECONDS,
-        )
-    except ReplicateHTTPError as e:
-        raise VeoFlowError(str(e)) from e
-    finally:
-        if close_session:
-            await session.close()
-
-
-async def run_veo_31(
-    *,
-    prompt: str,
-    mode: Mode,
-    image_url: Optional[str] = None,
-    last_frame_url: Optional[str] = None,
-    reference_images: Optional[List[str]] = None,
-    duration: int = 8,
-    resolution: str = "1080p",
-    aspect_ratio: str = "16:9",
-    generate_audio: bool = False,
-    session: Optional[aiohttp.ClientSession] = None,
-) -> str:
-    """
-    google/veo-3.1
-    PRO: supports 720p/1080p, reference_images (0..4), last_frame (requires image).
-    """
-    inp = _build_input_pro(
-        prompt=prompt,
-        mode=mode,
-        image_url=image_url,
-        last_frame_url=last_frame_url,
-        reference_images=reference_images,
-        duration=duration,
-        resolution=resolution,
-        aspect_ratio=aspect_ratio,
-        generate_audio=generate_audio,
-    )
-
-    payload = {"input": inp}
-
-    close_session = False
-    if session is None:
-        session = aiohttp.ClientSession()
-        close_session = True
-
-    try:
-        pred = await post_prediction(session, REPLICATE_VEO_31_MODEL, payload)
-        get_url = get_prediction_get_url(pred)
-        if not get_url:
-            raise VeoFlowError(f"Replicate returned no urls.get: {pred}")
-
-        return await wait_for_result_url(
-            session,
-            get_url,
-            max_wait_seconds=VEO_MAX_WAIT_SECONDS,
-            poll_interval_seconds=VEO_POLL_INTERVAL_SECONDS,
-        )
-    except ReplicateHTTPError as e:
-        raise VeoFlowError(str(e)) from e
-    finally:
-        if close_session:
-            await session.close()
-
-
-# ============================================================
-# COMPAT LAYER — то, что вызывает main.py
-# ============================================================
-
 def _tier_from_params(tier: Optional[str], model: Optional[str]) -> Tier:
-    """
-    Определяем fast/pro по тому, что обычно приходит из main/webapp.
-    Поддерживаем:
-      - tier="fast|pro"
-      - model="fast|pro" или "veo-3-fast" / "veo-3.1" / "google/veo-3.1"
-    """
     t = (tier or "").strip().lower()
     if t in ("pro", "premium", "31", "3.1"):
         return "pro"
@@ -355,57 +87,135 @@ def _tier_from_params(tier: Optional[str], model: Optional[str]) -> Tier:
     return "fast"
 
 
+def _sec_to_str(duration: int) -> str:
+    # PiAPI ждёт "4s"/"6s"/"8s"
+    return f"{int(duration)}s"
+
+
+def _make_path(user_id: int, name: str, ext: str = "jpg") -> str:
+    ts = int(time.time())
+    return f"{VEO_BUCKET_PREFIX}/{user_id}/{ts}_{name}.{ext}"
+
+
+async def _ensure_url_from_bytes(
+    *,
+    user_id: int,
+    bytes_data: Optional[bytes],
+    url: Optional[str],
+    name: str,
+    content_type: str = "image/jpeg",
+) -> Optional[str]:
+    if url:
+        return url
+    if not bytes_data:
+        return None
+    path = _make_path(user_id, name, "jpg")
+    return upload_bytes_to_supabase(path, bytes_data, content_type)
+
+
+def _build_piapi_payload(
+    *,
+    task_type: str,
+    prompt: str,
+    image_url: Optional[str],
+    tail_image_url: Optional[str],
+    reference_image_urls: Optional[List[str]],
+    aspect_ratio: str,
+    duration: int,
+    resolution: str,
+    generate_audio: bool,
+) -> Dict[str, Any]:
+    # Важно: в их спеке model фикс "veo3.1" и task_type "veo3.1-video(-fast)" (у них с точкой, но часто принимают и без)
+    payload: Dict[str, Any] = {
+        "model": "veo3.1",
+        "task_type": task_type,
+        "input": {
+            "prompt": prompt,
+            "aspect_ratio": aspect_ratio,
+            "duration": _sec_to_str(duration),
+            "resolution": resolution,
+            "generate_audio": bool(generate_audio),
+        },
+    }
+
+    # Если PiAPI реально поддерживает text->video без image_url — ок.
+    # Если нет — они вернут понятную ошибку, main покажет.
+    if image_url:
+        payload["input"]["image_url"] = image_url
+
+    if reference_image_urls:
+        # По спеке: refs игнорят tail, и доступны только при 16:9 и 8s
+        payload["input"]["reference_image_urls"] = reference_image_urls[:3]
+    elif tail_image_url:
+        payload["input"]["tail_image_url"] = tail_image_url
+
+    # Если хочешь потом webhook — добавишь config.webhook_config сюда.
+    return payload
+
+
+# ============================================================
+# Public API — то, что вызывает main.py
+# ============================================================
+
 async def run_veo_text_to_video(
     *,
-    user_id: int,  # <-- ВАЖНО: main передаёт user_id
+    user_id: int,
     model: str = "fast",
     prompt: str,
     duration: int = 8,
     resolution: str = "1080p",
     aspect_ratio: str = "16:9",
     generate_audio: bool = False,
-    negative_prompt: Optional[str] = None,  # сейчас не используем, но не падаем
-    tier: Optional[str] = None,             # поддержка старого интерфейса
-    reference_images: Optional[List[str]] = None,  # если main вдруг пошлёт URL-ы
+    negative_prompt: Optional[str] = None,
+    tier: Optional[str] = None,
+    reference_images: Optional[List[str]] = None,
     session: Optional[aiohttp.ClientSession] = None,
-    **_ignore: Any,  # <-- чтобы больше никогда не падало на лишних kwargs
+    **_ignore: Any,
 ) -> str:
-    """
-    Text → Video (совместимо с main.py)
-    Для твоего теста (Veo fast, text->video) — сработает сразу.
-    """
-    _ = user_id  # пока не нужен (нужен будет для загрузки refs/lastframe по bytes, если добавим позже)
+    _ = user_id
+    _ = negative_prompt
 
     chosen_tier = _tier_from_params(tier, model)
+    _validate_common(duration=duration, aspect_ratio=aspect_ratio, generate_audio=generate_audio)
 
-    if chosen_tier == "pro":
-        # PRO: можно передавать reference_images как URL (если main даст)
-        return await run_veo_31(
-            prompt=prompt,
-            mode="text",
-            duration=duration,
-            resolution=resolution,
-            aspect_ratio=aspect_ratio,
-            generate_audio=generate_audio,
-            reference_images=reference_images,
-            session=session,
-        )
+    task_type = PIAPI_TASK_TYPE_PRO if chosen_tier == "pro" else PIAPI_TASK_TYPE_FAST
 
-    return await run_veo_fast(
+    # PiAPI text->video: пробуем без image_url (если их сервер требует image_url — увидишь ошибку в боте)
+    payload = _build_piapi_payload(
+        task_type=task_type,
         prompt=prompt,
-        mode="text",
-        duration=duration,
+        image_url=None,
+        tail_image_url=None,
+        reference_image_urls=(reference_images[:3] if reference_images else None),
         aspect_ratio=aspect_ratio,
+        duration=duration,
+        resolution=("1080p" if chosen_tier == "pro" else "720p"),
         generate_audio=generate_audio,
-        session=session,
     )
+
+    close_session = False
+    if session is None:
+        session = aiohttp.ClientSession()
+        close_session = True
+
+    try:
+        return await piapi_run_and_wait_for_url(
+            session,
+            payload,
+            max_wait_seconds=VEO_MAX_WAIT_SECONDS,
+            poll_interval_seconds=VEO_POLL_INTERVAL_SECONDS,
+        )
+    except PiAPIError as e:
+        raise VeoFlowError(str(e)) from e
+    finally:
+        if close_session:
+            await session.close()
 
 
 async def run_veo_image_to_video(
     *,
-    user_id: int,  # <-- ВАЖНО: main передаёт user_id
+    user_id: int,
     model: str = "fast",
-    # Можно передать либо URL, либо bytes (bytes будут загружены в Replicate Files API внутри этого модуля)
     image_url: Optional[str] = None,
     image_bytes: Optional[bytes] = None,
     prompt: str,
@@ -413,8 +223,8 @@ async def run_veo_image_to_video(
     resolution: str = "1080p",
     aspect_ratio: str = "16:9",
     generate_audio: bool = False,
-    negative_prompt: Optional[str] = None,  # сейчас не используем, но не падаем
-    tier: Optional[str] = None,             # поддержка старого интерфейса
+    negative_prompt: Optional[str] = None,
+    tier: Optional[str] = None,
     last_frame_url: Optional[str] = None,
     last_frame_bytes: Optional[bytes] = None,
     reference_images: Optional[List[str]] = None,
@@ -422,84 +232,95 @@ async def run_veo_image_to_video(
     session: Optional[aiohttp.ClientSession] = None,
     **_ignore: Any,
 ) -> str:
-    """
-    Image → Video (совместимо с main.py)
-    """
-    _ = user_id
     _ = negative_prompt
+    _validate_common(duration=duration, aspect_ratio=aspect_ratio, generate_audio=generate_audio)
 
+    chosen_tier = _tier_from_params(tier, model)
+    task_type = PIAPI_TASK_TYPE_PRO if chosen_tier == "pro" else PIAPI_TASK_TYPE_FAST
 
-    # ---- Resolve inputs: bytes -> upload to Replicate Files API ----
-    session_to_use = session
+    # 1) bytes -> Supabase public URLs
+    image_url = await _ensure_url_from_bytes(
+        user_id=user_id,
+        bytes_data=image_bytes,
+        url=image_url,
+        name="start",
+        content_type="image/jpeg",
+    )
+    if not image_url:
+        raise VeoFlowError("Для Image→Video нужен стартовый кадр (image_bytes или image_url).")
+
+    # last frame
+    last_frame_url = await _ensure_url_from_bytes(
+        user_id=user_id,
+        bytes_data=last_frame_bytes,
+        url=last_frame_url,
+        name="tail",
+        content_type="image/jpeg",
+    )
+
+    # reference images (обрежем до 3 для PiAPI)
+    if (not reference_images) and reference_images_bytes:
+        uploaded: List[str] = []
+        for i, b in enumerate(reference_images_bytes[:3]):
+            u = upload_bytes_to_supabase(_make_path(user_id, f"ref{i+1}", "jpg"), b, "image/jpeg")
+            uploaded.append(u)
+        reference_images = uploaded
+    elif reference_images:
+        reference_images = reference_images[:3]
+
+    # 2) pro-валидация
+    if chosen_tier == "pro":
+        _validate_pro(
+            resolution=resolution,
+            reference_images=reference_images,
+            image_url=image_url,
+            last_frame_url=last_frame_url,
+        )
+    else:
+        # fast принудительно 720p
+        resolution = "720p"
+
+    # 3) PiAPI ограничения на refs (по их спеке)
+    refs_to_send = None
+    tail_to_send = None
+
+    if reference_images:
+        # refs доступны только при 16:9 и 8s
+        if aspect_ratio == "16:9" and int(duration) == 8:
+            refs_to_send = reference_images[:3]
+        else:
+            # мягко игнорим refs (чтобы не ломать UX)
+            refs_to_send = None
+
+    if (not refs_to_send) and last_frame_url:
+        tail_to_send = last_frame_url
+
+    payload = _build_piapi_payload(
+        task_type=task_type,
+        prompt=prompt,
+        image_url=image_url,
+        tail_image_url=tail_to_send,
+        reference_image_urls=refs_to_send,
+        aspect_ratio=aspect_ratio,
+        duration=duration,
+        resolution=resolution,
+        generate_audio=generate_audio,
+    )
+
     close_session = False
-    if session_to_use is None:
-        session_to_use = aiohttp.ClientSession()
+    if session is None:
+        session = aiohttp.ClientSession()
         close_session = True
 
     try:
-        # 🔍 DEBUG — что реально пришло в veo_flow
-        print("VEO image_url =", image_url)
-        print("VEO image_bytes len =", (len(image_bytes) if image_bytes else None))
-        print("VEO last_frame_bytes len =", (len(last_frame_bytes) if last_frame_bytes else None))
-        print("VEO reference_images_bytes lens =",
-              ([len(b) for b in reference_images_bytes] if reference_images_bytes else None))
-        if not image_url:
-            if not image_bytes:
-                raise ValueError("Either image_url or image_bytes must be provided")
-            image_url = await _replicate_upload_bytes(
-                image_bytes,
-                filename="veo_start.jpg",
-                content_type="image/jpeg",
-                session=session_to_use,
-            )
-
-        if (not last_frame_url) and last_frame_bytes:
-            last_frame_url = await _replicate_upload_bytes(
-                last_frame_bytes,
-                filename="veo_last_frame.jpg",
-                content_type="image/jpeg",
-                session=session_to_use,
-            )
-
-        if (not reference_images) and reference_images_bytes:
-            uploaded: List[str] = []
-            for i, b in enumerate(reference_images_bytes):
-                uploaded.append(
-                    await _replicate_upload_bytes(
-                        b,
-                        filename=f"veo_ref_{i+1}.jpg",
-                        content_type="image/jpeg",
-                        session=session_to_use,
-                    )
-                )
-            reference_images = uploaded
-
-        chosen_tier = _tier_from_params(tier, model)
-
-        if chosen_tier == "pro":
-            return await run_veo_31(
-                prompt=prompt,
-                mode="image",
-                image_url=image_url,
-                last_frame_url=last_frame_url,
-                reference_images=reference_images,
-                duration=duration,
-                resolution=resolution,
-                aspect_ratio=aspect_ratio,
-                generate_audio=generate_audio,
-                session=session_to_use,
-            )
-
-        return await run_veo_fast(
-            prompt=prompt,
-            mode="image",
-            image_url=image_url,
-            duration=duration,
-            aspect_ratio=aspect_ratio,
-            generate_audio=generate_audio,
-            session=session_to_use,
+        return await piapi_run_and_wait_for_url(
+            session,
+            payload,
+            max_wait_seconds=VEO_MAX_WAIT_SECONDS,
+            poll_interval_seconds=VEO_POLL_INTERVAL_SECONDS,
         )
+    except PiAPIError as e:
+        raise VeoFlowError(str(e)) from e
     finally:
         if close_session:
-            await session_to_use.close()
-
+            await session.close()
