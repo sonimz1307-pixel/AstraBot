@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from db_supabase import track_user_activity, get_basic_stats, supabase as sb
 from kling_flow import run_motion_control_from_bytes, run_image_to_video_from_bytes
 from veo_flow import run_veo_text_to_video, run_veo_image_to_video
+from veo_billing import calc_veo_charge, format_veo_charge_line
 from billing_db import ensure_user_row, get_balance, add_tokens
 from nano_banana import run_nano_banana
 from yookassa_flow import create_yookassa_payment
@@ -4250,7 +4251,7 @@ async def webhook(secret: str, request: Request):
         return {"ok": True}
 
 
-    # ---- VEO Text→Video: ждём промпт ----
+        # ---- VEO Text→Video: ждём промпт ----
     if st.get("mode") == "veo_t2v" and incoming_text:
         # Если пользователь нажал кнопку меню/навигации — НЕ считаем это промптом
         if _is_nav_or_menu_text(incoming_text):
@@ -4265,7 +4266,11 @@ async def webhook(secret: str, request: Request):
         # Блокируем параллельные запуски (двойные списания), пока Veo ещё считается/отправляется
         if _busy_is_active(int(user_id)):
             kind = _busy_kind(int(user_id)) or "генерация"
-            await tg_send_message(chat_id, f"⏳ Сейчас выполняется: {kind}. Дождись завершения (или /reset).", reply_markup=_help_menu_for(user_id))
+            await tg_send_message(
+                chat_id,
+                f"⏳ Сейчас выполняется: {kind}. Дождись завершения (или /reset).",
+                reply_markup=_help_menu_for(user_id),
+            )
             return {"ok": True}
 
         settings = st.get("veo_settings") or {}
@@ -4277,11 +4282,51 @@ async def webhook(secret: str, request: Request):
         aspect_ratio = str(settings.get("aspect_ratio") or "16:9")
         generate_audio = bool(settings.get("generate_audio"))
 
-        info = f"⏳ Генерирую видео (Veo {'3.1' if veo_model == 'pro' else 'Fast'} | {resolution} | {duration}s | {aspect_ratio} | звук: {'да' if generate_audio else 'нет'})"
-
-        await tg_send_message(chat_id, info, reply_markup=_help_menu_for(user_id))
+        # ---- VEO BILLING (Text→Video) ----
         _busy_start(int(user_id), "Veo видео")
         try:
+            # Баланс + списание
+            try:
+                ensure_user_row(user_id)
+                bal = int(get_balance(user_id) or 0)
+            except Exception:
+                bal = 0
+
+            ch = calc_veo_charge(
+                veo_model=veo_model,
+                model_slug=model_slug,
+                generate_audio=generate_audio,
+                duration_sec=duration,
+            )
+
+            if bal < ch.total_tokens:
+                await tg_send_message(
+                    chat_id,
+                    f"❌ Недостаточно токенов.\nНужно: {ch.total_tokens}\nБаланс: {bal}\n\n{format_veo_charge_line(ch)}",
+                    reply_markup=_topup_balance_inline_kb(),
+                )
+                return {"ok": True}
+
+            add_tokens(
+                user_id,
+                -ch.total_tokens,
+                reason="veo_video",
+                meta={
+                    "tier": ch.tier,
+                    "generate_audio": ch.generate_audio,
+                    "duration": ch.duration_sec,
+                    "tokens_per_sec": ch.tokens_per_sec,
+                    "total_tokens": ch.total_tokens,
+                    "flow": "t2v",
+                },
+            )
+
+            info = (
+                f"⏳ Генерирую видео (Veo {'3.1' if veo_model == 'pro' else 'Fast'} | "
+                f"{resolution} | {duration}s | {aspect_ratio} | звук: {'да' if generate_audio else 'нет'})"
+            )
+            await tg_send_message(chat_id, info, reply_markup=_help_menu_for(user_id))
+
             try:
                 video_url = await run_veo_text_to_video(
                     user_id=int(user_id),
@@ -4302,6 +4347,7 @@ async def webhook(secret: str, request: Request):
                 await tg_send_video_url(chat_id, video_url, caption="✅ Готово! (Veo)")
             except Exception:
                 await tg_send_message(chat_id, f"✅ Готово! Видео: {video_url}", reply_markup=_help_menu_for(user_id))
+
         finally:
             _busy_end(int(user_id))
 
