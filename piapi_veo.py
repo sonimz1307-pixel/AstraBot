@@ -19,18 +19,29 @@ class PiAPIError(RuntimeError):
     pass
 
 
-def _headers() -> Dict[str, str]:
+def _require_key() -> None:
     if not PIAPI_API_KEY:
         raise PiAPIError("PIAPI_API_KEY is missing (set it in Render env vars).")
+
+
+def _headers_json() -> Dict[str, str]:
+    _require_key()
     return {"X-API-Key": PIAPI_API_KEY, "Content-Type": "application/json"}
 
 
-async def piapi_create_task(
-    session: aiohttp.ClientSession,
-    payload: Dict[str, Any],
-) -> Dict[str, Any]:
+def _headers_key_only() -> Dict[str, str]:
+    _require_key()
+    return {"X-API-Key": PIAPI_API_KEY}
+
+
+async def piapi_create_task(session: aiohttp.ClientSession, payload: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{PIAPI_BASE_URL}/api/v1/task"
-    async with session.post(url, headers=_headers(), json=payload, timeout=PIAPI_HTTP_TIMEOUT_SECONDS) as r:
+    async with session.post(
+        url,
+        headers=_headers_json(),
+        json=payload,
+        timeout=PIAPI_HTTP_TIMEOUT_SECONDS,
+    ) as r:
         text = await r.text()
         if r.status >= 400:
             raise PiAPIError(f"PiAPI POST failed ({r.status}): {text[:2000]}")
@@ -40,12 +51,13 @@ async def piapi_create_task(
             raise PiAPIError(f"PiAPI POST: invalid JSON: {e}; body={text[:2000]}") from e
 
 
-async def piapi_get_task(
-    session: aiohttp.ClientSession,
-    task_id: str,
-) -> Dict[str, Any]:
+async def piapi_get_task(session: aiohttp.ClientSession, task_id: str) -> Dict[str, Any]:
     url = f"{PIAPI_BASE_URL}/api/v1/task/{task_id}"
-    async with session.get(url, headers={"X-API-Key": PIAPI_API_KEY}, timeout=PIAPI_HTTP_TIMEOUT_SECONDS) as r:
+    async with session.get(
+        url,
+        headers=_headers_key_only(),
+        timeout=PIAPI_HTTP_TIMEOUT_SECONDS,
+    ) as r:
         text = await r.text()
         if r.status >= 400:
             raise PiAPIError(f"PiAPI GET failed ({r.status}): {text[:2000]}")
@@ -57,10 +69,10 @@ async def piapi_get_task(
 
 def _extract_task_id(resp: Dict[str, Any]) -> str:
     data = resp.get("data") or {}
-    tid = data.get("task_id") or data.get("taskId") or resp.get("task_id")
+    tid = data.get("task_id") or data.get("taskId") or resp.get("task_id") or resp.get("taskId")
     if not tid:
         raise PiAPIError(f"PiAPI response missing task_id. resp={str(resp)[:1500]}")
-    return str(tid)
+    return str(tid).strip()
 
 
 def _status_lower(resp: Dict[str, Any]) -> str:
@@ -69,9 +81,27 @@ def _status_lower(resp: Dict[str, Any]) -> str:
 
 
 def _extract_output_url(resp: Dict[str, Any]) -> Optional[str]:
+    """
+    PiAPI output differs by product.
+    For Veo tasks, observed shape:
+      data.output.video = "https://...mp4"
+    """
     data = resp.get("data") or {}
     out = data.get("output") or {}
-    # PiAPI sometimes returns image_url (single) or image_urls (list)
+
+    # ✅ Veo: mp4 is here
+    v = out.get("video") or out.get("video_url") or out.get("videoUrl")
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+
+    # sometimes as list
+    vids = out.get("videos") or out.get("video_urls") or out.get("videoUrls")
+    if isinstance(vids, list):
+        for item in vids:
+            if isinstance(item, str) and item.strip():
+                return item.strip()
+
+    # fallback: image outputs (other tasks)
     u = out.get("image_url")
     if isinstance(u, str) and u.strip():
         return u.strip()
@@ -80,14 +110,16 @@ def _extract_output_url(resp: Dict[str, Any]) -> Optional[str]:
         for item in arr:
             if isinstance(item, str) and item.strip():
                 return item.strip()
+
     return None
 
 
 def _extract_error_message(resp: Dict[str, Any]) -> str:
     data = resp.get("data") or {}
     err = data.get("error") or {}
-    msg = err.get("message") or resp.get("message") or ""
-    return str(msg)
+    # some responses use raw_message/detail
+    msg = err.get("message") or err.get("raw_message") or resp.get("message") or ""
+    return str(msg).strip()
 
 
 async def piapi_run_and_wait_for_url(
@@ -101,20 +133,24 @@ async def piapi_run_and_wait_for_url(
     task_id = _extract_task_id(created)
 
     start = asyncio.get_event_loop().time()
-    last = None
+    last: Optional[Dict[str, Any]] = None
+    last_status: Optional[str] = None
 
     while True:
         last = await piapi_get_task(session, task_id)
         st = _status_lower(last)
 
+        if st != last_status:
+            last_status = st
+
         if st == "completed":
             url = _extract_output_url(last)
             if not url:
-                raise PiAPIError(f"PiAPI completed but no output url. resp={str(last)[:1500]}")
+                raise PiAPIError(f"PiAPI completed but no output url. resp={str(last)[:2000]}")
             return url
 
         if st == "failed":
-            raise PiAPIError(f"PiAPI task failed: {_extract_error_message(last)}")
+            raise PiAPIError(f"PiAPI task failed: {_extract_error_message(last) or str(last)[:1200]}")
 
         if asyncio.get_event_loop().time() - start > max_wait_seconds:
             raise TimeoutError(f"PiAPI task timeout after {max_wait_seconds}s (task_id={task_id}, status={st})")
