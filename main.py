@@ -3848,18 +3848,6 @@ async def webhook(secret: str, request: Request):
                         if u:
                             return u
                     return ""
-                try:
-                    await tg_send_message(
-                        chat_id,
-                        "DEBUG PiAPI data.output:\n" + json.dumps((data.get("output") or {}), ensure_ascii=False)[:3500]
-                    )
-                except Exception:
-                    pass
-
-                try:
-                    print("DEBUG PiAPI data.output =", json.dumps((data.get("output") or {}), ensure_ascii=False)[:3500])
-                except Exception as e:
-                    print("DEBUG PiAPI dump failed:", e)
 
                 await tg_send_message(chat_id, "✅ Музыка готова:", reply_markup=None)
 
