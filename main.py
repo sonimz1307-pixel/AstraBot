@@ -4174,50 +4174,25 @@ async def webhook(secret: str, request: Request):
                     await tg_send_message(chat_id, f"❌ Музыка не сгенерировалась: {status}\n{err}")
                     return {"ok": True}
 
-                out_raw = data.get("output")
-
-                # Нормализуем output -> список клипов
-                out = []
-                if isinstance(out_raw, dict) and isinstance(out_raw.get("clips"), dict):
-                    out = [v for v in out_raw["clips"].values() if isinstance(v, dict)]
-                elif isinstance(out_raw, list):
-                    out = [x for x in out_raw if isinstance(x, dict)]
-                elif isinstance(out_raw, dict):
-                    out = [out_raw]
-
+                out = data.get("output") or []
+                if isinstance(out, dict):
+                    out = [out]
                 if not out:
-                    await tg_send_message(chat_id, "✅ Готово, но PiAPI не вернул клипы/output. Проверь task в кабинете.")
-                    _clear_music_ctx()
+                    await tg_send_message(chat_id, "✅ Готово, но PiAPI не вернул output. Проверь task в кабинете.")
                     return {"ok": True}
 
-                await tg_send_message(chat_id, "✅ Музыка готова:")
-
-                for i, item in enumerate(out[:2], start=1):
-                    audio_url = _first_http_url(
-                        item.get("audio_url"), item.get("audioUrl"),
-                        item.get("song_url"), item.get("songUrl"),
-                        item.get("mp3_url"), item.get("mp3"),
-                        item.get("file_url"), item.get("fileUrl"),
-                        item.get("url"),
-                    )
-
-                    if audio_url:
-                        await tg_send_audio_from_url(
-                            chat_id,
-                            audio_url,
-                            caption=f"🎵 Трек #{i}",
-                            reply_markup=_main_menu_for(user_id) if i == 1 else None,
-                        )
-                    else:
-                        await tg_send_message(
-                            chat_id,
-                            f"⚠️ Трек #{i}: PiAPI не вернул ссылку на MP3.",
-                            reply_markup=_main_menu_for(user_id) if i == 1 else None,
-                        )
-
-                _clear_music_ctx()
-                return {"ok": True}
-
+            lines = ["✅ Музыка готова:"]
+            for i, item in enumerate(out[:2], start=1):
+                audio_url = item.get("audio_url") or ""
+                video_url = item.get("video_url") or ""
+                image_url = item.get("image_url") or ""
+                lines.append(f"#{i}")
+                if audio_url:
+                    lines.append(f"🎧 MP3: {audio_url}")
+                if video_url:
+                    lines.append(f"🎬 MP4: {video_url}")
+            await tg_send_message(chat_id, "\n".join(lines), reply_markup=_main_menu_for(user_id))
+            _clear_music_ctx()
         except Exception as e:
             await tg_send_message(chat_id, f"❌ Ошибка PiAPI/Suno: {e}", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
