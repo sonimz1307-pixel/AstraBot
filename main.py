@@ -3308,7 +3308,7 @@ async def webhook(secret: str, request: Request):
                     },
                     # ВАЖНО: для music-u лучше явно ставить public, иначе PiAPI часто возвращает только file_id,
                     # и тогда нужно отдельное скачивание файла.
-                    "config": {"service_mode": (settings.get("service_mode") or "public")},
+                    "config": {"service_mode": "public"},
                 }
             else:
                 payload_api = {
@@ -3455,6 +3455,13 @@ async def webhook(secret: str, request: Request):
                         return {"ok": True}
 
                 # Отправка результата: стараемся отправить MP3 файлом (плеер), а не только ссылкой.
+                def _is_http_url(u: str) -> bool:
+                    try:
+                        u = (u or "").strip()
+                    except Exception:
+                        return False
+                    return u.startswith("http://") or u.startswith("https://")
+
                 def _pick_first_url(val) -> str:
                     if not val:
                         return ""
@@ -3480,21 +3487,31 @@ async def webhook(secret: str, request: Request):
                 def _extract_audio_url(item: dict) -> str:
                     if not isinstance(item, dict):
                         return ""
-                    # прямые варианты
-                    for k in ("audio_url", "audioUrl", "song_url", "songUrl", "url"):
+
+                    # 1) явные строки-URL
+                    for k in (
+                        "audio_url", "audioUrl", "mp3_url", "mp3Url",
+                        "song_url", "songUrl", "url", "file_url", "fileUrl", "download_url", "downloadUrl"
+                    ):
                         v = item.get(k)
-                        if isinstance(v, str) and v.strip():
+                        if isinstance(v, str) and _is_http_url(v):
                             return v.strip()
-                    # часто audio = {"url": ...} или audio = [...]
-                    u = _pick_first_url(item.get("audio"))
-                    if u:
-                        return u
-                    # иногда ключи во множественном числе
-                    for k in ("audio_urls", "audios", "urls", "songs"):
+
+                        # иногда эти поля бывают dict/list вида {"url": "..."} или [{"url": "..."}]
+                        if isinstance(v, (dict, list)):
+                            u = _pick_first_url(v)
+                            if u:
+                                return u
+
+                    # 2) часто audio/mp3 вложенные
+                    for k in ("audio", "mp3", "song", "file", "files", "outputs", "output"):
                         u = _pick_first_url(item.get(k))
                         if u:
                             return u
+
+                    # 3) если вернулся UUID/clip_id — это НЕ URL, не отправляем как аудио
                     return ""
+
 
                 await tg_send_message(chat_id, "✅ Музыка готова:", reply_markup=None)
 
