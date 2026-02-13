@@ -3848,7 +3848,14 @@ async def webhook(secret: str, request: Request):
                         if u:
                             return u
                     return ""
-
+                try:
+                    await tg_send_message(
+                        chat_id,
+                        "DEBUG PiAPI data.output:\n" + json.dumps((data.get("output") or {}), ensure_ascii=False)[:3500]
+                    )
+                except Exception:
+                    pass
+                
                 await tg_send_message(chat_id, "✅ Музыка готова:", reply_markup=None)
 
                 # Отправляем максимум 2 трека, чтобы не спамить.
