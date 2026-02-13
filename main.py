@@ -3446,7 +3446,7 @@ async def webhook(secret: str, request: Request):
                         _clear_music_ctx()
                         return {"ok": True}
 
-                                      out = data.get("output") or []
+                    out = data.get("output") or []
 
                     # ✅ Нормализация ответа PiAPI для разных моделей
                     # Suno обычно возвращает dict/list с audio_url/url/mp3
