@@ -36,17 +36,7 @@ async def build_brand_endpoint(payload: dict = Body(...)):
 async def run_apify_build_brand(payload: dict = Body(...)):
     """
     Runs Apify actor, builds unified model, and AUTO-SAVES into Supabase (mi_* tables).
-
-    Body:
-    {
-      "actor_id": "m_mamaev~2gis-places-scraper",
-      "actor_input": {...},
-      "meta": {
-        "source": "apify_2gis",
-        "city": "астрахань",
-        "queries": ["школа танцев","танцы"]
-      }
-    }
+    Adds `saved_debug` with the real Supabase error text if saving fails.
     """
     token = env("APIFY_TOKEN")
     actor_id = (payload.get("actor_id") or "").strip()
@@ -64,7 +54,7 @@ async def run_apify_build_brand(payload: dict = Body(...)):
 
     try:
         client = ApifyClient(token)
-        # run + fetch items
+
         run_id = await client.run_actor(actor_id, actor_input)
         run = await client.wait_run_finished(run_id, max_wait_seconds=240.0)
         status = (run.get("status") or "").upper()
@@ -74,13 +64,13 @@ async def run_apify_build_brand(payload: dict = Body(...)):
         dataset_id = run.get("defaultDatasetId")
         items = await client.get_dataset_items(dataset_id, limit=2000)
 
-        # build unified model (currently expects "yandex items" shape, but works as generic branches list too)
         model = await build_brand_model_from_yandex_items(items)
 
-        # ---- AUTO SAVE ----
-        # 1) raw items
+        saved_debug = {}
+
+        # raw items snapshot
         try:
-            insert_raw_items(
+            saved_debug["raw_items"] = insert_raw_items(
                 source=source,
                 city=city,
                 queries=queries,
@@ -88,17 +78,16 @@ async def run_apify_build_brand(payload: dict = Body(...)):
                 run_id=run_id,
                 items=items,
             )
-        except Exception:
-            # don't fail the whole request if logging fails
-            pass
+        except Exception as e:
+            saved_debug["raw_items"] = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:400]}"}
 
-        # 2) brand + branches + socials + web snapshot
+        # brand + branches + socials + web snapshot
         saved = {"ok": False}
         try:
             brand_id = upsert_brand(model)
             branches_count = replace_branches(brand_id, model.get("branches") or [])
             socials_count = upsert_brand_socials(brand_id, model.get("socials") or [])
-            # store website enrichment snapshot if present
+
             web = model.get("website_enrichment") or {}
             if isinstance(web, dict) and web.get("ok"):
                 insert_web_snapshot(
@@ -107,9 +96,10 @@ async def run_apify_build_brand(payload: dict = Body(...)):
                     source_type=web.get("source_type") or "",
                     snapshot=web,
                 )
+
             saved = {"ok": True, "brand_id": brand_id, "branches": branches_count, "socials": socials_count}
         except Exception as e:
-            saved = {"ok": False, "error": type(e).__name__}
+            saved = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:600]}"}
 
         model["apify"] = {
             "actor_id": actor_id,
@@ -118,6 +108,7 @@ async def run_apify_build_brand(payload: dict = Body(...)):
             "dataset_id": dataset_id,
         }
         model["saved"] = saved
+        model["saved_debug"] = saved_debug
         return model
 
     except httpx.HTTPStatusError as e:
@@ -135,4 +126,4 @@ async def run_apify_build_brand(payload: dict = Body(...)):
         return {"ok": False, "error": f"apify_error: {str(e)}"}
 
     except Exception as e:
-        return {"ok": False, "error": f"server_error: {type(e).__name__}"}
+        return {"ok": False, "error": f"server_error: {type(e).__name__}: {str(e)[:500]}"}
