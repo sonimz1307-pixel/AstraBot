@@ -1,107 +1,115 @@
+"""
+Apify API helper.
+
+This module is intentionally small and dependency-light. It provides a stable
+interface for the rest of the app:
+
+- run_actor_sync_get_dataset_items(actor_id, actor_input, **kwargs)
+
+Env:
+- APIFY_TOKEN (required)
+"""
 from __future__ import annotations
 
-import asyncio
-from typing import Any, Dict, List, Optional
+import os
+import json
+from typing import Any, Dict, List, Optional, Union, Tuple
 
-import httpx
+import requests
 
 
 class ApifyError(RuntimeError):
-    pass
+    def __init__(self, message: str, status_code: Optional[int] = None, response_text: Optional[str] = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_text = response_text
 
 
-class ApifyClient:
+def _get_token(explicit_token: Optional[str] = None) -> str:
+    token = explicit_token or os.getenv("APIFY_TOKEN") or os.getenv("APIFY_API_TOKEN")
+    if not token:
+        raise ApifyError("APIFY_TOKEN is not set in environment")
+    return token
+
+
+def _actor_to_url_path(actor_id: str) -> str:
     """
-    Minimal Apify REST client:
-    - run actor
-    - wait until finished
-    - fetch dataset items
+    actor_id can be like:
+      - "m_mamaev~2gis-places-scraper" (recommended)
+      - "username~actorname"
+      - "actorId" (Apify internal id)
     """
+    actor_id = actor_id.strip()
+    if not actor_id:
+        raise ApifyError("actor_id is empty")
+    return actor_id
 
-    def __init__(self, token: str, *, timeout: float = 40.0):
-        if not token:
-            raise ApifyError("APIFY_TOKEN is empty")
-        self.token = token
-        self.timeout = timeout
-        self.base = "https://api.apify.com/v2"
 
-    def _auth_params(self) -> Dict[str, str]:
-        return {"token": self.token}
+def run_actor_sync_get_dataset_items(
+    actor_id: str,
+    actor_input: Dict[str, Any],
+    *,
+    token: Optional[str] = None,
+    timeout_sec: int = 300,
+    clean: bool = True,
+    format: str = "json",
+    limit: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Runs an Actor synchronously and returns dataset items.
 
-    async def run_actor(self, actor_id: str, actor_input: Dict[str, Any]) -> str:
-        """
-        Starts actor and returns run_id.
-        """
-        if not actor_id:
-            raise ApifyError("actor_id is empty")
+    Uses:
+      POST https://api.apify.com/v2/acts/{actor_id}/run-sync-get-dataset-items?token=...
 
-        url = f"{self.base}/acts/{actor_id}/runs"
-        params = {"waitForFinish": "0", **self._auth_params()}
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            r = await client.post(url, params=params, json=actor_input)
-            r.raise_for_status()
-            data = r.json()
-        run_id = (data.get("data") or {}).get("id")
-        if not run_id:
-            raise ApifyError("Failed to start actor: no run id returned")
-        return run_id
+    Returns:
+      list of dataset items (dicts)
 
-    async def wait_run_finished(self, run_id: str, *, poll_seconds: float = 2.0, max_wait_seconds: float = 180.0) -> Dict[str, Any]:
-        """
-        Polls run until SUCCEEDED/FAILED/TIMED-OUT/ABORTED.
-        Returns run object (data).
-        """
-        url = f"{self.base}/actor-runs/{run_id}"
-        deadline = asyncio.get_event_loop().time() + max_wait_seconds
+    Raises:
+      ApifyError on HTTP errors / invalid responses.
+    """
+    token_val = _get_token(token)
+    actor_path = _actor_to_url_path(actor_id)
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            while True:
-                r = await client.get(url, params=self._auth_params())
-                r.raise_for_status()
-                run = (r.json().get("data") or {})
-                status = (run.get("status") or "").upper()
+    url = f"https://api.apify.com/v2/acts/{actor_path}/run-sync-get-dataset-items"
+    params: Dict[str, Any] = {"token": token_val, "format": format}
+    if clean:
+        params["clean"] = "true"
+    if limit is not None:
+        params["limit"] = int(limit)
 
-                if status in {"SUCCEEDED", "FAILED", "TIMED-OUT", "ABORTED"}:
-                    return run
+    try:
+        resp = requests.post(url, params=params, json=actor_input, timeout=timeout_sec)
+    except requests.RequestException as e:
+        raise ApifyError(f"Apify request failed: {e}") from e
 
-                if asyncio.get_event_loop().time() > deadline:
-                    raise ApifyError(f"Run timeout (>{max_wait_seconds}s). Last status={status}")
+    if resp.status_code >= 400:
+        # Apify typically returns JSON with error details
+        text = resp.text
+        try:
+            j = resp.json()
+            text = json.dumps(j, ensure_ascii=False)
+        except Exception:
+            pass
+        raise ApifyError("Apify HTTP error", status_code=resp.status_code, response_text=text)
 
-                await asyncio.sleep(poll_seconds)
+    # If format=json, body is JSON array
+    try:
+        data = resp.json()
+    except Exception as e:
+        raise ApifyError(f"Failed to parse Apify JSON response: {e}", status_code=resp.status_code, response_text=resp.text)
 
-    async def get_dataset_items(self, dataset_id: str, *, limit: int = 2000) -> List[Dict[str, Any]]:
-        """
-        Fetches dataset items (clean=true returns simplified objects).
-        """
-        if not dataset_id:
-            return []
-        url = f"{self.base}/datasets/{dataset_id}/items"
-        params = {
-            "clean": "true",
-            "format": "json",
-            "limit": str(limit),
-            **self._auth_params(),
-        }
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            r = await client.get(url, params=params)
-            r.raise_for_status()
-            items = r.json()
-        if not isinstance(items, list):
-            return []
-        return items
+    if not isinstance(data, list):
+        raise ApifyError("Unexpected Apify response type (expected list)", status_code=resp.status_code, response_text=resp.text)
 
-    async def run_actor_and_get_items(
-        self,
-        actor_id: str,
-        actor_input: Dict[str, Any],
-        *,
-        max_wait_seconds: float = 240.0,
-        limit: int = 2000,
-    ) -> List[Dict[str, Any]]:
-        run_id = await self.run_actor(actor_id, actor_input)
-        run = await self.wait_run_finished(run_id, max_wait_seconds=max_wait_seconds)
-        status = (run.get("status") or "").upper()
-        if status != "SUCCEEDED":
-            raise ApifyError(f"Actor run ended with status={status}")
-        dataset_id = run.get("defaultDatasetId")
-        return await self.get_dataset_items(dataset_id, limit=limit)
+    # Ensure items are dicts
+    items: List[Dict[str, Any]] = []
+    for it in data:
+        if isinstance(it, dict):
+            items.append(it)
+        else:
+            items.append({"value": it})
+    return items
+
+
+# Backward-compatible alias (some older code may import this name)
+run_actor_sync = run_actor_sync_get_dataset_items
