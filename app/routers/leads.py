@@ -378,7 +378,6 @@ async def _orchestrate_full_job(
         # --- Yandex loop ---
         processed = 0
         failed = 0
-        errors_sample: list = []  # keep first N errors for diagnostics
         existing = (
             sb.table("mi_places")
             .select("place_key")
@@ -429,10 +428,8 @@ async def _orchestrate_full_job(
                         continue
                     break
 
-if last_err is not None:
-    failed += 1
-    if len(errors_sample) < 5:
-        errors_sample.append({"place_key": pk, **last_err})
+            if last_err is not None:
+                failed += 1
 
             processed += 1
             _job_state_upsert(
@@ -440,29 +437,27 @@ if last_err is not None:
                 job_id,
                 done=processed,
                 failed=failed,
-meta={
-    "phase": "yandex",
-    "stopped_reason": stopped_reason,
-    "elapsed_seconds": round(time.time() - started_ts, 2),
-    "errors_sample": errors_sample,
-},
+                meta={
+                    "phase": "yandex",
+                    "stopped_reason": stopped_reason,
+                    "elapsed_seconds": round(time.time() - started_ts, 2),
+                },
             )
 
             if sleep_ms and sleep_ms > 0:
                 time.sleep(sleep_ms / 1000.0)
 
-        status = "done" if failed == 0 and stopped_reason is None else ("done_with_errors" if stopped_reason is None else "done")
+        status = "done" if failed == 0 and stopped_reason is None else ("failed" if stopped_reason is None else "done")
         _job_state_upsert(
             sb,
             job_id,
             status=status,
-meta={
-    "phase": "done",
-    "stopped_reason": stopped_reason,
-    "elapsed_seconds": round(time.time() - started_ts, 2),
-    "failed_count": failed,
-    "errors_sample": errors_sample,
-},
+            meta={
+                "phase": "done",
+                "stopped_reason": stopped_reason,
+                "elapsed_seconds": round(time.time() - started_ts, 2),
+                "failed_count": failed,
+            },
         )
     except Exception as e:
         _job_state_upsert(
