@@ -265,6 +265,68 @@ async def run_apify_yandex_for_place(payload: Dict[str, Any] = Body(...)):
     }
 
 
+@router.post("/run_full_job")
+async def run_full_job(payload: Dict[str, Any] = Body(...)):
+    """
+    v2 orchestration (STEP 1.1):
+    - creates mi_jobs record
+    - returns job_id
+    (2GIS/Yandex loop will be added in next steps)
+
+    Payload:
+    {
+      "tg_user_id": 1,
+      "city": "астрахань",
+      "niche": "школа танцев",
+      "limit": 20,              # optional
+      "mode": "full"            # optional: "fast" | "full"
+    }
+    """
+    tg_user_id = payload.get("tg_user_id")
+    city = (payload.get("city") or "").strip().lower()
+    niche = (payload.get("niche") or payload.get("query") or "").strip()
+
+    if tg_user_id is None:
+        raise HTTPException(status_code=400, detail="tg_user_id is required")
+    try:
+        tg_user_id = int(tg_user_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="tg_user_id must be an integer")
+
+    if not city:
+        raise HTTPException(status_code=400, detail="city is required")
+    if not niche:
+        raise HTTPException(status_code=400, detail="niche is required")
+
+    limit = payload.get("limit")
+    try:
+        limit = int(limit) if limit is not None else None
+    except Exception:
+        raise HTTPException(status_code=400, detail="limit must be an integer")
+
+    mode = (payload.get("mode") or "full").strip().lower()
+    if mode not in ("fast", "full"):
+        raise HTTPException(status_code=400, detail="mode must be 'fast' or 'full'")
+
+    try:
+        job_id = create_job(
+            tg_user_id=tg_user_id,
+            city=city,
+            query=niche,
+            queries=[niche],
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": "job_create_failed", "message": str(e)})
+
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "params": {"tg_user_id": tg_user_id, "city": city, "niche": niche, "limit": limit, "mode": mode},
+        "next": "STEP 1.2 will run 2GIS and persist RAW under this job_id",
+    }
+
+
+
 @router.post("/collect_place")
 async def collect_place(payload: Dict[str, Any] = Body(...)):
     """
