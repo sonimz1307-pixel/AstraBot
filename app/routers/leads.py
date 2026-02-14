@@ -8,7 +8,7 @@ from fastapi import APIRouter, Body, HTTPException
 from app.services.socials_extract import fetch_and_extract_website_data
 from app.services.market_model_builder import build_brand_model_from_yandex_items
 from app.services.apify_client import run_actor_sync_get_dataset_items, ApifyError
-from app.services.mi_storage import insert_raw_items
+from app.services.mi_storage import create_job, insert_raw_items
 
 router = APIRouter()
 
@@ -49,6 +49,14 @@ async def run_apify_build_brand(payload: Dict[str, Any] = Body(...)):
     actor_input = payload.get("actor_input") or {}
     meta = payload.get("meta") or {}
 
+    # Optional: bind run to a конкретному пользователю TG-бота
+    tg_user_id = payload.get("tg_user_id") or meta.get("tg_user_id")
+    if tg_user_id is not None:
+        try:
+            tg_user_id = int(tg_user_id)
+        except Exception:
+            raise HTTPException(status_code=400, detail="tg_user_id must be an integer")
+
     if not actor_id:
         raise HTTPException(status_code=400, detail="actor_id is required")
     if not isinstance(actor_input, dict):
@@ -83,6 +91,14 @@ async def run_apify_build_brand(payload: Dict[str, Any] = Body(...)):
 
     run_id = f"sync_{int(time.time())}"
 
+    job_id = None
+    if tg_user_id is not None:
+        try:
+            # query (single) stored for convenience; queries (list) stored fully
+            job_id = create_job(tg_user_id=tg_user_id, city=city, query=(queries[0] if queries else None), queries=queries)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail={"error": "job_create_failed", "message": str(e)})
+
     try:
         items = run_actor_sync_get_dataset_items(actor_id=actor_id, actor_input=actor_input)
     except ApifyError as e:
@@ -102,6 +118,7 @@ async def run_apify_build_brand(payload: Dict[str, Any] = Body(...)):
     saved = {"ok": True, "inserted": 0}
     try:
         saved = insert_raw_items(
+            job_id=job_id,
             source="apify_2gis",
             city=city,
             queries=queries,
@@ -115,6 +132,7 @@ async def run_apify_build_brand(payload: Dict[str, Any] = Body(...)):
 
     return {
         "ok": True,
+        "job": {"id": job_id, "tg_user_id": tg_user_id},
         "meta": {"source": "apify_2gis", "city": city, "queries": queries},
         "apify": {"actor_id": actor_id, "run_id": run_id, "items_count": len(items)},
         "saved": saved,
