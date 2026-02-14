@@ -24,6 +24,8 @@ from yookassa_flow import create_yookassa_payment
 app = FastAPI()
 # --- static files (/static/...) ---
 app.mount("/static", StaticFiles(directory="static"), name="static")
+from app.routers.leads import router as leads_router
+app.include_router(leads_router, prefix="/api/leads", tags=["leads"])
 
 APP_VERSION = "v7-suno-callback-dedup-fix"
 try:
