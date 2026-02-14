@@ -1,9 +1,14 @@
-from fastapi import APIRouter, Body
+from __future__ import annotations
+
+import time
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, Body, HTTPException
 
 from app.services.socials_extract import fetch_and_extract_website_data
-from app.services.apify_client import run_actor_sync_get_dataset_items
 from app.services.market_model_builder import build_brand_model_from_yandex_items
-from app.services.mi_storage import insert_raw_items, upsert_brand, replace_branches
+from app.services.apify_client import run_actor_sync_get_dataset_items, ApifyError
+from app.services.mi_storage import insert_raw_items
 
 router = APIRouter()
 
@@ -19,87 +24,99 @@ async def extract_site(url: str):
 
 
 @router.post("/build_brand")
-async def build_brand_endpoint(payload: dict = Body(...)):
-    """Build brand model from already-collected yandex/2gis-like items."""
+async def build_brand_endpoint(payload: Dict[str, Any] = Body(...)):
+    """
+    Legacy: builds brand model from already prepared items (usually yandex/2gis-normalized).
+    """
     items = payload.get("items") or []
     return await build_brand_model_from_yandex_items(items)
 
 
 @router.post("/run_apify_build_brand")
-async def run_apify_build_brand(payload: dict = Body(...)):
-    """1) Run Apify actor (sync) -> get dataset items.
-    2) Autosave raw items into Supabase (mi_raw_items).
-    3) Build a simple brand model -> try to upsert mi_brands and mi_branches.
+async def run_apify_build_brand(payload: Dict[str, Any] = Body(...)):
+    """
+    Runs an Apify Actor (sync), saves RAW items into Supabase mi_raw_items,
+    and returns a lightweight summary.
 
     Expected payload:
     {
       "actor_id": "m_mamaev~2gis-places-scraper",
-      "actor_input": { ... Apify actor input ... },
-      "meta": {"city": "астрахань", "queries": ["школа танцев"]}
+      "actor_input": {...},
+      "meta": {"city": "астрахань", "queries": ["школа танцев", "танцы"]}   # optional
     }
     """
-
-    actor_id = payload.get("actor_id")
+    actor_id = (payload.get("actor_id") or "").strip()
     actor_input = payload.get("actor_input") or {}
     meta = payload.get("meta") or {}
 
-    # For your 2GIS actor the city/queries are typically part of actor_input,
-    # but we also accept meta.city for DB NOT NULL constraints.
-    city = (meta.get("city") or actor_input.get("locationQuery") or "").strip().lower()
+    if not actor_id:
+        raise HTTPException(status_code=400, detail="actor_id is required")
+    if not isinstance(actor_input, dict):
+        raise HTTPException(status_code=400, detail="actor_input must be an object")
 
-    # Run actor
-    run_id, items = run_actor_sync_get_dataset_items(actor_id=actor_id, actor_input=actor_input)
+    # Derive city/queries if not provided explicitly
+    city = (meta.get("city") or actor_input.get("locationQuery") or actor_input.get("location") or "").strip().lower()
+    queries: List[str] = []
 
-    # Always autosave raw items (this should never break even if brand tables change)
-    saved_raw = {"ok": False, "error": "not_run"}
+    q = meta.get("queries")
+    if isinstance(q, list):
+        queries = [str(x).strip() for x in q if str(x).strip()]
+    elif isinstance(q, str) and q.strip():
+        queries = [q.strip()]
+
+    if not queries:
+        # Actor uses "query" (array) in m_mamaev~2gis-places-scraper
+        aq = actor_input.get("query")
+        if isinstance(aq, list):
+            queries = [str(x).strip() for x in aq if str(x).strip()]
+        elif isinstance(aq, str) and aq.strip():
+            queries = [aq.strip()]
+        else:
+            # Some actors use "search"
+            s = actor_input.get("search")
+            if isinstance(s, str) and s.strip():
+                queries = [s.strip()]
+
+    if not city:
+        # Keep DB constraint happy; you can replace with real city later
+        city = "unknown"
+
+    run_id = f"sync_{int(time.time())}"
+
     try:
-        saved_raw = insert_raw_items(
-            source="apify_2gis",
-            city=city or "unknown",
-            items=items,
-            meta={
-                "actor_id": actor_id,
-                "run_id": run_id,
-                "queries": meta.get("queries") or actor_input.get("query") or actor_input.get("queries"),
-                "locationQuery": actor_input.get("locationQuery"),
+        items = run_actor_sync_get_dataset_items(actor_id=actor_id, actor_input=actor_input)
+    except ApifyError as e:
+        # Return readable error to shell (so you don't see only "Internal Server Error")
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "apify_http_error",
+                "message": str(e),
+                "status_code": getattr(e, "status_code", None),
+                "response": getattr(e, "response_text", None),
             },
         )
     except Exception as e:
-        saved_raw = {"ok": False, "error": f"raw_save_failed: {type(e).__name__}: {e}"}
+        raise HTTPException(status_code=500, detail={"error": "apify_unexpected_error", "message": str(e)})
 
-    # Build model
-    model = await build_brand_model_from_yandex_items(items)
-    model.setdefault("meta", {})
-    model["meta"].update({
-        "city": city,
-        "queries": meta.get("queries") or actor_input.get("query") or actor_input.get("queries"),
-        "actor_id": actor_id,
-        "run_id": run_id,
-    })
-
-    # Try to save brand + branches (can be switched off if you want only raw)
-    saved_model = {"ok": True, "brand_id": None, "branches_inserted": 0}
+    saved = {"ok": True, "inserted": 0}
     try:
-        brand_name = (model.get("brand") or {}).get("name") or ""
-        website = (model.get("brand") or {}).get("website") or ""
-        taplink = (model.get("brand") or {}).get("taplink") or ""
-
-        if city and brand_name:
-            brand_id = upsert_brand(city=city, name=brand_name, website=website, taplink=taplink)
-            branches = (model.get("brand") or {}).get("branches") or []
-            br_res = replace_branches(brand_id=brand_id, branches=branches)
-            saved_model = {"ok": True, "brand_id": brand_id, "branches_inserted": br_res.get("inserted", 0)}
-        else:
-            saved_model = {"ok": False, "error": "missing city or brand_name (skip mi_brands/mi_branches)"}
-
+        saved = insert_raw_items(
+            source="apify_2gis",
+            city=city,
+            queries=queries,
+            actor_id=actor_id,
+            run_id=run_id,
+            items=items,
+        )
     except Exception as e:
-        saved_model = {"ok": False, "error": f"model_save_failed: {type(e).__name__}: {e}"}
+        # Do NOT fail the whole endpoint if saving fails; return debug.
+        saved = {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
     return {
         "ok": True,
+        "meta": {"source": "apify_2gis", "city": city, "queries": queries},
         "apify": {"actor_id": actor_id, "run_id": run_id, "items_count": len(items)},
-        "meta": {"city": city, "queries": meta.get("queries") or actor_input.get("query") or actor_input.get("queries")},
-        "saved_raw": saved_raw,
-        "saved_model": saved_model,
-        "brand": model.get("brand"),
+        "saved": saved,
+        "sample_items": items[:3],
     }
