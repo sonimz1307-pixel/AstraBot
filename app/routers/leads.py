@@ -286,8 +286,7 @@ async def run_full_job(payload: Dict[str, Any] = Body(...)):
     }
     """
     tg_user_id = payload.get("tg_user_id")
-    city_raw = (payload.get("city") or "").strip()
-    city = city_raw.lower()
+    city = (payload.get("city") or "").strip().lower()
     niche = (payload.get("niche") or payload.get("query") or "").strip()
 
     if tg_user_id is None:
@@ -329,17 +328,10 @@ async def run_full_job(payload: Dict[str, Any] = Body(...)):
         raise HTTPException(status_code=500, detail="actor_id_2gis resolved to empty")
 
     actor_input: Dict[str, Any] = {
-    "domain": "2gis.ru",
-    "enableGlobalDataset": True,
-    "filterRating": "rating_rating_excellent",
-    "locationQuery": city_raw or city,
-    "query": [niche],
-}
-
-# optional override/merge from request (advanced)
-actor_input_override = payload.get("actor_input_2gis")
-if isinstance(actor_input_override, dict) and actor_input_override:
-    actor_input.update(actor_input_override)
+        "domain": "2gis.ru",
+        "locationQuery": city,
+        "query": [niche],
+    }
     if limit is not None:
         actor_input["maxItems"] = limit
 
@@ -385,38 +377,6 @@ if isinstance(actor_input_override, dict) and actor_input_override:
     yandex_actor_id = (payload.get("actor_id_yandex") or os.getenv("APIFY_YANDEX_ACTOR_ID") or "m_mamaev~yandex-maps-places-scraper").strip()
     yandex_max_items = int(payload.get("yandex_maxItems") or payload.get("maxItems") or 6)
 
-# STEP 1.4 guards for large jobs (>20 places)
-max_places = payload.get("max_places") or payload.get("maxPlaces") or os.getenv("MI_MAX_PLACES") or None
-max_seconds = payload.get("max_seconds") or payload.get("maxSeconds") or os.getenv("MI_MAX_SECONDS") or None
-yandex_retries = payload.get("yandex_retries") or payload.get("yandexRetries") or os.getenv("MI_YANDEX_RETRIES") or 1
-sleep_ms = payload.get("sleep_ms") or payload.get("sleepMs") or os.getenv("MI_SLEEP_MS") or 0
-
-try:
-    max_places = int(max_places) if max_places is not None else None
-except Exception:
-    raise HTTPException(status_code=400, detail="max_places must be an integer")
-
-try:
-    max_seconds = int(max_seconds) if max_seconds is not None else None
-except Exception:
-    raise HTTPException(status_code=400, detail="max_seconds must be an integer")
-
-try:
-    yandex_retries = int(yandex_retries)
-except Exception:
-    raise HTTPException(status_code=400, detail="yandex_retries must be an integer")
-
-try:
-    sleep_ms = int(sleep_ms)
-except Exception:
-    raise HTTPException(status_code=400, detail="sleep_ms must be an integer")
-
-started_ts = time.time()
-stopped_reason = None
-
-if max_places is not None and max_places > 0 and len(place_keys) > max_places:
-    place_keys = place_keys[:max_places]
-
     processed = 0
     failed: List[Dict[str, Any]] = []
     if mode == "full" and place_keys:
@@ -436,48 +396,21 @@ if max_places is not None and max_places > 0 and len(place_keys) > max_places:
             existing_keys = set()
 
         for pk in place_keys:
-    if pk in existing_keys:
-        continue
-
-    # time guard
-    if max_seconds is not None and max_seconds > 0 and (time.time() - started_ts) >= max_seconds:
-        stopped_reason = "max_seconds_reached"
-        break
-
-    last_err = None
-    for attempt in range(max(0, yandex_retries) + 1):
-        try:
-            _collect_place_internal(
-                sb=sb,
-                job_id=job_id,
-                place_key=pk,
-                actor_id=yandex_actor_id,
-                max_items=yandex_max_items,
-            )
-            processed += 1
-            last_err = None
-            break
-        except HTTPException as e:
-            last_err = {"status_code": e.status_code, "detail": e.detail}
-            # retry only for apify errors
-            detail = e.detail or {}
-            is_apify = isinstance(detail, dict) and detail.get("error") in ("apify_http_error", "apify_unexpected_error")
-            if attempt < max(0, yandex_retries) and is_apify:
-                time.sleep(1.5)
+            if pk in existing_keys:
                 continue
-            break
-        except Exception as e:
-            last_err = {"error": f"{type(e).__name__}: {e}"}
-            if attempt < max(0, yandex_retries):
-                time.sleep(1.5)
-                continue
-            break
-
-    if last_err is not None:
-        failed.append({"place_key": pk, **last_err})
-
-    if sleep_ms and sleep_ms > 0:
-        time.sleep(sleep_ms / 1000.0)
+            try:
+                _collect_place_internal(
+                    sb=sb,
+                    job_id=job_id,
+                    place_key=pk,
+                    actor_id=yandex_actor_id,
+                    max_items=yandex_max_items,
+                )
+                processed += 1
+            except HTTPException as e:
+                failed.append({"place_key": pk, "status_code": e.status_code, "detail": e.detail})
+            except Exception as e:
+                failed.append({"place_key": pk, "error": f"{type(e).__name__}: {e}"})
 
     return {
         "ok": True,
@@ -496,14 +429,6 @@ if max_places is not None and max_places > 0 and len(place_keys) > max_places:
             "places_processed": processed if mode == "full" else 0,
             "places_failed": len(failed) if mode == "full" else 0,
             "failed": failed[:10],
-            "guards": {
-                "max_places": max_places,
-                "max_seconds": max_seconds,
-                "yandex_retries": yandex_retries,
-                "sleep_ms": sleep_ms,
-                "stopped_reason": stopped_reason,
-                "elapsed_seconds": round(time.time() - started_ts, 2),
-            },
         },
     }
 
