@@ -3447,25 +3447,13 @@ async def webhook(secret: str, request: Request):
                         return {"ok": True}
 
                     out = data.get("output") or []
-
-                    # ✅ Нормализация ответа PiAPI для разных моделей
-                    # Suno обычно возвращает dict/list с audio_url/url/mp3
-                    # Udio (music-u) возвращает:
-                    # output = {"generation_id": "...", "songs": [ ... ]}
                     if isinstance(out, dict):
-                        model_name = str(data.get("model") or "").lower().strip()
-                        if model_name == "music-u" and isinstance(out.get("songs"), list):
-                            out = out.get("songs") or []
-                        else:
-                            out = [out]
-
+                        out = [out]
                     if not out:
-                        await tg_send_message(
-                            chat_id,
-                            "✅ Готово, но PiAPI не вернул output. Я сбросил режим, попробуйте снова через «Музыка будущего»."
-                        )
+                        await tg_send_message(chat_id, "✅ Готово, но PiAPI не вернул output. Я сбросил режим, попробуйте снова через «Музыка будущего».")
                         _clear_music_ctx()
                         return {"ok": True}
+
                 # Отправка результата: стараемся отправить MP3 файлом (плеер), а не только ссылкой.
                 def _pick_first_url(val) -> str:
                     if not val:
