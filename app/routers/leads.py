@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Body
+import httpx
 
 from app.core.config import env
 from app.services.socials_extract import fetch_and_extract_website_data
@@ -26,18 +27,6 @@ async def build_brand_endpoint(payload: dict = Body(...)):
 
 @router.post("/run_apify_build_brand")
 async def run_apify_build_brand(payload: dict = Body(...)):
-    """
-    WebApp -> backend:
-    {
-      "actor_id": "username~actor-name" OR "actorId",
-      "actor_input": {...}    # exact actor input for Apify
-    }
-
-    Backend:
-    - runs Apify actor using APIFY_TOKEN
-    - downloads dataset items
-    - builds unified brand model
-    """
     token = env("APIFY_TOKEN")
     actor_id = (payload.get("actor_id") or "").strip()
     actor_input = payload.get("actor_input") or {}
@@ -53,7 +42,26 @@ async def run_apify_build_brand(payload: dict = Body(...)):
         model = await build_brand_model_from_yandex_items(items)
         model["apify"] = {"actor_id": actor_id, "items_count": len(items)}
         return model
+
+    except httpx.HTTPStatusError as e:
+        # show Apify response (most useful for wrong actor_id / bad input / auth)
+        text = ""
+        try:
+            text = (e.response.text or "")[:1200]
+        except Exception:
+            text = ""
+        return {
+            "ok": False,
+            "error": "apify_http_error",
+            "status_code": getattr(e.response, "status_code", None),
+            "response": text,
+        }
+
+    except httpx.HTTPError as e:
+        return {"ok": False, "error": f"apify_network_error: {type(e).__name__}"}
+
     except ApifyError as e:
         return {"ok": False, "error": f"apify_error: {str(e)}"}
+
     except Exception as e:
         return {"ok": False, "error": f"server_error: {type(e).__name__}"}
