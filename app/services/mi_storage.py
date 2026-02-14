@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from supabase import create_client, Client
+
+
+def _norm_name(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = re.sub(r"\s+", " ", s)
+    return s
 
 
 def _env(name: str, default: str = "") -> str:
