@@ -1,154 +1,167 @@
+"""Market-intel storage helpers (Supabase).
+
+This version is aligned to the schema you currently have:
+- public.mi_raw_items: stores raw JSON payloads (columns: source, city, item)
+- public.mi_brands:    id, city (NOT NULL), name, name_norm, website, taplink, created_at, updated_at
+- public.mi_branches:  id, brand_id, source, source_place_id, source_url, title, address, lat, lon,
+                       phone, rating, reviews_count, website, taplink, created_at, updated_at
+
+It intentionally does NOT touch your existing bot_* tables.
+
+Env vars expected (already in Render):
+- SUPABASE_URL
+- SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_SERVICE_KEY)
+
+Notes:
+- We avoid inserting columns that might not exist (avg_rating/total_reviews/digital_score/etc.).
+- Any extra metadata (queries, actor_id, run_id) is stored inside `item` as embedded meta.
+"""
+
 from __future__ import annotations
 
 import os
 import re
-from typing import Any, Dict, List, Optional, Tuple
+import time
+from typing import Any, Dict, List, Optional
 
 from supabase import create_client, Client
 
 
-def _norm_name(s: str) -> str:
-    s = (s or "").strip().lower()
-    s = re.sub(r"\s+", " ", s)
-    return s
+def _get_env(*names: str) -> Optional[str]:
+    for n in names:
+        v = os.getenv(n)
+        if v:
+            return v
+    return None
 
 
-def _env(name: str, default: str = "") -> str:
-    return (os.getenv(name, default) or "").strip()
+_supabase_client: Optional[Client] = None
 
 
 def get_supabase() -> Client:
-    """
-    Uses your existing Supabase project.
-    Prefer SERVICE ROLE key for server-side writes.
-    """
-    url = _env("SUPABASE_URL")
-    key = _env("SUPABASE_SERVICE_ROLE_KEY") or _env("SUPABASE_ANON_KEY")
+    global _supabase_client
+    if _supabase_client is not None:
+        return _supabase_client
+
+    url = _get_env("SUPABASE_URL")
+    key = _get_env("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY", "SUPABASE_SERVICE_ROLE")
+
     if not url or not key:
-        raise RuntimeError("Missing SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_ANON_KEY).")
-    return create_client(url, key)
+        raise RuntimeError("Supabase env vars not set: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY")
+
+    _supabase_client = create_client(url, key)
+    return _supabase_client
 
 
-def insert_raw_items(
-    *,
-    source: str,
-    city: str,
-    queries: List[str],
-    actor_id: str,
-    run_id: str,
-    items: List[Dict[str, Any]],
-) -> Dict[str, Any]:
-    """
-    Stores raw Apify dataset items into mi_raw_items (bulk insert).
+_ws_re = re.compile(r"\s+")
+
+
+def normalize_name(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = _ws_re.sub(" ", s)
+    return s
+
+
+def insert_raw_items(*, source: str, city: str, items: List[Dict[str, Any]], meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Insert raw items into mi_raw_items.
+
+    We only rely on columns: source, city, item.
+    All other context is embedded into item['__meta'].
     """
     sb = get_supabase()
+
+    meta = meta or {}
     rows = []
-    for it in items or []:
+    ts = int(time.time())
+    for i, it in enumerate(items or []):
+        payload = dict(it) if isinstance(it, dict) else {"value": it}
+        payload.setdefault("__meta", {})
+        # keep existing meta but add ours
+        payload["__meta"].update({
+            **meta,
+            "source": source,
+            "city": city,
+            "seq": i,
+            "ts": ts,
+        })
         rows.append({
             "source": source,
             "city": city,
-            "queries": queries,
-            "actor_id": actor_id,
-            "run_id": run_id,
-            "item": it,
+            "item": payload,
         })
+
     if not rows:
         return {"ok": True, "inserted": 0}
-    # Bulk insert; PostgREST will accept list
-    sb.table("mi_raw_items").insert(rows).execute()
-    return {"ok": True, "inserted": len(rows)}
+
+    res = sb.table("mi_raw_items").insert(rows).execute()
+    data = getattr(res, "data", None)
+    return {"ok": True, "inserted": len(data) if data is not None else len(rows)}
 
 
-def upsert_brand(model: Dict[str, Any]) -> str:
-    """
-    Upserts into mi_brands by normalized_name unique constraint (handled in SQL via generated column + unique index).
-    Returns brand_id.
-    """
+def upsert_brand(*, city: str, name: str, website: str = "", taplink: str = "") -> str:
+    """Upsert into mi_brands and return brand_id."""
     sb = get_supabase()
-    brand = (model or {}).get("brand") or {}
-    name = (brand.get("name") or "").strip()
+
+    city = (city or "").strip().lower()
+    if not city:
+        raise ValueError("city is required (mi_brands.city is NOT NULL)")
+
+    name = (name or "").strip()
     if not name:
-        raise RuntimeError("brand.name is empty")
+        raise ValueError("brand name is required")
+
+    name_norm = normalize_name(name)
 
     payload = {
+        "city": city,
         "name": name,
-        "website": brand.get("website"),
-        "avg_rating": brand.get("avg_rating"),
-        "total_reviews": brand.get("total_reviews"),
-        "digital_score": model.get("digital_score"),
-        "phones": model.get("phones") or [],
-        "emails": model.get("emails") or [],
+        "name_norm": name_norm,
+        "website": website or "",
+        "taplink": taplink or "",
     }
 
-    norm = " ".join(name.lower().split())
-    existing = sb.table("mi_brands").select("id").eq("normalized_name", norm).limit(1).execute().data
-    if existing:
-        brand_id = existing[0]["id"]
-        sb.table("mi_brands").update(payload).eq("id", brand_id).execute()
-        return brand_id
+    # Your DB has unique index mi_brands_city_name_norm_ux.
+    res = sb.table("mi_brands").upsert(payload, on_conflict="city,name_norm").select("id").execute()
 
-    inserted = sb.table("mi_brands").insert(payload).execute().data
-    return inserted[0]["id"]
+    data = getattr(res, "data", None) or []
+    if not data or "id" not in data[0]:
+        raise RuntimeError("Supabase upsert to mi_brands returned no id")
+
+    return data[0]["id"]
 
 
-def replace_branches(brand_id: str, branches: List[Dict[str, Any]]) -> int:
+def replace_branches(*, brand_id: str, branches: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Replace branches for brand_id in mi_branches.
+
+    We delete existing branches for this brand_id then insert the new set.
+    This avoids conflicts with unknown unique constraints.
+    """
     sb = get_supabase()
+
+    # delete old
     sb.table("mi_branches").delete().eq("brand_id", brand_id).execute()
 
     rows = []
     for b in branches or []:
         rows.append({
             "brand_id": brand_id,
-            "name": b.get("name"),
-            "address": b.get("address"),
-            "phone": b.get("phone"),
+            "source": (b.get("source") or "").strip() or None,
+            "source_place_id": (b.get("source_place_id") or "").strip() or None,
+            "source_url": (b.get("source_url") or b.get("yandex_url") or b.get("2gis_url") or "").strip() or None,
+            "title": (b.get("title") or b.get("name") or "").strip() or None,
+            "address": (b.get("address") or "").strip() or None,
+            "lat": b.get("lat"),
+            "lon": b.get("lon"),
+            "phone": (b.get("phone") or "").strip() or None,
             "rating": b.get("rating"),
             "reviews_count": b.get("reviews_count"),
-            "website": b.get("website"),
-            "yandex_url": b.get("yandex_url"),
-            "two_gis_url": b.get("two_gis_url"),
-            "source": b.get("source"),
+            "website": (b.get("website") or "").strip() or None,
+            "taplink": (b.get("taplink") or "").strip() or None,
         })
-    if rows:
-        sb.table("mi_branches").insert(rows).execute()
-    return len(rows)
 
+    if not rows:
+        return {"ok": True, "inserted": 0}
 
-def upsert_brand_socials(brand_id: str, socials: List[Dict[str, Any]]) -> int:
-    """
-    Replaces socials for simplicity (delete + insert).
-    """
-    sb = get_supabase()
-    sb.table("mi_brand_socials").delete().eq("brand_id", brand_id).execute()
-
-    rows = []
-    for s in socials or []:
-        url = (s.get("url") or "").strip()
-        platform = (s.get("platform") or "").strip()
-        if not url or not platform:
-            continue
-        rows.append({
-            "brand_id": brand_id,
-            "platform": platform,
-            "url": url,
-            "kind": s.get("kind") or "",
-        })
-    if rows:
-        sb.table("mi_brand_socials").insert(rows).execute()
-    return len(rows)
-
-
-def insert_web_snapshot(
-    *,
-    brand_id: str,
-    website: str,
-    source_type: str,
-    snapshot: Dict[str, Any],
-) -> None:
-    sb = get_supabase()
-    sb.table("mi_web_snapshots").insert({
-        "brand_id": brand_id,
-        "website": website,
-        "source_type": source_type,
-        "snapshot": snapshot,
-    }).execute()
+    res = sb.table("mi_branches").insert(rows).execute()
+    data = getattr(res, "data", None)
+    return {"ok": True, "inserted": len(data) if data is not None else len(rows)}
