@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import os
 import re
 from typing import Any, Dict, List, Optional
 
@@ -268,18 +269,20 @@ async def run_apify_yandex_for_place(payload: Dict[str, Any] = Body(...)):
 @router.post("/run_full_job")
 async def run_full_job(payload: Dict[str, Any] = Body(...)):
     """
-    v2 orchestration (STEP 1.1):
+    v2 orchestration (STEP 1.2):
     - creates mi_jobs record
-    - returns job_id
-    (2GIS/Yandex loop will be added in next steps)
+    - runs 2GIS actor (sync) for the given city+niche (+limit)
+    - saves RAW items into mi_raw_items under this job_id (source=apify_2gis, place_key=item.id)
+    - returns job_id + place_keys
 
     Payload:
     {
       "tg_user_id": 1,
       "city": "астрахань",
       "niche": "школа танцев",
-      "limit": 20,              # optional
-      "mode": "full"            # optional: "fast" | "full"
+      "limit": 20,                 # optional
+      "mode": "fast" | "full",     # optional (for now both run 2GIS)
+      "actor_id_2gis": "m_mamaev~2gis-places-scraper"   # optional override
     }
     """
     tg_user_id = payload.get("tg_user_id")
@@ -308,6 +311,7 @@ async def run_full_job(payload: Dict[str, Any] = Body(...)):
     if mode not in ("fast", "full"):
         raise HTTPException(status_code=400, detail="mode must be 'fast' or 'full'")
 
+    # 1) create job
     try:
         job_id = create_job(
             tg_user_id=tg_user_id,
@@ -318,13 +322,66 @@ async def run_full_job(payload: Dict[str, Any] = Body(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": "job_create_failed", "message": str(e)})
 
+    # 2) run 2GIS (sync)
+    actor_id = (payload.get("actor_id_2gis") or os.getenv("APIFY_2GIS_ACTOR_ID") or "m_mamaev~2gis-places-scraper").strip()
+    if not actor_id:
+        raise HTTPException(status_code=500, detail="actor_id_2gis resolved to empty")
+
+    actor_input: Dict[str, Any] = {
+        "domain": "2gis.ru",
+        "locationQuery": city,
+        "query": [niche],
+    }
+    if limit is not None:
+        actor_input["maxItems"] = limit
+
+    run_id = f"sync_{int(time.time())}"
+
+    try:
+        items = run_actor_sync_get_dataset_items(actor_id=actor_id, actor_input=actor_input)
+    except ApifyError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "apify_http_error",
+                "message": str(e),
+                "status_code": getattr(e, "status_code", None),
+                "response": getattr(e, "response_text", None),
+            },
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": "apify_unexpected_error", "message": str(e)})
+
+    # 3) save RAW under this job_id
+    saved = {"ok": True, "inserted": 0}
+    try:
+        saved = _insert_raw_items_compat(
+            job_id=job_id,
+            source="apify_2gis",
+            city=city,
+            queries=[niche],
+            actor_id=actor_id,
+            run_id=run_id,
+            items=items,
+        )
+    except Exception as e:
+        saved = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    place_keys: List[str] = []
+    for it in items or []:
+        if isinstance(it, dict) and it.get("id") is not None:
+            place_keys.append(str(it["id"]))
+
     return {
         "ok": True,
         "job_id": job_id,
-        "params": {"tg_user_id": tg_user_id, "city": city, "niche": niche, "limit": limit, "mode": mode},
-        "next": "STEP 1.2 will run 2GIS and persist RAW under this job_id",
+        "mode": mode,
+        "apify_2gis": {"actor_id": actor_id, "run_id": run_id, "items_count": len(items)},
+        "saved": saved,
+        "place_keys": place_keys,
+        "sample_items": items[:3],
+        "next": "STEP 1.3 will loop place_keys -> run Yandex -> best match -> mi_places",
     }
-
 
 
 @router.post("/collect_place")
