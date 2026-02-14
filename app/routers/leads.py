@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import re
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, HTTPException
@@ -8,9 +9,26 @@ from fastapi import APIRouter, Body, HTTPException
 from app.services.socials_extract import fetch_and_extract_website_data
 from app.services.market_model_builder import build_brand_model_from_yandex_items
 from app.services.apify_client import run_actor_sync_get_dataset_items, ApifyError
-from app.services.mi_storage import create_job, insert_raw_items
+from app.services.mi_storage import create_job, insert_raw_items, get_supabase
 
 router = APIRouter()
+
+def _insert_raw_items_compat(**kwargs):
+    """Compatibility wrapper: older insert_raw_items may not accept some kwargs (e.g., place_key/job_id)."""
+    try:
+        return insert_raw_items(**kwargs)
+    except TypeError:
+        # Drop unknown keys progressively
+        for k in ["place_key", "job_id"]:
+            if k in kwargs:
+                kwargs = dict(kwargs)
+                kwargs.pop(k, None)
+                try:
+                    return insert_raw_items(**kwargs)
+                except TypeError:
+                    pass
+        raise
+
 
 
 @router.get("/ping")
@@ -117,7 +135,7 @@ async def run_apify_build_brand(payload: Dict[str, Any] = Body(...)):
 
     saved = {"ok": True, "inserted": 0}
     try:
-        saved = insert_raw_items(
+        saved = _insert_raw_items_compat(
             job_id=job_id,
             source="apify_2gis",
             city=city,
@@ -137,4 +155,111 @@ async def run_apify_build_brand(payload: Dict[str, Any] = Body(...)):
         "apify": {"actor_id": actor_id, "run_id": run_id, "items_count": len(items)},
         "saved": saved,
         "sample_items": items[:3],
+    }
+
+@router.post("/run_apify_yandex_for_place")
+async def run_apify_yandex_for_place(payload: Dict[str, Any] = Body(...)):
+    """
+    Runs Yandex Maps Places Scraper for a single 2GIS place inside a job, and saves results as RAW items
+    with the same job_id + place_key (2GIS firm id).
+    Expected payload:
+    {
+      "job_id": "...uuid...",
+      "place_key": "70000001028864385",
+      "actor_id": "m_mamaev~yandex-maps-places-scraper",   # optional
+      "maxItems": 6                                       # optional
+    }
+    """
+    job_id = payload.get("job_id")
+    place_key = payload.get("place_key")
+    if not job_id or not place_key:
+        raise HTTPException(status_code=400, detail="job_id and place_key are required")
+
+    actor_id = (payload.get("actor_id") or "m_mamaev~yandex-maps-places-scraper").strip()
+    max_items = int(payload.get("maxItems") or 6)
+
+    sb = get_supabase()
+
+    # Fetch the 2GIS source item for this place_key
+    resp = (
+        sb.table("mi_raw_items")
+        .select("item, city")
+        .eq("job_id", job_id)
+        .eq("place_key", str(place_key))
+        .eq("source", "apify_2gis")
+        .limit(1)
+        .execute()
+    )
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="2GIS item not found for job_id + place_key")
+
+    base_item = resp.data[0].get("item") or {}
+    city = (resp.data[0].get("city") or base_item.get("city") or "").strip()
+    title = (base_item.get("title") or base_item.get("name") or "").strip()
+    if not city:
+        city = "unknown"
+    if not title:
+        raise HTTPException(status_code=400, detail="2GIS item has no title/name to form yandex query")
+
+    yandex_query = f"{title} {city}".strip()
+
+    actor_input = {
+        "enableGlobalDataset": False,
+        "language": "RU",
+        "maxItems": max_items,
+        "query": yandex_query,
+    }
+
+    run_id = f"sync_{int(time.time())}"
+
+    try:
+        y_items = run_actor_sync_get_dataset_items(actor_id=actor_id, actor_input=actor_input)
+    except ApifyError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "apify_http_error",
+                "message": str(e),
+                "status_code": getattr(e, "status_code", None),
+                "response": getattr(e, "response_text", None),
+            },
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": "apify_unexpected_error", "message": str(e)})
+
+    # Ensure each item has a stable id for generated item_id column (extract org id from URL)
+    def _y_id(it: Dict[str, Any]) -> str:
+        url = (it.get("url") or "").strip()
+        m = re.search(r"/org/(\d+)/", url)
+        if m:
+            return m.group(1)
+        return url or (it.get("title") or "unknown")
+
+    for it in y_items:
+        if not it.get("id"):
+            it["id"] = _y_id(it)
+
+    saved = {"ok": True, "inserted": 0}
+    try:
+        saved = _insert_raw_items_compat(
+            job_id=job_id,
+            place_key=str(place_key),
+            source="apify_yandex",
+            city=city.lower(),
+            queries=[yandex_query],
+            actor_id=actor_id,
+            run_id=run_id,
+            items=y_items,
+        )
+    except Exception as e:
+        saved = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "place_key": str(place_key),
+        "yandex_query": yandex_query,
+        "apify": {"actor_id": actor_id, "run_id": run_id, "items_count": len(y_items)},
+        "saved": saved,
+        "sample_items": y_items[:3],
     }
