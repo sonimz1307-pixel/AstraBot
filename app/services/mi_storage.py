@@ -69,7 +69,6 @@ def insert_raw_items(
         dedup[key] = {
             "job_id": job_id,
             "source": source,
-            "item_id": str(item_id),
             "city": city,
             "query": it.get("searchString"),
             "queries": queries,
