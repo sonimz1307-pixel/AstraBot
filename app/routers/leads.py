@@ -372,6 +372,46 @@ async def run_full_job(payload: Dict[str, Any] = Body(...)):
         if isinstance(it, dict) and it.get("id") is not None:
             place_keys.append(str(it["id"]))
 
+
+    # 4) (STEP 1.3) if mode=full -> for each place_key run Yandex + best match + upsert mi_places
+    yandex_actor_id = (payload.get("actor_id_yandex") or os.getenv("APIFY_YANDEX_ACTOR_ID") or "m_mamaev~yandex-maps-places-scraper").strip()
+    yandex_max_items = int(payload.get("yandex_maxItems") or payload.get("maxItems") or 6)
+
+    processed = 0
+    failed: List[Dict[str, Any]] = []
+    if mode == "full" and place_keys:
+        sb = get_supabase()
+
+        # optional: skip already aggregated
+        existing = (
+            sb.table("mi_places")
+            .select("place_key")
+            .eq("job_id", job_id)
+            .in_("place_key", place_keys)
+            .execute()
+        )
+        try:
+            existing_keys = {str(r.get("place_key")) for r in (existing.data or []) if r.get("place_key") is not None}
+        except Exception:
+            existing_keys = set()
+
+        for pk in place_keys:
+            if pk in existing_keys:
+                continue
+            try:
+                _collect_place_internal(
+                    sb=sb,
+                    job_id=job_id,
+                    place_key=pk,
+                    actor_id=yandex_actor_id,
+                    max_items=yandex_max_items,
+                )
+                processed += 1
+            except HTTPException as e:
+                failed.append({"place_key": pk, "status_code": e.status_code, "detail": e.detail})
+            except Exception as e:
+                failed.append({"place_key": pk, "error": f"{type(e).__name__}: {e}"})
+
     return {
         "ok": True,
         "job_id": job_id,
@@ -380,37 +420,29 @@ async def run_full_job(payload: Dict[str, Any] = Body(...)):
         "saved": saved,
         "place_keys": place_keys,
         "sample_items": items[:3],
-        "next": "STEP 1.3 will loop place_keys -> run Yandex -> best match -> mi_places",
+        "next": "STEP 1.3 is executed when mode=full (Yandex loop + mi_places upsert)",
+        "orchestration": {
+            "mode": mode,
+            "yandex_actor_id": yandex_actor_id if mode == "full" else None,
+            "yandex_maxItems": yandex_max_items if mode == "full" else None,
+            "places_total": len(place_keys),
+            "places_processed": processed if mode == "full" else 0,
+            "places_failed": len(failed) if mode == "full" else 0,
+            "failed": failed[:10],
+        },
     }
 
 
-@router.post("/collect_place")
-async def collect_place(payload: Dict[str, Any] = Body(...)):
-    """
-    One-button pipeline for ONE company (place_key) inside an existing job:
-    1) reads 2GIS item (apify_2gis) by (job_id, place_key)
-    2) runs Yandex actor (1 company = 1 run)
-    3) saves Yandex RAW under same (job_id, place_key)
-    4) selects BEST Yandex match by address similarity
-    5) upserts aggregated record into mi_places
 
-    Payload:
-    {
-      "job_id": "...uuid...",
-      "place_key": "70000001028864385",
-      "actor_id": "m_mamaev~yandex-maps-places-scraper",   # optional
-      "maxItems": 6                                       # optional
-    }
-    """
-    job_id = payload.get("job_id")
-    place_key = payload.get("place_key")
-    if not job_id or not place_key:
-        raise HTTPException(status_code=400, detail="job_id and place_key are required")
-
-    actor_id = (payload.get("actor_id") or "m_mamaev~yandex-maps-places-scraper").strip()
-    max_items = int(payload.get("maxItems") or 6)
-
-    sb = get_supabase()
+def _collect_place_internal(
+    *,
+    sb,
+    job_id: str,
+    place_key: str,
+    actor_id: str = "m_mamaev~yandex-maps-places-scraper",
+    max_items: int = 6,
+) -> Dict[str, Any]:
+    """Internal helper used by collect_place and run_full_job (STEP 1.3)."""
 
     # 1) Fetch 2GIS item
     resp = (
@@ -437,7 +469,7 @@ async def collect_place(payload: Dict[str, Any] = Body(...)):
     actor_input = {
         "enableGlobalDataset": False,
         "language": "RU",
-        "maxItems": max_items,
+        "maxItems": int(max_items or 6),
         "query": yandex_query,
     }
     run_id = f"sync_{int(time.time())}"
@@ -497,7 +529,6 @@ async def collect_place(payload: Dict[str, Any] = Body(...)):
         return s
 
     def _house_token(s: str) -> str:
-        # tries to extract "8д", "59г", "6 10" etc.
         s = _norm_addr(s)
         m = re.search(r"\b(\d+[a-zа-яё]?)\b", s)
         return m.group(1) if m else ""
@@ -511,7 +542,6 @@ async def collect_place(payload: Dict[str, Any] = Body(...)):
         score = 0
         if h2 and hy and h2 == hy:
             score += 5
-        # token overlap
         t2 = set(n2.split())
         ty = set(ny.split())
         score += len(t2 & ty)
@@ -539,7 +569,6 @@ async def collect_place(payload: Dict[str, Any] = Body(...)):
         if isinstance(urls, list):
             all_urls.extend([u for u in urls if isinstance(u, str) and u.strip()])
 
-        # dedup preserve order
         seen = set()
         dedup_urls = []
         for u in all_urls:
@@ -561,7 +590,6 @@ async def collect_place(payload: Dict[str, Any] = Body(...)):
             raise HTTPException(status_code=500, detail={"error": "mi_places_upsert_failed", "message": str(e)})
 
     return {
-        "ok": True,
         "job_id": job_id,
         "place_key": str(place_key),
         "yandex_query": yandex_query,
@@ -574,4 +602,47 @@ async def collect_place(payload: Dict[str, Any] = Body(...)):
             "addr_yandex": (best_item or {}).get("address"),
             "website": (best_item or {}).get("website"),
         },
+    }
+
+
+
+@router.post("/collect_place")
+async def collect_place(payload: Dict[str, Any] = Body(...)):
+    """
+    One-button pipeline for ONE company (place_key) inside an existing job:
+    1) reads 2GIS item (apify_2gis) by (job_id, place_key)
+    2) runs Yandex actor (1 company = 1 run)
+    3) saves Yandex RAW under same (job_id, place_key)
+    4) selects BEST Yandex match by address similarity
+    5) upserts aggregated record into mi_places
+
+    Payload:
+    {
+      "job_id": "...uuid...",
+      "place_key": "70000001028864385",
+      "actor_id": "m_mamaev~yandex-maps-places-scraper",   # optional
+      "maxItems": 6                                       # optional
+    }
+    """
+    job_id = payload.get("job_id")
+    place_key = payload.get("place_key")
+    if not job_id or not place_key:
+        raise HTTPException(status_code=400, detail="job_id and place_key are required")
+
+    actor_id = (payload.get("actor_id") or "m_mamaev~yandex-maps-places-scraper").strip()
+    max_items = int(payload.get("maxItems") or 6)
+
+    sb = get_supabase()
+
+    result = _collect_place_internal(
+        sb=sb,
+        job_id=str(job_id),
+        place_key=str(place_key),
+        actor_id=actor_id,
+        max_items=max_items,
+    )
+
+    return {
+        "ok": True,
+        **result,
     }
