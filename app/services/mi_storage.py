@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from supabase import Client, create_client
 
@@ -35,6 +35,7 @@ def get_supabase() -> Client:
 
 def insert_raw_items(
     *,
+    job_id: Optional[str] = None,
     source: str,
     city: str,
     queries: List[str],
@@ -66,7 +67,9 @@ def insert_raw_items(
         key = (source, str(item_id))
         # Keep last occurrence
         dedup[key] = {
+            "job_id": job_id,
             "source": source,
+            "item_id": str(item_id),
             "city": city,
             "query": it.get("searchString"),
             "queries": queries,
@@ -87,3 +90,29 @@ def insert_raw_items(
     affected = len(getattr(res, "data", []) or []) if res is not None else 0
 
     return {"ok": True, "attempted": attempted, "deduped": deduped, "affected": affected}
+
+
+def create_job(
+    *,
+    tg_user_id: int,
+    city: str,
+    query: Optional[str] = None,
+    queries: Optional[List[str]] = None,
+) -> str:
+    """Create a new market-intel run (job) and return its UUID."""
+    sb = get_supabase()
+    payload: Dict[str, Any] = {
+        "tg_user_id": int(tg_user_id),
+        "city": (city or "unknown").strip().lower(),
+        "status": "running",
+    }
+    if query is not None:
+        payload["query"] = str(query)
+    if queries is not None:
+        payload["queries"] = queries
+
+    res = sb.table("mi_jobs").insert(payload).execute()
+    data = getattr(res, "data", None) or []
+    if not data or not isinstance(data, list) or not data[0].get("id"):
+        raise RuntimeError("Failed to create mi_jobs row")
+    return str(data[0]["id"])
