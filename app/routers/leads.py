@@ -263,3 +263,196 @@ async def run_apify_yandex_for_place(payload: Dict[str, Any] = Body(...)):
         "saved": saved,
         "sample_items": y_items[:3],
     }
+
+
+@router.post("/collect_place")
+async def collect_place(payload: Dict[str, Any] = Body(...)):
+    """
+    One-button pipeline for ONE company (place_key) inside an existing job:
+    1) reads 2GIS item (apify_2gis) by (job_id, place_key)
+    2) runs Yandex actor (1 company = 1 run)
+    3) saves Yandex RAW under same (job_id, place_key)
+    4) selects BEST Yandex match by address similarity
+    5) upserts aggregated record into mi_places
+
+    Payload:
+    {
+      "job_id": "...uuid...",
+      "place_key": "70000001028864385",
+      "actor_id": "m_mamaev~yandex-maps-places-scraper",   # optional
+      "maxItems": 6                                       # optional
+    }
+    """
+    job_id = payload.get("job_id")
+    place_key = payload.get("place_key")
+    if not job_id or not place_key:
+        raise HTTPException(status_code=400, detail="job_id and place_key are required")
+
+    actor_id = (payload.get("actor_id") or "m_mamaev~yandex-maps-places-scraper").strip()
+    max_items = int(payload.get("maxItems") or 6)
+
+    sb = get_supabase()
+
+    # 1) Fetch 2GIS item
+    resp = (
+        sb.table("mi_raw_items")
+        .select("item, city")
+        .eq("job_id", job_id)
+        .eq("place_key", str(place_key))
+        .eq("source", "apify_2gis")
+        .limit(1)
+        .execute()
+    )
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="2GIS item not found for job_id + place_key")
+
+    base_item = resp.data[0].get("item") or {}
+    city = (resp.data[0].get("city") or base_item.get("city") or "").strip() or "unknown"
+    title = (base_item.get("title") or base_item.get("name") or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="2GIS item has no title/name to form yandex query")
+
+    yandex_query = f"{title} {city}".strip()
+
+    # 2) Run Yandex actor
+    actor_input = {
+        "enableGlobalDataset": False,
+        "language": "RU",
+        "maxItems": max_items,
+        "query": yandex_query,
+    }
+    run_id = f"sync_{int(time.time())}"
+
+    try:
+        y_items = run_actor_sync_get_dataset_items(actor_id=actor_id, actor_input=actor_input)
+    except ApifyError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "apify_http_error",
+                "message": str(e),
+                "status_code": getattr(e, "status_code", None),
+                "response": getattr(e, "response_text", None),
+            },
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": "apify_unexpected_error", "message": str(e)})
+
+    # normalize / ensure id
+    def _y_id(it: Dict[str, Any]) -> str:
+        url = (it.get("url") or "").strip()
+        m = re.search(r"/org/(\d+)/", url)
+        if m:
+            return m.group(1)
+        return url or (it.get("title") or "unknown")
+
+    for it in y_items:
+        if not it.get("id"):
+            it["id"] = _y_id(it)
+
+    # 3) Save RAW yandex
+    saved_raw = {"ok": True, "inserted": 0}
+    try:
+        saved_raw = _insert_raw_items_compat(
+            job_id=job_id,
+            place_key=str(place_key),
+            source="apify_yandex",
+            city=city.lower(),
+            queries=[yandex_query],
+            actor_id=actor_id,
+            run_id=run_id,
+            items=y_items,
+        )
+    except Exception as e:
+        saved_raw = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    # 4) Pick BEST yandex by address similarity
+    addr_2gis = (base_item.get("address") or "").strip().lower()
+
+    def _norm_addr(s: str) -> str:
+        s = (s or "").lower()
+        s = re.sub(r"\b(г\.|город)\b", " ", s)
+        s = re.sub(r"\b(ул\.|улица|пр\.|проспект|пер\.|переулок|пл\.|площадь)\b", " ", s)
+        s = re.sub(r"[^0-9a-zа-яё]+", " ", s, flags=re.IGNORECASE)
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
+
+    def _house_token(s: str) -> str:
+        # tries to extract "8д", "59г", "6 10" etc.
+        s = _norm_addr(s)
+        m = re.search(r"\b(\d+[a-zа-яё]?)\b", s)
+        return m.group(1) if m else ""
+
+    n2 = _norm_addr(addr_2gis)
+    h2 = _house_token(addr_2gis)
+
+    def _score(y_addr: str) -> int:
+        ny = _norm_addr(y_addr)
+        hy = _house_token(y_addr)
+        score = 0
+        if h2 and hy and h2 == hy:
+            score += 5
+        # token overlap
+        t2 = set(n2.split())
+        ty = set(ny.split())
+        score += len(t2 & ty)
+        return score
+
+    best_item = None
+    best_score = -1
+    for it in y_items:
+        ya = (it.get("address") or "").strip()
+        sc = _score(ya)
+        if sc > best_score:
+            best_score = sc
+            best_item = it
+
+    if best_item is None and y_items:
+        best_item = y_items[0]
+
+    # 5) Upsert into mi_places (final card)
+    if best_item:
+        website = (best_item.get("website") or "").strip()
+        urls = best_item.get("urls") or []
+        all_urls = []
+        if website:
+            all_urls.append(website)
+        if isinstance(urls, list):
+            all_urls.extend([u for u in urls if isinstance(u, str) and u.strip()])
+
+        # dedup preserve order
+        seen = set()
+        dedup_urls = []
+        for u in all_urls:
+            if u not in seen:
+                seen.add(u)
+                dedup_urls.append(u)
+
+        up = {
+            "job_id": job_id,
+            "place_key": str(place_key),
+            "best_2gis": base_item,
+            "best_yandex": best_item,
+            "site_urls": dedup_urls,
+            "social_links": best_item.get("socialLinks") or [],
+        }
+        try:
+            sb.table("mi_places").upsert(up, on_conflict="job_id,place_key").execute()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail={"error": "mi_places_upsert_failed", "message": str(e)})
+
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "place_key": str(place_key),
+        "yandex_query": yandex_query,
+        "apify": {"actor_id": actor_id, "run_id": run_id, "items_count": len(y_items)},
+        "saved_raw": saved_raw,
+        "best_match": {
+            "score": best_score,
+            "yandex_place_id": (best_item or {}).get("placeId") or (best_item or {}).get("id"),
+            "addr_2gis": base_item.get("address"),
+            "addr_yandex": (best_item or {}).get("address"),
+            "website": (best_item or {}).get("website"),
+        },
+    }
