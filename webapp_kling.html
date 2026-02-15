@@ -393,6 +393,34 @@
           </div>
         </div>
 
+        
+<div class="row" style="margin-top:10px;">
+  <div style="flex:1; min-width: 180px;">
+    <label class="badge" style="display:inline-block;margin-bottom:8px;">Формат</label>
+    <select id="kling3_aspect">
+      <option value="16:9" selected>16:9</option>
+      <option value="9:16">9:16</option>
+    </select>
+  </div>
+</div>
+
+<div class="card" style="margin-top:12px; padding: 14px;">
+  <h4 style="margin:0 0 10px 0;">Режим Kling 3.0</h4>
+  <div class="seg" role="radiogroup" aria-label="Режим Kling 3.0">
+    <input id="k3_t2v" type="radio" name="kling3_gen_mode" value="t2v" checked>
+    <label for="k3_t2v">
+      <span class="name">Text → Video</span>
+      <span class="desc">Промпт → видео</span>
+    </label>
+
+    <input id="k3_i2v" type="radio" name="kling3_gen_mode" value="i2v">
+    <label for="k3_i2v">
+      <span class="name">Image → Video</span>
+      <span class="desc">Фото → видео</span>
+    </label>
+  </div>
+</div>
+
         <div class="hint">Эти настройки применяются только если выбран Kling PRO 3.0.</div>
       </div>
       <div class="card" id="klingFlowCard">
@@ -562,6 +590,17 @@
 
     function getKlingVersion(){ return qs('input[name="kling_version"]:checked')?.value || "1_6"; }
     function getKling3Resolution(){ return qs('input[name="kling3_resolution"]:checked')?.value || "720"; }
+
+function getKling3Aspect(){ 
+  const v = (qs('#kling3_aspect')?.value || "16:9");
+  return (v === "9:16") ? "9:16" : "16:9";
+}
+
+function getKling3GenMode(){
+  const el = qs('input[name="kling3_gen_mode"]:checked');
+  const v = (el?.value || "t2v");
+  return (v === "i2v") ? "i2v" : "t2v";
+}
 
     // Veo getters
     function getVeoModel(){ return qs('input[name="veo_model"]:checked')?.value || "fast"; } // fast|pro
@@ -739,7 +778,8 @@
               resolution,
               enable_audio,
               duration,
-              aspect_ratio: "16:9"
+              gen_mode: getKling3GenMode(),
+              aspect_ratio: getKling3Aspect()
             };
           }
         } else {
