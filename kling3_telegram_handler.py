@@ -1,5 +1,5 @@
 import time
-from typing import Any, Dict, Callable, Awaitable
+from typing import Any, Dict, Callable, Awaitable, Optional, List
 
 from kling3_pricing import calculate_kling3_price
 from kling3_runner import run_kling3_task_and_wait, Kling3RunnerError
@@ -7,34 +7,18 @@ from billing_db import ensure_user_row, get_balance, add_tokens
 
 
 def _friendly_kling3_error(err: Exception) -> str:
-    """Map provider/runner errors to user-friendly Russian messages."""
-    msg = (str(err) or "").strip()
-    low = msg.lower()
+    msg = (str(err) or "").strip().lower()
 
-    # Typical PiAPI/Kling failure strings
-    overload_markers = [
-        "task failed",
-        "failed",
-        "server busy",
-        "too many requests",
-        "rate limit",
-        "overloaded",
-        "timeout",
-        "timed out",
-        "temporarily unavailable",
-        "service unavailable",
-        "bad gateway",
-        "gateway timeout",
-        "upstream",
-    ]
-    if any(m in low for m in overload_markers):
-        return (
-            "⚠️ Сервер Kling 3.0 сейчас перегружен или временно недоступен.\n"
-            "Попробуйте ещё раз через пару минут."
-        )
-
-    # Default: show brief error without scary prefix
-    return "⚠️ Не получилось сгенерировать видео. Попробуйте ещё раз чуть позже."
+    # Common PiAPI/Kling runner patterns
+    if "timeout" in msg:
+        return "⚠️ Сервер Kling долго отвечает. Попробуй ещё раз через пару минут."
+    if "task failed" in msg or "failed" in msg:
+        return "⚠️ Сервер Kling сейчас перегружен или временно недоступен. Попробуй ещё раз через пару минут."
+    if "rate" in msg and "limit" in msg:
+        return "⚠️ Лимит запросов. Попробуй ещё раз через пару минут."
+    if "supabase upload failed" in msg:
+        return "⚠️ Не удалось загрузить кадр (хранилище). Попробуй ещё раз или пришли другое фото."
+    return f"⚠️ Не получилось выполнить генерацию. Попробуй ещё раз через пару минут.\n(детали: {str(err)})"
 
 
 async def handle_kling3_wait_prompt(
@@ -45,57 +29,78 @@ async def handle_kling3_wait_prompt(
     st: Dict[str, Any],
     deps: Dict[str, Any],
 ) -> bool:
-    """
-    Обработка режима kling3_wait_prompt.
-    Возвращает True, если сообщение обработано.
+    """Handle Kling PRO 3.0 prompt step.
+
+    Expects st['kling3_settings'] prepared by WebApp/main.py.
+    Supports:
+    - text->video
+    - image->video (start_image_bytes, optional end_image_bytes)
+    - multi_shots (list of {prompt,duration})
     """
 
     if st.get("mode") != "kling3_wait_prompt":
         return False
 
-    tg_send_message: Callable[..., Awaitable[Any]] = deps["tg_send_message"]
+    # ignore navigation/menu text while waiting prompt
+    if deps.get("_is_nav_or_menu_text") and deps["_is_nav_or_menu_text"](incoming_text):
+        return True
+
+    text = (incoming_text or "").strip()
+    if not text:
+        return True
+
+    tg_send_message: Callable[[int, str], Awaitable[Any]] = deps["tg_send_message"]
     _main_menu_for = deps["_main_menu_for"]
-    _is_nav_or_menu_text = deps["_is_nav_or_menu_text"]
     _set_mode = deps["_set_mode"]
     _now = deps["_now"]
     sb_clear_user_state = deps["sb_clear_user_state"]
 
-    text = (incoming_text or "").strip()
-
-    if not text:
-        await tg_send_message(
-            chat_id,
-            "Пришли текст (промпт) для Kling PRO 3.0.",
-            reply_markup=_main_menu_for(user_id),
-        )
-        return True
-
-    # Если нажали кнопку меню — выходим из режима
-    if _is_nav_or_menu_text(text):
-        _set_mode(chat_id, user_id, "chat")
-        st.pop("kling3_settings", None)
-        st["ts"] = _now()
-        sb_clear_user_state(user_id)
-        await tg_send_message(
-            chat_id,
-            "Главное меню.",
-            reply_markup=_main_menu_for(user_id),
-        )
-        return True
-
     settings = st.get("kling3_settings") or {}
+
     resolution = str(settings.get("resolution") or "720")
     enable_audio = bool(settings.get("enable_audio"))
     duration = int(settings.get("duration") or 5)
     aspect_ratio = str(settings.get("aspect_ratio") or "16:9")
 
-    # 1) Расчёт токенов
+    flow = str(settings.get("flow") or settings.get("mode") or "t2v").lower().strip()
+    prefer_multi_shots = bool(settings.get("prefer_multi_shots"))
+
+    # image bytes (optional)
+    start_image_bytes: Optional[bytes] = settings.get("start_image_bytes")
+    end_image_bytes: Optional[bytes] = settings.get("end_image_bytes")
+
+    # multi-shots
+    multi_shots = settings.get("multi_shots") or None
+    if isinstance(multi_shots, list):
+        ms_clean: List[Dict[str, Any]] = []
+        for it in multi_shots:
+            if not isinstance(it, dict):
+                continue
+            p = (it.get("prompt") or "").strip()
+            if not p:
+                continue
+            try:
+                d = int(it.get("duration") or 3)
+            except Exception:
+                d = 3
+            ms_clean.append({"prompt": p, "duration": d})
+        multi_shots = ms_clean
+    else:
+        multi_shots = None
+
+    # 1) Billing duration:
+    # - for multi-shots: sum durations
+    # - else: regular duration
+    bill_seconds = duration
+    if multi_shots:
+        try:
+            bill_seconds = int(sum(int(x.get("duration") or 0) for x in multi_shots))
+        except Exception:
+            bill_seconds = duration
+
+    # 2) token calc
     try:
-        tokens_required = calculate_kling3_price(
-            resolution,
-            enable_audio,
-            duration,
-        )
+        tokens_required = calculate_kling3_price(resolution, enable_audio, bill_seconds)
     except Exception as e:
         await tg_send_message(
             chat_id,
@@ -108,10 +113,9 @@ async def handle_kling3_wait_prompt(
         sb_clear_user_state(user_id)
         return True
 
-    # 2) Проверка баланса
+    # 3) balance check
     ensure_user_row(user_id)
     bal = get_balance(user_id) or 0
-
     if bal < tokens_required:
         await tg_send_message(
             chat_id,
@@ -120,19 +124,23 @@ async def handle_kling3_wait_prompt(
         )
         return True
 
-    # 3) Списание
+    # 4) charge
     ref_id = f"kling3_{user_id}_{int(time.time() * 1000)}"
-
     add_tokens(
         user_id,
         -tokens_required,
         reason="kling3_create",
         ref_id=ref_id,
         meta={
+            "bill_seconds": bill_seconds,
             "duration": duration,
             "resolution": resolution,
             "enable_audio": enable_audio,
             "aspect_ratio": aspect_ratio,
+            "flow": flow,
+            "multi_shots": bool(multi_shots),
+            "has_start_image": bool(start_image_bytes),
+            "has_end_image": bool(end_image_bytes),
         },
     )
 
@@ -145,6 +153,10 @@ async def handle_kling3_wait_prompt(
             resolution=resolution,
             enable_audio=enable_audio,
             aspect_ratio=aspect_ratio,
+            prefer_multi_shots=prefer_multi_shots,
+            multi_shots=multi_shots,
+            start_image_bytes=start_image_bytes,
+            end_image_bytes=end_image_bytes,
             poll_interval_sec=deps.get("poll_interval_sec", 2.0),
             timeout_sec=deps.get("timeout_sec", 300),
         )
@@ -163,7 +175,7 @@ async def handle_kling3_wait_prompt(
             )
 
     except (Kling3RunnerError, Exception) as e:
-        # Refund при ошибке
+        # Refund on error
         try:
             add_tokens(
                 user_id,
@@ -181,10 +193,9 @@ async def handle_kling3_wait_prompt(
             reply_markup=_main_menu_for(user_id),
         )
 
-    # 4) Очистка состояния
+    # 5) cleanup
     _set_mode(chat_id, user_id, "chat")
     st.pop("kling3_settings", None)
     st["ts"] = _now()
     sb_clear_user_state(user_id)
-
     return True
