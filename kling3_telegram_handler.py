@@ -162,7 +162,7 @@ async def handle_kling3_wait_prompt(
             start_image_bytes=start_image_bytes,
             end_image_bytes=end_image_bytes,
             poll_interval_sec=deps.get("poll_interval_sec", 2.0),
-            timeout_sec=deps.get("timeout_sec", 300),
+            timeout_sec=deps.get("timeout_sec", 1200),
         )
 
         if not video_url:
