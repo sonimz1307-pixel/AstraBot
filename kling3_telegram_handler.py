@@ -6,6 +6,37 @@ from kling3_runner import run_kling3_task_and_wait, Kling3RunnerError
 from billing_db import ensure_user_row, get_balance, add_tokens
 
 
+def _friendly_kling3_error(err: Exception) -> str:
+    """Map provider/runner errors to user-friendly Russian messages."""
+    msg = (str(err) or "").strip()
+    low = msg.lower()
+
+    # Typical PiAPI/Kling failure strings
+    overload_markers = [
+        "task failed",
+        "failed",
+        "server busy",
+        "too many requests",
+        "rate limit",
+        "overloaded",
+        "timeout",
+        "timed out",
+        "temporarily unavailable",
+        "service unavailable",
+        "bad gateway",
+        "gateway timeout",
+        "upstream",
+    ]
+    if any(m in low for m in overload_markers):
+        return (
+            "⚠️ Сервер Kling 3.0 сейчас перегружен или временно недоступен.\n"
+            "Попробуйте ещё раз через пару минут."
+        )
+
+    # Default: show brief error without scary prefix
+    return "⚠️ Не получилось сгенерировать видео. Попробуйте ещё раз чуть позже."
+
+
 async def handle_kling3_wait_prompt(
     *,
     chat_id: int,
@@ -146,7 +177,7 @@ async def handle_kling3_wait_prompt(
 
         await tg_send_message(
             chat_id,
-            f"❌ Ошибка Kling PRO 3.0: {e}",
+            _friendly_kling3_error(e),
             reply_markup=_main_menu_for(user_id),
         )
 
