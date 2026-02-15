@@ -413,7 +413,7 @@
         <div class="hint">Для Motion Control длительность задаётся референс-видео (3–30 сек).</div>
       </div>
 
-      <div class="card">
+      <div class="card" id="klingQualityCard">
         <h3>Качество</h3>
         <div class="seg" role="radiogroup" aria-label="Качество">
           <input id="mode_std" type="radio" name="mode" value="std" checked>
@@ -582,9 +582,9 @@
 
       // Hide 1.6-specific controls when 3.0 selected (to avoid user confusion)
       const flowCard = qs('#klingFlowCard');
-      const modeCard = qs('#klingModeCard');
+      const qualityCard = qs('#klingQualityCard');
       if (flowCard) flowCard.style.display = (version === '1_6') ? 'block' : 'none';
-      if (modeCard) modeCard.style.display = (version === '1_6') ? 'block' : 'none';
+      if (qualityCard) qualityCard.style.display = (version === '1_6') ? 'block' : 'none';
     }
 
     function updateTokenRateHint(){
