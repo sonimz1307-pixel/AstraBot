@@ -119,6 +119,16 @@ def add_tokens(
 
     # пишем ledger
     ledger_id = str(uuid4())
+    # normalize ref_id for DB (column is UUID). If caller passes a non-UUID tag, keep it in meta.
+    if ref_id:
+        try:
+            _ = uuid.UUID(str(ref_id))
+            ref_id = str(ref_id)
+        except Exception:
+            meta = dict(meta or {})
+            meta.setdefault('ref_tag', str(ref_id))
+            ref_id = str(uuid4())
+
     supabase.table("bot_balance_ledger").insert(
         {
             "id": ledger_id,
