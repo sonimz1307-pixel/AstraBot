@@ -4295,8 +4295,26 @@ async def webhook(secret: str, request: Request):
         )
         return {"ok": True}
 
+    handled = await handle_kling3_wait_prompt(
+        chat_id=chat_id,
+        user_id=user_id,
+        incoming_text=incoming_text,
+        st=st,
+        deps={
+            "tg_send_message": tg_send_message,
+            "_main_menu_for": _main_menu_for,
+            "_is_nav_or_menu_text": _is_nav_or_menu_text,
+            "_set_mode": _set_mode,
+            "_now": _now,
+            "sb_clear_user_state": sb_clear_user_state,
+            "poll_interval_sec": 2.0,
+            "timeout_sec": 300,
+        },
+    )
+    if handled:
+        return {"ok": True}
 
-        # ---- VEO Text→Video: ждём промпт ----
+    # ---- VEO Text→Video: ждём промпт ----
     if st.get("mode") == "veo_t2v" and incoming_text:
         # Если пользователь нажал кнопку меню/навигации — НЕ считаем это промптом
         if _is_nav_or_menu_text(incoming_text):
