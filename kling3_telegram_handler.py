@@ -62,7 +62,11 @@ async def handle_kling3_wait_prompt(
     duration = int(settings.get("duration") or 5)
     aspect_ratio = str(settings.get("aspect_ratio") or "16:9")
 
-    flow = str(settings.get("flow") or settings.get("mode") or "t2v").lower().strip()
+    gen_mode = str(settings.get("gen_mode") or settings.get("flow") or settings.get("mode") or "t2v").lower().strip()
+    if gen_mode not in ("t2v", "i2v", "multishot"):
+        gen_mode = "t2v"
+
+    flow = gen_mode  # backward compat
     prefer_multi_shots = bool(settings.get("prefer_multi_shots"))
 
     # image bytes (optional)
