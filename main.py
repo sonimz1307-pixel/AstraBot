@@ -3896,6 +3896,35 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(chat_id, f"❌ Ошибка PiAPI (music): {e}\n\nГенерация остановлена. Нажмите «Музыка будущего», чтобы попробовать снова.")
                 _clear_music_ctx()
             return {"ok": True}
+            
+        # ----- Kling PRO 3.0 -----
+        if str(payload.get("type") or "").lower().strip() == "kling3_settings":
+
+            resolution = str(payload.get("resolution") or "720")
+            enable_audio = bool(payload.get("enable_audio"))
+            duration = int(payload.get("duration") or 5)
+            aspect_ratio = str(payload.get("aspect_ratio") or "16:9")
+
+            st["kling3_settings"] = {
+                "resolution": resolution,
+                "enable_audio": enable_audio,
+                "duration": duration,
+                "aspect_ratio": aspect_ratio,
+            }
+            st["ts"] = _now()
+
+            _set_mode(chat_id, user_id, "kling3_wait_prompt")
+
+            await tg_send_message(
+                chat_id,
+                f"✅ Kling PRO 3.0 сохранён\n"
+                f"{resolution}p • {duration} сек • "
+                f"{'Audio ON' if enable_audio else 'Audio OFF'}\n\n"
+                "Теперь пришли текст (промпт) для генерации видео.",
+                reply_markup=_help_menu_for(user_id),
+            )
+
+            return {"ok": True}
 
         # из WebApp может прилетать примерно так: {"flow":"motion","mode":"pro"}
         flow = (payload.get("flow") or payload.get("gen_type") or payload.get("genType") or "").lower().strip()
