@@ -726,7 +726,7 @@ function renderKling3Shots(){
   });
 
   // handlers
-  qa('.ms_prompt').forEach((ta) => {
+  qsa('.ms_prompt').forEach((ta) => {
     ta.addEventListener('input', (e) => {
       const el = e.target;
       const idx = parseInt(el.closest('.shot')?.dataset?.idx || "0", 10);
@@ -735,7 +735,7 @@ function renderKling3Shots(){
     });
   });
 
-  qa('.ms_dur').forEach((sel) => {
+  qsa('.ms_dur').forEach((sel) => {
     sel.addEventListener('change', (e) => {
       const el = e.target;
       const idx = parseInt(el.closest('.shot')?.dataset?.idx || "0", 10);
@@ -744,7 +744,7 @@ function renderKling3Shots(){
     });
   });
 
-  qa('.ms_del').forEach((btn) => {
+  qsa('.ms_del').forEach((btn) => {
     btn.addEventListener('click', (e) => {
       const el = e.target;
       const idx = parseInt(el.closest('.shot')?.dataset?.idx || "0", 10);
@@ -815,7 +815,7 @@ function initKling3MultiShotUI(){
   }
 
   // mode switch
-  qa('input[name="kling3_gen_mode"]').forEach((el) => {
+  qsa('input[name="kling3_gen_mode"]').forEach((el) => {
     el.addEventListener('change', () => {
       updateKling3ModeUI();
       // ensure list rendered when switching to multishot
