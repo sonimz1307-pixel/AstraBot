@@ -28,6 +28,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 from app.routers.leads import router as leads_router
 from app.routers.kling3 import router as kling3_router
 app.include_router(leads_router, prefix="/api/leads", tags=["leads"])
+app.include_router(kling3_router, prefix="/api/kling3", tags=["kling3"])
 
 APP_VERSION = "v7-suno-callback-dedup-fix"
 try:
