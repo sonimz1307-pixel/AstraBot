@@ -330,6 +330,72 @@
     <!-- ===================== KLING BLOCK ===================== -->
     <div id="klingBlock">
       <div class="card">
+        <h3>Kling — версия</h3>
+        <div class="seg" role="radiogroup" aria-label="Версия Kling">
+          <input id="kling_v16" type="radio" name="kling_version" value="1_6" checked>
+          <label for="kling_v16">
+            <span class="name">Standard</span>
+            <span class="desc">Kling 1.6 (текущий)</span>
+          </label>
+
+          <input id="kling_v30" type="radio" name="kling_version" value="3_0">
+          <label for="kling_v30">
+            <span class="name">PRO 3.0</span>
+            <span class="desc">720/1080 + audio</span>
+          </label>
+        </div>
+        <div class="hint">PRO 3.0 — PiAPI. Standard — как было (ничего не ломаем).</div>
+      </div>
+
+      <div class="card" id="kling3Options" style="display:none;">
+        <h3>Kling PRO 3.0 — настройки</h3>
+
+        <div class="seg" role="radiogroup" aria-label="Разрешение Kling 3.0">
+          <input id="k3_720" type="radio" name="kling3_resolution" value="720" checked>
+          <label for="k3_720">
+            <span class="name">720p</span>
+            <span class="desc">2 токена / сек</span>
+          </label>
+
+          <input id="k3_1080" type="radio" name="kling3_resolution" value="1080">
+          <label for="k3_1080">
+            <span class="name">1080p</span>
+            <span class="desc">2 токена / сек</span>
+          </label>
+        </div>
+
+        <div class="toggle">
+          <div class="left">
+            <div class="tname">Audio</div>
+            <div class="tdesc">Включить генерацию звука (1080+audio = 3 токена/сек)</div>
+          </div>
+          <input id="kling3_audio" type="checkbox">
+        </div>
+
+        <div class="row" style="margin-top:10px;">
+          <div style="flex:1; min-width: 180px;">
+            <label class="badge" style="display:inline-block;margin-bottom:8px;">Длительность (3–15 сек)</label>
+            <select id="kling3_duration">
+              <option value="3">3</option>
+              <option value="4">4</option>
+              <option value="5" selected>5</option>
+              <option value="6">6</option>
+              <option value="7">7</option>
+              <option value="8">8</option>
+              <option value="9">9</option>
+              <option value="10">10</option>
+              <option value="11">11</option>
+              <option value="12">12</option>
+              <option value="13">13</option>
+              <option value="14">14</option>
+              <option value="15">15</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="hint">Эти настройки применяются только если выбран Kling PRO 3.0.</div>
+      </div>
+      <div class="card" id="klingFlowCard">
         <h3>Тип генерации</h3>
         <div class="seg" role="radiogroup" aria-label="Тип генерации">
           <input id="flow_motion" type="radio" name="flow" value="motion" checked>
@@ -401,7 +467,7 @@
         </div>
       </div>
 
-      <div class="card">
+      <div class="card" id="klingModeCard">
         <h3>Режим</h3>
         <div class="seg" role="radiogroup" aria-label="Режим Veo">
           <input id="veo_flow_text" type="radio" name="veo_flow" value="text" checked>
@@ -494,21 +560,44 @@
     function getFlow(){ return qs('input[name="flow"]:checked')?.value || "motion"; }
     function getMode(){ return qs('input[name="mode"]:checked')?.value || "std"; }
 
+    function getKlingVersion(){ return qs('input[name="kling_version"]:checked')?.value || "1_6"; }
+    function getKling3Resolution(){ return qs('input[name="kling3_resolution"]:checked')?.value || "720"; }
+
     // Veo getters
     function getVeoModel(){ return qs('input[name="veo_model"]:checked')?.value || "fast"; } // fast|pro
     function getVeoFlow(){ return qs('input[name="veo_flow"]:checked')?.value || "text"; }   // text|image
 
     function updateKlingUI(){
       const flow = getFlow();
+      const version = getKlingVersion();
+
       const durCard = qs('#durationCard');
-      if (durCard) durCard.style.display = (flow === 'i2v') ? 'block' : 'none';
+      const kling3Options = qs('#kling3Options');
+
+      // Existing Kling 1.6 UI
+      if (durCard) durCard.style.display = (version === '1_6' && flow === 'i2v') ? 'block' : 'none';
+
+      // Kling 3.0 options card
+      if (kling3Options) kling3Options.style.display = (version === '3_0') ? 'block' : 'none';
+
+      // Hide 1.6-specific controls when 3.0 selected (to avoid user confusion)
+      const flowCard = qs('#klingFlowCard');
+      const modeCard = qs('#klingModeCard');
+      if (flowCard) flowCard.style.display = (version === '1_6') ? 'block' : 'none';
+      if (modeCard) modeCard.style.display = (version === '1_6') ? 'block' : 'none';
     }
 
     function updateTokenRateHint(){
-      const mode = getMode();
+      const version = getKlingVersion();
       const el = qs('#tokenRateHint');
       if (!el) return;
 
+      if (version === '3_0'){
+        el.innerHTML = 'Kling PRO 3.0: <b>720/1080 = 2 токена/сек</b>, <b>1080+audio = 3 токена/сек</b>. Длительность 3–15 сек.';
+        return;
+      }
+
+      const mode = getMode();
       if (mode === 'pro'){
         el.innerHTML = 'Standard — 1 сек = 1 токен (≈9–10 ₽)<br>Pro — <b>1 сек = 2 токена (≈18–20 ₽)</b>';
       } else {
@@ -574,6 +663,7 @@
     qsa('input[name="provider"]').forEach(el => el.addEventListener('change', updateProviderUI));
     qsa('input[name="flow"]').forEach(el => el.addEventListener('change', updateKlingUI));
     qsa('input[name="mode"]').forEach(el => el.addEventListener('change', updateTokenRateHint));
+    qsa('input[name="kling_version"]').forEach(el => el.addEventListener('change', () => { updateKlingUI(); updateTokenRateHint(); }));
     qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () => {
       updateVeoPriceHint();
       setVeoAdvancedEnabled(getVeoModel() === 'pro');
@@ -581,6 +671,7 @@
 
     // Init
     updateProviderUI();
+    updateKlingUI();
     updateTokenRateHint();
     updateVeoPriceHint();
     setVeoAdvancedEnabled(getVeoModel() === 'pro');
@@ -622,14 +713,34 @@
         let payload = null;
 
         if (provider === 'kling'){
-          const flow = getFlow();
-          const mode = getMode();
+          const kling_version = getKlingVersion();
 
-          payload = { type: "kling_settings", provider: "kling", flow, mode };
+          // Keep legacy payload for Kling 1.6 (so existing bot logic keeps working)
+          if (kling_version === '1_6'){
+            const flow = getFlow();
+            const mode = getMode();
 
-          if (flow === 'i2v'){
-            const durEl = qs('#duration');
-            payload.duration = durEl ? parseInt(durEl.value, 10) : 10;
+            payload = { type: "kling_settings", provider: "kling", kling_version, flow, mode };
+
+            if (flow === 'i2v'){
+              const durEl = qs('#duration');
+              payload.duration = durEl ? parseInt(durEl.value, 10) : 10;
+            }
+          } else {
+            // Kling PRO 3.0 settings (PiAPI)
+            const resolution = getKling3Resolution(); // "720" | "1080"
+            const enable_audio = !!qs('#kling3_audio')?.checked;
+            const duration = parseInt((qs('#kling3_duration')?.value || "5"), 10);
+
+            payload = {
+              type: "kling3_settings",
+              provider: "kling",
+              kling_version,
+              resolution,
+              enable_audio,
+              duration,
+              aspect_ratio: "16:9"
+            };
           }
         } else {
           const veo_model = getVeoModel(); // fast|pro
