@@ -109,35 +109,45 @@ def _normalize_btn_text(t: str) -> str:
     t = (t or "").strip()
     # remove leading emojis/checkmarks/spaces
     t = t.replace("✅", "").replace("☑️", "").replace("✔️", "").strip()
+
+    # strip common leading menu emojis so exact-match works
+    for em in ("🎬", "🎵", "💰", "📊", "⬅", "🔄", "➕", "🍌"):
+        if t.startswith(em):
+            t = t[len(em):].strip()
+
     return t
 
 
 def _is_nav_or_menu_text(t: str) -> bool:
     """
-    True if the incoming text looks like a navigation/menu command (not a prompt).
-    We use it to prevent accidental launches when the user taps buttons during VEO flow.
+    True only if the incoming text EXACTLY matches a navigation/menu command (not a free-form prompt).
+
+    IMPORTANT:
+    - Do NOT use substring matching (it breaks prompts like "сгенерируй видео ...").
+    - We normalize leading emojis (🎬🎵💰📊⬅🔄➕🍌) and checkmarks (✅☑️✔️).
     """
     s = _normalize_btn_text(t).lower()
     if not s:
         return False
-    # common nav / menu buttons
-    nav = {
+
+    nav_exact = {
+        # basic nav
         "наз", "назад", "в меню", "главное меню", "меню", "start", "/start",
         "помощь", "help", "/help",
         "сброс", "reset", "/reset", "отмена", "cancel", "/cancel",
-        "ии", "ии чат", "чат", "ai chat", "chatgpt", "gpt",
-        "профиль", "баланс", "тарифы", "оплата", "пополнить",
-        "фото", "картинка", "изображение", "видео", "видео будущего", "музыка",
+        # main menu buttons (texts)
+        "ии (чат)", "ии", "ии чат", "чат", "ai chat", "chatgpt", "gpt",
+        "фото будущего", "видео будущего", "музыка будущего",
+        "баланс", "профиль", "тарифы", "оплата", "пополнить",
+        "статистика",
+        # submenus you use in keyboards
+        "фото/афиши", "нейро фотосессии", "2 фото", "nano banana",
+        "афиша: ярко", "афиша: кино",
+        "текст→картинка",
+        "🔄 сбросить генерацию".lower(),
     }
-    if s in nav:
-        return True
-    # buttons with emojis often include these words
-    markers = [
-        "назад", "меню", "помощ", "ии", "чат", "баланс", "пополн", "тариф", "оплат",
-        "фото", "видео", "музы", "сгенер", "генерац",
-    ]
-    return any(m in s for m in markers)
 
+    return s in nav_exact
 
 
 # ---------------- SunoAPI callback (required by SunoAPI.org) ----------------
