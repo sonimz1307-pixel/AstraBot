@@ -1,5 +1,5 @@
 import asyncio
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 
 from kling3_flow import create_kling3_task, get_kling3_task, Kling3Error
 
@@ -9,85 +9,87 @@ class Kling3RunnerError(Exception):
 
 
 def _extract_task_id(resp: Dict[str, Any]) -> Optional[str]:
-    # PiAPI typically returns: { code:200, data:{ task_id: "...", status:"pending", ... } }
-    if not isinstance(resp, dict):
-        return None
-    data = resp.get("data")
+    data = resp.get("data") if isinstance(resp, dict) else None
     if isinstance(data, dict) and data.get("task_id"):
         return str(data.get("task_id"))
-    if resp.get("task_id"):
-        return str(resp.get("task_id"))
     return None
 
 
-def _extract_video_url(task_resp: Dict[str, Any]) -> Optional[str]:
-    if not isinstance(task_resp, dict):
+def _extract_video_url(task_json: Dict[str, Any]) -> Optional[str]:
+    data = task_json.get("data") if isinstance(task_json, dict) else None
+    if not isinstance(data, dict):
         return None
-    data = task_resp.get("data") if isinstance(task_resp.get("data"), dict) else task_resp
-    output = data.get("output") if isinstance(data.get("output"), dict) else {}
-    video = output.get("video")
-    if isinstance(video, str) and video.strip():
-        return video.strip()
+    output = data.get("output") or {}
+    if isinstance(output, dict):
+        v = (output.get("video") or "").strip()
+        return v or None
     return None
-
-
-def _extract_status(task_resp: Dict[str, Any]) -> str:
-    if not isinstance(task_resp, dict):
-        return ""
-    data = task_resp.get("data") if isinstance(task_resp.get("data"), dict) else task_resp
-    status = data.get("status") or task_resp.get("status") or ""
-    return str(status).lower().strip()
 
 
 async def run_kling3_task_and_wait(
     *,
-    prompt: str,
-    duration: int,
+    # Text-to-video fallback (ignored if multi_shots present)
+    prompt: str = "",
+    duration: int = 5,
     resolution: str,
     enable_audio: bool,
     aspect_ratio: str = "16:9",
+    prefer_multi_shots: bool = False,
+    multi_shots: Optional[List[Dict[str, Any]]] = None,
+    # Image->Video
+    start_image_bytes: Optional[bytes] = None,
+    end_image_bytes: Optional[bytes] = None,
+    # Polling
     poll_interval_sec: float = 2.0,
     timeout_sec: int = 300,
 ) -> Tuple[str, Dict[str, Any], Optional[str]]:
-    """Create Kling 3.0 task and wait until it finishes.
+    """Create Kling 3.0 task and wait until Completed/Failed."""
+    try:
+        created = await create_kling3_task(
+            prompt=prompt,
+            duration=int(duration),
+            resolution=str(resolution),
+            enable_audio=bool(enable_audio),
+            aspect_ratio=str(aspect_ratio),
+            prefer_multi_shots=bool(prefer_multi_shots),
+            multi_shots=multi_shots,
+            start_image_bytes=start_image_bytes,
+            end_image_bytes=end_image_bytes,
+        )
+    except Kling3Error as e:
+        raise Kling3RunnerError(f"Kling3 create failed: {e}")
 
-    Returns: (task_id, final_task_json, video_url_or_None)
-    Raises: Kling3RunnerError / Kling3Error
-    """
-
-    create_resp = await create_kling3_task(
-        prompt=prompt,
-        duration=duration,
-        resolution=resolution,
-        enable_audio=enable_audio,
-        aspect_ratio=aspect_ratio,
-    )
-
-    task_id = _extract_task_id(create_resp)
+    task_id = _extract_task_id(created)
     if not task_id:
-        raise Kling3RunnerError(f"PiAPI: task_id not found in response: {create_resp}")
+        raise Kling3RunnerError(f"Kling3 create did not return task_id: {created}")
 
-    deadline = asyncio.get_event_loop().time() + float(timeout_sec)
+    t0 = asyncio.get_event_loop().time()
+    last: Dict[str, Any] = {}
 
-    last = None
     while True:
-        if asyncio.get_event_loop().time() > deadline:
-            raise Kling3RunnerError(f"Timeout waiting Kling3 task {task_id}")
+        try:
+            last = await get_kling3_task(task_id)
+        except Kling3Error as e:
+            raise Kling3RunnerError(f"Kling3 get failed: {e}")
 
-        last = await get_kling3_task(task_id)
-        status = _extract_status(last)
+        data = last.get("data") if isinstance(last, dict) else None
+        status = (data.get("status") if isinstance(data, dict) else "") or ""
+        status_l = str(status).lower()
 
-        if status in ("succeed", "succeeded", "success", "completed", "done", "finished"):
-            video_url = _extract_video_url(last)
-            return task_id, last, video_url
+        if status_l in ("completed", "failed"):
+            break
 
-        if status in ("failed", "error", "canceled", "cancelled"):
-            # Try to pass provider error message if present
-            data = last.get("data") if isinstance(last.get("data"), dict) else last
-            err = data.get("error") or {}
-            msg = ""
-            if isinstance(err, dict):
-                msg = err.get("message") or err.get("raw_message") or ""
-            raise Kling3RunnerError(f"Kling3 failed: {msg or last}")
+        if (asyncio.get_event_loop().time() - t0) > float(timeout_sec):
+            raise Kling3RunnerError(f"Kling3 timeout after {timeout_sec}s (task_id={task_id}, status={status})")
 
         await asyncio.sleep(float(poll_interval_sec))
+
+    if str(status).lower() == "failed":
+        # keep the raw error if present
+        err = None
+        if isinstance(data, dict):
+            err = data.get("error") or {}
+        raise Kling3RunnerError(f"Kling3 failed: {status}. {err}")
+
+    video_url = _extract_video_url(last)
+    return (task_id, last, video_url)
