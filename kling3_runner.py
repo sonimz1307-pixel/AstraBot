@@ -1,6 +1,24 @@
 import asyncio
 from typing import Any, Dict, Optional, Tuple, List
 
+
+def _extract_error_message(task_resp: Dict[str, Any]) -> str:
+    """Try to extract provider error message from PiAPI task response."""
+    if not isinstance(task_resp, dict):
+        return ""
+    data = task_resp.get("data") if isinstance(task_resp.get("data"), dict) else task_resp
+    err = data.get("error") or {}
+    if isinstance(err, dict):
+        msg = (err.get("message") or err.get("raw_message") or "").strip()
+        if msg:
+            return msg
+    # sometimes 'detail' or 'logs' may exist
+    for k in ("detail", "logs", "message"):
+        v = data.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
 from kling3_flow import create_kling3_task, get_kling3_task, Kling3Error
 
 
@@ -76,15 +94,15 @@ async def run_kling3_task_and_wait(
         status = (data.get("status") if isinstance(data, dict) else "") or ""
         status_l = str(status).lower()
 
-        if status_l in ("completed", "failed"):
-            break
+        if status_l in ("completed", "succeed", "succeeded", "success", "done", "finished", "failed", "error", "canceled", "cancelled"):
+                break
 
         if (asyncio.get_event_loop().time() - t0) > float(timeout_sec):
             raise Kling3RunnerError(f"Kling3 timeout after {timeout_sec}s (task_id={task_id}, status={status})")
 
         await asyncio.sleep(float(poll_interval_sec))
 
-    if str(status).lower() == "failed":
+    if str(status).lower() in ("failed", "error", "canceled", "cancelled"):
         # keep the raw error if present
         err = None
         if isinstance(data, dict):
