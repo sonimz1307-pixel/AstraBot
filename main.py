@@ -20,6 +20,7 @@ from veo_billing import calc_veo_charge, format_veo_charge_line
 from billing_db import ensure_user_row, get_balance, add_tokens
 from nano_banana import run_nano_banana
 from yookassa_flow import create_yookassa_payment
+from kling3_pricing import calculate_kling3_price
 
 app = FastAPI()
 # --- static files (/static/...) ---
