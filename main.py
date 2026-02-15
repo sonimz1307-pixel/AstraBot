@@ -21,7 +21,7 @@ from billing_db import ensure_user_row, get_balance, add_tokens
 from nano_banana import run_nano_banana
 from yookassa_flow import create_yookassa_payment
 from kling3_pricing import calculate_kling3_price
-from kling3_runner import run_kling3_task_and_wait, Kling3RunnerError
+from kling3_telegram_handler import handle_kling3_wait_prompt
 
 app = FastAPI()
 # --- static files (/static/...) ---
