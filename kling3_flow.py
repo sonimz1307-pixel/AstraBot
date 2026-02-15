@@ -30,6 +30,28 @@ def _validate_inputs(duration: int, resolution: str):
         raise Kling3Error("resolution must be '720' or '1080'")
 
 
+def _validate_multi_shots(multi_shots: List[Dict[str, Any]]) -> int:
+    if not isinstance(multi_shots, list) or not multi_shots:
+        raise Kling3Error("multi_shots must be a non-empty list")
+    if len(multi_shots) > 6:
+        raise Kling3Error("Maximum 6 multi_shots allowed")
+
+    total = 0
+    for i, shot in enumerate(multi_shots, start=1):
+        if not isinstance(shot, dict):
+            raise Kling3Error(f"multi_shots[{i}] must be an object")
+        p = (shot.get("prompt") or "").strip()
+        if not p:
+            raise Kling3Error(f"multi_shots[{i}].prompt is required")
+        d = int(shot.get("duration") or 3)
+        if d < 1 or d > 14:
+            raise Kling3Error(f"multi_shots[{i}].duration must be 1..14")
+        total += d
+
+    if total > 15:
+        raise Kling3Error("Total duration of multi_shots should not exceed 15 seconds")
+    return total
+
 def _sb_upload_bytes_public(data: bytes, *, ext: str, content_type: str) -> str:
     """Upload bytes to Supabase Storage and return a public URL.
 
@@ -56,7 +78,7 @@ def _sb_upload_bytes_public(data: bytes, *, ext: str, content_type: str) -> str:
         sb.storage.from_(bucket).upload(
             path=fn,
             file=data,
-            file_options={"content-type": content_type, "upsert": True},
+            file_options={"content-type": content_type, "upsert": "true"},
         )
         public = sb.storage.from_(bucket).get_public_url(fn)
         if isinstance(public, str):
@@ -108,6 +130,7 @@ async def create_kling3_task(
     # Multi-shots
     ms = [x for x in (multi_shots or []) if isinstance(x, dict)]
     if ms:
+        _validate_multi_shots(ms)
         input_obj["multi_shots"] = ms
     else:
         # Text-to-video
