@@ -1,5 +1,5 @@
 import time
-from typing import Any, Dict, Callable, Optional, Awaitable, Tuple
+from typing import Any, Dict, Callable, Awaitable
 
 from kling3_pricing import calculate_kling3_price
 from kling3_runner import run_kling3_task_and_wait, Kling3RunnerError
@@ -14,43 +14,42 @@ async def handle_kling3_wait_prompt(
     st: Dict[str, Any],
     deps: Dict[str, Any],
 ) -> bool:
-    """Handle Telegram text when user is in mode 'kling3_wait_prompt'.
-
-    Returns True if handled (caller should stop further processing).
-    deps must provide:
-      - tg_send_message(chat_id, text, reply_markup=...)
-      - _main_menu_for(user_id)
-      - _is_nav_or_menu_text(text) -> bool
-      - _set_mode(chat_id, user_id, mode)
-      - _now() -> any
-      - sb_clear_user_state(user_id)
-    Optional:
-      - poll_interval_sec (float)
-      - timeout_sec (int)
     """
-    mode = st.get("mode")
-    if mode != "kling3_wait_prompt":
+    Обработка режима kling3_wait_prompt.
+    Возвращает True, если сообщение обработано.
+    """
+
+    if st.get("mode") != "kling3_wait_prompt":
         return False
 
     tg_send_message: Callable[..., Awaitable[Any]] = deps["tg_send_message"]
-    _main_menu_for: Callable[[int], Any] = deps["_main_menu_for"]
-    _is_nav_or_menu_text: Callable[[str], bool] = deps["_is_nav_or_menu_text"]
-    _set_mode: Callable[[int, int, str], Any] = deps["_set_mode"]
-    _now: Callable[[], Any] = deps["_now"]
-    sb_clear_user_state: Callable[[int], Any] = deps["sb_clear_user_state"]
+    _main_menu_for = deps["_main_menu_for"]
+    _is_nav_or_menu_text = deps["_is_nav_or_menu_text"]
+    _set_mode = deps["_set_mode"]
+    _now = deps["_now"]
+    sb_clear_user_state = deps["sb_clear_user_state"]
 
     text = (incoming_text or "").strip()
+
     if not text:
-        await tg_send_message(chat_id, "Пришли текст (промпт) для Kling PRO 3.0.", reply_markup=_main_menu_for(user_id))
+        await tg_send_message(
+            chat_id,
+            "Пришли текст (промпт) для Kling PRO 3.0.",
+            reply_markup=_main_menu_for(user_id),
+        )
         return True
 
-    # Menu/navigation messages should exit the flow cleanly
+    # Если нажали кнопку меню — выходим из режима
     if _is_nav_or_menu_text(text):
         _set_mode(chat_id, user_id, "chat")
         st.pop("kling3_settings", None)
         st["ts"] = _now()
         sb_clear_user_state(user_id)
-        await tg_send_message(chat_id, "Главное меню.", reply_markup=_main_menu_for(user_id))
+        await tg_send_message(
+            chat_id,
+            "Главное меню.",
+            reply_markup=_main_menu_for(user_id),
+        )
         return True
 
     settings = st.get("kling3_settings") or {}
@@ -59,30 +58,40 @@ async def handle_kling3_wait_prompt(
     duration = int(settings.get("duration") or 5)
     aspect_ratio = str(settings.get("aspect_ratio") or "16:9")
 
-    # 1) calculate tokens
+    # 1) Расчёт токенов
     try:
-        tokens_required = calculate_kling3_price(resolution, enable_audio, duration)
+        tokens_required = calculate_kling3_price(
+            resolution,
+            enable_audio,
+            duration,
+        )
     except Exception as e:
-        await tg_send_message(chat_id, f"❌ Ошибка настроек Kling 3.0: {e}", reply_markup=_main_menu_for(user_id))
+        await tg_send_message(
+            chat_id,
+            f"❌ Ошибка настроек Kling 3.0: {e}",
+            reply_markup=_main_menu_for(user_id),
+        )
         _set_mode(chat_id, user_id, "chat")
         st.pop("kling3_settings", None)
         st["ts"] = _now()
         sb_clear_user_state(user_id)
         return True
 
-    # 2) balance check
+    # 2) Проверка баланса
     ensure_user_row(user_id)
     bal = get_balance(user_id) or 0
+
     if bal < tokens_required:
         await tg_send_message(
             chat_id,
-            f"❌ Недостаточно токенов. Нужно: {tokens_required} • Баланс: {bal}",
+            f"❌ Недостаточно токенов.\nНужно: {tokens_required}\nБаланс: {bal}",
             reply_markup=_main_menu_for(user_id),
         )
         return True
 
-    # 3) charge
-    ref_id = f"kling3_{user_id}_{int(time.time()*1000)}"
+    # 3) Списание
+    ref_id = f"kling3_{user_id}_{int(time.time() * 1000)}"
+
     add_tokens(
         user_id,
         -tokens_required,
@@ -98,25 +107,21 @@ async def handle_kling3_wait_prompt(
 
     await tg_send_message(chat_id, "⏳ Генерирую Kling PRO 3.0…")
 
-    poll_interval_sec = float(deps.get("poll_interval_sec", 2.0))
-    timeout_sec = int(deps.get("timeout_sec", 300))
-
     try:
-        task_id, _final_task, video_url = await run_kling3_task_and_wait(
+        task_id, final_task, video_url = await run_kling3_task_and_wait(
             prompt=text,
             duration=duration,
             resolution=resolution,
             enable_audio=enable_audio,
             aspect_ratio=aspect_ratio,
-            poll_interval_sec=poll_interval_sec,
-            timeout_sec=timeout_sec,
+            poll_interval_sec=deps.get("poll_interval_sec", 2.0),
+            timeout_sec=deps.get("timeout_sec", 300),
         )
 
         if not video_url:
             await tg_send_message(
                 chat_id,
-                f"✅ Готово, но PiAPI не вернул ссылку на видео.
-Task: {task_id}",
+                f"✅ Готово, но PiAPI не вернул ссылку на видео.\nTask: {task_id}",
                 reply_markup=_main_menu_for(user_id),
             )
         else:
@@ -127,7 +132,7 @@ Task: {task_id}",
             )
 
     except (Kling3RunnerError, Exception) as e:
-        # refund on failure
+        # Refund при ошибке
         try:
             add_tokens(
                 user_id,
@@ -145,7 +150,7 @@ Task: {task_id}",
             reply_markup=_main_menu_for(user_id),
         )
 
-    # 4) clear state
+    # 4) Очистка состояния
     _set_mode(chat_id, user_id, "chat")
     st.pop("kling3_settings", None)
     st["ts"] = _now()
