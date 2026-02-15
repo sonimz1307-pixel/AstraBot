@@ -3904,13 +3904,40 @@ async def webhook(secret: str, request: Request):
             resolution = str(payload.get("resolution") or "720")
             enable_audio = bool(payload.get("enable_audio"))
             duration = int(payload.get("duration") or 5)
+
+            # Только 16:9 или 9:16 (как ты просил)
             aspect_ratio = str(payload.get("aspect_ratio") or "16:9")
+            aspect_ratio = "9:16" if aspect_ratio == "9:16" else "16:9"
+
+            # режим (принимаем разные ключи, чтобы не зависеть от WebApp)
+            gen_mode = (
+                str(payload.get("gen_mode") or payload.get("flow") or payload.get("kling3_gen_mode") or "t2v")
+                .lower()
+                .strip()
+            )
+            if gen_mode not in ("t2v", "i2v", "multishot"):
+                gen_mode = "t2v"
+
+            multi_shots = payload.get("multi_shots") or None
+            prefer_multi_shots = bool(payload.get("prefer_multi_shots"))
+
+            # 1-й/последний кадр: пока приходят фото в чат (см. Правка B)
+            # Здесь просто сохраняем текущие значения, если они уже есть в state
+            prev = st.get("kling3_settings") or {}
 
             st["kling3_settings"] = {
                 "resolution": resolution,
                 "enable_audio": enable_audio,
                 "duration": duration,
                 "aspect_ratio": aspect_ratio,
+
+                "gen_mode": gen_mode,
+                "multi_shots": multi_shots,
+                "prefer_multi_shots": prefer_multi_shots,
+
+                # кадры (байты) будут заполняться при приёме фото
+                "start_image_bytes": prev.get("start_image_bytes"),
+                "end_image_bytes": prev.get("end_image_bytes"),
             }
             st["ts"] = _now()
 
@@ -3918,10 +3945,16 @@ async def webhook(secret: str, request: Request):
 
             await tg_send_message(
                 chat_id,
-                f"✅ Kling PRO 3.0 сохранён\n"
-                f"{resolution}p • {duration} сек • "
-                f"{'Audio ON' if enable_audio else 'Audio OFF'}\n\n"
-                "Теперь пришли текст (промпт) для генерации видео.",
+                "✅ Kling PRO 3.0 настройки сохранены.\n"
+                f"Режим: {gen_mode}\n"
+                f"{resolution}p • {duration} сек • {'Audio ON' if enable_audio else 'Audio OFF'}\n"
+                f"Формат: {aspect_ratio}\n"
+                f"1-й кадр: {'да' if st['kling3_settings'].get('start_image_bytes') else 'нет'} • "
+                f"последний: {'да' if st['kling3_settings'].get('end_image_bytes') else 'нет'}\n\n"
+                "Дальше:\n"
+                "• Text→Video: пришли промпт\n"
+                "• Image→Video: пришли фото (1-й кадр), затем (опционально) ещё фото (последний кадр), затем промпт\n"
+                "• Multi-shot: пришли промпт multi-shot (или позже добавим UI), затем запуск",
                 reply_markup=_help_menu_for(user_id),
             )
 
@@ -4677,6 +4710,53 @@ async def webhook(secret: str, request: Request):
             )
             return {"ok": True}
 
+        # ---- KLING 3.0: приём 1-го/последнего кадра через фото ----
+        if st.get("mode") == "kling3_wait_prompt":
+            ks3 = st.get("kling3_settings") or {}
+            gen_mode = (ks3.get("gen_mode") or "t2v")
+
+            # Если режим не i2v/multishot — фото не нужно
+            if gen_mode not in ("i2v", "multishot"):
+                await tg_send_message(
+                    chat_id,
+                    "Для Kling 3.0 в режиме Text→Video фото не нужно.\n"
+                    "Открой WebApp и выбери Image→Video, либо пришли текстовый промпт.",
+                    reply_markup=_help_menu_for(user_id),
+                )
+                return {"ok": True}
+
+            # 1-й кадр
+            if not ks3.get("start_image_bytes"):
+                ks3["start_image_bytes"] = img_bytes
+                st["kling3_settings"] = ks3
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    "Стартовый кадр (1-й) получил ✅\n"
+                    "Если хочешь — пришли ещё одно фото как последний кадр.\n"
+                    "После этого пришли промпт.",
+                    reply_markup=_help_menu_for(user_id),
+                )
+                return {"ok": True}
+
+            # последний кадр
+            if not ks3.get("end_image_bytes"):
+                ks3["end_image_bytes"] = img_bytes
+                st["kling3_settings"] = ks3
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    "Последний кадр получил ✅\nТеперь пришли промпт.",
+                    reply_markup=_help_menu_for(user_id),
+                )
+                return {"ok": True}
+
+            await tg_send_message(
+                chat_id,
+                "1-й и последний кадры уже загружены ✅\nТеперь жду промпт (или /start чтобы выйти).",
+                reply_markup=_help_menu_for(user_id),
+            )
+            return {"ok": True}
 
 
         # ---- VEO Image → Video: шаги need_image / need_last_frame / need_refs ----
