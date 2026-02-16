@@ -4731,6 +4731,23 @@ async def webhook(secret: str, request: Request):
     # ---------------- Фото (photo) ----------------
     photos = message.get("photo") or []
     if photos:
+        # ENTER_PHOTO_TG (hard diag)
+        try:
+            await tg_send_message(chat_id, '📸 ENTER_PHOTO_HANDLER', reply_markup=_help_menu_for(user_id))
+        except Exception as e:
+            try:
+                ulog.warning('ENTER_PHOTO_TG_FAIL: %s', e)
+            except Exception:
+                pass
+        try:
+            sb_state = None
+            try:
+                sb_state, _ = sb_get_user_state(user_id)
+            except Exception:
+                sb_state = None
+            ulog.warning('PHOTO_MODE_DIAG: mode=%s sb_state=%s', st.get('mode'), sb_state)
+        except Exception:
+            pass
         largest = photos[-1]
         file_id = largest.get("file_id")
         if not file_id:
