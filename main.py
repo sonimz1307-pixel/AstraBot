@@ -3915,6 +3915,13 @@ async def webhook(secret: str, request: Request):
                 .lower()
                 .strip()
             )
+
+            # нормализация синонимов из WebApp
+            if gen_mode in ("image_to_video", "image2video", "image->video", "img2vid", "img2video"):
+                gen_mode = "i2v"
+            elif gen_mode in ("multi_shots", "multishots", "multi-shot", "multi_shot"):
+                gen_mode = "multishot"
+
             if gen_mode not in ("t2v", "i2v", "multishot"):
                 gen_mode = "t2v"
 
