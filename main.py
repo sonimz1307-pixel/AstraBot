@@ -7,6 +7,7 @@ import json
 import hashlib
 import hmac
 import logging
+import sqlite3
 from io import BytesIO
 from typing import Optional, Literal, Dict, Any, Tuple, List
 
@@ -858,6 +859,52 @@ def _yk_extract_confirmation_url(payment_json: Dict[str, Any]) -> str:
 
 
 # ---------------- In-memory state ----------------
+# ---------------- Kling 3.0 settings persistence (shared across workers) ----------------
+# ВАЖНО: твой STATE хранится в RAM. Если у uvicorn/gunicorn >1 worker, то:
+#   WebApp-сообщение может попасть в worker A (настройки сохранились там),
+#   а фото — в worker B (там st пустой) => "реакции ноль".
+# Поэтому для Kling 3.0 сохраняем настройки в маленькую SQLite-базу (общая для всех workers процесса/контейнера).
+K3_DB_PATH = os.getenv("K3_DB_PATH", "kling3_state.sqlite3")
+
+def _k3_db() -> sqlite3.Connection:
+    con = sqlite3.connect(K3_DB_PATH, check_same_thread=False)
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS kling3_settings ("
+        "user_id INTEGER PRIMARY KEY,"
+        "settings_json TEXT NOT NULL,"
+        "updated_at REAL NOT NULL"
+        ")"
+    )
+    return con
+
+def k3_save_settings(user_id: int, settings: Dict[str, Any]) -> None:
+    try:
+        con = _k3_db()
+        con.execute(
+            "INSERT INTO kling3_settings (user_id, settings_json, updated_at) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET settings_json=excluded.settings_json, updated_at=excluded.updated_at",
+            (int(user_id), json.dumps(settings, ensure_ascii=False), float(_now())),
+        )
+        con.commit()
+        con.close()
+    except Exception:
+        # не мешаем боту работать, просто не будет persistence
+        pass
+
+def k3_load_settings(user_id: int) -> Dict[str, Any]:
+    try:
+        con = _k3_db()
+        cur = con.execute("SELECT settings_json FROM kling3_settings WHERE user_id=?", (int(user_id),))
+        row = cur.fetchone()
+        con.close()
+        if not row or not row[0]:
+            return {}
+        j = json.loads(row[0])
+        return j if isinstance(j, dict) else {}
+    except Exception:
+        return {}
+
 STATE_TTL_SECONDS = int(os.getenv("STATE_TTL_SECONDS", "1800"))  # 30 минут
 STATE: Dict[Tuple[int, int], Dict[str, Any]] = {}
 
@@ -3962,6 +4009,8 @@ async def webhook(secret: str, request: Request):
                 "end_image_bytes": prev.get("end_image_bytes"),
             }
             st["ts"] = _now()
+            k3_save_settings(user_id, st.get("kling3_settings") or {})
+
 
             _set_mode(chat_id, user_id, "kling3_wait_prompt")
 
@@ -4350,7 +4399,13 @@ async def webhook(secret: str, request: Request):
         )
         return {"ok": True}
 
-    handled = await handle_kling3_wait_prompt(
+    # --- Kling3 persistence: если настройки были сохранены WebApp-ом, но этот апдейт в другом worker ---
+if (st.get("mode") == "kling3_wait_prompt") and not (st.get("kling3_settings") or {}):
+    loaded = k3_load_settings(user_id)
+    if loaded:
+        st["kling3_settings"] = loaded
+
+handled = await handle_kling3_wait_prompt(
         chat_id=chat_id,
         user_id=user_id,
         incoming_text=incoming_text,
@@ -4681,7 +4736,13 @@ async def webhook(secret: str, request: Request):
             return {"ok": True}
 
 
-        # ---- AUTO-ROUTE: если настройки Kling 3.0 уже сохранены, но mode почему-то не kling3_wait_prompt ----
+        # --- Kling3 persistence: если апдейт попал в другой worker, подтянем настройки из SQLite ---
+if not (st.get("kling3_settings") or {}):
+    loaded = k3_load_settings(user_id)
+    if loaded:
+        st["kling3_settings"] = loaded
+
+# ---- AUTO-ROUTE: если настройки Kling 3.0 уже сохранены, но mode почему-то не kling3_wait_prompt ----
         try:
             ks3 = st.get("kling3_settings") or {}
             gen_mode = (ks3.get("gen_mode") or "t2v")
@@ -4724,6 +4785,7 @@ async def webhook(secret: str, request: Request):
                 ks3["start_image_bytes"] = img_bytes
                 ks3["start_image_file_id"] = file_id
                 st["kling3_settings"] = ks3
+                k3_save_settings(user_id, ks3)
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
@@ -4739,6 +4801,7 @@ async def webhook(secret: str, request: Request):
                 ks3["end_image_bytes"] = img_bytes
                 ks3["end_image_file_id"] = file_id
                 st["kling3_settings"] = ks3
+                k3_save_settings(user_id, ks3)
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
@@ -4751,6 +4814,7 @@ async def webhook(secret: str, request: Request):
             ks3["end_image_bytes"] = img_bytes
             ks3["end_image_file_id"] = file_id
             st["kling3_settings"] = ks3
+                k3_save_settings(user_id, ks3)
             st["ts"] = _now()
             await tg_send_message(
                 chat_id,
@@ -4823,6 +4887,7 @@ async def webhook(secret: str, request: Request):
             if not ks3.get("start_image_bytes"):
                 ks3["start_image_bytes"] = img_bytes
                 st["kling3_settings"] = ks3
+                k3_save_settings(user_id, ks3)
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
@@ -4837,6 +4902,7 @@ async def webhook(secret: str, request: Request):
             if not ks3.get("end_image_bytes"):
                 ks3["end_image_bytes"] = img_bytes
                 st["kling3_settings"] = ks3
+                k3_save_settings(user_id, ks3)
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
@@ -5058,6 +5124,7 @@ async def webhook(secret: str, request: Request):
             if not ks3.get("start_image_bytes"):
                 ks3["start_image_bytes"] = img_bytes
                 st["kling3_settings"] = ks3
+                k3_save_settings(user_id, ks3)
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
@@ -5072,6 +5139,7 @@ async def webhook(secret: str, request: Request):
             if not ks3.get("end_image_bytes"):
                 ks3["end_image_bytes"] = img_bytes
                 st["kling3_settings"] = ks3
+                k3_save_settings(user_id, ks3)
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
