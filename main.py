@@ -3223,10 +3223,9 @@ async def webhook(secret: str, request: Request):
                 st["ts"] = _now()
 
                 _set_mode(chat_id, user_id, "kling3_wait_prompt")
-
-                # DIAG: confirm mode switch
+                # Persist Kling3 state to Supabase (survives multi-instance/restarts)
                 try:
-                    await tg_send_message(chat_id, f"🟣 Kling3 сохранено. mode={st.get('mode') or '?'} gen_mode={gen_mode}")
+                    sb_set_user_state(user_id, "kling3_wait_prompt", st.get("kling3_settings") or {})
                 except Exception:
                     pass
 
@@ -4709,14 +4708,21 @@ async def webhook(secret: str, request: Request):
         )
         return {"ok": True}
 
+    # Kling 3.0 restore on photo (only when photo arrives, to avoid slowing all updates)
+    if (message.get("photo") or []) and st.get("mode") != "kling3_wait_prompt":
+        try:
+            sb_state, sb_payload = sb_get_user_state(user_id)
+            if sb_state == "kling3_wait_prompt" and isinstance(sb_payload, dict) and sb_payload:
+                st["kling3_settings"] = sb_payload
+                _set_mode(chat_id, user_id, "kling3_wait_prompt")
+        except Exception:
+            pass
+
+
+
     # ---------------- Фото (photo) ----------------
     photos = message.get("photo") or []
     if photos:
-        # DIAG: photo received
-        try:
-            await tg_send_message(chat_id, f"📸 Фото дошло. mode={st.get('mode')}")
-        except Exception:
-            pass
         largest = photos[-1]
         file_id = largest.get("file_id")
         if not file_id:
@@ -4802,6 +4808,10 @@ async def webhook(secret: str, request: Request):
                 ks3["start_image_bytes"] = img_bytes
                 st["kling3_settings"] = ks3
                 st["ts"] = _now()
+                try:
+                    sb_set_user_state(user_id, "kling3_wait_prompt", st.get("kling3_settings") or {})
+                except Exception:
+                    pass
                 await tg_send_message(
                     chat_id,
                     "Стартовый кадр (1-й) получил ✅\n"
@@ -4816,6 +4826,10 @@ async def webhook(secret: str, request: Request):
                 ks3["end_image_bytes"] = img_bytes
                 st["kling3_settings"] = ks3
                 st["ts"] = _now()
+                try:
+                    sb_set_user_state(user_id, "kling3_wait_prompt", st.get("kling3_settings") or {})
+                except Exception:
+                    pass
                 await tg_send_message(
                     chat_id,
                     "Последний кадр получил ✅\nТеперь пришли промпт.",
