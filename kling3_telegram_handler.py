@@ -73,6 +73,18 @@ async def handle_kling3_wait_prompt(
     start_image_bytes: Optional[bytes] = settings.get("start_image_bytes")
     end_image_bytes: Optional[bytes] = settings.get("end_image_bytes")
 
+    # HARD GUARD: in image->video mode we MUST have the 1st frame.
+    # Otherwise we will accidentally run text->video.
+    if gen_mode == "i2v" and not start_image_bytes:
+        await tg_send_message(
+            chat_id,
+            "📷 Режим «Image → Video» выбран. Сначала пришли фото (1-й кадр).\n"
+            "Затем можно (опционально) прислать ещё фото (последний кадр).\n"
+            "После этого пришли промт.",
+            reply_markup=_main_menu_for(user_id),
+        )
+        return True
+
     # multi-shots
     multi_shots = settings.get("multi_shots") or None
     if isinstance(multi_shots, list):
