@@ -7,7 +7,6 @@ import json
 import hashlib
 import hmac
 import logging
-ulog = logging.getLogger("uvicorn.error")
 from io import BytesIO
 from typing import Optional, Literal, Dict, Any, Tuple, List
 
@@ -3018,16 +3017,7 @@ async def webhook(secret: str, request: Request):
         return {"ok": True}
 
 
-    message = update.get("message") or update.get("edited_message") or update.get("channel_post") or update.get("edited_channel_post")
-    try:
-        if isinstance(message, dict):
-            ulog.warning('IN_MSG_KEYS: %s', sorted(list(message.keys())))
-            if message.get('photo'):
-                ulog.warning('PHOTO_KEY_SEEN: chat_id=%s user_id=%s sizes=%s', (message.get('chat') or {}).get('id'), (message.get('from') or {}).get('id'), len(message.get('photo') or []))
-            if message.get('document'):
-                ulog.warning('DOC_KEY_SEEN: mime=%s', (message.get('document') or {}).get('mime_type'))
-    except Exception:
-        pass
+    message = update.get("message") or update.get("edited_message")
     if not message:
         return {"ok": True}
 
@@ -3132,8 +3122,7 @@ async def webhook(secret: str, request: Request):
 
     # Execution guard: while a long generation is running, ignore accidental navigation/button texts
     # so they do not get interpreted as prompts and start a second generation.
-    if incoming_text and _busy_is_active(int(user_id)) and _is_nav_or_menu_text(incoming_text) and incoming_text not in ("Помощь","💰 Баланс","Баланс","💰Баланс","🔄 Сбросить генерацию","/reset","/resetgen"):
-
+    if _busy_is_active(int(user_id)) and _is_nav_or_menu_text(incoming_text):
         kind = _busy_kind(int(user_id)) or "генерация"
         await tg_send_message(
             chat_id,
@@ -4339,7 +4328,11 @@ async def webhook(secret: str, request: Request):
         )
         return {"ok": True}
 
-    handled = await handle_kling3_wait_prompt(
+    handled = False
+
+    if incoming_text:
+
+        handled = await handle_kling3_wait_prompt(
         chat_id=chat_id,
         user_id=user_id,
         incoming_text=incoming_text,
@@ -4656,18 +4649,6 @@ async def webhook(secret: str, request: Request):
     # ---------------- Фото (photo) ----------------
     photos = message.get("photo") or []
     if photos:
-        # PHOTO_ACK_ALWAYS
-        try:
-            ulog.warning('PHOTO_HANDLER_ENTER: mode=%s', st.get('mode'))
-        except Exception:
-            pass
-        try:
-            await tg_send_message(chat_id, f'📸 Фото получил ✅ (mode={st.get("mode")})', reply_markup=_help_menu_for(user_id))
-        except Exception as e:
-            try:
-                ulog.warning('PHOTO_ACK_FAIL: %s', e)
-            except Exception:
-                pass
         largest = photos[-1]
         file_id = largest.get("file_id")
         if not file_id:
