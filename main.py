@@ -3224,6 +3224,12 @@ async def webhook(secret: str, request: Request):
 
                 _set_mode(chat_id, user_id, "kling3_wait_prompt")
 
+                # DIAG: confirm mode switch
+                try:
+                    await tg_send_message(chat_id, f"🟣 Kling3 сохранено. mode={st.get('mode') or '?'} gen_mode={gen_mode}")
+                except Exception:
+                    pass
+
                 await tg_send_message(
                     chat_id,
                     "✅ Kling PRO 3.0 настройки сохранены.\n"
@@ -4706,6 +4712,11 @@ async def webhook(secret: str, request: Request):
     # ---------------- Фото (photo) ----------------
     photos = message.get("photo") or []
     if photos:
+        # DIAG: photo received
+        try:
+            await tg_send_message(chat_id, f"📸 Фото дошло. mode={st.get('mode')}")
+        except Exception:
+            pass
         largest = photos[-1]
         file_id = largest.get("file_id")
         if not file_id:
