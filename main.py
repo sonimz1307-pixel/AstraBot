@@ -4697,7 +4697,68 @@ async def webhook(secret: str, request: Request):
         
         
         
-        # ---- NANO BANANA: ждём фото ----
+        
+        # ---- KLING 3.0: приём 1-го/последнего кадра через фото ----
+        if st.get("mode") == "kling3_wait_prompt":
+            ks3 = st.get("kling3_settings") or {}
+            gen_mode = str(ks3.get("gen_mode") or ks3.get("flow") or ks3.get("mode") or "t2v").lower().strip()
+
+            # нормализация синонимов (на всякий случай)
+            if gen_mode in ("image_to_video", "image2video", "image->video", "img2vid", "img2video", "image-to-video"):
+                gen_mode = "i2v"
+            elif gen_mode in ("multi_shots", "multishots", "multi-shot", "multi_shot", "multi shots"):
+                gen_mode = "multishot"
+
+            # Если пользователь прислал фото, но gen_mode не i2v — подскажем (и НЕ молчим)
+            if gen_mode not in ("i2v", "multishot"):
+                await tg_send_message(
+                    chat_id,
+                    ("ℹ️ Сейчас в Kling 3.0 выбран режим Text→Video.\n"
+                     "Если хочешь Image→Video — открой «🎬 Видео будущего», выбери Image→Video и снова пришли фото."),
+                    reply_markup=_main_menu_for(user_id),
+                )
+                return {"ok": True}
+
+            # 1) Стартовый кадр
+            if not ks3.get("start_image_bytes"):
+                ks3["start_image_bytes"] = img_bytes
+                ks3["start_image_file_id"] = file_id
+                st["kling3_settings"] = ks3
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    ("✅ Фото 1 (стартовый кадр) получил.\n"
+                     "Теперь напиши промпт.\n"
+                     "Если хочешь задать последний кадр — пришли ещё одно фото."),
+                    reply_markup=_main_menu_for(user_id),
+                )
+                return {"ok": True}
+
+            # 2) Последний кадр (опционально)
+            if not ks3.get("end_image_bytes"):
+                ks3["end_image_bytes"] = img_bytes
+                ks3["end_image_file_id"] = file_id
+                st["kling3_settings"] = ks3
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    "✅ Фото 2 (последний кадр) получил.\nТеперь напиши промпт.",
+                    reply_markup=_main_menu_for(user_id),
+                )
+                return {"ok": True}
+
+            # 3) Если оба уже были — перезапишем последний кадр
+            ks3["end_image_bytes"] = img_bytes
+            ks3["end_image_file_id"] = file_id
+            st["kling3_settings"] = ks3
+            st["ts"] = _now()
+            await tg_send_message(
+                chat_id,
+                "✅ Последний кадр обновил.\nТеперь напиши промпт.",
+                reply_markup=_main_menu_for(user_id),
+            )
+            return {"ok": True}
+# ---- NANO BANANA: ждём фото ----
         if st.get("mode") == "nano_banana":
             nb = st.get("nano_banana") or {}
             step = (nb.get("step") or "need_photo")
@@ -4748,13 +4809,15 @@ async def webhook(secret: str, request: Request):
             ks3 = st.get("kling3_settings") or {}
             gen_mode = (ks3.get("gen_mode") or "t2v")
 
-            # Если в настройках почему-то остался t2v, но пользователь прислал ФОТО —
-            # считаем это явным намерением сделать Image→Video и автоматически переключаемся.
+            # Если режим не i2v/multishot — фото не нужно
             if gen_mode not in ("i2v", "multishot"):
-                ks3["gen_mode"] = "i2v"
-                st["kling3_settings"] = ks3
-                st["ts"] = _now()
-                gen_mode = "i2v"
+                await tg_send_message(
+                    chat_id,
+                    "Для Kling 3.0 в режиме Text→Video фото не нужно.\n"
+                    "Открой WebApp и выбери Image→Video, либо пришли текстовый промпт.",
+                    reply_markup=_help_menu_for(user_id),
+                )
+                return {"ok": True}
 
             # 1-й кадр
             if not ks3.get("start_image_bytes"):
