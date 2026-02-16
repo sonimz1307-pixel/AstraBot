@@ -294,61 +294,7 @@
     .seg.providerSeg label:hover{
       filter: brightness(1.05);
     }
-  
-/* Kling 3.0 Multi-shot */
-.shot{
-  border:1px solid var(--stroke);
-  background: rgba(255,255,255,.02);
-  border-radius:16px;
-  padding:12px;
-  margin-top:10px;
-}
-.shot .shotHead{
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
-  gap:10px;
-  margin-bottom:10px;
-}
-.shot .shotTitle{
-  font-weight:800;
-  letter-spacing:.2px;
-}
-.shot .shotControls{
-  display:flex;
-  align-items:center;
-  gap:10px;
-}
-.shot textarea{
-  width:100%;
-  min-height:72px;
-  resize:vertical;
-}
-.shot .dangerBtn{
-  border:1px solid rgba(255,77,77,.5);
-  background: rgba(255,77,77,.10);
-  color: #ffd9d9;
-  padding:10px 12px;
-  border-radius:14px;
-  cursor:pointer;
-  font-weight:800;
-}
-.shot .dangerBtn:hover{ filter:brightness(1.08); }
-.msBar{
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
-  gap:12px;
-  margin-top:10px;
-  padding-top:10px;
-  border-top:1px dashed rgba(170,190,255,.16);
-}
-.msMeta{
-  font-size:13px;
-  color: var(--muted);
-}
-.msTotal.bad{ color: var(--danger); font-weight:900; }
-</style>
+  </style>
 
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
@@ -404,6 +350,21 @@
       <div class="card" id="kling3Options" style="display:none;">
         <h3>Kling PRO 3.0 — настройки</h3>
 
+        <div class="seg" role="radiogroup" aria-label="Режим Kling 3.0" style="margin-top:10px;">
+          <input id="k3_mode_i2v" type="radio" name="kling3_gen_mode" value="i2v" checked>
+          <label for="k3_mode_i2v">
+            <span class="name">Image → Video</span>
+            <span class="desc">Фото → промпт → видео</span>
+          </label>
+
+          <input id="k3_mode_t2v" type="radio" name="kling3_gen_mode" value="t2v">
+          <label for="k3_mode_t2v">
+            <span class="name">Text → Video</span>
+            <span class="desc">Только промпт</span>
+          </label>
+        </div>
+
+
         <div class="seg" role="radiogroup" aria-label="Разрешение Kling 3.0">
           <input id="k3_720" type="radio" name="kling3_resolution" value="720" checked>
           <label for="k3_720">
@@ -447,58 +408,6 @@
           </div>
         </div>
 
-        
-<div class="row" style="margin-top:10px;">
-  <div style="flex:1; min-width: 180px;">
-    <label class="badge" style="display:inline-block;margin-bottom:8px;">Формат</label>
-    <select id="kling3_aspect">
-      <option value="16:9" selected>16:9</option>
-      <option value="9:16">9:16</option>
-    </select>
-  </div>
-</div>
-
-<div class="card" style="margin-top:12px; padding: 14px;">
-  <h4 style="margin:0 0 10px 0;">Режим Kling 3.0</h4>
-  <div class="seg" role="radiogroup" aria-label="Режим Kling 3.0">
-    <input id="k3_t2v" type="radio" name="kling3_gen_mode" value="t2v" checked>
-    <label for="k3_t2v">
-      <span class="name">Text → Video</span>
-      <span class="desc">Промпт → видео</span>
-    </label>
-
-    <input id="k3_i2v" type="radio" name="kling3_gen_mode" value="i2v">
-    <label for="k3_i2v">
-      <span class="name">Image → Video</span>
-      <span class="desc">Фото → видео</span>
-    </label>
-
-<input id="k3_ms" type="radio" name="kling3_gen_mode" value="multishot">
-<label for="k3_ms">
-  <span class="name">Multi-shot</span>
-  <span class="desc">до 6 сцен • суммарно ≤ 15 сек</span>
-</label>
-  </div>
-</div>
-
-        
-<div class="card" id="kling3MultiShotsCard" style="display:none; margin-top:12px; padding: 14px;">
-  <h4 style="margin:0 0 10px 0;">Multi-shot — сцены</h4>
-
-  <div class="hint" style="margin-top:-4px;">
-    До 6 сцен. Каждая сцена: prompt + длительность (1–14 сек). Суммарно не больше 15 сек.
-  </div>
-
-  <div id="k3_ms_list"></div>
-
-  <div class="msBar">
-    <button id="k3_ms_add" class="btn" type="button">+ Добавить сцену</button>
-    <div class="msMeta">
-      <span class="msTotal" id="k3_ms_total">Total: 0 / 15</span>
-    </div>
-  </div>
-</div>
-
         <div class="hint">Эти настройки применяются только если выбран Kling PRO 3.0.</div>
       </div>
       <div class="card" id="klingFlowCard">
@@ -519,7 +428,7 @@
         <div class="hint">Для Motion Control длительность задаётся референс-видео (3–30 сек).</div>
       </div>
 
-      <div class="card" id="klingQualityCard">
+      <div class="card">
         <h3>Качество</h3>
         <div class="seg" role="radiogroup" aria-label="Качество">
           <input id="mode_std" type="radio" name="mode" value="std" checked>
@@ -668,163 +577,8 @@
 
     function getKlingVersion(){ return qs('input[name="kling_version"]:checked')?.value || "1_6"; }
     function getKling3Resolution(){ return qs('input[name="kling3_resolution"]:checked')?.value || "720"; }
+    function getKling3GenMode(){ return qs('input[name="kling3_gen_mode"]:checked')?.value || "i2v"; }
 
-function getKling3Aspect(){ 
-  const v = (qs('#kling3_aspect')?.value || "16:9");
-  return (v === "9:16") ? "9:16" : "16:9";
-}
-
-function getKling3GenMode(){
-  const el = qs('input[name="kling3_gen_mode"]:checked');
-  const v = (el?.value || "t2v");
-  if (v === "i2v") return "i2v";
-  if (v === "multishot") return "multishot";
-  return "t2v";
-}
-
-// --- Kling 3.0 Multi-shot state ---
-let kling3Shots = [
-  { prompt: "", duration: 3 },
-];
-
-function clampInt(v, lo, hi, defV){
-  const n = parseInt(v, 10);
-  if (Number.isNaN(n)) return defV;
-  return Math.max(lo, Math.min(hi, n));
-}
-
-function msTotalDuration(shots){
-  return (shots || []).reduce((acc, s) => acc + clampInt(s?.duration, 1, 14, 3), 0);
-}
-
-function renderKling3Shots(){
-  const list = qs('#k3_ms_list');
-  if (!list) return;
-
-  list.innerHTML = "";
-
-  kling3Shots.forEach((s, idx) => {
-    const wrap = document.createElement('div');
-    wrap.className = 'shot';
-    wrap.dataset.idx = String(idx);
-
-    wrap.innerHTML = `
-      <div class="shotHead">
-        <div class="shotTitle">Сцена ${idx+1}</div>
-        <div class="shotControls">
-          <label class="badge">Длительность</label>
-          <select class="ms_dur">
-            ${Array.from({length:14}, (_,i)=>i+1).map(d=>`<option value="${d}" ${d===clampInt(s.duration,1,14,3)?'selected':''}>${d}</option>`).join('')}
-          </select>
-          <button class="dangerBtn ms_del" type="button">Удалить</button>
-        </div>
-      </div>
-      <textarea class="ms_prompt" placeholder="Опиши сцену: действие, камера, стиль, свет...">${(s.prompt||"").replaceAll('<','&lt;').replaceAll('>','&gt;')}</textarea>
-    `;
-
-    list.appendChild(wrap);
-  });
-
-  // handlers
-  qsa('.ms_prompt').forEach((ta) => {
-    ta.addEventListener('input', (e) => {
-      const el = e.target;
-      const idx = parseInt(el.closest('.shot')?.dataset?.idx || "0", 10);
-      kling3Shots[idx].prompt = el.value;
-      updateMsBar();
-    });
-  });
-
-  qsa('.ms_dur').forEach((sel) => {
-    sel.addEventListener('change', (e) => {
-      const el = e.target;
-      const idx = parseInt(el.closest('.shot')?.dataset?.idx || "0", 10);
-      kling3Shots[idx].duration = clampInt(el.value, 1, 14, 3);
-      updateMsBar();
-    });
-  });
-
-  qsa('.ms_del').forEach((btn) => {
-    btn.addEventListener('click', (e) => {
-      const el = e.target;
-      const idx = parseInt(el.closest('.shot')?.dataset?.idx || "0", 10);
-      kling3Shots.splice(idx, 1);
-      if (kling3Shots.length === 0) kling3Shots.push({prompt:"", duration:3});
-      renderKling3Shots();
-    });
-  });
-
-  updateMsBar();
-}
-
-function updateMsBar(){
-  const total = msTotalDuration(kling3Shots);
-  const totalEl = qs('#k3_ms_total');
-  if (totalEl){
-    totalEl.textContent = `Total: ${total} / 15`;
-    totalEl.classList.toggle('bad', total > 15);
-  }
-  const addBtn = qs('#k3_ms_add');
-  if (addBtn){
-    addBtn.disabled = (kling3Shots.length >= 6);
-    addBtn.style.opacity = addBtn.disabled ? "0.6" : "1";
-    addBtn.style.cursor = addBtn.disabled ? "not-allowed" : "pointer";
-  }
-}
-
-function updateKling3ModeUI(){
-  const mode = getKling3GenMode();
-  const msCard = qs('#kling3MultiShotsCard');
-  const durSel = qs('#kling3_duration');
-  if (msCard){
-    msCard.style.display = (mode === 'multishot') ? '' : 'none';
-  }
-  // duration selector is ignored by provider in multi-shot, but keep visible; we can dim it
-  if (durSel){
-    const row = durSel.closest('.row');
-    if (row){
-      row.style.opacity = (mode === 'multishot') ? '0.55' : '1';
-    }
-  }
-}
-
-function getKling3MultiShots(){
-  // Clean + validate
-  const shots = (kling3Shots || []).map(s => ({
-    prompt: String(s?.prompt || "").trim(),
-    duration: clampInt(s?.duration, 1, 14, 3)
-  }));
-
-  if (shots.length > 6) throw new Error("Максимум 6 сцен.");
-  if (shots.some(s => !s.prompt)) throw new Error("Заполни prompt у каждой сцены.");
-  const total = msTotalDuration(shots);
-  if (total > 15) throw new Error("Суммарная длительность сцен не должна превышать 15 секунд.");
-
-  return shots;
-}
-
-function initKling3MultiShotUI(){
-  const addBtn = qs('#k3_ms_add');
-  if (addBtn){
-    addBtn.addEventListener('click', (e) => {
-      e.preventDefault();
-      if (kling3Shots.length >= 6) return;
-      kling3Shots.push({prompt:"", duration:3});
-      renderKling3Shots();
-    });
-  }
-
-  // mode switch
-  qsa('input[name="kling3_gen_mode"]').forEach((el) => {
-    el.addEventListener('change', () => {
-      updateKling3ModeUI();
-      // ensure list rendered when switching to multishot
-      if (getKling3GenMode() === 'multishot') renderKling3Shots();
-    });
-  });
-
-  updateKling3ModeUI();
-}
 
     // Veo getters
     function getVeoModel(){ return qs('input[name="veo_model"]:checked')?.value || "fast"; } // fast|pro
@@ -845,9 +599,9 @@ function initKling3MultiShotUI(){
 
       // Hide 1.6-specific controls when 3.0 selected (to avoid user confusion)
       const flowCard = qs('#klingFlowCard');
-      const qualityCard = qs('#klingQualityCard');
+      const modeCard = qs('#klingModeCard');
       if (flowCard) flowCard.style.display = (version === '1_6') ? 'block' : 'none';
-      if (qualityCard) qualityCard.style.display = (version === '1_6') ? 'block' : 'none';
+      if (modeCard) modeCard.style.display = (version === '1_6') ? 'block' : 'none';
     }
 
     function updateTokenRateHint(){
@@ -926,7 +680,8 @@ function initKling3MultiShotUI(){
     qsa('input[name="provider"]').forEach(el => el.addEventListener('change', updateProviderUI));
     qsa('input[name="flow"]').forEach(el => el.addEventListener('change', updateKlingUI));
     qsa('input[name="mode"]').forEach(el => el.addEventListener('change', updateTokenRateHint));
-    qsa('input[name="kling_version"]').forEach(el => el.addEventListener('change', () => { updateKlingUI(); updateTokenRateHint(); }));
+    qsa('input[name="kling_version"]').forEach(el => el.addEventListener('change', () => { updateKlingUI();     qsa('input[name="kling3_gen_mode"]').forEach(el => el.addEventListener('change', updateKlingUI));
+updateTokenRateHint(); }));
     qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () => {
       updateVeoPriceHint();
       setVeoAdvancedEnabled(getVeoModel() === 'pro');
@@ -967,8 +722,6 @@ function initKling3MultiShotUI(){
       setTimeout(() => toastEl.classList.remove('show'), 6000);
     }
 
-    initKling3MultiShotUI();
-
     const saveBtn = qs('#saveBtn');
     if (saveBtn){
       saveBtn.addEventListener('click', (e) => {
@@ -997,8 +750,6 @@ function initKling3MultiShotUI(){
             const enable_audio = !!qs('#kling3_audio')?.checked;
             const duration = parseInt((qs('#kling3_duration')?.value || "5"), 10);
 
-            try{
-
             payload = {
               type: "kling3_settings",
               provider: "kling",
@@ -1007,14 +758,8 @@ function initKling3MultiShotUI(){
               enable_audio,
               duration,
               gen_mode: getKling3GenMode(),
-              aspect_ratio: getKling3Aspect(),
-              multi_shots: (getKling3GenMode() === "multishot") ? getKling3MultiShots() : null,
-              prefer_multi_shots: (getKling3GenMode() === "multishot")
+              aspect_ratio: "16:9"
             };
-            }catch(err){
-              alert(err?.message || 'Проверь Multi-shot настройки');
-              return;
-            }
           }
         } else {
           const veo_model = getVeoModel(); // fast|pro
