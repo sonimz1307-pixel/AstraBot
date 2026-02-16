@@ -1042,14 +1042,6 @@ async def _ai_maybe_summarize(st: Dict[str, Any]):
 
 def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photosession", "t2i", "two_photos", "nano_banana", "kling_mc", "kling_i2v", "suno_music", "veo_t2v", "veo_i2v"]):
     st = _ensure_state(chat_id, user_id)
-
-    # ---- Restore persisted state (Render multi-instance safe) ----
-    if (st.get("mode") in (None, "chat")):
-        sb_state, sb_payload = sb_get_user_state(user_id)
-        if sb_state == "kling3_wait_prompt" and isinstance(sb_payload, dict) and sb_payload:
-            st["kling3_settings"] = sb_payload
-            _set_mode(chat_id, user_id, "kling3_wait_prompt")
-
     st["mode"] = mode
     st["ts"] = _now()
 
@@ -3950,7 +3942,6 @@ async def webhook(secret: str, request: Request):
             st["ts"] = _now()
 
             _set_mode(chat_id, user_id, "kling3_wait_prompt")
-            sb_set_user_state(user_id, "kling3_wait_prompt", st["kling3_settings"])
 
             await tg_send_message(
                 chat_id,
@@ -4739,7 +4730,6 @@ async def webhook(secret: str, request: Request):
                 ks3["start_image_bytes"] = img_bytes
                 st["kling3_settings"] = ks3
                 st["ts"] = _now()
-                sb_set_user_state(user_id, "kling3_wait_prompt", st["kling3_settings"])
                 await tg_send_message(
                     chat_id,
                     "Стартовый кадр (1-й) получил ✅\n"
@@ -4754,7 +4744,6 @@ async def webhook(secret: str, request: Request):
                 ks3["end_image_bytes"] = img_bytes
                 st["kling3_settings"] = ks3
                 st["ts"] = _now()
-                sb_set_user_state(user_id, "kling3_wait_prompt", st["kling3_settings"])
                 await tg_send_message(
                     chat_id,
                     "Последний кадр получил ✅\nТеперь пришли промпт.",
