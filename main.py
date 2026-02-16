@@ -3941,6 +3941,9 @@ async def webhook(secret: str, request: Request):
             }
             st["ts"] = _now()
 
+
+            # persist state (so photo step survives Render restarts / multi-instances)
+            sb_set_user_state(user_id, "kling3_wait_prompt", st["kling3_settings"])
             _set_mode(chat_id, user_id, "kling3_wait_prompt")
 
             await tg_send_message(
@@ -4664,6 +4667,15 @@ async def webhook(secret: str, request: Request):
         
         
         
+        
+        # ---- Restore Kling 3.0 waiting state on photo (if bot restarted / state lost) ----
+        if (st.get("mode") in (None, "chat")):
+            sb_state, sb_payload = sb_get_user_state(user_id)
+            if sb_state == "kling3_wait_prompt" and isinstance(sb_payload, dict) and sb_payload:
+                st["kling3_settings"] = sb_payload
+                _set_mode(chat_id, user_id, "kling3_wait_prompt")
+
+
         # ---- NANO BANANA: ждём фото ----
         if st.get("mode") == "nano_banana":
             nb = st.get("nano_banana") or {}
