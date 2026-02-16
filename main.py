@@ -4650,6 +4650,15 @@ async def webhook(secret: str, request: Request):
     # ---------------- Фото (photo) ----------------
     photos = message.get("photo") or []
     if photos:
+        # HARD DIAG: must appear if we entered photo handler
+        try:
+            ulog.warning("ENTER_PHOTO_HANDLER")
+        except Exception:
+            pass
+        try:
+            await tg_send_message(chat_id, "📸 ENTER_PHOTO_HANDLER")
+        except Exception:
+            pass
         try:
             sb_state = None
             try:
