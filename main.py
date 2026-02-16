@@ -7,6 +7,7 @@ import json
 import hashlib
 import hmac
 import logging
+ulog = logging.getLogger("uvicorn.error")
 from io import BytesIO
 from typing import Optional, Literal, Dict, Any, Tuple, List
 
@@ -3122,7 +3123,8 @@ async def webhook(secret: str, request: Request):
 
     # Execution guard: while a long generation is running, ignore accidental navigation/button texts
     # so they do not get interpreted as prompts and start a second generation.
-    if incoming_text and _busy_is_active(int(user_id)) and _is_nav_or_menu_text(incoming_text):
+    if incoming_text and _busy_is_active(int(user_id)) and _is_nav_or_menu_text(incoming_text) and incoming_text not in ("Помощь","💰 Баланс","Баланс","💰Баланс","🔄 Сбросить генерацию","/reset","/resetgen"):
+
         kind = _busy_kind(int(user_id)) or "генерация"
         await tg_send_message(
             chat_id,
@@ -4645,6 +4647,18 @@ async def webhook(secret: str, request: Request):
     # ---------------- Фото (photo) ----------------
     photos = message.get("photo") or []
     if photos:
+        # PHOTO_ACK_ALWAYS: prevent silence on any photo
+        try:
+            ulog.warning('PHOTO_HANDLER_ENTER: mode=%s', st.get('mode'))
+        except Exception:
+            pass
+        try:
+            await tg_send_message(chat_id, f'📸 Фото получил ✅ (mode={st.get("mode")})', reply_markup=_help_menu_for(user_id))
+        except Exception as e:
+            try:
+                ulog.warning('PHOTO_ACK_FAIL: %s', e)
+            except Exception:
+                pass
         largest = photos[-1]
         file_id = largest.get("file_id")
         if not file_id:
