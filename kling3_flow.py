@@ -1,10 +1,20 @@
 import httpx
 import os
+import logging
 from typing import Dict, Any, Optional, List
 
 from db_supabase import supabase as sb  # service key client
 
-PIAPI_KEY = os.getenv("PIAPI_API_KEY")
+# Use uvicorn logger so it shows in Render logs
+ulog = logging.getLogger("uvicorn.error")
+
+# Support multiple env var names to avoid "silent" misconfig
+PIAPI_KEY = (
+    os.getenv("PIAPI_API_KEY")
+    or os.getenv("PIAPI_KEY")
+    or os.getenv("PIAPI_TOKEN")
+    or os.getenv("PIAPI_API_TOKEN")
+)
 
 BASE_URL = "https://api.piapi.ai/api/v1/task"
 
@@ -15,8 +25,11 @@ class Kling3Error(Exception):
 
 def _build_headers() -> Dict[str, str]:
     if not PIAPI_KEY:
-        raise Kling3Error("PIAPI_API_KEY is not set")
+        raise Kling3Error(
+            "PiAPI key is not set. Set env var PIAPI_API_KEY (preferred) or PIAPI_KEY."
+        )
 
+    # PiAPI uses x-api-key in many examples; keep it.
     return {
         "x-api-key": PIAPI_KEY,
         "Content-Type": "application/json",
@@ -52,13 +65,9 @@ def _validate_multi_shots(multi_shots: List[Dict[str, Any]]) -> int:
         raise Kling3Error("Total duration of multi_shots should not exceed 15 seconds")
     return total
 
-def _sb_upload_bytes_public(data: bytes, *, ext: str, content_type: str) -> str:
-    """Upload bytes to Supabase Storage and return a public URL.
 
-    Requirements:
-    - Supabase Storage bucket must exist and be public (or signed URLs logic added).
-    - Uses storage3; must pass raw bytes (not BytesIO).
-    """
+def _sb_upload_bytes_public(data: bytes, *, ext: str, content_type: str) -> str:
+    """Upload bytes to Supabase Storage and return a public URL."""
     if sb is None:
         raise Kling3Error("Supabase client is not configured (db_supabase.supabase is None)")
 
@@ -66,12 +75,11 @@ def _sb_upload_bytes_public(data: bytes, *, ext: str, content_type: str) -> str:
     if ext not in ("jpg", "jpeg", "png", "webp"):
         ext = "jpg"
 
-    # Bucket name: try env, else fallback
     bucket = (os.getenv("SB_MEDIA_BUCKET") or os.getenv("SUPABASE_MEDIA_BUCKET") or "media").strip() or "media"
 
-    # deterministic-ish path (avoid collisions, but keep short)
     import time
     from uuid import uuid4
+
     fn = f"kling3/{int(time.time())}_{uuid4().hex[:10]}.{ext}"
 
     try:
@@ -83,7 +91,6 @@ def _sb_upload_bytes_public(data: bytes, *, ext: str, content_type: str) -> str:
         public = sb.storage.from_(bucket).get_public_url(fn)
         if isinstance(public, str):
             return public
-        # storage3 sometimes returns dict-like
         url = (public.get("publicUrl") if isinstance(public, dict) else None) or ""
         if not url:
             raise Kling3Error("Supabase storage: could not get public url")
@@ -100,16 +107,20 @@ async def create_kling3_task(
     enable_audio: bool,
     aspect_ratio: str = "16:9",
     prefer_multi_shots: bool = False,
+    request_id: Optional[str] = None,
     # Image -> Video
     start_image_bytes: Optional[bytes] = None,
     end_image_bytes: Optional[bytes] = None,
     # Multi-shot
     multi_shots: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Create a Kling 3.0 video task in PiAPI.
+    """
+    Create a Kling 3.0 video task in PiAPI.
 
-    - If multi_shots provided (non-empty), PiAPI ignores prompt+duration.
-    - start/end frames are uploaded to Supabase Storage to obtain public URLs.
+    Debug changes:
+    - Logs outgoing request meta and any non-2xx responses (status + body).
+    - Accepts any 2xx as success (PiAPI may return 201).
+    - Supports multiple env var names for PiAPI key.
     """
 
     _validate_inputs(int(duration), str(resolution))
@@ -123,25 +134,20 @@ async def create_kling3_task(
         "prefer_multi_shots": bool(prefer_multi_shots),
     }
 
-    # aspect_ratio is ignored if start image provided (per docs), but safe to include
     if aspect_ratio:
         input_obj["aspect_ratio"] = str(aspect_ratio)
 
-    # Multi-shots
     ms = [x for x in (multi_shots or []) if isinstance(x, dict)]
     if ms:
         _validate_multi_shots(ms)
         input_obj["multi_shots"] = ms
     else:
-        # Text-to-video
         input_obj["prompt"] = str(prompt or "")
         input_obj["duration"] = int(duration)
 
-    # Image frames (upload to public URLs)
+    # Frames -> upload to public URLs (this can fail BEFORE PiAPI call)
     if start_image_bytes:
-        # naive content type detection
-        ct = "image/jpeg"
-        ext = "jpg"
+        ct, ext = "image/jpeg", "jpg"
         if start_image_bytes[:8].startswith(b"\x89PNG"):
             ct, ext = "image/png", "png"
         elif start_image_bytes[:12].startswith(b"RIFF") and start_image_bytes[8:12] == b"WEBP":
@@ -150,8 +156,7 @@ async def create_kling3_task(
         input_obj["start_image_url"] = url
 
     if end_image_bytes:
-        ct = "image/jpeg"
-        ext = "jpg"
+        ct, ext = "image/jpeg", "jpg"
         if end_image_bytes[:8].startswith(b"\x89PNG"):
             ct, ext = "image/png", "png"
         elif end_image_bytes[:12].startswith(b"RIFF") and end_image_bytes[8:12] == b"WEBP":
@@ -167,23 +172,68 @@ async def create_kling3_task(
     }
 
     headers = _build_headers()
+    if request_id:
+        headers["x-request-id"] = str(request_id)
+
+    # Log the fact we are about to call PiAPI (without leaking the key)
+    try:
+        safe = dict(payload)
+        safe_in = dict(input_obj)
+        # do not log URLs in full
+        if "start_image_url" in safe_in:
+            safe_in["start_image_url"] = "<set>"
+        if "end_image_url" in safe_in:
+            safe_in["end_image_url"] = "<set>"
+        safe["input"] = safe_in
+        ulog.warning("PIAPI_CREATE -> %s payload=%s", BASE_URL, safe)
+    except Exception:
+        pass
 
     async with httpx.AsyncClient(timeout=120) as client:
-        response = await client.post(BASE_URL, json=payload, headers=headers)
+        try:
+            response = await client.post(BASE_URL, json=payload, headers=headers)
+        except Exception as e:
+            raise Kling3Error(f"PiAPI request failed: {e}")
 
-    if response.status_code != 200:
-        raise Kling3Error(response.text)
+    # Accept any 2xx
+    if not (200 <= response.status_code < 300):
+        # Log status + body so you can see EXACT reason in Render logs
+        try:
+            ulog.warning("PIAPI_CREATE_FAIL status=%s body=%s", response.status_code, response.text[:2000])
+        except Exception:
+            pass
+        raise Kling3Error(f"PiAPI error {response.status_code}: {response.text}")
 
-    return response.json()
+    try:
+        data = response.json()
+    except Exception:
+        data = {"raw": response.text}
+
+    try:
+        ulog.warning("PIAPI_CREATE_OK status=%s data_keys=%s", response.status_code, list(data.keys()) if isinstance(data, dict) else type(data))
+    except Exception:
+        pass
+
+    return data
 
 
 async def get_kling3_task(task_id: str) -> Dict[str, Any]:
     headers = _build_headers()
 
     async with httpx.AsyncClient(timeout=60) as client:
-        response = await client.get(f"{BASE_URL}/{task_id}", headers=headers)
+        try:
+            response = await client.get(f"{BASE_URL}/{task_id}", headers=headers)
+        except Exception as e:
+            raise Kling3Error(f"PiAPI request failed: {e}")
 
-    if response.status_code != 200:
-        raise Kling3Error(response.text)
+    if not (200 <= response.status_code < 300):
+        try:
+            ulog.warning("PIAPI_GET_FAIL status=%s body=%s", response.status_code, response.text[:2000])
+        except Exception:
+            pass
+        raise Kling3Error(f"PiAPI error {response.status_code}: {response.text}")
 
-    return response.json()
+    try:
+        return response.json()
+    except Exception:
+        return {"raw": response.text}
