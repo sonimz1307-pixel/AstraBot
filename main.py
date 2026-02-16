@@ -3018,7 +3018,16 @@ async def webhook(secret: str, request: Request):
         return {"ok": True}
 
 
-    message = update.get("message") or update.get("edited_message")
+    message = update.get("message") or update.get("edited_message") or update.get("channel_post") or update.get("edited_channel_post")
+    try:
+        if isinstance(message, dict):
+            ulog.warning('IN_MSG_KEYS: %s', sorted(list(message.keys())))
+            if message.get('photo'):
+                ulog.warning('PHOTO_KEY_SEEN: chat_id=%s user_id=%s sizes=%s', (message.get('chat') or {}).get('id'), (message.get('from') or {}).get('id'), len(message.get('photo') or []))
+            if message.get('document'):
+                ulog.warning('DOC_KEY_SEEN: mime=%s', (message.get('document') or {}).get('mime_type'))
+    except Exception:
+        pass
     if not message:
         return {"ok": True}
 
@@ -4647,7 +4656,7 @@ async def webhook(secret: str, request: Request):
     # ---------------- Фото (photo) ----------------
     photos = message.get("photo") or []
     if photos:
-        # PHOTO_ACK_ALWAYS: prevent silence on any photo
+        # PHOTO_ACK_ALWAYS
         try:
             ulog.warning('PHOTO_HANDLER_ENTER: mode=%s', st.get('mode'))
         except Exception:
