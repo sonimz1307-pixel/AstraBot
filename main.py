@@ -7,6 +7,7 @@ import json
 import hashlib
 import hmac
 import logging
+ulog = logging.getLogger("uvicorn.error")
 from io import BytesIO
 from typing import Optional, Literal, Dict, Any, Tuple, List
 
@@ -4723,6 +4724,11 @@ async def webhook(secret: str, request: Request):
     # ---------------- Фото (photo) ----------------
     photos = message.get("photo") or []
     if photos:
+        # K3_PHOTO_DIAG
+        try:
+            ulog.warning('PHOTO_IN: mode=%s has_k3=%s', st.get('mode'), bool(st.get('kling3_settings')))
+        except Exception:
+            pass
         largest = photos[-1]
         file_id = largest.get("file_id")
         if not file_id:
@@ -4789,6 +4795,17 @@ async def webhook(secret: str, request: Request):
             return {"ok": True}
 
         # ---- KLING 3.0: приём 1-го/последнего кадра через фото ----
+
+        # Быстрый ACK, чтобы не было "тишины"
+        if st.get("mode") == "kling3_wait_prompt":
+            try:
+                await tg_send_message(chat_id, "📸 Фото получил для Kling PRO 3.0 ✅", reply_markup=_help_menu_for(user_id))
+            except Exception as e:
+                try:
+                    ulog.warning("TG_ACK_FAIL: %s", e)
+                except Exception:
+                    pass
+
         if st.get("mode") == "kling3_wait_prompt":
             ks3 = st.get("kling3_settings") or {}
             gen_mode = (ks3.get("gen_mode") or "t2v")
