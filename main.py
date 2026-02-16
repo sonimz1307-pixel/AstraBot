@@ -3119,6 +3119,21 @@ async def webhook(secret: str, request: Request):
 
     # ✅ Telegram: текст может быть в caption
     incoming_text = (message.get("text") or message.get("caption") or "").strip()
+    # ⚠️ ВАЖНО (альбомы/подписи): если пришло фото/картинка как part of media group,
+    # Telegram кладёт текст в caption. Но для Kling 3.0 (i2v/multishot) caption НЕ должен
+    # перехватываться как промпт ДО сохранения кадров. Иначе обработчик текста вернёт early-return,
+    # и фото-ветка не выполнится.
+    has_photo = bool(message.get("photo"))
+    doc = message.get("document") or {}
+    doc_mime = (doc.get("mime_type") or "").lower().strip() if isinstance(doc, dict) else ""
+    has_image_doc = bool(doc) and doc_mime.startswith("image/")
+    if (has_photo or has_image_doc) and st.get("mode") == "kling3_wait_prompt":
+        ks3 = st.get("kling3_settings") or {}
+        gen_mode = str(ks3.get("gen_mode") or "t2v").lower().strip()
+        if gen_mode in ("i2v", "multishot"):
+            # игнорируем caption в этом апдейте, чтобы не сработал prompt-handler раньше фото-ветки
+            incoming_text = ""
+
 
     # Execution guard: while a long generation is running, ignore accidental navigation/button texts
     # so they do not get interpreted as prompts and start a second generation.
@@ -5169,164 +5184,115 @@ async def webhook(secret: str, request: Request):
                 )
                 return {"ok": True}
 
-        # ---- KLING Image → Video: accept start image as document ----
-        if st.get("mode") == "kling_i2v":
-            ki = st.get("kling_i2v") or {}
-            step = (ki.get("step") or "need_image")
+# ---- KLING Image → Video: accept start image as document ----
+            if st.get("mode") == "kling_i2v":
+                ki = st.get("kling_i2v") or {}
+                step = (ki.get("step") or "need_image")
 
-            if step == "need_image":
-                ki["image_bytes"] = img_bytes
-                ki["step"] = "need_prompt"
-                st["kling_i2v"] = ki
+                if step == "need_image":
+                    ki["image_bytes"] = img_bytes
+                    ki["step"] = "need_prompt"
+                    st["kling_i2v"] = ki
+                    st["ts"] = _now()
+
+                    ks = st.get("kling_settings") or {}
+                    quality = (ks.get("quality") or "std").lower()
+                    duration = int((ks.get("duration") or ki.get("duration") or 5))
+                    await tg_send_message(
+                        chat_id,
+                        f"Фото получил ✅\nТеперь напиши текстом, что должно происходить ({quality.upper()}, {duration} сек)\n"
+                        "Можно просто: Старт",
+                        reply_markup=_help_menu_for(user_id),
+                    )
+                    return {"ok": True}
+
+                await tg_send_message(chat_id, "Фото уже есть ✅ Теперь жду ТЕКСТ.", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            # TWO PHOTOS mode
+            if st.get("mode") == "two_photos":
+                tp = st.get("two_photos") or {}
+                step = (tp.get("step") or "need_photo_1")
+
+                if step == "need_photo_1":
+                    st["two_photos"] = {
+                        "step": "need_photo_2",
+                        "photo1_bytes": img_bytes,
+                        "photo1_file_id": file_id,
+                        "photo2_bytes": None,
+                        "photo2_file_id": None,
+                    }
+                    st["ts"] = _now()
+                    await tg_send_message(chat_id, "Фото 1 получил. Теперь пришли Фото 2.", reply_markup=_main_menu_for(user_id))
+                    return {"ok": True}
+
+                if step == "need_photo_2":
+                    tp["photo2_bytes"] = img_bytes
+                    tp["photo2_file_id"] = file_id
+                    tp["step"] = "need_prompt"
+                    st["two_photos"] = tp
+                    st["ts"] = _now()
+                    await tg_send_message(chat_id, "Фото 2 получил. Теперь напиши текстом, что сделать.", reply_markup=_main_menu_for(user_id))
+                    return {"ok": True}
+
+                if step == "need_prompt":
+                    await tg_send_message(chat_id, "Я уже получил 2 фото. Пришли текстом задачу (или /reset).", reply_markup=_main_menu_for(user_id))
+                    return {"ok": True}
+
+            if st.get("mode") == "photosession":
+                st["photosession"] = {"step": "need_prompt", "photo_bytes": img_bytes, "photo_file_id": file_id}
                 st["ts"] = _now()
-
-                ks = st.get("kling_settings") or {}
-                quality = (ks.get("quality") or "std").lower()
-                duration = int((ks.get("duration") or ki.get("duration") or 5))
                 await tg_send_message(
                     chat_id,
-                    f"Фото получил ✅\nТеперь напиши текстом, что должно происходить ({quality.upper()}, {duration} сек)\n"
-                    "Можно просто: Старт",
+                    "Фото получил. Теперь напиши задачу для фотосессии:\n"
+                    "• где находится человек (место/фон)\n"
+                    "• стиль/настроение\n"
+                    "• можно указать одежду/аксессуары\n",
                     reply_markup=_help_menu_for(user_id),
                 )
                 return {"ok": True}
 
-            await tg_send_message(chat_id, "Фото уже есть ✅ Теперь жду ТЕКСТ.", reply_markup=_main_menu_for(user_id))
-            return {"ok": True}
-
-        # ---- KLING 3.0: accept start/end frames in i2v / multishot ----
-        if st.get("mode") == "kling3_wait_prompt":
-            ks3 = st.get("kling3_settings") or {}
-            gen_mode = str(ks3.get("gen_mode") or "t2v").lower().strip()
-
-            # если режим не i2v/multishot — фото не нужно
-            if gen_mode not in ("i2v", "multishot"):
-                await tg_send_message(
-                    chat_id,
-                    "Для Kling 3.0 в режиме Text→Video фото не нужно.\n"
-                    "Открой WebApp и выбери Image→Video, либо пришли текстовый промпт.",
-                    reply_markup=_help_menu_for(user_id),
-                )
-                return {"ok": True}
-
-            # 1-й кадр
-            if not ks3.get("start_image_bytes"):
-                ks3["start_image_bytes"] = img_bytes
-                st["kling3_settings"] = ks3
+            if st.get("mode") == "poster":
+                st["poster"] = {"step": "need_prompt", "photo_bytes": img_bytes, "light": (st.get("poster") or {}).get("light", "bright")}
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
-                    "Стартовый кадр (1-й) получил ✅\n"
-                    "Если хочешь — пришли ещё одно фото как последний кадр.\n"
-                    "После этого пришли промпт.",
-                    reply_markup=_help_menu_for(user_id),
+                    "Фото получил. Теперь одним сообщением напиши:\n"
+                    "• для афиши: надпись/цена/стиль (или слово 'афиша')\n"
+                    "• для обычной картинки: опиши сцену (или 'без текста').",
+                    reply_markup=_poster_menu_keyboard((st.get("poster") or {}).get("light", "bright"))
                 )
                 return {"ok": True}
 
-            # последний кадр
-            if not ks3.get("end_image_bytes"):
-                ks3["end_image_bytes"] = img_bytes
-                st["kling3_settings"] = ks3
-                st["ts"] = _now()
-                await tg_send_message(
-                    chat_id,
-                    "Последний кадр получил ✅\nТеперь пришли промпт.",
-                    reply_markup=_help_menu_for(user_id),
+            if _is_math_request(incoming_text) or _infer_intent_from_text(incoming_text) == "math":
+                prompt = incoming_text if incoming_text else "Реши задачу с картинки. Дай решение по шагам и строку 'Ответ: ...'."
+                answer = await openai_chat_answer(
+                    user_text=prompt,
+                    system_prompt=UNICODE_MATH_SYSTEM_PROMPT,
+                    image_bytes=img_bytes,
+                    temperature=0.3,
+                    max_tokens=900,
                 )
+                if st.get("mode") == "chat":
+                    _ai_hist_add(st, "user", prompt)
+                    _ai_hist_add(st, "assistant", answer)
+                await tg_send_message(chat_id, answer, reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
-            await tg_send_message(
-                chat_id,
-                "1-й и последний кадры уже загружены ✅\nТеперь жду промпт (или /start чтобы выйти).",
-                reply_markup=_help_menu_for(user_id),
-            )
-            return {"ok": True}
-
-
-        # TWO PHOTOS mode
-        if st.get("mode") == "two_photos":
-            tp = st.get("two_photos") or {}
-            step = (tp.get("step") or "need_photo_1")
-
-            if step == "need_photo_1":
-                st["two_photos"] = {
-                    "step": "need_photo_2",
-                    "photo1_bytes": img_bytes,
-                    "photo1_file_id": file_id,
-                    "photo2_bytes": None,
-                    "photo2_file_id": None,
-                }
-                st["ts"] = _now()
-                await tg_send_message(chat_id, "Фото 1 получил. Теперь пришли Фото 2.", reply_markup=_main_menu_for(user_id))
-                return {"ok": True}
-
-            if step == "need_photo_2":
-                tp["photo2_bytes"] = img_bytes
-                tp["photo2_file_id"] = file_id
-                tp["step"] = "need_prompt"
-                st["two_photos"] = tp
-                st["ts"] = _now()
-                await tg_send_message(chat_id, "Фото 2 получил. Теперь напиши текстом, что сделать.", reply_markup=_main_menu_for(user_id))
-                return {"ok": True}
-
-            if step == "need_prompt":
-                await tg_send_message(chat_id, "Я уже получил 2 фото. Пришли текстом задачу (или /reset).", reply_markup=_main_menu_for(user_id))
-                return {"ok": True}
-
-        if st.get("mode") == "photosession":
-            st["photosession"] = {"step": "need_prompt", "photo_bytes": img_bytes, "photo_file_id": file_id}
-            st["ts"] = _now()
-            await tg_send_message(
-                chat_id,
-                "Фото получил. Теперь напиши задачу для фотосессии:\n"
-                "• где находится человек (место/фон)\n"
-                "• стиль/настроение\n"
-                "• можно указать одежду/аксессуары\n",
-                reply_markup=_help_menu_for(user_id),
-            )
-            return {"ok": True}
-
-        if st.get("mode") == "poster":
-            st["poster"] = {"step": "need_prompt", "photo_bytes": img_bytes, "light": (st.get("poster") or {}).get("light", "bright")}
-            st["ts"] = _now()
-            await tg_send_message(
-                chat_id,
-                "Фото получил. Теперь одним сообщением напиши:\n"
-                "• для афиши: надпись/цена/стиль (или слово 'афиша')\n"
-                "• для обычной картинки: опиши сцену (или 'без текста').",
-                reply_markup=_poster_menu_keyboard((st.get("poster") or {}).get("light", "bright"))
-            )
-            return {"ok": True}
-
-        if _is_math_request(incoming_text) or _infer_intent_from_text(incoming_text) == "math":
-            prompt = incoming_text if incoming_text else "Реши задачу с картинки. Дай решение по шагам и строку 'Ответ: ...'."
+            await tg_send_message(chat_id, "Фото получил. Анализирую...", reply_markup=_main_menu_for(user_id))
+            prompt = incoming_text if incoming_text else VISION_DEFAULT_USER_PROMPT
             answer = await openai_chat_answer(
                 user_text=prompt,
-                system_prompt=UNICODE_MATH_SYSTEM_PROMPT,
+                system_prompt=VISION_GENERAL_SYSTEM_PROMPT,
                 image_bytes=img_bytes,
-                temperature=0.3,
-                max_tokens=900,
+                temperature=0.4,
+                max_tokens=700,
             )
             if st.get("mode") == "chat":
                 _ai_hist_add(st, "user", prompt)
                 _ai_hist_add(st, "assistant", answer)
             await tg_send_message(chat_id, answer, reply_markup=_main_menu_for(user_id))
             return {"ok": True}
-
-        await tg_send_message(chat_id, "Фото получил. Анализирую...", reply_markup=_main_menu_for(user_id))
-        prompt = incoming_text if incoming_text else VISION_DEFAULT_USER_PROMPT
-        answer = await openai_chat_answer(
-            user_text=prompt,
-            system_prompt=VISION_GENERAL_SYSTEM_PROMPT,
-            image_bytes=img_bytes,
-            temperature=0.4,
-            max_tokens=700,
-        )
-        if st.get("mode") == "chat":
-            _ai_hist_add(st, "user", prompt)
-            _ai_hist_add(st, "assistant", answer)
-        await tg_send_message(chat_id, answer, reply_markup=_main_menu_for(user_id))
-        return {"ok": True}
 
     # ---------------- Текст без фото ----------------
     if incoming_text:
