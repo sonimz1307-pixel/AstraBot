@@ -63,8 +63,26 @@ async def handle_kling3_wait_prompt(
     aspect_ratio = str(settings.get("aspect_ratio") or "16:9")
 
     gen_mode = str(settings.get("gen_mode") or settings.get("flow") or settings.get("mode") or "t2v").lower().strip()
+
+    # нормализация синонимов из WebApp
+    if gen_mode in ("image_to_video", "image2video", "image->video", "img2vid", "img2video"):
+        gen_mode = "i2v"
+    elif gen_mode in ("multi_shots", "multishots", "multi-shot", "multi_shot"):
+        gen_mode = "multishot"
+
     if gen_mode not in ("t2v", "i2v", "multishot"):
         gen_mode = "t2v"
+
+    # HARD GUARD: в i2v без 1-го кадра не запускаем вообще
+    if gen_mode == "i2v" and not settings.get("start_image_bytes"):
+        await tg_send_message(
+            chat_id,
+            "❗Сначала пришли фото (1-й кадр).\n"
+            "Потом (опционально) ещё фото (последний кадр).\n"
+            "И только затем — промт.",
+            reply_markup=_main_menu_for(user_id),
+        )
+        return True
 
     flow = gen_mode  # backward compat
     prefer_multi_shots = bool(settings.get("prefer_multi_shots"))
@@ -72,18 +90,6 @@ async def handle_kling3_wait_prompt(
     # image bytes (optional)
     start_image_bytes: Optional[bytes] = settings.get("start_image_bytes")
     end_image_bytes: Optional[bytes] = settings.get("end_image_bytes")
-
-    # HARD GUARD: in image->video mode we MUST have the 1st frame.
-    # Otherwise we will accidentally run text->video.
-    if gen_mode == "i2v" and not start_image_bytes:
-        await tg_send_message(
-            chat_id,
-            "📷 Режим «Image → Video» выбран. Сначала пришли фото (1-й кадр).\n"
-            "Затем можно (опционально) прислать ещё фото (последний кадр).\n"
-            "После этого пришли промт.",
-            reply_markup=_main_menu_for(user_id),
-        )
-        return True
 
     # multi-shots
     multi_shots = settings.get("multi_shots") or None
