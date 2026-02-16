@@ -4952,8 +4952,55 @@ async def webhook(secret: str, request: Request):
                     reply_markup=_help_menu_for(user_id),
                 )
                 return {"ok": True}
+        # ---- KLING 3.0: accept start/end frames in i2v / multishot ----
+        if st.get("mode") == "kling3_wait_prompt":
+            ks3 = st.get("kling3_settings") or {}
+            gen_mode = str(ks3.get("gen_mode") or "t2v").lower().strip()
 
-# PHOTOSESSION mode (Seedream/ModelArk)
+            # если режим не i2v/multishot — фото не нужно
+            if gen_mode not in ("i2v", "multishot"):
+                await tg_send_message(
+                    chat_id,
+                    "Для Kling 3.0 в режиме Text→Video фото не нужно.\n"
+                    "Открой WebApp и выбери Image→Video, либо пришли текстовый промпт.",
+                    reply_markup=_help_menu_for(user_id),
+                )
+                return {"ok": True}
+
+            # 1-й кадр
+            if not ks3.get("start_image_bytes"):
+                ks3["start_image_bytes"] = img_bytes
+                st["kling3_settings"] = ks3
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    "Стартовый кадр (1-й) получил ✅\n"
+                    "Если хочешь — пришли ещё одно фото как последний кадр.\n"
+                    "После этого пришли промпт.",
+                    reply_markup=_help_menu_for(user_id),
+                )
+                return {"ok": True}
+
+            # последний кадр
+            if not ks3.get("end_image_bytes"):
+                ks3["end_image_bytes"] = img_bytes
+                st["kling3_settings"] = ks3
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    "Последний кадр получил ✅\nТеперь пришли промпт.",
+                    reply_markup=_help_menu_for(user_id),
+                )
+                return {"ok": True}
+
+            await tg_send_message(
+                chat_id,
+                "1-й и последний кадры уже загружены ✅\nТеперь жду промпт (или /start чтобы выйти).",
+                reply_markup=_help_menu_for(user_id),
+            )
+            return {"ok": True}
+
+        # PHOTOSESSION mode (Seedream/ModelArk)
         if st.get("mode") == "photosession":
             st["photosession"] = {"step": "need_prompt", "photo_bytes": img_bytes, "photo_file_id": file_id}
             st["ts"] = _now()
