@@ -4748,15 +4748,13 @@ async def webhook(secret: str, request: Request):
             ks3 = st.get("kling3_settings") or {}
             gen_mode = (ks3.get("gen_mode") or "t2v")
 
-            # Если режим не i2v/multishot — фото не нужно
+            # Если в настройках почему-то остался t2v, но пользователь прислал ФОТО —
+            # считаем это явным намерением сделать Image→Video и автоматически переключаемся.
             if gen_mode not in ("i2v", "multishot"):
-                await tg_send_message(
-                    chat_id,
-                    "Для Kling 3.0 в режиме Text→Video фото не нужно.\n"
-                    "Открой WebApp и выбери Image→Video, либо пришли текстовый промпт.",
-                    reply_markup=_help_menu_for(user_id),
-                )
-                return {"ok": True}
+                ks3["gen_mode"] = "i2v"
+                st["kling3_settings"] = ks3
+                st["ts"] = _now()
+                gen_mode = "i2v"
 
             # 1-й кадр
             if not ks3.get("start_image_bytes"):
