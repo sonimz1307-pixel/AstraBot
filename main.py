@@ -7,7 +7,7 @@ import json
 import hashlib
 import hmac
 import logging
-logger = logging.getLogger(__name__)
+ulog = logging.getLogger("uvicorn.error")
 from io import BytesIO
 from typing import Optional, Literal, Dict, Any, Tuple, List
 
@@ -3020,7 +3020,7 @@ async def webhook(secret: str, request: Request):
 
     message = update.get("message") or update.get("edited_message")
     try:
-        logger.info("IN_MSG_KEYS: %s", sorted(list(message.keys())) if isinstance(message, dict) else None)
+        ulog.info("IN_MSG_KEYS: %s", sorted(list(message.keys())) if isinstance(message, dict) else None)
     except Exception:
         pass
     if not message:
@@ -4652,12 +4652,16 @@ async def webhook(secret: str, request: Request):
     if photos:
         try:
             sb_state = None
-            if st.get('mode') != 'kling3_wait_prompt':
-                try:
-                    sb_state, _ = sb_get_user_state(user_id)
-                except Exception:
-                    sb_state = None
-            logger.info('MODE_ON_PHOTO: mode=%s sb_state=%s', st.get('mode'), sb_state)
+            try:
+                sb_state, _ = sb_get_user_state(user_id)
+            except Exception:
+                sb_state = None
+            ulog.info('MODE_ON_PHOTO: mode=%s sb_state=%s', st.get('mode'), sb_state)
+        except Exception:
+            pass
+        # TEMP DIAG: show user we received photo and current mode
+        try:
+            await tg_send_message(chat_id, f'📸 Фото дошло. mode={st.get("mode")}, sb_state={sb_state}')
         except Exception:
             pass
         largest = photos[-1]
