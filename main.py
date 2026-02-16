@@ -7,7 +7,6 @@ import json
 import hashlib
 import hmac
 import logging
-import sqlite3
 from io import BytesIO
 from typing import Optional, Literal, Dict, Any, Tuple, List
 
@@ -859,52 +858,6 @@ def _yk_extract_confirmation_url(payment_json: Dict[str, Any]) -> str:
 
 
 # ---------------- In-memory state ----------------
-# ---------------- Kling 3.0 settings persistence (shared across workers) ----------------
-# ВАЖНО: твой STATE хранится в RAM. Если у uvicorn/gunicorn >1 worker, то:
-#   WebApp-сообщение может попасть в worker A (настройки сохранились там),
-#   а фото — в worker B (там st пустой) => "реакции ноль".
-# Поэтому для Kling 3.0 сохраняем настройки в маленькую SQLite-базу (общая для всех workers процесса/контейнера).
-K3_DB_PATH = os.getenv("K3_DB_PATH", "kling3_state.sqlite3")
-
-def _k3_db() -> sqlite3.Connection:
-    con = sqlite3.connect(K3_DB_PATH, check_same_thread=False)
-    con.execute(
-        "CREATE TABLE IF NOT EXISTS kling3_settings ("
-        "user_id INTEGER PRIMARY KEY,"
-        "settings_json TEXT NOT NULL,"
-        "updated_at REAL NOT NULL"
-        ")"
-    )
-    return con
-
-def k3_save_settings(user_id: int, settings: Dict[str, Any]) -> None:
-    try:
-        con = _k3_db()
-        con.execute(
-            "INSERT INTO kling3_settings (user_id, settings_json, updated_at) "
-            "VALUES (?, ?, ?) "
-            "ON CONFLICT(user_id) DO UPDATE SET settings_json=excluded.settings_json, updated_at=excluded.updated_at",
-            (int(user_id), json.dumps(settings, ensure_ascii=False), float(_now())),
-        )
-        con.commit()
-        con.close()
-    except Exception:
-        # не мешаем боту работать, просто не будет persistence
-        pass
-
-def k3_load_settings(user_id: int) -> Dict[str, Any]:
-    try:
-        con = _k3_db()
-        cur = con.execute("SELECT settings_json FROM kling3_settings WHERE user_id=?", (int(user_id),))
-        row = cur.fetchone()
-        con.close()
-        if not row or not row[0]:
-            return {}
-        j = json.loads(row[0])
-        return j if isinstance(j, dict) else {}
-    except Exception:
-        return {}
-
 STATE_TTL_SECONDS = int(os.getenv("STATE_TTL_SECONDS", "1800"))  # 30 минут
 STATE: Dict[Tuple[int, int], Dict[str, Any]] = {}
 
@@ -3194,7 +3147,22 @@ async def webhook(secret: str, request: Request):
         return {"ok": True}
 
 
-    # ----- Supabase state resume (Music Future) -----
+    
+    # ----- Supabase state resume (Kling PRO 3.0) -----
+    # Важно: state в памяти может потеряться при рестарте/нескольких инстансах.
+    # Если в Supabase сохранён kling3_wait_prompt — восстанавливаем режим и настройки.
+    try:
+        sb_state, sb_payload = sb_get_user_state(user_id)
+        if sb_state == "kling3_wait_prompt" and isinstance(sb_payload, dict) and sb_payload:
+            if not st.get("kling3_settings"):
+                st["kling3_settings"] = sb_payload
+            if st.get("mode") != "kling3_wait_prompt":
+                st["mode"] = "kling3_wait_prompt"
+                st["ts"] = _now()
+    except Exception:
+        pass
+
+# ----- Supabase state resume (Music Future) -----
     # Если бот перезапустился, режим "ожидаем текст для музыки" берём из Supabase.
     if incoming_text and not (incoming_text.startswith("/") or incoming_text in ("⬅ Назад", "Назад")):
         sb_state, sb_payload = sb_get_user_state(user_id)
@@ -4009,10 +3977,14 @@ async def webhook(secret: str, request: Request):
                 "end_image_bytes": prev.get("end_image_bytes"),
             }
             st["ts"] = _now()
-            k3_save_settings(user_id, st.get("kling3_settings") or {})
-
 
             _set_mode(chat_id, user_id, "kling3_wait_prompt")
+
+            # persist to Supabase to survive restarts/multi-instances
+            try:
+                sb_set_user_state(user_id, "kling3_wait_prompt", st.get("kling3_settings") or {})
+            except Exception:
+                pass
 
             await tg_send_message(
                 chat_id,
@@ -4399,13 +4371,7 @@ async def webhook(secret: str, request: Request):
         )
         return {"ok": True}
 
-    # --- Kling3 persistence: если настройки были сохранены WebApp-ом, но этот апдейт в другом worker ---
-if (st.get("mode") == "kling3_wait_prompt") and not (st.get("kling3_settings") or {}):
-    loaded = k3_load_settings(user_id)
-    if loaded:
-        st["kling3_settings"] = loaded
-
-handled = await handle_kling3_wait_prompt(
+    handled = await handle_kling3_wait_prompt(
         chat_id=chat_id,
         user_id=user_id,
         incoming_text=incoming_text,
@@ -4736,13 +4702,7 @@ handled = await handle_kling3_wait_prompt(
             return {"ok": True}
 
 
-        # --- Kling3 persistence: если апдейт попал в другой worker, подтянем настройки из SQLite ---
-if not (st.get("kling3_settings") or {}):
-    loaded = k3_load_settings(user_id)
-    if loaded:
-        st["kling3_settings"] = loaded
-
-# ---- AUTO-ROUTE: если настройки Kling 3.0 уже сохранены, но mode почему-то не kling3_wait_prompt ----
+        # ---- AUTO-ROUTE: если настройки Kling 3.0 уже сохранены, но mode почему-то не kling3_wait_prompt ----
         try:
             ks3 = st.get("kling3_settings") or {}
             gen_mode = (ks3.get("gen_mode") or "t2v")
@@ -4758,71 +4718,7 @@ if not (st.get("kling3_settings") or {}):
         
         
         
-        
-        # ---- KLING 3.0: приём 1-го/последнего кадра через фото ----
-        if st.get("mode") == "kling3_wait_prompt":
-            ks3 = st.get("kling3_settings") or {}
-            gen_mode = str(ks3.get("gen_mode") or ks3.get("flow") or ks3.get("mode") or "t2v").lower().strip()
-
-            # нормализация синонимов (на всякий случай)
-            if gen_mode in ("image_to_video", "image2video", "image->video", "img2vid", "img2video", "image-to-video"):
-                gen_mode = "i2v"
-            elif gen_mode in ("multi_shots", "multishots", "multi-shot", "multi_shot", "multi shots"):
-                gen_mode = "multishot"
-
-            # Если пользователь прислал фото, но gen_mode не i2v — подскажем (и НЕ молчим)
-            if gen_mode not in ("i2v", "multishot"):
-                await tg_send_message(
-                    chat_id,
-                    ("ℹ️ Сейчас в Kling 3.0 выбран режим Text→Video.\n"
-                     "Если хочешь Image→Video — открой «🎬 Видео будущего», выбери Image→Video и снова пришли фото."),
-                    reply_markup=_main_menu_for(user_id),
-                )
-                return {"ok": True}
-
-            # 1) Стартовый кадр
-            if not ks3.get("start_image_bytes"):
-                ks3["start_image_bytes"] = img_bytes
-                ks3["start_image_file_id"] = file_id
-                st["kling3_settings"] = ks3
-                k3_save_settings(user_id, ks3)
-                st["ts"] = _now()
-                await tg_send_message(
-                    chat_id,
-                    ("✅ Фото 1 (стартовый кадр) получил.\n"
-                     "Теперь напиши промпт.\n"
-                     "Если хочешь задать последний кадр — пришли ещё одно фото."),
-                    reply_markup=_main_menu_for(user_id),
-                )
-                return {"ok": True}
-
-            # 2) Последний кадр (опционально)
-            if not ks3.get("end_image_bytes"):
-                ks3["end_image_bytes"] = img_bytes
-                ks3["end_image_file_id"] = file_id
-                st["kling3_settings"] = ks3
-                k3_save_settings(user_id, ks3)
-                st["ts"] = _now()
-                await tg_send_message(
-                    chat_id,
-                    "✅ Фото 2 (последний кадр) получил.\nТеперь напиши промпт.",
-                    reply_markup=_main_menu_for(user_id),
-                )
-                return {"ok": True}
-
-            # 3) Если оба уже были — перезапишем последний кадр
-            ks3["end_image_bytes"] = img_bytes
-            ks3["end_image_file_id"] = file_id
-            st["kling3_settings"] = ks3
-                k3_save_settings(user_id, ks3)
-            st["ts"] = _now()
-            await tg_send_message(
-                chat_id,
-                "✅ Последний кадр обновил.\nТеперь напиши промпт.",
-                reply_markup=_main_menu_for(user_id),
-            )
-            return {"ok": True}
-# ---- NANO BANANA: ждём фото ----
+        # ---- NANO BANANA: ждём фото ----
         if st.get("mode") == "nano_banana":
             nb = st.get("nano_banana") or {}
             step = (nb.get("step") or "need_photo")
@@ -4887,7 +4783,6 @@ if not (st.get("kling3_settings") or {}):
             if not ks3.get("start_image_bytes"):
                 ks3["start_image_bytes"] = img_bytes
                 st["kling3_settings"] = ks3
-                k3_save_settings(user_id, ks3)
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
@@ -4902,7 +4797,6 @@ if not (st.get("kling3_settings") or {}):
             if not ks3.get("end_image_bytes"):
                 ks3["end_image_bytes"] = img_bytes
                 st["kling3_settings"] = ks3
-                k3_save_settings(user_id, ks3)
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
@@ -5124,7 +5018,6 @@ if not (st.get("kling3_settings") or {}):
             if not ks3.get("start_image_bytes"):
                 ks3["start_image_bytes"] = img_bytes
                 st["kling3_settings"] = ks3
-                k3_save_settings(user_id, ks3)
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
@@ -5139,7 +5032,6 @@ if not (st.get("kling3_settings") or {}):
             if not ks3.get("end_image_bytes"):
                 ks3["end_image_bytes"] = img_bytes
                 st["kling3_settings"] = ks3
-                k3_save_settings(user_id, ks3)
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
