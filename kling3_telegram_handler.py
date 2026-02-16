@@ -38,8 +38,12 @@ async def handle_kling3_wait_prompt(
     - multi_shots (list of {prompt,duration})
     """
 
+    # AUTO-RECOVERY: если есть kling3_settings — считаем что ждём промпт
     if st.get("mode") != "kling3_wait_prompt":
-        return False
+        if st.get("kling3_settings"):
+            st["mode"] = "kling3_wait_prompt"
+        else:
+            return False
 
     # ignore navigation/menu text while waiting prompt
     if deps.get("_is_nav_or_menu_text") and deps["_is_nav_or_menu_text"](incoming_text):
