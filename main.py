@@ -7,6 +7,7 @@ import json
 import hashlib
 import hmac
 import logging
+logger = logging.getLogger(__name__)
 from io import BytesIO
 from typing import Optional, Literal, Dict, Any, Tuple, List
 
@@ -3018,6 +3019,10 @@ async def webhook(secret: str, request: Request):
 
 
     message = update.get("message") or update.get("edited_message")
+    try:
+        logger.info("IN_MSG_KEYS: %s", sorted(list(message.keys())) if isinstance(message, dict) else None)
+    except Exception:
+        pass
     if not message:
         return {"ok": True}
 
@@ -4645,6 +4650,16 @@ async def webhook(secret: str, request: Request):
     # ---------------- Фото (photo) ----------------
     photos = message.get("photo") or []
     if photos:
+        try:
+            sb_state = None
+            if st.get('mode') != 'kling3_wait_prompt':
+                try:
+                    sb_state, _ = sb_get_user_state(user_id)
+                except Exception:
+                    sb_state = None
+            logger.info('MODE_ON_PHOTO: mode=%s sb_state=%s', st.get('mode'), sb_state)
+        except Exception:
+            pass
         largest = photos[-1]
         file_id = largest.get("file_id")
         if not file_id:
@@ -4710,14 +4725,7 @@ async def webhook(secret: str, request: Request):
             )
             return {"ok": True}
 
-                # DEBUG: see active mode when photo arrives
-        try:
-            sb_state, _sb_payload = sb_get_user_state(user_id)
-        except Exception:
-            sb_state = None
-        print("MODE_ON_PHOTO", st.get("mode"), sb_state)
-
-# ---- KLING 3.0: приём 1-го/последнего кадра через фото ----
+        # ---- KLING 3.0: приём 1-го/последнего кадра через фото ----
         if st.get("mode") == "kling3_wait_prompt":
             ks3 = st.get("kling3_settings") or {}
             gen_mode = (ks3.get("gen_mode") or "t2v")
