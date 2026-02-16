@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import logging
 ulog = logging.getLogger("uvicorn.error")
+ulog.warning("BOOT_MARKER_MAIN 2026-02-16T20:32:15.148629Z")
 from io import BytesIO
 from typing import Optional, Literal, Dict, Any, Tuple, List
 
@@ -3019,6 +3020,11 @@ async def webhook(secret: str, request: Request):
 
 
     message = update.get("message") or update.get("edited_message")
+    try:
+        if isinstance(message, dict) and message.get("photo"):
+            ulog.warning("PHOTO_KEY_SEEN: chat_id=%s user_id=%s sizes=%s", (message.get("chat") or {}).get("id"), (message.get("from") or {}).get("id"), len(message.get("photo") or []))
+    except Exception:
+        pass
     if not message:
         return {"ok": True}
 
@@ -3184,72 +3190,6 @@ async def webhook(secret: str, request: Request):
             payload = json.loads(raw) if isinstance(raw, str) else (raw or {})
         except Exception:
             payload = {"raw": raw}
-
-        # ----- WebApp data (Kling PRO 3.0 settings) -----
-        # ВАЖНО: Kling 3.0 payload НЕ должен проваливаться в legacy Kling 1.6 обработчик.
-        if str(payload.get("type") or "").lower().strip() == "kling3_settings":
-            try:
-                resolution = str(payload.get("resolution") or "720")
-                enable_audio = bool(payload.get("enable_audio"))
-                duration = int(payload.get("duration") or 5)
-
-                # Только 16:9 или 9:16
-                aspect_ratio = str(payload.get("aspect_ratio") or "16:9")
-                aspect_ratio = "9:16" if aspect_ratio == "9:16" else "16:9"
-
-                # режим
-                gen_mode = (
-                    str(payload.get("gen_mode") or payload.get("flow") or payload.get("kling3_gen_mode") or "t2v")
-                    .lower()
-                    .strip()
-                )
-                if gen_mode not in ("t2v", "i2v", "multishot"):
-                    gen_mode = "t2v"
-
-                multi_shots = payload.get("multi_shots") or None
-                prefer_multi_shots = bool(payload.get("prefer_multi_shots"))
-
-                prev = st.get("kling3_settings") or {}
-                st["kling3_settings"] = {
-                    "resolution": resolution,
-                    "enable_audio": enable_audio,
-                    "duration": duration,
-                    "aspect_ratio": aspect_ratio,
-                    "gen_mode": gen_mode,
-                    "multi_shots": multi_shots,
-                    "prefer_multi_shots": prefer_multi_shots,
-                    "start_image_bytes": prev.get("start_image_bytes"),
-                    "end_image_bytes": prev.get("end_image_bytes"),
-                }
-                st["ts"] = _now()
-
-                _set_mode(chat_id, user_id, "kling3_wait_prompt")
-                # Persist Kling3 state to Supabase (survives multi-instance/restarts)
-                try:
-                    sb_set_user_state(user_id, "kling3_wait_prompt", st.get("kling3_settings") or {})
-                except Exception:
-                    pass
-
-                await tg_send_message(
-                    chat_id,
-                    "✅ Kling PRO 3.0 настройки сохранены.\n"
-                    f"Режим: {gen_mode}\n"
-                    f"{resolution}p • {duration} сек • {'Audio ON' if enable_audio else 'Audio OFF'}\n"
-                    f"Формат: {aspect_ratio}\n"
-                    f"1-й кадр: {'да' if st['kling3_settings'].get('start_image_bytes') else 'нет'} • "
-                    f"последний: {'да' if st['kling3_settings'].get('end_image_bytes') else 'нет'}\n\n"
-                    "Дальше:\n"
-                    "• Text→Video: пришли промпт\n"
-                    "• Image→Video: пришли фото (1-й кадр), затем (опционально) ещё фото (последний кадр), затем промпт\n"
-                    "• Multi-shot: пришли промпт multi-shot (или позже добавим UI), затем запуск",
-                    reply_markup=_help_menu_for(user_id),
-                )
-                return {"ok": True}
-            except Exception as e:
-                # не даём провалиться в legacy-обработчик
-                await tg_send_message(chat_id, f"Ошибка Kling 3.0 настроек: {e}", reply_markup=_help_menu_for(user_id))
-                return {"ok": True}
-
 
         # ----- WebApp data (Music settings) -----
         # Поддерживаем разные версии WebApp payload:
@@ -4709,26 +4649,9 @@ async def webhook(secret: str, request: Request):
         )
         return {"ok": True}
 
-    # Kling 3.0 restore on photo (only when photo arrives, to avoid slowing all updates)
-    if (message.get("photo") or []) and st.get("mode") != "kling3_wait_prompt":
-        try:
-            sb_state, sb_payload = sb_get_user_state(user_id)
-            if sb_state == "kling3_wait_prompt" and isinstance(sb_payload, dict) and sb_payload:
-                st["kling3_settings"] = sb_payload
-                _set_mode(chat_id, user_id, "kling3_wait_prompt")
-        except Exception:
-            pass
-
-
-
     # ---------------- Фото (photo) ----------------
     photos = message.get("photo") or []
     if photos:
-        # K3_PHOTO_DIAG
-        try:
-            ulog.warning('PHOTO_IN: mode=%s has_k3=%s', st.get('mode'), bool(st.get('kling3_settings')))
-        except Exception:
-            pass
         largest = photos[-1]
         file_id = largest.get("file_id")
         if not file_id:
@@ -4795,17 +4718,6 @@ async def webhook(secret: str, request: Request):
             return {"ok": True}
 
         # ---- KLING 3.0: приём 1-го/последнего кадра через фото ----
-
-        # Быстрый ACK, чтобы не было "тишины"
-        if st.get("mode") == "kling3_wait_prompt":
-            try:
-                await tg_send_message(chat_id, "📸 Фото получил для Kling PRO 3.0 ✅", reply_markup=_help_menu_for(user_id))
-            except Exception as e:
-                try:
-                    ulog.warning("TG_ACK_FAIL: %s", e)
-                except Exception:
-                    pass
-
         if st.get("mode") == "kling3_wait_prompt":
             ks3 = st.get("kling3_settings") or {}
             gen_mode = (ks3.get("gen_mode") or "t2v")
@@ -4825,10 +4737,6 @@ async def webhook(secret: str, request: Request):
                 ks3["start_image_bytes"] = img_bytes
                 st["kling3_settings"] = ks3
                 st["ts"] = _now()
-                try:
-                    sb_set_user_state(user_id, "kling3_wait_prompt", st.get("kling3_settings") or {})
-                except Exception:
-                    pass
                 await tg_send_message(
                     chat_id,
                     "Стартовый кадр (1-й) получил ✅\n"
@@ -4843,10 +4751,6 @@ async def webhook(secret: str, request: Request):
                 ks3["end_image_bytes"] = img_bytes
                 st["kling3_settings"] = ks3
                 st["ts"] = _now()
-                try:
-                    sb_set_user_state(user_id, "kling3_wait_prompt", st.get("kling3_settings") or {})
-                except Exception:
-                    pass
                 await tg_send_message(
                     chat_id,
                     "Последний кадр получил ✅\nТеперь пришли промпт.",
