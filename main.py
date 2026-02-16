@@ -3119,21 +3119,6 @@ async def webhook(secret: str, request: Request):
 
     # ✅ Telegram: текст может быть в caption
     incoming_text = (message.get("text") or message.get("caption") or "").strip()
-    # ⚠️ ВАЖНО (альбомы/подписи): если пришло фото/картинка как part of media group,
-    # Telegram кладёт текст в caption. Но для Kling 3.0 (i2v/multishot) caption НЕ должен
-    # перехватываться как промпт ДО сохранения кадров. Иначе обработчик текста вернёт early-return,
-    # и фото-ветка не выполнится.
-    has_photo = bool(message.get("photo"))
-    doc = message.get("document") or {}
-    doc_mime = (doc.get("mime_type") or "").lower().strip() if isinstance(doc, dict) else ""
-    has_image_doc = bool(doc) and doc_mime.startswith("image/")
-    if (has_photo or has_image_doc) and st.get("mode") == "kling3_wait_prompt":
-        ks3 = st.get("kling3_settings") or {}
-        gen_mode = str(ks3.get("gen_mode") or "t2v").lower().strip()
-        if gen_mode in ("i2v", "multishot"):
-            # игнорируем caption в этом апдейте, чтобы не сработал prompt-handler раньше фото-ветки
-            incoming_text = ""
-
 
     # Execution guard: while a long generation is running, ignore accidental navigation/button texts
     # so they do not get interpreted as prompts and start a second generation.
@@ -3147,22 +3132,7 @@ async def webhook(secret: str, request: Request):
         return {"ok": True}
 
 
-    
-    # ----- Supabase state resume (Kling PRO 3.0) -----
-    # Важно: state в памяти может потеряться при рестарте/нескольких инстансах.
-    # Если в Supabase сохранён kling3_wait_prompt — восстанавливаем режим и настройки.
-    try:
-        sb_state, sb_payload = sb_get_user_state(user_id)
-        if sb_state == "kling3_wait_prompt" and isinstance(sb_payload, dict) and sb_payload:
-            if not st.get("kling3_settings"):
-                st["kling3_settings"] = sb_payload
-            if st.get("mode") != "kling3_wait_prompt":
-                st["mode"] = "kling3_wait_prompt"
-                st["ts"] = _now()
-    except Exception:
-        pass
-
-# ----- Supabase state resume (Music Future) -----
+    # ----- Supabase state resume (Music Future) -----
     # Если бот перезапустился, режим "ожидаем текст для музыки" берём из Supabase.
     if incoming_text and not (incoming_text.startswith("/") or incoming_text in ("⬅ Назад", "Назад")):
         sb_state, sb_payload = sb_get_user_state(user_id)
@@ -3945,13 +3915,6 @@ async def webhook(secret: str, request: Request):
                 .lower()
                 .strip()
             )
-
-            # нормализация синонимов из WebApp
-            if gen_mode in ("image_to_video", "image2video", "image->video", "img2vid", "img2video"):
-                gen_mode = "i2v"
-            elif gen_mode in ("multi_shots", "multishots", "multi-shot", "multi_shot"):
-                gen_mode = "multishot"
-
             if gen_mode not in ("t2v", "i2v", "multishot"):
                 gen_mode = "t2v"
 
@@ -3979,12 +3942,6 @@ async def webhook(secret: str, request: Request):
             st["ts"] = _now()
 
             _set_mode(chat_id, user_id, "kling3_wait_prompt")
-
-            # persist to Supabase to survive restarts/multi-instances
-            try:
-                sb_set_user_state(user_id, "kling3_wait_prompt", st.get("kling3_settings") or {})
-            except Exception:
-                pass
 
             await tg_send_message(
                 chat_id,
@@ -4702,17 +4659,6 @@ async def webhook(secret: str, request: Request):
             return {"ok": True}
 
 
-        # ---- AUTO-ROUTE: если настройки Kling 3.0 уже сохранены, но mode почему-то не kling3_wait_prompt ----
-        try:
-            ks3 = st.get("kling3_settings") or {}
-            gen_mode = (ks3.get("gen_mode") or "t2v")
-            if gen_mode in ("i2v", "multishot") and st.get("mode") != "kling3_wait_prompt":
-                st["mode"] = "kling3_wait_prompt"
-                st["ts"] = _now()
-        except Exception:
-            pass
-
-
 
         
         
@@ -4999,55 +4945,8 @@ async def webhook(secret: str, request: Request):
                     reply_markup=_help_menu_for(user_id),
                 )
                 return {"ok": True}
-        # ---- KLING 3.0: accept start/end frames in i2v / multishot ----
-        if st.get("mode") == "kling3_wait_prompt":
-            ks3 = st.get("kling3_settings") or {}
-            gen_mode = str(ks3.get("gen_mode") or "t2v").lower().strip()
 
-            # если режим не i2v/multishot — фото не нужно
-            if gen_mode not in ("i2v", "multishot"):
-                await tg_send_message(
-                    chat_id,
-                    "Для Kling 3.0 в режиме Text→Video фото не нужно.\n"
-                    "Открой WebApp и выбери Image→Video, либо пришли текстовый промпт.",
-                    reply_markup=_help_menu_for(user_id),
-                )
-                return {"ok": True}
-
-            # 1-й кадр
-            if not ks3.get("start_image_bytes"):
-                ks3["start_image_bytes"] = img_bytes
-                st["kling3_settings"] = ks3
-                st["ts"] = _now()
-                await tg_send_message(
-                    chat_id,
-                    "Стартовый кадр (1-й) получил ✅\n"
-                    "Если хочешь — пришли ещё одно фото как последний кадр.\n"
-                    "После этого пришли промпт.",
-                    reply_markup=_help_menu_for(user_id),
-                )
-                return {"ok": True}
-
-            # последний кадр
-            if not ks3.get("end_image_bytes"):
-                ks3["end_image_bytes"] = img_bytes
-                st["kling3_settings"] = ks3
-                st["ts"] = _now()
-                await tg_send_message(
-                    chat_id,
-                    "Последний кадр получил ✅\nТеперь пришли промпт.",
-                    reply_markup=_help_menu_for(user_id),
-                )
-                return {"ok": True}
-
-            await tg_send_message(
-                chat_id,
-                "1-й и последний кадры уже загружены ✅\nТеперь жду промпт (или /start чтобы выйти).",
-                reply_markup=_help_menu_for(user_id),
-            )
-            return {"ok": True}
-
-        # PHOTOSESSION mode (Seedream/ModelArk)
+# PHOTOSESSION mode (Seedream/ModelArk)
         if st.get("mode") == "photosession":
             st["photosession"] = {"step": "need_prompt", "photo_bytes": img_bytes, "photo_file_id": file_id}
             st["ts"] = _now()
@@ -5156,17 +5055,6 @@ async def webhook(secret: str, request: Request):
             )
             return {"ok": True}
 
-
-
-        # ---- FALLBACK: фото пришло, но активный режим не ожидает фото ----
-        await tg_send_message(
-            chat_id,
-            f"Фото получил ✅\nНо текущий режим: {st.get('mode')}.\n\n"
-            "Если тебе нужен Kling 3.0 Image→Video: открой «🎬 Видео будущего» (WebApp), выбери Image→Video и пришли фото ещё раз.\n"
-            "Если нужен Motion Control: сначала фото аватара, потом видео с движением.",
-            reply_markup=_help_menu_for(user_id),
-        )
-        return {"ok": True}
 
     # ---------------- Фото (document image/*) ----------------
     doc = message.get("document") or {}
