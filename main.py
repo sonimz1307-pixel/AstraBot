@@ -4710,7 +4710,14 @@ async def webhook(secret: str, request: Request):
             )
             return {"ok": True}
 
-        # ---- KLING 3.0: приём 1-го/последнего кадра через фото ----
+                # DEBUG: see active mode when photo arrives
+        try:
+            sb_state, _sb_payload = sb_get_user_state(user_id)
+        except Exception:
+            sb_state = None
+        print("MODE_ON_PHOTO", st.get("mode"), sb_state)
+
+# ---- KLING 3.0: приём 1-го/последнего кадра через фото ----
         if st.get("mode") == "kling3_wait_prompt":
             ks3 = st.get("kling3_settings") or {}
             gen_mode = (ks3.get("gen_mode") or "t2v")
