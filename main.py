@@ -4681,6 +4681,17 @@ async def webhook(secret: str, request: Request):
             return {"ok": True}
 
 
+        # ---- AUTO-ROUTE: если настройки Kling 3.0 уже сохранены, но mode почему-то не kling3_wait_prompt ----
+        try:
+            ks3 = st.get("kling3_settings") or {}
+            gen_mode = (ks3.get("gen_mode") or "t2v")
+            if gen_mode in ("i2v", "multishot") and st.get("mode") != "kling3_wait_prompt":
+                st["mode"] = "kling3_wait_prompt"
+                st["ts"] = _now()
+        except Exception:
+            pass
+
+
 
         
         
@@ -4701,16 +4712,6 @@ async def webhook(secret: str, request: Request):
                     reply_markup=_photo_future_menu_keyboard(),
                 )
                 return {"ok": True}
-
-
-        # ---- KLING 3.0: авто-приём фото для Image→Video (на случай если mode ещё не kling3_wait_prompt) ----
-        # Иногда пользователь закрывает WebApp/настройки, но фото присылает сразу — тогда фото "теряется".
-        # Если настройки Kling 3.0 уже сохранены и выбран i2v/multishot, переключаемся в нужный режим здесь.
-        if st.get("mode") in (None, "", "chat") and st.get("kling3_settings"):
-            ks3 = st.get("kling3_settings") or {}
-            gen_mode = (ks3.get("gen_mode") or "t2v")
-            if gen_mode in ("i2v", "multishot"):
-                _set_mode(chat_id, user_id, "kling3_wait_prompt")
 
 # ---- KLING Image → Video: step=need_image ----
         if st.get("mode") == "kling_i2v":
@@ -5134,6 +5135,17 @@ async def webhook(secret: str, request: Request):
             )
             return {"ok": True}
 
+
+
+        # ---- FALLBACK: фото пришло, но активный режим не ожидает фото ----
+        await tg_send_message(
+            chat_id,
+            f"Фото получил ✅\nНо текущий режим: {st.get('mode')}.\n\n"
+            "Если тебе нужен Kling 3.0 Image→Video: открой «🎬 Видео будущего» (WebApp), выбери Image→Video и пришли фото ещё раз.\n"
+            "Если нужен Motion Control: сначала фото аватара, потом видео с движением.",
+            reply_markup=_help_menu_for(user_id),
+        )
+        return {"ok": True}
 
     # ---------------- Фото (document image/*) ----------------
     doc = message.get("document") or {}
