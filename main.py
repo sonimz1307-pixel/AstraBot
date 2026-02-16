@@ -3017,7 +3017,7 @@ async def webhook(secret: str, request: Request):
         return {"ok": True}
 
 
-    message = update.get("message") or update.get("edited_message")
+    message = update.get("message") or update.get("edited_message") or update.get("channel_post") or update.get("edited_channel_post")
     if not message:
         return {"ok": True}
 
@@ -3032,6 +3032,17 @@ async def webhook(secret: str, request: Request):
 
     if not chat_id or not user_id:
         return {"ok": True}
+
+
+    # DEBUG: log message keys (helps diagnose "photo not detected")
+    try:
+        print("IN_MSG_KEYS:", sorted(list(message.keys())))
+        if message.get("photo"):
+            print("IN_HAS_PHOTO:", len(message.get("photo") or []))
+        if message.get("document"):
+            print("IN_HAS_DOC:", (message.get("document") or {}).get("mime_type"))
+    except Exception:
+        pass
 
 
     # --- Stars: successful payment ---
@@ -3941,9 +3952,6 @@ async def webhook(secret: str, request: Request):
             }
             st["ts"] = _now()
 
-
-            # persist state (so photo step survives Render restarts / multi-instances)
-            sb_set_user_state(user_id, "kling3_wait_prompt", st["kling3_settings"])
             _set_mode(chat_id, user_id, "kling3_wait_prompt")
 
             await tg_send_message(
@@ -4645,6 +4653,15 @@ async def webhook(secret: str, request: Request):
         )
         return {"ok": True}
 
+    # Если прислали картинку как документ (file), но mime_type image/* — обрабатываем как фото
+    if not (message.get("photo") or []) and message.get("document"):
+        doc = message.get("document") or {}
+        mt = (doc.get("mime_type") or "").lower()
+        if mt.startswith("image/") and doc.get("file_id"):
+            # эмулируем photos[-1].file_id
+            message["photo"] = [{"file_id": doc.get("file_id")}]
+
+
     # ---------------- Фото (photo) ----------------
     photos = message.get("photo") or []
     if photos:
@@ -4667,15 +4684,6 @@ async def webhook(secret: str, request: Request):
         
         
         
-        
-        # ---- Restore Kling 3.0 waiting state on photo (if bot restarted / state lost) ----
-        if (st.get("mode") in (None, "chat")):
-            sb_state, sb_payload = sb_get_user_state(user_id)
-            if sb_state == "kling3_wait_prompt" and isinstance(sb_payload, dict) and sb_payload:
-                st["kling3_settings"] = sb_payload
-                _set_mode(chat_id, user_id, "kling3_wait_prompt")
-
-
         # ---- NANO BANANA: ждём фото ----
         if st.get("mode") == "nano_banana":
             nb = st.get("nano_banana") or {}
