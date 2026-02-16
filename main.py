@@ -4702,6 +4702,16 @@ async def webhook(secret: str, request: Request):
                 )
                 return {"ok": True}
 
+
+        # ---- KLING 3.0: авто-приём фото для Image→Video (на случай если mode ещё не kling3_wait_prompt) ----
+        # Иногда пользователь закрывает WebApp/настройки, но фото присылает сразу — тогда фото "теряется".
+        # Если настройки Kling 3.0 уже сохранены и выбран i2v/multishot, переключаемся в нужный режим здесь.
+        if st.get("mode") in (None, "", "chat") and st.get("kling3_settings"):
+            ks3 = st.get("kling3_settings") or {}
+            gen_mode = (ks3.get("gen_mode") or "t2v")
+            if gen_mode in ("i2v", "multishot"):
+                _set_mode(chat_id, user_id, "kling3_wait_prompt")
+
 # ---- KLING Image → Video: step=need_image ----
         if st.get("mode") == "kling_i2v":
             ki = st.get("kling_i2v") or {}
