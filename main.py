@@ -4460,7 +4460,7 @@ async def webhook(secret: str, request: Request):
                     reference_images_bytes=None,
                 )
             except Exception as e:
-                await tg_send_message(chat_id, f"❌ Ошибка Veo: {e}", reply_markup=_help_menu_for(user_id))
+                await tg_send_message(chat_id, f"⚠️ Veo временно недоступен. Попробуй через минуту", reply_markup=_help_menu_for(user_id))
                 return {"ok": True}
 
             try:
@@ -4591,7 +4591,7 @@ async def webhook(secret: str, request: Request):
                         last_frame_bytes=last_frame_bytes if last_frame_bytes else None,
                     )
                 except Exception as e:
-                    await tg_send_message(chat_id, f"❌ Ошибка Veo: {e}", reply_markup=_help_menu_for(user_id))
+                    await tg_send_message(chat_id, f"⚠️ Veo временно недоступен. Попробуй через минуту", reply_markup=_help_menu_for(user_id))
                     return {"ok": True}
 
                 try:
