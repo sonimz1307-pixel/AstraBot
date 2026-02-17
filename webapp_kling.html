@@ -349,8 +349,12 @@
 
       <div class="card" id="kling3Options" style="display:none;">
         <h3>Kling PRO 3.0 — настройки</h3>
+        <div style="margin-top:10px;">
+          <label class="badge" style="display:inline-block;margin-bottom:8px;">Режим</label>
+        </div>
 
-        <div class="seg" role="radiogroup" aria-label="Режим Kling 3.0" style="margin-top:10px;">
+
+        <div class="seg" role="radiogroup" aria-label="Режим Kling 3.0">
           <input id="k3_mode_i2v" type="radio" name="kling3_gen_mode" value="i2v" checked>
           <label for="k3_mode_i2v">
             <span class="name">Image → Video</span>
@@ -363,6 +367,11 @@
             <span class="desc">Только промпт</span>
           </label>
         </div>
+
+        <div style="margin-top:14px;">
+          <label class="badge" style="display:inline-block;margin-bottom:8px;">Качество</label>
+        </div>
+
 
 
         <div class="seg" role="radiogroup" aria-label="Разрешение Kling 3.0">
@@ -379,17 +388,17 @@
           </label>
         </div>
 
-        <div class="row" style="margin-top:10px;">
+        <div class="row" style="margin-top:12px;">
           <div style="flex:1; min-width: 180px;">
             <label class="badge" style="display:inline-block;margin-bottom:8px;">Формат</label>
-            <select id="kling3_aspect" aria-label="Формат Kling 3.0">
+            <select id="kling3_aspect">
               <option value="16:9" selected>16:9 (горизонтально)</option>
               <option value="9:16">9:16 (вертикально)</option>
             </select>
           </div>
         </div>
 
-        <div class="toggle" style="margin-top:10px;">
+        <div class="toggle" style="margin-top:12px;">
           <div class="left">
             <div class="tname">Multi-shot</div>
             <div class="tdesc">Сценарий из нескольких планов (запуск по промпту). В тексте используй планы/шоты.</div>
@@ -596,6 +605,8 @@
     function getKlingVersion(){ return qs('input[name="kling_version"]:checked')?.value || "1_6"; }
     function getKling3Resolution(){ return qs('input[name="kling3_resolution"]:checked')?.value || "720"; }
     function getKling3GenMode(){ return qs('input[name="kling3_gen_mode"]:checked')?.value || "i2v"; }
+    function getKling3Aspect(){ return qs('#kling3_aspect')?.value || "16:9"; }
+    function getKling3PreferMultiShots(){ return !!qs('#kling3_multishot')?.checked; }
 
 
     // Veo getters
@@ -776,8 +787,9 @@ updateTokenRateHint(); }));
               enable_audio,
               duration,
               gen_mode: getKling3GenMode(),
-              aspect_ratio: (qs('#kling3_aspect')?.value || "16:9"),
-              prefer_multi_shots: !!qs('#kling3_multishot')?.checked};
+              aspect_ratio: getKling3Aspect(),
+              prefer_multi_shots: getKling3PreferMultiShots()
+            };
           }
         } else {
           const veo_model = getVeoModel(); // fast|pro
