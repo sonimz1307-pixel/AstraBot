@@ -153,7 +153,7 @@ async def create_kling3_task(
         elif start_image_bytes[:12].startswith(b"RIFF") and start_image_bytes[8:12] == b"WEBP":
             ct, ext = "image/webp", "webp"
         url = _sb_upload_bytes_public(bytes(start_image_bytes), ext=ext, content_type=ct)
-        input_obj["start_image_url"] = url
+        input_obj["image_url"] = url
 
     if end_image_bytes:
         ct, ext = "image/jpeg", "jpg"
