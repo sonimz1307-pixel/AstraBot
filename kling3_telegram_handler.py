@@ -7,7 +7,38 @@ from billing_db import ensure_user_row, get_balance, add_tokens
 
 
 def _friendly_kling3_error(err: Exception) -> str:
-    msg = (str(err) or "").strip().lower()
+    """
+    Делает ошибки понятными.
+    ВАЖНО: не маскируем локальные/пред-PiAPI ошибки под "сервер перегружен".
+    """
+    raw = (str(err) or "").strip()
+    msg = raw.lower()
+
+    # --- Локальные ошибки ДО PiAPI ---
+    if "piapi key is not set" in msg or "piapi_api_key" in msg or "piapi_key" in msg:
+        return "⚠️ Не настроен ключ PiAPI (env PIAPI_API_KEY). Проверь переменные окружения Render."
+
+    if "supabase upload failed" in msg or "storage" in msg:
+        return "⚠️ Не удалось загрузить кадр в хранилище (Supabase Storage). Проверь bucket/права/ключи."
+
+    # Частый кейс: мы сами выбрасываем 'Kling3 create failed: ...'
+    if "kling3 create failed" in msg:
+        return f"⚠️ Не удалось СОЗДАТЬ задачу Kling 3.0 в PiAPI.\nДетали: {raw}"
+
+    # --- Ошибки PiAPI/провайдера ---
+    if "timeout" in msg:
+        return "⚠️ Сервер Kling долго отвечает. Попробуй ещё раз через пару минут."
+
+    if "rate" in msg and "limit" in msg:
+        return "⚠️ Лимит запросов. Попробуй ещё раз через пару минут."
+
+    # ВАЖНО: убрали общий триггер 'failed' — он маскировал 'create failed'
+    if "task failed" in msg:
+        return "⚠️ Сервер Kling сейчас перегружен или временно недоступен. Попробуй ещё раз через пару минут."
+
+    # Fallback (коротко, но с деталями)
+    return f"⚠️ Не получилось выполнить генерацию.\nДетали: {raw}"
+
 
     # Common PiAPI/Kling runner patterns
     if "timeout" in msg:
