@@ -4284,9 +4284,24 @@ async def webhook(secret: str, request: Request):
                     await tg_send_message(chat_id, f"❌ Музыка не сгенерировалась: {status}\n{err}")
                     return {"ok": True}
 
-                out = data.get("output") or []
-                if isinstance(out, dict):
-                    out = [out]
+                output = data.get("output") or {}
+
+                # 🔥 Udio (model=music-u) возвращает output.songs[]
+                if isinstance(output, dict) and isinstance(output.get("songs"), list):
+                    out = output.get("songs") or []
+                    # Нормализуем поля под существующий рендер (audio_url/image_url)
+                    for it in out:
+                        if isinstance(it, dict):
+                            if not it.get("audio_url") and it.get("song_path"):
+                                it["audio_url"] = it.get("song_path")
+                            if not it.get("image_url") and it.get("image_path"):
+                                it["image_url"] = it.get("image_path")
+                else:
+                    # suno-like
+                    out = output or []
+                    if isinstance(out, dict):
+                        out = [out]
+
                 if not out:
                     await tg_send_message(chat_id, "✅ Готово, но PiAPI не вернул output. Проверь task в кабинете.")
                     return {"ok": True}
