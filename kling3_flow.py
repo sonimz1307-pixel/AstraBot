@@ -1,6 +1,7 @@
 import httpx
 import os
 import logging
+import re
 from typing import Dict, Any, Optional, List
 
 from db_supabase import supabase as sb  # service key client
@@ -136,7 +137,102 @@ def _append_frame_constraints_to_prompt(prompt: str, has_start: bool, has_end: b
         # Rare case, but supported
         lines.append("Use @image_1 as the end frame reference. Move naturally toward that final frame.")
 
-    return " ".join(lines).strip()
+    return " ".join(lines
+
+def _parse_multishot_prompt(prompt: str) -> Optional[List[Dict[str, Any]]]:
+    """
+    Parse a user prompt into structured multi_shots.
+
+    Supported examples:
+      SHOT 1 (3s): ...text...
+      Shot 2 (4): ...text...
+      SHOT 3: ...text...          (duration default = 3)
+      1) (3s) ...text...
+      2) ...text...              (duration default = 3)
+
+    Rules:
+      - max 6 shots
+      - each duration 1..14
+      - total duration <= 15
+    Returns list[{"prompt": str, "duration": int}] or None if not detected.
+    """
+    p = (prompt or "").strip()
+    if not p:
+        return None
+
+    lines = [ln.strip() for ln in p.splitlines() if ln.strip()]
+    if not lines:
+        return None
+
+    shots: List[Dict[str, Any]] = []
+    # Patterns: "SHOT 1 (3s): text", "1) (3s) text", "SHOT 1: text"
+    pat = re.compile(
+        r'^(?:shot\s*(\d+)|(\d+)[\)\.\-])\s*'          # shot number (optional)
+        r'(?:\(\s*(\d+)\s*s?\s*\)\s*)?'                # optional duration in seconds
+        r'[:\-]?\s*(.+)$',
+        re.IGNORECASE
+    )
+
+    for ln in lines:
+        mm = pat.match(ln)
+        if not mm:
+            # If we already started collecting shots, treat non-matching as continuation of last shot
+            if shots:
+                shots[-1]["prompt"] = (shots[-1]["prompt"] + " " + ln).strip()
+                continue
+            # no structured start -> not a multishot prompt
+            return None
+
+        dur_raw = mm.group(3)
+        text = (mm.group(4) or "").strip()
+        if not text:
+            continue
+        dur = int(dur_raw) if dur_raw else 3
+        shots.append({"prompt": text, "duration": dur})
+
+    if len(shots) < 2:
+        return None
+    if len(shots) > 6:
+        shots = shots[:6]
+
+    # Validate using same constraints
+    _validate_multi_shots(shots)
+    return shots
+
+
+def _apply_ref_images_to_shots(
+    shots: List[Dict[str, Any]],
+    *,
+    has_start: bool,
+    has_end: bool,
+) -> List[Dict[str, Any]]:
+    """
+    Omni references images via @image_i. If we have refs but user didn't mention them,
+    we softly anchor start/end to first/last shots.
+    """
+    if not shots:
+        return shots
+
+    def _contains(token: str) -> bool:
+        token_l = token.lower()
+        for s in shots:
+            if token_l in (s.get("prompt") or "").lower():
+                return True
+        return False
+
+    out = [dict(s) for s in shots]
+
+    if has_start and not _contains("@image_1"):
+        out[0]["prompt"] = (out[0]["prompt"] + " Use @image_1 as visual reference.").strip()
+
+    if has_end:
+        # if start exists, end is @image_2; otherwise end is @image_1
+        end_token = "@image_2" if has_start else "@image_1"
+        if not _contains(end_token):
+            out[-1]["prompt"] = (out[-1]["prompt"] + f" End frame should match {end_token}.").strip()
+
+    return out
+).strip()
 
 
 async def create_kling3_task(
@@ -187,6 +283,14 @@ async def create_kling3_task(
 
     # Multi-shot
     ms = [x for x in (multi_shots or []) if isinstance(x, dict)]
+
+    # If UI toggled prefer_multi_shots but backend didn't provide structured multi_shots,
+    # try to parse them from the prompt text (no main.py changes required).
+    if (not ms) and bool(prefer_multi_shots):
+        parsed = _parse_multishot_prompt(prompt)
+        if parsed:
+            ms = _apply_ref_images_to_shots(parsed, has_start=bool(start_image_bytes), has_end=bool(end_image_bytes))
+
     if ms:
         _validate_multi_shots(ms)
         input_obj["multi_shots"] = ms
