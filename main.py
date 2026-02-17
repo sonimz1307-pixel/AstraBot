@@ -3371,6 +3371,12 @@ async def webhook(secret: str, request: Request):
                     if not task_id_local:
                         raise RuntimeError(f"PiAPI did not return task_id: {created_local}")
                     done_local = await piapi_poll_task(task_id_local, timeout_sec=300, sleep_sec=2.0)
+                    # 👇 ЛОГ РЕЗУЛЬТАТА
+                    try:
+                        import json
+                        print("PIAPI RESULT:", json.dumps(done_local, ensure_ascii=False)[:3000])
+                    except Exception:
+                        print("PIAPI RESULT RAW:", done_local)
                     return ("piapi", done_local)
 
                 async def _run_sunoapi():
@@ -3724,6 +3730,12 @@ async def webhook(secret: str, request: Request):
                     if not task_id_local:
                         raise RuntimeError(f"PiAPI did not return task_id: {created_local}")
                     done_local = await piapi_poll_task(task_id_local, timeout_sec=300, sleep_sec=2.0)
+                    # 👇 ЛОГ РЕЗУЛЬТАТА
+                    try:
+                        import json
+                        print("PIAPI RESULT:", json.dumps(done_local, ensure_ascii=False)[:3000])
+                    except Exception:
+                        print("PIAPI RESULT RAW:", done_local)
                     return ("piapi", done_local)
 
                 async def _run_sunoapi():
