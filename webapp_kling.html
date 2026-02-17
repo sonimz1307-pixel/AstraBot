@@ -379,6 +379,24 @@
           </label>
         </div>
 
+        <div class="row" style="margin-top:10px;">
+          <div style="flex:1; min-width: 180px;">
+            <label class="badge" style="display:inline-block;margin-bottom:8px;">Формат</label>
+            <select id="kling3_aspect" aria-label="Формат Kling 3.0">
+              <option value="16:9" selected>16:9 (горизонтально)</option>
+              <option value="9:16">9:16 (вертикально)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="toggle" style="margin-top:10px;">
+          <div class="left">
+            <div class="tname">Multi-shot</div>
+            <div class="tdesc">Сценарий из нескольких планов (запуск по промпту). В тексте используй планы/шоты.</div>
+          </div>
+          <input id="kling3_multishot" type="checkbox">
+        </div>
+
         <div class="toggle">
           <div class="left">
             <div class="tname">Audio</div>
@@ -758,8 +776,8 @@ updateTokenRateHint(); }));
               enable_audio,
               duration,
               gen_mode: getKling3GenMode(),
-              aspect_ratio: "16:9"
-            };
+              aspect_ratio: (qs('#kling3_aspect')?.value || "16:9"),
+              prefer_multi_shots: !!qs('#kling3_multishot')?.checked};
           }
         } else {
           const veo_model = getVeoModel(); // fast|pro
