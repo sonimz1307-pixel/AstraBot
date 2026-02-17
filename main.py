@@ -3943,6 +3943,29 @@ async def webhook(secret: str, request: Request):
 
             _set_mode(chat_id, user_id, "kling3_wait_prompt")
 
+            mode = gen_mode
+
+            if mode == "i2v":
+                next_block = (
+                    "Дальше:\n"
+                    "• Пришли фото (1-й кадр)\n"
+                    "• (опционально) ещё фото — последний кадр\n"
+                    "• Затем пришли промпт"
+                )
+            elif mode == "t2v":
+                next_block = (
+                    "Дальше:\n"
+                    "• Пришли текстовый промпт"
+                )
+            elif mode == "multi":
+                next_block = (
+                    "Дальше:\n"
+                    "• Пришли multi-shot промпт\n"
+                    "• Затем запуск"
+                )
+            else:
+                next_block = ""
+
             await tg_send_message(
                 chat_id,
                 "✅ Kling PRO 3.0 настройки сохранены.\n"
@@ -3951,10 +3974,7 @@ async def webhook(secret: str, request: Request):
                 f"Формат: {aspect_ratio}\n"
                 f"1-й кадр: {'да' if st['kling3_settings'].get('start_image_bytes') else 'нет'} • "
                 f"последний: {'да' if st['kling3_settings'].get('end_image_bytes') else 'нет'}\n\n"
-                "Дальше:\n"
-                "• Text→Video: пришли промпт\n"
-                "• Image→Video: пришли фото (1-й кадр), затем (опционально) ещё фото (последний кадр), затем промпт\n"
-                "• Multi-shot: пришли промпт multi-shot (или позже добавим UI), затем запуск",
+                f"{next_block}",
                 reply_markup=_help_menu_for(user_id),
             )
 
