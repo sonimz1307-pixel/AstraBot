@@ -3481,9 +3481,12 @@ async def webhook(secret: str, request: Request):
                     if not val:
                         return ""
                     if isinstance(val, str):
-                        return val
+                        s = val.strip()
+                        if s.startswith("http://") or s.startswith("https://"):
+                            return s
+                        return ""
                     if isinstance(val, dict):
-                        for k in ("url", "audio_url", "audioUrl", "song_url", "songUrl", "mp3", "mp3_url"):
+                        for k in ("url", "audio_url", "audioUrl", "song_url", "songUrl", "song_path", "songPath", "mp3", "mp3_url", "file_url", "fileUrl", "download_url", "downloadUrl", "source_stream_audio_url", "sourceStreamAudioUrl"):
                             v = val.get(k)
                             if isinstance(v, str) and v.strip():
                                 return v.strip()
@@ -3503,10 +3506,12 @@ async def webhook(secret: str, request: Request):
                     if not isinstance(item, dict):
                         return ""
                     # прямые варианты
-                    for k in ("audio_url", "audioUrl", "song_url", "songUrl", "url"):
+                    for k in ("audio_url", "audioUrl", "song_url", "songUrl", "song_path", "songPath", "mp3_url", "mp3", "file_url", "fileUrl", "url", "source_stream_audio_url", "sourceStreamAudioUrl"):
                         v = item.get(k)
                         if isinstance(v, str) and v.strip():
-                            return v.strip()
+                            s = v.strip()
+                            if s.startswith("http://") or s.startswith("https://"):
+                                return s
                     # часто audio = {"url": ...} или audio = [...]
                     u = _pick_first_url(item.get("audio"))
                     if u:
@@ -3840,9 +3845,12 @@ async def webhook(secret: str, request: Request):
                     if not val:
                         return ""
                     if isinstance(val, str):
-                        return val
+                        s = val.strip()
+                        if s.startswith("http://") or s.startswith("https://"):
+                            return s
+                        return ""
                     if isinstance(val, dict):
-                        for k in ("url", "audio_url", "audioUrl", "song_url", "songUrl", "mp3", "mp3_url"):
+                        for k in ("url", "audio_url", "audioUrl", "song_url", "songUrl", "song_path", "songPath", "mp3", "mp3_url", "file_url", "fileUrl", "download_url", "downloadUrl", "source_stream_audio_url", "sourceStreamAudioUrl"):
                             v = val.get(k)
                             if isinstance(v, str) and v.strip():
                                 return v.strip()
@@ -3862,10 +3870,12 @@ async def webhook(secret: str, request: Request):
                     if not isinstance(item, dict):
                         return ""
                     # прямые варианты
-                    for k in ("audio_url", "audioUrl", "song_url", "songUrl", "url"):
+                    for k in ("audio_url", "audioUrl", "song_url", "songUrl", "song_path", "songPath", "mp3_url", "mp3", "file_url", "fileUrl", "url", "source_stream_audio_url", "sourceStreamAudioUrl"):
                         v = item.get(k)
                         if isinstance(v, str) and v.strip():
-                            return v.strip()
+                            s = v.strip()
+                            if s.startswith("http://") or s.startswith("https://"):
+                                return s
                     # часто audio = {"url": ...} или audio = [...]
                     u = _pick_first_url(item.get("audio"))
                     if u:
@@ -4284,24 +4294,9 @@ async def webhook(secret: str, request: Request):
                     await tg_send_message(chat_id, f"❌ Музыка не сгенерировалась: {status}\n{err}")
                     return {"ok": True}
 
-                output = data.get("output") or {}
-
-                # 🔥 Udio (model=music-u) возвращает output.songs[]
-                if isinstance(output, dict) and isinstance(output.get("songs"), list):
-                    out = output.get("songs") or []
-                    # Нормализуем поля под существующий рендер (audio_url/image_url)
-                    for it in out:
-                        if isinstance(it, dict):
-                            if not it.get("audio_url") and it.get("song_path"):
-                                it["audio_url"] = it.get("song_path")
-                            if not it.get("image_url") and it.get("image_path"):
-                                it["image_url"] = it.get("image_path")
-                else:
-                    # suno-like
-                    out = output or []
-                    if isinstance(out, dict):
-                        out = [out]
-
+                out = data.get("output") or []
+                if isinstance(out, dict):
+                    out = [out]
                 if not out:
                     await tg_send_message(chat_id, "✅ Готово, но PiAPI не вернул output. Проверь task в кабинете.")
                     return {"ok": True}
