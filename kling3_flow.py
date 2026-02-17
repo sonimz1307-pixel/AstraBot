@@ -29,7 +29,6 @@ def _build_headers() -> Dict[str, str]:
             "PiAPI key is not set. Set env var PIAPI_API_KEY (preferred) or PIAPI_KEY."
         )
 
-    # PiAPI uses x-api-key in many examples; keep it.
     return {
         "x-api-key": PIAPI_KEY,
         "Content-Type": "application/json",
@@ -99,6 +98,47 @@ def _sb_upload_bytes_public(data: bytes, *, ext: str, content_type: str) -> str:
         raise Kling3Error(f"Supabase upload failed: {e}")
 
 
+def _detect_image_ct_ext(img_bytes: bytes) -> tuple[str, str]:
+    """Best-effort content-type/ext detection for common formats."""
+    ct, ext = "image/jpeg", "jpg"
+    if not img_bytes:
+        return ct, ext
+    if img_bytes[:8].startswith(b"\x89PNG"):
+        return "image/png", "png"
+    if img_bytes[:12].startswith(b"RIFF") and img_bytes[8:12] == b"WEBP":
+        return "image/webp", "webp"
+    return ct, ext
+
+
+def _resolution_to_omni(resolution: str) -> str:
+    """PiAPI Kling 3.0 Omni expects '720p' / '1080p'."""
+    return "720p" if str(resolution) == "720" else "1080p"
+
+
+def _append_frame_constraints_to_prompt(prompt: str, has_start: bool, has_end: bool) -> str:
+    """
+    Kling 3.0 Omni uses ref images via @image_i placeholders (i starts at 1).
+    We drive first/last frames by referencing @image_1 / @image_2 in the prompt.
+    """
+    p = (prompt or "").strip()
+    lines: List[str] = []
+    if p:
+        lines.append(p)
+
+    if has_start and has_end:
+        # Use both frames: start=@image_1, end=@image_2
+        lines.append("Start frame MUST match @image_1.")
+        lines.append("End frame MUST match @image_2.")
+        lines.append("Maintain the same subject identity and composition between frames.")
+    elif has_start:
+        lines.append("Use @image_1 as the start frame reference. Preserve subject identity and composition.")
+    elif has_end:
+        # Rare case, but supported
+        lines.append("Use @image_1 as the end frame reference. Move naturally toward that final frame.")
+
+    return " ".join(lines).strip()
+
+
 async def create_kling3_task(
     *,
     prompt: str = "",
@@ -108,28 +148,36 @@ async def create_kling3_task(
     aspect_ratio: str = "16:9",
     prefer_multi_shots: bool = False,
     request_id: Optional[str] = None,
-    # Image -> Video
+    # Image -> Video (first/last frame)
     start_image_bytes: Optional[bytes] = None,
     end_image_bytes: Optional[bytes] = None,
     # Multi-shot
     multi_shots: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
-    Create a Kling 3.0 video task in PiAPI.
+    Create a Kling 3.0 task in PiAPI.
 
-    Debug changes:
-    - Logs outgoing request meta and any non-2xx responses (status + body).
-    - Accepts any 2xx as success (PiAPI may return 201).
-    - Supports multiple env var names for PiAPI key.
+    ✅ Fix for FIRST+LAST frame:
+    - Base 'video_generation' task_type does not reliably support end frame.
+    - We switch to Kling 3.0 Omni endpoint via:
+        task_type = 'omni_video_generation'
+        input.resolution = '720p' | '1080p'
+    - Omni supports reference images and prompt placeholders @image_i to reference them.
+      Use @image_1 for start frame and @image_2 for end frame by putting both URLs in input.images.
+
+    Notes (per PiAPI docs):
+    - If multi_shots is provided, prompt/duration are ignored for omni. Total <= 15s, max 6 shots.
+    - If reference images provided, use @image_i in prompt (i starts at 1).
+
+    Docs:
+    - Kling 3.0 Omni API: https://piapi.ai/docs/kling-api/kling-3-omni-api
     """
 
     _validate_inputs(int(duration), str(resolution))
 
-    mode = "std" if str(resolution) == "720" else "pro"
-
     input_obj: Dict[str, Any] = {
         "version": "3.0",
-        "mode": mode,
+        "resolution": _resolution_to_omni(str(resolution)),
         "enable_audio": bool(enable_audio),
         "prefer_multi_shots": bool(prefer_multi_shots),
     }
@@ -137,36 +185,49 @@ async def create_kling3_task(
     if aspect_ratio:
         input_obj["aspect_ratio"] = str(aspect_ratio)
 
+    # Multi-shot
     ms = [x for x in (multi_shots or []) if isinstance(x, dict)]
     if ms:
         _validate_multi_shots(ms)
         input_obj["multi_shots"] = ms
+        # In omni, prompt/duration are ignored when multi_shots used (per docs).
+        # But we still may want ref images for consistency; user can reference @image_i inside each shot prompt.
     else:
-        input_obj["prompt"] = str(prompt or "")
         input_obj["duration"] = int(duration)
 
-    # Frames -> upload to public URLs (this can fail BEFORE PiAPI call)
+    # Upload reference images (order matters: @image_1, @image_2, ...)
+    images: List[str] = []
+
     if start_image_bytes:
-        ct, ext = "image/jpeg", "jpg"
-        if start_image_bytes[:8].startswith(b"\x89PNG"):
-            ct, ext = "image/png", "png"
-        elif start_image_bytes[:12].startswith(b"RIFF") and start_image_bytes[8:12] == b"WEBP":
-            ct, ext = "image/webp", "webp"
-        url = _sb_upload_bytes_public(bytes(start_image_bytes), ext=ext, content_type=ct)
-        input_obj["image_url"] = url
+        ct, ext = _detect_image_ct_ext(start_image_bytes)
+        start_url = _sb_upload_bytes_public(bytes(start_image_bytes), ext=ext, content_type=ct)
+        images.append(start_url)
 
     if end_image_bytes:
-        ct, ext = "image/jpeg", "jpg"
-        if end_image_bytes[:8].startswith(b"\x89PNG"):
-            ct, ext = "image/png", "png"
-        elif end_image_bytes[:12].startswith(b"RIFF") and end_image_bytes[8:12] == b"WEBP":
-            ct, ext = "image/webp", "webp"
-        url = _sb_upload_bytes_public(bytes(end_image_bytes), ext=ext, content_type=ct)
-        input_obj["end_image_url"] = url
+        ct, ext = _detect_image_ct_ext(end_image_bytes)
+        end_url = _sb_upload_bytes_public(bytes(end_image_bytes), ext=ext, content_type=ct)
+        images.append(end_url)
+
+    if images:
+        # PiAPI omni uses a list of ref images, referenced by @image_i in prompt.
+        input_obj["images"] = images
+
+    # Prompt building (single-shot)
+    if not ms:
+        # If we have ref images, steer first/last frames via @image_i.
+        input_obj["prompt"] = _append_frame_constraints_to_prompt(
+            prompt=prompt,
+            has_start=bool(start_image_bytes),
+            has_end=bool(end_image_bytes),
+        )
+    else:
+        # In multi-shot mode: do NOT overwrite shot prompts.
+        # But for debugging, we can warn if end frame exists but isn't referenced anywhere.
+        pass
 
     payload = {
         "model": "kling",
-        "task_type": "video_generation",
+        "task_type": "omni_video_generation",
         "input": input_obj,
         "config": {"service_mode": "public"},
     }
@@ -175,17 +236,15 @@ async def create_kling3_task(
     if request_id:
         headers["x-request-id"] = str(request_id)
 
-    # Log the fact we are about to call PiAPI (without leaking the key)
+    # Log outgoing meta (no secrets)
     try:
-        safe = dict(payload)
+        safe = {"model": payload["model"], "task_type": payload["task_type"], "config": payload["config"]}
         safe_in = dict(input_obj)
-        # do not log URLs in full
-        if "start_image_url" in safe_in:
-            safe_in["start_image_url"] = "<set>"
-        if "end_image_url" in safe_in:
-            safe_in["end_image_url"] = "<set>"
+        if "images" in safe_in:
+            safe_in["images"] = [f"<set:{len(images)}>" for _ in safe_in.get("images", [])]
         safe["input"] = safe_in
         ulog.warning("PIAPI_CREATE -> %s payload=%s", BASE_URL, safe)
+        ulog.warning("Kling3Omni refs: start=%s end=%s images_count=%s", bool(start_image_bytes), bool(end_image_bytes), len(images))
     except Exception:
         pass
 
@@ -195,9 +254,7 @@ async def create_kling3_task(
         except Exception as e:
             raise Kling3Error(f"PiAPI request failed: {e}")
 
-    # Accept any 2xx
     if not (200 <= response.status_code < 300):
-        # Log status + body so you can see EXACT reason in Render logs
         try:
             ulog.warning("PIAPI_CREATE_FAIL status=%s body=%s", response.status_code, response.text[:2000])
         except Exception:
