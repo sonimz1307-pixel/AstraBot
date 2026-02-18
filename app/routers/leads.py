@@ -421,7 +421,8 @@ async def _orchestrate_full_job(
                 _job_state_upsert(sb, job_id, done=processed, failed=failed)
                 continue
 
-            # Skip if we already have Yandex RAW for this place_key in this job
+            # Idempotency guard: if Yandex RAW already exists for this place_key in this job,
+            # do NOT re-run the actor (even if mi_places upsert failed previously).
             y_exist = (
                 sb.table("mi_raw_items")
                 .select("id")
@@ -435,6 +436,7 @@ async def _orchestrate_full_job(
                 processed += 1
                 _job_state_upsert(sb, job_id, done=processed, failed=failed)
                 continue
+
 
             if max_seconds is not None and max_seconds > 0 and (time.time() - started_ts) >= max_seconds:
                 stopped_reason = "max_seconds_reached"
