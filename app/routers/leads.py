@@ -572,7 +572,7 @@ async def run_full_job(payload: Dict[str, Any] = Body(...), background_tasks: Ba
 
     max_places = payload.get("max_places") or payload.get("maxPlaces")
     max_seconds = payload.get("max_seconds") or payload.get("maxSeconds")
-        yandex_retries = payload.get("yandex_retries")
+    yandex_retries = payload.get("yandex_retries")
     if yandex_retries is None:
         yandex_retries = payload.get("yandexRetries")
     if yandex_retries is None:
