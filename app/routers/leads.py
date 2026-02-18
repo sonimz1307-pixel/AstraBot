@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 import os
 import re
+import difflib
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, HTTPException, BackgroundTasks
@@ -27,6 +28,24 @@ def _job_state_get(sb, job_id: str) -> Dict[str, Any]:
     if not resp.data:
         return {}
     return resp.data[0] or {}
+
+
+def _job_state_try_claim(sb, job_id: str) -> bool:
+    """Atomically claim a queued job to avoid multiple workers executing the same BackgroundTask.
+    Returns True if we changed status queued -> running, False otherwise.
+    """
+    try:
+        resp = (
+            sb.table("mi_job_state")
+            .update({"status": "running"})
+            .eq("job_id", job_id)
+            .eq("status", "queued")
+            .execute()
+        )
+        return bool(getattr(resp, "data", None))
+    except Exception:
+        # If we cannot claim (db hiccup), be conservative and do NOT run.
+        return False
 
 
 def _insert_raw_items_compat(**kwargs):
@@ -307,6 +326,9 @@ async def _orchestrate_full_job(
     sleep_ms: int = 0,
 ):
     sb = get_supabase()
+    # Claim job execution (prevents duplicate BackgroundTasks across multiple workers)
+    if not _job_state_try_claim(sb, job_id):
+        return
     started_ts = time.time()
     try:
         _job_state_upsert(
@@ -355,6 +377,8 @@ async def _orchestrate_full_job(
         )
 
         place_keys = [str(it["id"]) for it in (items_2gis or []) if isinstance(it, dict) and it.get("id") is not None]
+        # de-dup while preserving order
+        place_keys = list(dict.fromkeys([pk for pk in place_keys if pk]))
         if max_places is not None and max_places > 0 and len(place_keys) > max_places:
             place_keys = place_keys[:max_places]
 
@@ -393,6 +417,21 @@ async def _orchestrate_full_job(
         stopped_reason = None
         for pk in place_keys:
             if pk in existing_keys:
+                processed += 1
+                _job_state_upsert(sb, job_id, done=processed, failed=failed)
+                continue
+
+            # Skip if we already have Yandex RAW for this place_key in this job
+            y_exist = (
+                sb.table("mi_raw_items")
+                .select("id")
+                .eq("job_id", job_id)
+                .eq("place_key", pk)
+                .eq("source", "apify_yandex")
+                .limit(1)
+                .execute()
+            )
+            if getattr(y_exist, "data", None):
                 processed += 1
                 _job_state_upsert(sb, job_id, done=processed, failed=failed)
                 continue
