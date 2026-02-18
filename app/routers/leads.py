@@ -4,6 +4,9 @@ import time
 import os
 import re
 import difflib
+import json
+import traceback
+import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, HTTPException, BackgroundTasks
@@ -14,6 +17,24 @@ from app.services.apify_client import run_actor_sync_get_dataset_items, ApifyErr
 from app.services.mi_storage import create_job, insert_raw_items, get_supabase
 
 router = APIRouter()
+
+logger = logging.getLogger("leads")
+
+# Ensure logs are visible in environments where logging isn't configured (e.g., some Render setups)
+if not logging.getLogger().handlers:
+    logging.basicConfig(level=logging.INFO)
+
+def _dbg_enabled() -> bool:
+    return str(os.getenv("LEADS_DEBUG", "")).strip() in ("1", "true", "True", "yes", "YES")
+
+def _log_evt(evt: str, **kw):
+    payload = {"evt": evt, **kw}
+    # Use WARNING to ensure visibility in Render logs even if INFO/DEBUG are filtered.
+    try:
+        logger.warning(json.dumps(payload, ensure_ascii=False, default=str))
+    except Exception:
+        # Last resort: avoid crashing on logging serialization.
+        logger.warning(f"{evt} {kw}")
 
 def _job_state_upsert(sb, job_id: str, **fields):
     data = {"job_id": job_id, **fields}
@@ -443,25 +464,9 @@ async def _orchestrate_full_job(
                 break
 
             last_err = None
-            # Website/Taplink enrichment (best-effort)
-
-            try:
-
-                site_candidates = []
-
-                if isinstance(result, dict):
-
-                    site_candidates = result.get("site_urls") or []
-
-                await _enrich_place_site(sb=sb, job_id=job_id, place_key=pk, candidate_urls=site_candidates)
-
-            except Exception:
-
-                pass
-
-
             for attempt in range(max(0, yandex_retries) + 1):
                 try:
+                    _log_evt("YANDEX_PLACE_START", job_id=str(job_id), place_key=str(pk), attempt=int(attempt))
                     result = _collect_place_internal(
                         sb=sb,
                         job_id=job_id,
@@ -470,6 +475,7 @@ async def _orchestrate_full_job(
                         max_items=yandex_max_items,
                     )
                     last_err = None
+                    _log_evt("YANDEX_PLACE_OK", job_id=str(job_id), place_key=str(pk), run_id=(result.get('apify') or {}).get('run_id') if isinstance(result, dict) else None)
                     break
                 except HTTPException as e:
                     last_err = {"status_code": e.status_code, "detail": e.detail}
@@ -486,6 +492,26 @@ async def _orchestrate_full_job(
                         continue
                     break
 
+
+            # Website/Taplink enrichment (best-effort) - only after successful Yandex collect
+            if last_err is None and isinstance(result, dict):
+                try:
+                    site_candidates = result.get("site_urls") or []
+                    if site_candidates:
+                        await _enrich_place_site(
+                            sb=sb,
+                            job_id=str(job_id),
+                            place_key=str(pk),
+                            candidate_urls=site_candidates,
+                        )
+                except Exception as e:
+                    _log_evt(
+                        "SITE_EXTRACT_FAIL",
+                        job_id=str(job_id),
+                        place_key=str(pk),
+                        err=f"{type(e).__name__}: {e}",
+                        traceback=traceback.format_exc(),
+                    )
             if last_err is not None:
                 failed += 1
 
@@ -714,22 +740,57 @@ def _best_match_yandex(base_title: str, base_addr: str, items: List[Dict[str, An
 def _extract_site_urls_and_socials(y_it: Dict[str, Any]) -> tuple[list[str], dict]:
     """
     Best-effort extractor from Yandex item fields.
+
     Returns:
       site_urls: list[str]
-      social_links: dict[str, str|list]
+      social_links: dict[str, Any]
     """
     site_urls: list[str] = []
     social: dict = {}
 
     def _push_url(u: Any):
         if isinstance(u, str):
-            u = u.strip()
-            if u and u not in site_urls:
-                site_urls.append(u)
+            u2 = u.strip()
+            if u2 and u2 not in site_urls:
+                site_urls.append(u2)
 
     if not isinstance(y_it, dict):
         return site_urls, social
 
+    # website variants
+    for k in ("website", "site", "url", "webSite", "web", "websites", "site_urls"):
+        v = y_it.get(k)
+        if isinstance(v, str):
+            _push_url(v)
+        elif isinstance(v, list):
+            for x in v:
+                _push_url(x)
+
+    # Some actors put websites inside nested fields
+    for k in ("links", "externalLinks", "contactLinks", "contacts"):
+        v = y_it.get(k)
+        if isinstance(v, dict):
+            for vv in v.values():
+                _push_url(vv)
+        elif isinstance(v, list):
+            for it in v:
+                if isinstance(it, dict):
+                    for vv in it.values():
+                        _push_url(vv)
+
+    # socials variants (keep raw)
+    for k in ("socials", "socialLinks", "social_links", "social", "links"):
+        v = y_it.get(k)
+        if v:
+            social[k] = v
+
+    # common explicit fields
+    for k in ("telegram", "instagram", "vk", "whatsapp", "youtube", "tiktok", "facebook", "ok", "rutube"):
+        v = y_it.get(k)
+        if v:
+            social[k] = v
+
+    return site_urls, social
 
 
 def _dedup_preserve_order(items: list[str]) -> list[str]:
@@ -779,6 +840,8 @@ async def _enrich_place_site(
     if not urls:
         return {"ok": True, "skipped": "no_urls"}
 
+    _log_evt("SITE_EXTRACT_START", job_id=str(job_id), place_key=str(place_key), urls=urls)
+
     extracted_all: list[dict] = []
     merged_social: dict = {}
     merged_sites: list[str] = []
@@ -790,6 +853,7 @@ async def _enrich_place_site(
             data = {"ok": False, "error": f"{type(e).__name__}: {e}", "url": url}
 
         extracted_all.append(data if isinstance(data, dict) else {"ok": True, "data": data, "url": url})
+        _log_evt("SITE_EXTRACT_ITEM", job_id=str(job_id), place_key=str(place_key), url=url, ok=(isinstance(data, dict) and data.get("ok", True) is not False))
 
         if isinstance(data, dict):
             s = data.get("social_links") or data.get("socials") or {}
@@ -816,23 +880,26 @@ async def _enrich_place_site(
             run_id=f"site_{int(time.time())}",
             items=extracted_all,
         )
-    except Exception:
-        pass
+    except Exception as e:
+        _log_evt("SITE_EXTRACT_RAW_SAVE_FAIL", job_id=str(job_id), place_key=str(place_key), err=f"{type(e).__name__}: {e}", traceback=traceback.format_exc())
 
     payload = {
         "job_id": str(job_id),
         "place_key": str(place_key),
         "site_urls": merged_sites,
         "social_links": merged_social,
-        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "site_data": extracted_all,  # optional column
     }
 
     try:
         sb.table("mi_places").upsert(payload, on_conflict="job_id,place_key").execute()
-    except Exception:
+    except Exception as e:
+        # schema may not have site_data; retry without it
         payload.pop("site_data", None)
         sb.table("mi_places").upsert(payload, on_conflict="job_id,place_key").execute()
+        _log_evt("SITE_EXTRACT_UPSERT_FALLBACK", job_id=str(job_id), place_key=str(place_key), err=f"{type(e).__name__}: {e}")
+    else:
+        _log_evt("SITE_EXTRACT_UPSERT_OK", job_id=str(job_id), place_key=str(place_key))
 
     return {"ok": True, "urls": urls, "extracted_count": len(extracted_all)}
     # website variants
@@ -875,105 +942,157 @@ def _collect_place_internal(
     - picks best yandex match (heuristic)
     - upserts aggregated record into mi_places
     """
-    # 1) Fetch 2GIS source item
-    resp = (
-        sb.table("mi_raw_items")
-        .select("item, city")
-        .eq("job_id", str(job_id))
-        .eq("place_key", str(place_key))
-        .eq("source", "apify_2gis")
-        .limit(1)
-        .execute()
-    )
-    if not resp.data:
-        raise HTTPException(status_code=404, detail="2GIS item not found for job_id + place_key")
-
-    base_item = resp.data[0].get("item") or {}
-    city = (resp.data[0].get("city") or base_item.get("city") or "").strip().lower() or "unknown"
-    title = (base_item.get("title") or base_item.get("name") or "").strip()
-    if not title:
-        raise HTTPException(status_code=400, detail="2GIS item has no title/name to form yandex query")
-
-    # 2) Run Yandex actor
-    yandex_query = f"{title} {city}".strip()
-    actor_input = {
-        "enableGlobalDataset": False,
-        "language": "RU",
-        "maxItems": int(max_items),
-        "query": yandex_query,
-    }
-    run_id = f"sync_{int(time.time())}"
+    t0 = time.time()
+    run_id: str | None = None
+    yandex_query: str | None = None
 
     try:
-        y_items = run_actor_sync_get_dataset_items(actor_id=actor_id, actor_input=actor_input)
-    except ApifyError as e:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "apify_http_error",
-                "message": str(e),
-                "status_code": getattr(e, "status_code", None),
-                "response": getattr(e, "response_text", None),
-            },
+        _log_evt("YANDEX_START", job_id=str(job_id), place_key=str(place_key), actor_id=str(actor_id), max_items=int(max_items))
+
+        # 1) Fetch 2GIS source item
+        resp = (
+            sb.table("mi_raw_items")
+            .select("item, city")
+            .eq("job_id", str(job_id))
+            .eq("place_key", str(place_key))
+            .eq("source", "apify_2gis")
+            .limit(1)
+            .execute()
         )
+        if not resp.data:
+            raise HTTPException(status_code=404, detail="2GIS item not found for job_id + place_key")
+
+        base_item = resp.data[0].get("item") or {}
+        city = (resp.data[0].get("city") or base_item.get("city") or "").strip().lower() or "unknown"
+        title = (base_item.get("title") or base_item.get("name") or "").strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="2GIS item has no title/name to form yandex query")
+
+        # 2) Run Yandex actor
+        yandex_query = f"{title} {city}".strip()
+        actor_input = {
+            "enableGlobalDataset": False,
+            "language": "RU",
+            "maxItems": int(max_items),
+            "query": yandex_query,
+        }
+        run_id = f"sync_{int(time.time())}"
+        _log_evt("YANDEX_RUN_CREATED", job_id=str(job_id), place_key=str(place_key), run_id=run_id, query=yandex_query)
+
+        try:
+            y_items = run_actor_sync_get_dataset_items(actor_id=actor_id, actor_input=actor_input)
+        except ApifyError as e:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "apify_http_error",
+                    "message": str(e),
+                    "status_code": getattr(e, "status_code", None),
+                    "response": getattr(e, "response_text", None),
+                },
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail={"error": "apify_unexpected_error", "message": str(e)})
+
+        if not isinstance(y_items, list):
+            # normalize to list so we always know what we save
+            y_items = [] if y_items is None else [y_items]
+
+        preview = y_items[0] if y_items else None
+        _log_evt(
+            "YANDEX_DATASET_FETCH",
+            job_id=str(job_id),
+            place_key=str(place_key),
+            run_id=run_id,
+            item_count=len(y_items),
+            first_item_preview=preview,
+            elapsed_ms=int((time.time() - t0) * 1000),
+        )
+
+        # Ensure each item has a stable id for generated item_id column (extract org id from URL)
+        def _y_id(it: Dict[str, Any]) -> str:
+            url = (it.get("url") or "").strip()
+            m = re.search(r"/org/(\d+)/", url)
+            if m:
+                return m.group(1)
+            return url or (it.get("title") or "unknown")
+
+        for it in y_items:
+            if isinstance(it, dict) and not it.get("id"):
+                it["id"] = _y_id(it)
+
+        # 3) Save RAW yandex (always, even if empty)
+        _insert_raw_items_compat(
+            job_id=str(job_id),
+            place_key=str(place_key),
+            source="apify_yandex",
+            city=city,
+            queries=[yandex_query],
+            actor_id=actor_id,
+            run_id=run_id,
+            items=y_items,
+        )
+        _log_evt("YANDEX_RAW_SAVED", job_id=str(job_id), place_key=str(place_key), run_id=run_id, item_count=len(y_items))
+
+        # 4) Best match
+        base_addr = (
+            base_item.get("address")
+            or base_item.get("addressText")
+            or (base_item.get("address") or {}).get("address")
+            or ""
+        )
+        best_y = _best_match_yandex(title, str(base_addr or ""), y_items or [])
+
+        # 5) Upsert mi_places (schema-safe)
+        site_urls, social_links = _extract_site_urls_and_socials(best_y or {})
+
+        # Keep payload minimal (per your schema: job_id/place_key/site_urls/social_links)
+        payload_min = {
+            "job_id": str(job_id),
+            "place_key": str(place_key),
+            "site_urls": site_urls,
+            "social_links": social_links,
+        }
+
+        # Try extended payload if columns exist; fallback to minimal.
+        payload_ext = dict(payload_min)
+        payload_ext.update(
+            {
+                "best_2gis": base_item,
+                "best_yandex": best_y,
+                "yandex_query": yandex_query,
+            }
+        )
+
+        try:
+            sb.table("mi_places").upsert(payload_ext, on_conflict="job_id,place_key").execute()
+            _log_evt("MI_PLACES_UPSERT_OK", job_id=str(job_id), place_key=str(place_key), mode="extended")
+        except Exception as e:
+            sb.table("mi_places").upsert(payload_min, on_conflict="job_id,place_key").execute()
+            _log_evt("MI_PLACES_UPSERT_FALLBACK", job_id=str(job_id), place_key=str(place_key), mode="minimal", err=f"{type(e).__name__}: {e}")
+
+        return {
+            "job_id": str(job_id),
+            "place_key": str(place_key),
+            "yandex_query": yandex_query,
+            "apify": {"actor_id": actor_id, "run_id": run_id, "items_count": len(y_items or [])},
+            "best_yandex": best_y,
+            "site_urls": site_urls,
+            "social_links": social_links,
+        }
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail={"error": "apify_unexpected_error", "message": str(e)})
-
-    # Ensure each item has a stable id for generated item_id column (extract org id from URL)
-    def _y_id(it: Dict[str, Any]) -> str:
-        url = (it.get("url") or "").strip()
-        m = re.search(r"/org/(\d+)/", url)
-        if m:
-            return m.group(1)
-        return url or (it.get("title") or "unknown")
-
-    for it in y_items or []:
-        if isinstance(it, dict) and not it.get("id"):
-            it["id"] = _y_id(it)
-
-    # 3) Save RAW yandex
-    _insert_raw_items_compat(
-        job_id=str(job_id),
-        place_key=str(place_key),
-        source="apify_yandex",
-        city=city,
-        queries=[yandex_query],
-        actor_id=actor_id,
-        run_id=run_id,
-        items=y_items or [],
-    )
-
-    # 4) Best match
-    base_addr = (
-        base_item.get("address")
-        or base_item.get("addressText")
-        or (base_item.get("address") or {}).get("address")
-        or ""
-    )
-    best_y = _best_match_yandex(title, str(base_addr or ""), y_items or [])
-
-    # 5) Upsert mi_places
-    site_urls, social_links = _extract_site_urls_and_socials(best_y or {})
-    payload = {
-        "job_id": str(job_id),
-        "place_key": str(place_key),
-        "best_2gis": base_item,
-        "best_yandex": best_y,
-        "site_urls": site_urls,
-        "social_links": social_links,
-        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
-    sb.table("mi_places").upsert(payload, on_conflict="job_id,place_key").execute()
-
-    return {
-        "job_id": str(job_id),
-        "place_key": str(place_key),
-        "yandex_query": yandex_query,
-        "apify": {"actor_id": actor_id, "run_id": run_id, "items_count": len(y_items or [])},
-        "best_yandex": best_y,
-        "site_urls": site_urls,
-        "social_links": social_links,
-    }
+        _log_evt(
+            "YANDEX_FAIL",
+            job_id=str(job_id),
+            place_key=str(place_key),
+            run_id=run_id,
+            query=yandex_query,
+            err=f"{type(e).__name__}: {e}",
+            traceback=traceback.format_exc(),
+            elapsed_ms=int((time.time() - t0) * 1000),
+        )
+        raise
 
 
 @router.post("/collect_place")
