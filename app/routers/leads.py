@@ -441,16 +441,25 @@ async def _orchestrate_full_job(
             if max_seconds is not None and max_seconds > 0 and (time.time() - started_ts) >= max_seconds:
                 stopped_reason = "max_seconds_reached"
                 break
-(?P<ind># Website/Taplink enrichment (best-effort)
-?P<ind>try:
-?P<ind>    site_candidates = []
-?P<ind>    if isinstance(result, dict):
-?P<ind>        site_candidates = result.get("site_urls") or []
-?P<ind>    await _enrich_place_site(sb=sb, job_id=job_id, place_key=pk, candidate_urls=site_candidates)
-?P<ind>except Exception:
-?P<ind>    pass
 
-?P<ind>last_err = None
+            last_err = None
+            # Website/Taplink enrichment (best-effort)
+
+            try:
+
+                site_candidates = []
+
+                if isinstance(result, dict):
+
+                    site_candidates = result.get("site_urls") or []
+
+                await _enrich_place_site(sb=sb, job_id=job_id, place_key=pk, candidate_urls=site_candidates)
+
+            except Exception:
+
+                pass
+
+
             for attempt in range(max(0, yandex_retries) + 1):
                 try:
                     result = _collect_place_internal(
@@ -460,15 +469,6 @@ async def _orchestrate_full_job(
                         actor_id=yandex_actor_id,
                         max_items=yandex_max_items,
                     )
-                    # Website/Taplink enrichment (best-effort)
-                    try:
-                        site_candidates = []
-                        if isinstance(result, dict):
-                            site_candidates = result.get("site_urls") or []
-                        await _enrich_place_site(sb=sb, job_id=job_id, place_key=pk, candidate_urls=site_candidates)
-                    except Exception:
-                        pass
-
                     last_err = None
                     break
                 except HTTPException as e:
@@ -749,11 +749,12 @@ def _dedup_preserve_order(items: list[str]) -> list[str]:
 
 
 def _merge_dict(a: dict | None, b: dict | None) -> dict:
-    res = {}
+    res: dict = {}
     if isinstance(a, dict):
         res.update(a)
     if isinstance(b, dict):
         for k, v in b.items():
+            # don't overwrite non-empty with empty
             if k in res and res[k] not in (None, "", [], {}) and v in (None, "", [], {}):
                 continue
             res[k] = v
@@ -768,8 +769,11 @@ async def _enrich_place_site(
     candidate_urls: list[str],
     timeout: float = 25.0,
 ) -> dict:
-    """Parse website/taplink pages and store enrichment.
-    Uses fetch_and_extract_website_data (routes to taplink extractor automatically).
+    """Website/Taplink enrichment.
+
+    Uses fetch_and_extract_website_data() (it routes to taplink extractor automatically).
+    Saves RAW in mi_raw_items with source='site_extract'.
+    Updates mi_places.site_urls and mi_places.social_links (and tries to store site_data if column exists).
     """
     urls = _dedup_preserve_order(candidate_urls)[:2]
     if not urls:
@@ -791,6 +795,7 @@ async def _enrich_place_site(
             s = data.get("social_links") or data.get("socials") or {}
             if isinstance(s, dict):
                 merged_social = _merge_dict(merged_social, s)
+
             su = data.get("site_urls") or data.get("websites") or []
             if isinstance(su, list):
                 merged_sites.extend([str(x) for x in su if x])
@@ -799,7 +804,7 @@ async def _enrich_place_site(
 
     merged_sites = _dedup_preserve_order(urls + merged_sites)
 
-    # RAW save (best-effort)
+    # Save RAW (best-effort)
     try:
         _insert_raw_items_compat(
             job_id=str(job_id),
@@ -820,8 +825,9 @@ async def _enrich_place_site(
         "site_urls": merged_sites,
         "social_links": merged_social,
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "site_data": extracted_all,
+        "site_data": extracted_all,  # optional column
     }
+
     try:
         sb.table("mi_places").upsert(payload, on_conflict="job_id,place_key").execute()
     except Exception:
