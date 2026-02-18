@@ -441,6 +441,8 @@ async def _orchestrate_full_job(
                     "phase": "yandex",
                     "stopped_reason": stopped_reason,
                     "elapsed_seconds": round(time.time() - started_ts, 2),
+                    "place_key": pk,
+                    "last_error": last_err,
                 },
             )
 
@@ -603,6 +605,208 @@ async def run_full_job(payload: Dict[str, Any] = Body(...), background_tasks: Ba
 
     return {"ok": True, "job_id": job_id, "state": "queued"}
 
+
+
+
+def _normalize_text(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = re.sub(r"\s+", " ", s)
+    s = re.sub(r"[^0-9a-zа-яё ,.\-/#]", "", s)
+    return s.strip()
+
+
+def _best_match_yandex(base_title: str, base_addr: str, items: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """
+    Heuristic best-match selector:
+    - address similarity is primary
+    - title similarity is secondary
+    """
+    if not items:
+        return None
+
+    bt = _normalize_text(base_title)
+    ba = _normalize_text(base_addr)
+
+    best = None
+    best_score = -1.0
+
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        yt = _normalize_text(str(it.get("title") or it.get("name") or ""))
+        ya = _normalize_text(str(it.get("address") or it.get("addressText") or it.get("fullAddress") or ""))
+
+        addr_score = difflib.SequenceMatcher(None, ba, ya).ratio() if ba and ya else 0.0
+        title_score = difflib.SequenceMatcher(None, bt, yt).ratio() if bt and yt else 0.0
+
+        score = addr_score * 0.75 + title_score * 0.25
+        if score > best_score:
+            best_score = score
+            best = it
+
+    if best is None:
+        return items[0]
+    return best
+
+
+def _extract_site_urls_and_socials(y_it: Dict[str, Any]) -> tuple[list[str], dict]:
+    """
+    Best-effort extractor from Yandex item fields.
+    Returns:
+      site_urls: list[str]
+      social_links: dict[str, str|list]
+    """
+    site_urls: list[str] = []
+    social: dict = {}
+
+    def _push_url(u: Any):
+        if isinstance(u, str):
+            u = u.strip()
+            if u and u not in site_urls:
+                site_urls.append(u)
+
+    if not isinstance(y_it, dict):
+        return site_urls, social
+
+    # website variants
+    for k in ("website", "site", "url", "webSite", "web"):
+        v = y_it.get(k)
+        if isinstance(v, str):
+            _push_url(v)
+        elif isinstance(v, list):
+            for x in v:
+                _push_url(x)
+
+    # socials variants (keep raw)
+    for k in ("socials", "socialLinks", "social_links", "links"):
+        v = y_it.get(k)
+        if v:
+            social[k] = v
+
+    # common explicit fields
+    for k in ("telegram", "instagram", "vk", "whatsapp", "youtube", "tiktok", "facebook"):
+        v = y_it.get(k)
+        if v:
+            social[k] = v
+
+    return site_urls, social
+
+
+def _collect_place_internal(
+    *,
+    sb,
+    job_id: str,
+    place_key: str,
+    actor_id: str,
+    max_items: int = 6,
+) -> Dict[str, Any]:
+    """
+    Internal single-place pipeline (sync):
+    - reads 2GIS raw by (job_id, place_key)
+    - runs Yandex actor (1 place = 1 run)
+    - saves Yandex raw by same (job_id, place_key)
+    - picks best yandex match (heuristic)
+    - upserts aggregated record into mi_places
+    """
+    # 1) Fetch 2GIS source item
+    resp = (
+        sb.table("mi_raw_items")
+        .select("item, city")
+        .eq("job_id", str(job_id))
+        .eq("place_key", str(place_key))
+        .eq("source", "apify_2gis")
+        .limit(1)
+        .execute()
+    )
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="2GIS item not found for job_id + place_key")
+
+    base_item = resp.data[0].get("item") or {}
+    city = (resp.data[0].get("city") or base_item.get("city") or "").strip().lower() or "unknown"
+    title = (base_item.get("title") or base_item.get("name") or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="2GIS item has no title/name to form yandex query")
+
+    # 2) Run Yandex actor
+    yandex_query = f"{title} {city}".strip()
+    actor_input = {
+        "enableGlobalDataset": False,
+        "language": "RU",
+        "maxItems": int(max_items),
+        "query": yandex_query,
+    }
+    run_id = f"sync_{int(time.time())}"
+
+    try:
+        y_items = run_actor_sync_get_dataset_items(actor_id=actor_id, actor_input=actor_input)
+    except ApifyError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "apify_http_error",
+                "message": str(e),
+                "status_code": getattr(e, "status_code", None),
+                "response": getattr(e, "response_text", None),
+            },
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": "apify_unexpected_error", "message": str(e)})
+
+    # Ensure each item has a stable id for generated item_id column (extract org id from URL)
+    def _y_id(it: Dict[str, Any]) -> str:
+        url = (it.get("url") or "").strip()
+        m = re.search(r"/org/(\d+)/", url)
+        if m:
+            return m.group(1)
+        return url or (it.get("title") or "unknown")
+
+    for it in y_items or []:
+        if isinstance(it, dict) and not it.get("id"):
+            it["id"] = _y_id(it)
+
+    # 3) Save RAW yandex
+    _insert_raw_items_compat(
+        job_id=str(job_id),
+        place_key=str(place_key),
+        source="apify_yandex",
+        city=city,
+        queries=[yandex_query],
+        actor_id=actor_id,
+        run_id=run_id,
+        items=y_items or [],
+    )
+
+    # 4) Best match
+    base_addr = (
+        base_item.get("address")
+        or base_item.get("addressText")
+        or (base_item.get("address") or {}).get("address")
+        or ""
+    )
+    best_y = _best_match_yandex(title, str(base_addr or ""), y_items or [])
+
+    # 5) Upsert mi_places
+    site_urls, social_links = _extract_site_urls_and_socials(best_y or {})
+    payload = {
+        "job_id": str(job_id),
+        "place_key": str(place_key),
+        "best_2gis": base_item,
+        "best_yandex": best_y,
+        "site_urls": site_urls,
+        "social_links": social_links,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    sb.table("mi_places").upsert(payload, on_conflict="job_id,place_key").execute()
+
+    return {
+        "job_id": str(job_id),
+        "place_key": str(place_key),
+        "yandex_query": yandex_query,
+        "apify": {"actor_id": actor_id, "run_id": run_id, "items_count": len(y_items or [])},
+        "best_yandex": best_y,
+        "site_urls": site_urls,
+        "social_links": social_links,
+    }
 
 
 @router.post("/collect_place")
