@@ -2,49 +2,47 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Top Analizator (Admin)</title>
   <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;padding:16px;background:#0b0f17;color:#e7eaf0}
-    h1{font-size:18px;margin:0 0 12px 0}
-    .card{background:#111a2b;border:1px solid #1c2a44;border-radius:12px;padding:12px;margin:12px 0}
-    label{display:block;font-size:12px;opacity:.9;margin:8px 0 4px}
-    input,select,textarea{width:100%;padding:10px;border-radius:10px;border:1px solid #243554;background:#0b1220;color:#e7eaf0}
-    button{padding:10px 12px;border:0;border-radius:10px;background:#2d6cdf;color:white;font-weight:600;cursor:pointer}
-    button.secondary{background:#22314d}
+    body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:0;background:#0b1220;color:#e6edf3}
+    .wrap{max-width:980px;margin:0 auto;padding:14px}
+    .card{background:#0f1a33;border:1px solid rgba(255,255,255,.08);border-radius:14px;padding:12px;margin:10px 0}
+    input,textarea,button{width:100%;padding:10px;border-radius:10px;border:1px solid rgba(255,255,255,.12);background:#0b1220;color:#e6edf3}
+    textarea{min-height:110px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}
+    button{cursor:pointer}
     .row{display:flex;gap:10px;flex-wrap:wrap}
-    .row > div{flex:1;min-width:160px}
-    table{width:100%;border-collapse:collapse;font-size:12px}
-    th,td{border-bottom:1px solid #1c2a44;padding:8px;text-align:left;vertical-align:top}
-    tr:hover{background:#0f1626}
-    .muted{opacity:.8}
-    .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#22314d}
-    .ok{background:#1e5d3b}
-    .fail{background:#6a2b2b}
-    .queued{background:#5b4a1f}
-    pre{white-space:pre-wrap;word-break:break-word;background:#0b1220;border:1px solid #243554;border-radius:10px;padding:10px;max-height:280px;overflow:auto}
-    a{color:#7fb2ff}
+    .row>div{flex:1;min-width:210px}
+    .muted{color:#9fb1c1;font-size:13px}
+    table{width:100%;border-collapse:collapse}
+    th,td{border-bottom:1px solid rgba(255,255,255,.08);padding:8px;text-align:left;vertical-align:top}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:rgba(255,255,255,.08);font-size:12px}
+    .err{color:#ff6b6b}
+    .ok{color:#7ee787}
   </style>
 </head>
 <body>
-  <h1>🏆 Top Analizator (Admin)</h1>
+<div class="wrap">
+  <h2>🏆 Top Analizator (Admin)</h2>
 
   <div class="card">
     <div class="row">
       <div>
         <label>Admin token (X-Admin-Token)</label>
-        <input id="token" placeholder="вставь токен" type="password"/>
+        <input id="token" placeholder="вставь токен"/>
+        <div class="muted">Токен хранится в localStorage только в этом браузере.</div>
       </div>
-      <div style="display:flex;align-items:flex-end;gap:10px">
-        <button class="secondary" id="saveToken">Сохранить</button>
-        <button class="secondary" id="loadJobs">Обновить jobs</button>
+      <div style="max-width:220px">
+        <label>&nbsp;</label>
+        <button onclick="saveToken()">Сохранить</button>
+        <button style="margin-top:8px" onclick="loadJobs()">Обновить jobs</button>
       </div>
     </div>
-    <div class="muted" style="margin-top:8px">Токен хранится в localStorage только в этом браузере.</div>
+    <div id="tokenHint" class="muted"></div>
   </div>
 
   <div class="card">
-    <h1>Запуск парсинга</h1>
+    <h3>Запуск парсинга (run_full_job)</h3>
     <div class="row">
       <div>
         <label>Город</label>
@@ -54,190 +52,175 @@
         <label>Ниша</label>
         <input id="niche" value="школа танцев"/>
       </div>
+    </div>
+    <div class="row">
       <div>
         <label>Limit</label>
-        <input id="limit" type="number" value="5" min="1" max="100"/>
+        <input id="limit" type="number" value="5"/>
       </div>
       <div>
         <label>Yandex retries</label>
-        <input id="yandex_retries" type="number" value="0" min="0" max="5"/>
+        <input id="yandex_retries" type="number" value="0"/>
+      </div>
+      <div style="max-width:220px">
+        <label>&nbsp;</label>
+        <button onclick="runJob()">Запустить</button>
       </div>
     </div>
-    <div style="margin-top:10px;display:flex;gap:10px">
-      <button id="runJob">Run job</button>
-      <button class="secondary" id="openLastJob" disabled>Открыть последний job</button>
-    </div>
-    <div id="runOut" class="muted" style="margin-top:8px"></div>
+    <div id="runOut" class="muted"></div>
   </div>
 
   <div class="card">
-    <h1>Jobs</h1>
-    <table id="jobsTable">
-      <thead>
-        <tr>
-          <th>Updated</th>
-          <th>Status</th>
-          <th>City / Query</th>
-          <th>Progress</th>
-          <th>Job ID</th>
-        </tr>
-      </thead>
-      <tbody></tbody>
-    </table>
+    <h3>Jobs</h3>
+    <div id="jobsOut" class="muted">—</div>
   </div>
 
   <div class="card">
-    <h1>Job detail</h1>
-    <label>Job ID</label>
-    <input id="jobId" placeholder="вставь job_id и нажми Загрузить"/>
-    <div style="margin-top:10px;display:flex;gap:10px">
-      <button id="loadJob">Загрузить</button>
-      <button class="secondary" id="loadJobWithRaw">+ raw</button>
+    <h3>Job detail</h3>
+    <div class="row">
+      <div>
+        <label>Job ID</label>
+        <input id="jobId" placeholder="вставь job_id и нажми Загрузить"/>
+      </div>
+      <div style="max-width:220px">
+        <label>&nbsp;</label>
+        <button onclick="loadJob()">Загрузить</button>
+        <button style="margin-top:8px" onclick="extractSocials()">Extract TG/IG</button>
+      </div>
     </div>
 
-    <div style="margin-top:12px">
-      <div class="muted">State</div>
-      <pre id="statePre">{}</pre>
+    <div class="row">
+      <div>
+        <label>State</label>
+        <textarea id="stateOut" readonly>{}</textarea>
+      </div>
+      <div>
+        <label>Places (mi_places)</label>
+        <textarea id="placesOut" readonly>[]</textarea>
+      </div>
     </div>
 
-    <div style="margin-top:12px">
-      <div class="muted">Places (mi_places)</div>
-      <pre id="placesPre">[]</pre>
-    </div>
-
-    <div style="margin-top:12px">
-      <div class="muted">Raw items (mi_raw_items)</div>
-      <pre id="rawPre">[]</pre>
+    <div>
+      <label>Places table (TG/IG focus)</label>
+      <div id="placesTable" class="muted">—</div>
     </div>
   </div>
+</div>
 
 <script>
-  const $ = (id)=>document.getElementById(id);
+const API = "/api/admin";
+function getToken(){ return localStorage.getItem("admin_token") || ""; }
+function saveToken(){
+  const t = document.getElementById("token").value.trim();
+  localStorage.setItem("admin_token", t);
+  hint();
+}
+function hint(){
+  const t = getToken();
+  document.getElementById("token").value = t;
+  document.getElementById("tokenHint").innerHTML = t ? "<span class='ok'>✓ token сохранён</span>" : "<span class='err'>✗ token не задан</span>";
+}
+hint();
 
-  function getToken(){
-    return ($("token").value || localStorage.getItem("admin_token") || "").trim();
+async function apiFetch(path, opts={}){
+  const headers = Object.assign({}, opts.headers || {}, {"X-Admin-Token": getToken()});
+  const r = await fetch(API + path, Object.assign({}, opts, {headers}));
+  const text = await r.text();
+  let data = null;
+  try { data = JSON.parse(text); } catch(e) {}
+  if(!r.ok){
+    throw new Error((data && (data.detail||data.error)) ? (data.detail||data.error) : text);
   }
-  function setToken(t){
-    localStorage.setItem("admin_token", t);
-    $("token").value = t;
-  }
-  function hdr(){
-    const t = getToken();
-    return t ? {"X-Admin-Token": t} : {};
-  }
-  function fmtStatus(s){
-    const cls = (s==="done"||s==="completed")?"ok":(s==="failed"?"fail":"queued");
-    return `<span class="pill ${cls}">${s||"?"}</span>`;
-  }
+  return data;
+}
 
-  async function api(path, opts={}){
-    const r = await fetch(path, {
-      ...opts,
-      headers: {...(opts.headers||{}), ...hdr(), "Content-Type":"application/json"},
-    });
-    const text = await r.text();
-    let data;
-    try{ data = JSON.parse(text); }catch(e){ data = {raw:text}; }
-    if(!r.ok){
-      throw new Error((data && (data.detail||data.message)) ? (data.detail||data.message) : ("HTTP "+r.status));
+async function loadJobs(){
+  try{
+    const data = await apiFetch("/jobs?limit=50");
+    const jobs = data.jobs || [];
+    if(!jobs.length){ document.getElementById("jobsOut").innerText = "пока пусто"; return; }
+    let html = "<table><thead><tr><th>Updated</th><th>Status</th><th>Progress</th><th>Job ID</th></tr></thead><tbody>";
+    for(const j of jobs){
+      const upd = j.updated_at || "";
+      const st = j.status || "";
+      const prog = (j.done||0)+"/"+(j.total||0)+" (failed "+(j.failed||0)+")";
+      html += `<tr><td>${upd}</td><td><span class="pill">${st}</span></td><td>${prog}</td><td><a href="#" onclick="pickJob('${j.job_id}');return false;">${j.job_id}</a></td></tr>`;
     }
-    return data;
+    html += "</tbody></table>";
+    document.getElementById("jobsOut").innerHTML = html;
+  }catch(e){
+    document.getElementById("jobsOut").innerHTML = "<span class='err'>"+e.message+"</span>";
   }
+}
 
-  $("saveToken").onclick = ()=> setToken(getToken());
-  // preload token
-  setToken(localStorage.getItem("admin_token") || "");
+function pickJob(id){
+  document.getElementById("jobId").value = id;
+  loadJob();
+}
 
-  let lastJobId = null;
-
-  $("runJob").onclick = async ()=>{
-    $("runOut").textContent = "Запускаю...";
-    try{
-      const payload = {
-        tg_user_id: 1,
-        city: $("city").value,
-        niche: $("niche").value,
-        limit: parseInt($("limit").value || "5", 10),
-        yandex_retries: parseInt($("yandex_retries").value || "0", 10),
-      };
-      const res = await api("/api/admin/run_job", {method:"POST", body: JSON.stringify(payload)});
-      lastJobId = res.job_id || res.id || res.jobId;
-      $("runOut").innerHTML = `✅ job_id: <b>${lastJobId}</b>`;
-      $("openLastJob").disabled = !lastJobId;
-      if(lastJobId){ $("jobId").value = lastJobId; }
-      await loadJobs();
-    }catch(e){
-      $("runOut").textContent = "❌ " + e.message;
-    }
+async function runJob(){
+  const payload = {
+    tg_user_id: 1,
+    city: document.getElementById("city").value.trim(),
+    niche: document.getElementById("niche").value.trim(),
+    limit: parseInt(document.getElementById("limit").value||"0",10) || 5,
+    yandex_retries: parseInt(document.getElementById("yandex_retries").value||"0",10) || 0
   };
-
-  $("openLastJob").onclick = ()=>{
-    if(lastJobId){ $("jobId").value = lastJobId; }
-    loadJob(false);
-  };
-
-  async function loadJobs(){
-    const tbody = $("jobsTable").querySelector("tbody");
-    tbody.innerHTML = `<tr><td colspan="5" class="muted">Загрузка...</td></tr>`;
-    try{
-      const res = await api("/api/admin/jobs?limit=50");
-      const items = res.items || [];
-      if(!items.length){
-        tbody.innerHTML = `<tr><td colspan="5" class="muted">Нет данных</td></tr>`;
-        return;
-      }
-      tbody.innerHTML = items.map(it=>{
-        const meta = it.meta || {};
-        const phase = meta.phase ? ` · ${meta.phase}` : "";
-        const prog = `${it.done||0}/${it.total||0} · fail ${it.failed||0}${phase}`;
-        const q = it.query || (Array.isArray(it.queries) ? it.queries.join(", ") : "");
-        return `<tr data-job="${it.job_id}">
-          <td>${(it.updated_at||"").replace("T"," ").slice(0,19)}</td>
-          <td>${fmtStatus(it.status)}</td>
-          <td>${it.city||""}<div class="muted">${q}</div></td>
-          <td>${prog}</td>
-          <td><a href="#" data-open="${it.job_id}">${it.job_id}</a></td>
-        </tr>`;
-      }).join("");
-      tbody.querySelectorAll("a[data-open]").forEach(a=>{
-        a.onclick = (ev)=>{
-          ev.preventDefault();
-          const jid = a.getAttribute("data-open");
-          $("jobId").value = jid;
-          loadJob(false);
-        };
-      });
-    }catch(e){
-      tbody.innerHTML = `<tr><td colspan="5">❌ ${e.message}</td></tr>`;
-    }
+  try{
+    const data = await apiFetch("/run_job", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)});
+    document.getElementById("runOut").innerText = "OK: "+JSON.stringify(data);
+    if(data && data.job_id){ document.getElementById("jobId").value = data.job_id; }
+    await loadJobs();
+  }catch(e){
+    document.getElementById("runOut").innerHTML = "<span class='err'>"+e.message+"</span>";
   }
+}
 
-  async function loadJob(withRaw){
-    const jid = ($("jobId").value || "").trim();
-    if(!jid){ return; }
-    $("statePre").textContent = "Загрузка...";
-    $("placesPre").textContent = "Загрузка...";
-    $("rawPre").textContent = "[]";
-    try{
-      const url = withRaw ? `/api/admin/job/${encodeURIComponent(jid)}?include_raw=1&raw_limit=80`
-                          : `/api/admin/job/${encodeURIComponent(jid)}?include_raw=0`;
-      const res = await api(url);
-      $("statePre").textContent = JSON.stringify(res.state || {}, null, 2);
-      $("placesPre").textContent = JSON.stringify(res.places || [], null, 2);
-      $("rawPre").textContent = JSON.stringify(res.raw_items || [], null, 2);
-    }catch(e){
-      $("statePre").textContent = "❌ " + e.message;
-      $("placesPre").textContent = "[]";
-      $("rawPre").textContent = "[]";
-    }
+async function loadJob(){
+  const id = document.getElementById("jobId").value.trim();
+  if(!id) return;
+  try{
+    const data = await apiFetch("/job/"+encodeURIComponent(id)+"?include_raw=false");
+    document.getElementById("stateOut").value = JSON.stringify(data.state||{}, null, 2);
+    document.getElementById("placesOut").value = JSON.stringify(data.places||[], null, 2);
+    renderPlacesTable(data.places||[]);
+  }catch(e){
+    document.getElementById("stateOut").value = "{}";
+    document.getElementById("placesOut").value = "[]";
+    document.getElementById("placesTable").innerHTML = "<span class='err'>"+e.message+"</span>";
   }
+}
 
-  $("loadJobs").onclick = loadJobs;
-  $("loadJob").onclick = ()=>loadJob(false);
-  $("loadJobWithRaw").onclick = ()=>loadJob(true);
+function renderPlacesTable(places){
+  if(!places.length){ document.getElementById("placesTable").innerText = "—"; return; }
+  let html = "<table><thead><tr><th>place_key</th><th>site</th><th>Telegram</th><th>Instagram</th><th>other socials</th></tr></thead><tbody>";
+  for(const p of places){
+    const pk = p.place_key || "";
+    const sites = (p.site_urls||[]);
+    const site = Array.isArray(sites) ? (sites[0]||"") : (sites||"");
+    const tg = (p.tg_links||[]);
+    const ig = (p.ig_links||[]);
+    const tgCell = Array.isArray(tg) && tg.length ? tg.map(u=>`<div><a href="${u}" target="_blank">${u}</a></div>`).join("") : "<span class='muted'>—</span>";
+    const igCell = Array.isArray(ig) && ig.length ? ig.map(u=>`<div><a href="${u}" target="_blank">${u}</a></div>`).join("") : "<span class='muted'>—</span>";
+    const other = (p.social_links||[]);
+    const otherText = Array.isArray(other) ? other.filter(x=>typeof x==="string").slice(0,6).join("\n") : "";
+    html += `<tr><td>${pk}</td><td>${site}</td><td>${tgCell}</td><td>${igCell}</td><td><pre style="white-space:pre-wrap;margin:0">${otherText||""}</pre></td></tr>`;
+  }
+  html += "</tbody></table>";
+  document.getElementById("placesTable").innerHTML = html;
+}
 
-  // initial
-  loadJobs();
+async function extractSocials(){
+  const id = document.getElementById("jobId").value.trim();
+  if(!id) return;
+  try{
+    const data = await apiFetch("/extract_socials", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({job_id:id, taplink_fetch:true})});
+    alert("Updated: "+data.updated+" (errors: "+(data.errors||[]).length+")");
+    await loadJob();
+  }catch(e){
+    alert("ERR: "+e.message);
+  }
+}
 </script>
 </body>
 </html>
