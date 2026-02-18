@@ -1058,7 +1058,6 @@ def _collect_place_internal(
         # Stable upsert: only known columns in mi_places (avoid schema-cache 400s)
         sb.table("mi_places").upsert(payload_min, on_conflict="job_id,place_key").execute()
         _log_evt("MI_PLACES_UPSERT_OK", job_id=str(job_id), place_key=str(place_key), mode="minimal")
-, place_key=str(place_key), mode="minimal", err=f"{type(e).__name__}: {e}")
 
         return {
             "job_id": str(job_id),
