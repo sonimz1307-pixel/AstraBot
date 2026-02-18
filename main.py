@@ -28,8 +28,10 @@ app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 from app.routers.leads import router as leads_router
 from app.routers.kling3 import router as kling3_router
+from app.routers.admin_top import router as admin_top_router
 app.include_router(leads_router, prefix="/api/leads", tags=["leads"])
 app.include_router(kling3_router, prefix="/api/kling3", tags=["kling3"])
+app.include_router(admin_top_router, prefix="/api/admin", tags=["admin"])
 
 APP_VERSION = "v7-suno-callback-dedup-fix"
 try:
@@ -532,9 +534,16 @@ async def webapp_music():
     with open(os.path.join(BASE_DIR, "webapp_music.html"), "r", encoding="utf-8") as f:
         return f.read()
 
+
+@app.get("/webapp/top_analizator", response_class=HTMLResponse)
+async def webapp_top_analizator():
+    with open(os.path.join(BASE_DIR, "webapp_top_analizator.html"), "r", encoding="utf-8") as f:
+        return f.read()
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 WEBAPP_KLING_URL = os.getenv("WEBAPP_KLING_URL", "https://astrabot-tchj.onrender.com/webapp/kling")
 WEBAPP_MUSIC_URL = os.getenv("WEBAPP_MUSIC_URL", "https://astrabot-tchj.onrender.com/webapp/music")
+WEBAPP_TOP_ANALIZATOR_URL = os.getenv("WEBAPP_TOP_ANALIZATOR_URL", "https://astrabot-tchj.onrender.com/webapp/top_analizator")
 # --- YooKassa (cards/SBP) ---
 YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "").strip()
 YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "").strip()
@@ -1232,6 +1241,7 @@ def _main_menu_keyboard(is_admin: bool = False) -> dict:
             {"text": "🎬 Видео будущего", "web_app": {"url": WEBAPP_KLING_URL}},
             {"text": "🎵 Музыка будущего", "web_app": {"url": WEBAPP_MUSIC_URL}},
         ],
+        [{"text": "Для Pro"}],
         [{"text": "💰 Баланс"}, {"text": "Помощь"}],
     ]
     if is_admin:
@@ -1248,6 +1258,22 @@ def _main_menu_keyboard(is_admin: bool = False) -> dict:
 def _main_menu_for(user_id: int) -> dict:
     return _main_menu_keyboard(_is_admin(user_id))
 
+
+
+def _pro_menu_keyboard() -> dict:
+    rows = [
+        [{"text": "🏆 Top Analizator", "web_app": {"url": WEBAPP_TOP_ANALIZATOR_URL}}],
+        [{"text": "⬅️ Назад"}],
+    ]
+    return {
+        "keyboard": rows,
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+        "selective": False,
+    }
+
+def _pro_menu_for(user_id: int) -> dict:
+    return _pro_menu_keyboard()
 
 def _help_menu_for(user_id: int) -> dict:
     """Главное меню + экстренная кнопка сброса генерации (показываем ТОЛЬКО в «Помощь»)."""
@@ -4099,6 +4125,20 @@ async def webhook(secret: str, request: Request):
             "\n".join(lines),
             reply_markup=_help_menu_for(user_id),
         )
+        return {"ok": True}
+
+
+    # ----- Pro menu -----
+    if incoming_text == "Для Pro":
+        await tg_send_message(
+            chat_id,
+            "Раздел Pro. Открывай Top Analizator:",
+            reply_markup=_pro_menu_for(user_id),
+        )
+        return {"ok": True}
+
+    if incoming_text == "⬅️ Назад":
+        await tg_send_message(chat_id, "Главное меню.", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
 
     # ----- Video future (Kling Motion Control) -----
