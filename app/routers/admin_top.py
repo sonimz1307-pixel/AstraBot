@@ -72,6 +72,45 @@ def _extract_from_any(obj: Any) -> List[str]:
     return out
 
 
+
+async def _fetch_site_links(url: str) -> Tuple[List[str], Optional[Dict[str, Any]]]:
+    """Best-effort: download site HTML and regex tg/ig links (non-taplink too)."""
+    if not url:
+        return [], None
+    u = str(url).strip()
+
+    # Skip Yandex maps pages (often captcha/blocked) to avoid noise.
+    if re.search(r"(?:^|//)(?:www\.)?yandex\.(ru|com|eu)/maps", u):
+        return [], {"url": u, "skipped": "yandex_maps"}
+
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; AstraBot/1.0)"}
+    t0 = time.time()
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
+            r = await client.get(u, headers=headers)
+            html = r.text or ""
+            found: List[str] = []
+            # Telegram
+            found += re.findall(r"(https?://t\.me/[A-Za-z0-9_]{4,})", html)
+            found += re.findall(r"(?:https?://)?(?:www\.)?(?:telegram\.me|t\.me)/([A-Za-z0-9_]{4,})", html)
+            # Instagram
+            found += re.findall(r"(https?://(?:www\.)?instagram\.com/[A-Za-z0-9_.]+)", html)
+            meta = {"url": u, "status": r.status_code, "len": len(html), "elapsed_ms": int((time.time()-t0)*1000)}
+            # Normalize handles captured without scheme
+            normed: List[str] = []
+            for x in found:
+                if isinstance(x, tuple):
+                    x = x[0]
+                if isinstance(x, str) and x and x.startswith("t.me/"):
+                    x = "https://" + x
+                if isinstance(x, str) and x and re.fullmatch(r"[A-Za-z0-9_]{4,}", x):
+                    x = "https://t.me/" + x
+                if isinstance(x, str) and x:
+                    normed.append(x)
+            return list(dict.fromkeys(normed)), meta
+    except Exception as e:
+        return [], {"url": u, "error": f"{type(e).__name__}: {e}"}
+
 async def _fetch_taplink_links(url: str) -> Tuple[List[str], Optional[Dict[str, Any]]]:
     if not url:
         return [], None
@@ -192,6 +231,7 @@ async def extract_socials(
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
     max_places: int = Body(default=2000, embed=True),
     taplink_fetch: bool = Body(default=True, embed=True),
+    site_fetch: bool = Body(default=True, embed=True),
 ):
     """Extract canonical Telegram/Instagram links for all places in a job."""
     _require_admin(x_admin_token)
