@@ -876,7 +876,7 @@ async def _enrich_place_site(
             source="site_extract",
             city=None,
             queries=None,
-            actor_id=None,
+            actor_id="site_extract",
             run_id=f"site_{int(time.time())}",
             items=extracted_all,
         )
@@ -888,7 +888,7 @@ async def _enrich_place_site(
         "place_key": str(place_key),
         "site_urls": merged_sites,
         "social_links": merged_social,
-        "site_data": extracted_all,  # optional column
+# optional column
     }
 
     try:
@@ -1055,22 +1055,10 @@ def _collect_place_internal(
             "social_links": social_links,
         }
 
-        # Try extended payload if columns exist; fallback to minimal.
-        payload_ext = dict(payload_min)
-        payload_ext.update(
-            {
-                "best_2gis": base_item,
-                "best_yandex": best_y,
-                "yandex_query": yandex_query,
-            }
-        )
-
-        try:
-            sb.table("mi_places").upsert(payload_ext, on_conflict="job_id,place_key").execute()
-            _log_evt("MI_PLACES_UPSERT_OK", job_id=str(job_id), place_key=str(place_key), mode="extended")
-        except Exception as e:
-            sb.table("mi_places").upsert(payload_min, on_conflict="job_id,place_key").execute()
-            _log_evt("MI_PLACES_UPSERT_FALLBACK", job_id=str(job_id), place_key=str(place_key), mode="minimal", err=f"{type(e).__name__}: {e}")
+        # Stable upsert: only known columns in mi_places (avoid schema-cache 400s)
+        sb.table("mi_places").upsert(payload_min, on_conflict="job_id,place_key").execute()
+        _log_evt("MI_PLACES_UPSERT_OK", job_id=str(job_id), place_key=str(place_key), mode="minimal")
+, place_key=str(place_key), mode="minimal", err=f"{type(e).__name__}: {e}")
 
         return {
             "job_id": str(job_id),
