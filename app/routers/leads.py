@@ -13,7 +13,7 @@ from fastapi import APIRouter, Body, HTTPException, BackgroundTasks
 
 from app.services.socials_extract import fetch_and_extract_website_data
 from app.services.market_model_builder import build_brand_model_from_yandex_items
-from app.services.apify_client import run_actor_sync_get_dataset_items, ApifyError
+from app.services.apify_client import run_actor_sync_get_dataset_items, run_actor_fire_and_poll_get_dataset_items, ApifyError
 from app.services.mi_storage import create_job, insert_raw_items, get_supabase
 
 router = APIRouter()
@@ -976,11 +976,12 @@ def _collect_place_internal(
             "maxItems": int(max_items),
             "query": yandex_query,
         }
-        run_id = f"sync_{int(time.time())}"
-        _log_evt("YANDEX_RUN_CREATED", job_id=str(job_id), place_key=str(place_key), run_id=run_id, query=yandex_query)
-
+        run_id = None
         try:
-            y_items = run_actor_sync_get_dataset_items(actor_id=actor_id, actor_input=actor_input)
+            # Fire-and-poll (recommended for long Yandex actors)
+            run_id, y_items = run_actor_fire_and_poll_get_dataset_items(actor_id=actor_id, actor_input=actor_input)
+            _log_evt("YANDEX_RUN_CREATED", job_id=str(job_id), place_key=str(place_key), run_id=str(run_id), query=yandex_query)
+
         except ApifyError as e:
             raise HTTPException(
                 status_code=400,
