@@ -441,17 +441,34 @@ async def _orchestrate_full_job(
             if max_seconds is not None and max_seconds > 0 and (time.time() - started_ts) >= max_seconds:
                 stopped_reason = "max_seconds_reached"
                 break
+(?P<ind># Website/Taplink enrichment (best-effort)
+?P<ind>try:
+?P<ind>    site_candidates = []
+?P<ind>    if isinstance(result, dict):
+?P<ind>        site_candidates = result.get("site_urls") or []
+?P<ind>    await _enrich_place_site(sb=sb, job_id=job_id, place_key=pk, candidate_urls=site_candidates)
+?P<ind>except Exception:
+?P<ind>    pass
 
-            last_err = None
+?P<ind>last_err = None
             for attempt in range(max(0, yandex_retries) + 1):
                 try:
-                    _collect_place_internal(
+                    result = _collect_place_internal(
                         sb=sb,
                         job_id=job_id,
                         place_key=pk,
                         actor_id=yandex_actor_id,
                         max_items=yandex_max_items,
                     )
+                    # Website/Taplink enrichment (best-effort)
+                    try:
+                        site_candidates = []
+                        if isinstance(result, dict):
+                            site_candidates = result.get("site_urls") or []
+                        await _enrich_place_site(sb=sb, job_id=job_id, place_key=pk, candidate_urls=site_candidates)
+                    except Exception:
+                        pass
+
                     last_err = None
                     break
                 except HTTPException as e:
@@ -713,6 +730,105 @@ def _extract_site_urls_and_socials(y_it: Dict[str, Any]) -> tuple[list[str], dic
     if not isinstance(y_it, dict):
         return site_urls, social
 
+
+
+def _dedup_preserve_order(items: list[str]) -> list[str]:
+    out: list[str] = []
+    seen = set()
+    for x in items or []:
+        if not isinstance(x, str):
+            continue
+        x = x.strip()
+        if not x:
+            continue
+        if x in seen:
+            continue
+        seen.add(x)
+        out.append(x)
+    return out
+
+
+def _merge_dict(a: dict | None, b: dict | None) -> dict:
+    res = {}
+    if isinstance(a, dict):
+        res.update(a)
+    if isinstance(b, dict):
+        for k, v in b.items():
+            if k in res and res[k] not in (None, "", [], {}) and v in (None, "", [], {}):
+                continue
+            res[k] = v
+    return res
+
+
+async def _enrich_place_site(
+    *,
+    sb,
+    job_id: str,
+    place_key: str,
+    candidate_urls: list[str],
+    timeout: float = 25.0,
+) -> dict:
+    """Parse website/taplink pages and store enrichment.
+    Uses fetch_and_extract_website_data (routes to taplink extractor automatically).
+    """
+    urls = _dedup_preserve_order(candidate_urls)[:2]
+    if not urls:
+        return {"ok": True, "skipped": "no_urls"}
+
+    extracted_all: list[dict] = []
+    merged_social: dict = {}
+    merged_sites: list[str] = []
+
+    for url in urls:
+        try:
+            data = await fetch_and_extract_website_data(url)
+        except Exception as e:
+            data = {"ok": False, "error": f"{type(e).__name__}: {e}", "url": url}
+
+        extracted_all.append(data if isinstance(data, dict) else {"ok": True, "data": data, "url": url})
+
+        if isinstance(data, dict):
+            s = data.get("social_links") or data.get("socials") or {}
+            if isinstance(s, dict):
+                merged_social = _merge_dict(merged_social, s)
+            su = data.get("site_urls") or data.get("websites") or []
+            if isinstance(su, list):
+                merged_sites.extend([str(x) for x in su if x])
+            elif isinstance(su, str):
+                merged_sites.append(su)
+
+    merged_sites = _dedup_preserve_order(urls + merged_sites)
+
+    # RAW save (best-effort)
+    try:
+        _insert_raw_items_compat(
+            job_id=str(job_id),
+            place_key=str(place_key),
+            source="site_extract",
+            city=None,
+            queries=None,
+            actor_id=None,
+            run_id=f"site_{int(time.time())}",
+            items=extracted_all,
+        )
+    except Exception:
+        pass
+
+    payload = {
+        "job_id": str(job_id),
+        "place_key": str(place_key),
+        "site_urls": merged_sites,
+        "social_links": merged_social,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "site_data": extracted_all,
+    }
+    try:
+        sb.table("mi_places").upsert(payload, on_conflict="job_id,place_key").execute()
+    except Exception:
+        payload.pop("site_data", None)
+        sb.table("mi_places").upsert(payload, on_conflict="job_id,place_key").execute()
+
+    return {"ok": True, "urls": urls, "extracted_count": len(extracted_all)}
     # website variants
     for k in ("website", "site", "url", "webSite", "web"):
         v = y_it.get(k)
@@ -889,6 +1005,15 @@ async def collect_place(payload: Dict[str, Any] = Body(...)):
         actor_id=actor_id,
         max_items=max_items,
     )
+
+    # Website/Taplink enrichment (best-effort)
+    try:
+        site_candidates = []
+        if isinstance(result, dict):
+            site_candidates = result.get("site_urls") or []
+        await _enrich_place_site(sb=sb, job_id=str(job_id), place_key=str(place_key), candidate_urls=site_candidates)
+    except Exception:
+        pass
 
     return {
         "ok": True,
