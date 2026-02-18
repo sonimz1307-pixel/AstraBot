@@ -8,6 +8,64 @@ from fastapi import APIRouter, Header, HTTPException, Body, Query
 
 from db_supabase import supabase as sb
 
+def _load_yandex_raw_candidates(job_id: str, place_key: str) -> List[str]:
+    """
+    Pull extra candidate links from mi_raw_items(apify_yandex) for this place.
+    This is crucial because mi_places.social_links might be empty and site_urls might miss taplink/urls.
+    """
+    if sb is None:
+        return []
+    try:
+        rows = (
+            sb.table("mi_raw_items")
+            .select("item")
+            .eq("job_id", job_id)
+            .eq("place_key", place_key)
+            .eq("source", "apify_yandex")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        ).data or []
+        if not rows:
+            return []
+        item = (rows[0] or {}).get("item")
+
+        cands: List[str] = []
+
+        # The stored "item" might be a list (dataset items) or a dict
+        if isinstance(item, list) and item:
+            first = item[0]
+        else:
+            first = item
+
+        if isinstance(first, dict):
+            for key in ("website", "url", "yandexUrl"):
+                v = first.get(key)
+                if isinstance(v, str) and v:
+                    cands.append(v)
+
+            urls = first.get("urls")
+            if isinstance(urls, list):
+                for u in urls:
+                    if isinstance(u, str) and u:
+                        cands.append(u)
+
+            sl = first.get("socialLinks")
+            if isinstance(sl, list):
+                for it in sl:
+                    if isinstance(it, dict):
+                        u = it.get("url")
+                        r = it.get("readable")
+                        if isinstance(u, str) and u:
+                            cands.append(u)
+                        if isinstance(r, str) and r:
+                            cands.append(r)
+
+        return list(dict.fromkeys(cands))
+    except Exception:
+        return []
+
+
 router = APIRouter()
 LOG = logging.getLogger("uvicorn.error")
 
@@ -257,6 +315,7 @@ async def extract_socials(
         candidates: List[str] = []
         candidates += _extract_from_any(site_urls)
         candidates += _extract_from_any(social_links)
+        candidates += _load_yandex_raw_candidates(job_id, place_key)
 
         if taplink_fetch:
             for u in list(dict.fromkeys(candidates)):
