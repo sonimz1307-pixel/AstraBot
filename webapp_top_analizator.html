@@ -252,13 +252,30 @@ h1{
 
   function getTgUserId(){
     try{
-      return window.Telegram && window.Telegram.WebApp
-        && window.Telegram.WebApp.initDataUnsafe
-        && window.Telegram.WebApp.initDataUnsafe.user
-        && window.Telegram.WebApp.initDataUnsafe.user.id
-        ? window.Telegram.WebApp.initDataUnsafe.user.id
-        : null;
-    }catch(e){ return null; }
+      // 1) Telegram initDataUnsafe (preferred)
+      const id1 = window.Telegram?.WebApp?.initDataUnsafe?.user?.id;
+      if(id1) return id1;
+
+      // 2) Parse Telegram initData (desktop/webview edge cases)
+      const initData = window.Telegram?.WebApp?.initData;
+      if(initData && typeof initData === "string"){
+        const params = new URLSearchParams(initData);
+        const userStr = params.get("user");
+        if(userStr){
+          const userObj = JSON.parse(decodeURIComponent(userStr));
+          if(userObj && userObj.id) return userObj.id;
+        }
+      }
+
+      // 3) URL fallback (?uid=123 or ?tg_user_id=123)
+      const qs = new URLSearchParams(window.location.search || "");
+      const id3 = qs.get("tg_user_id") || qs.get("uid") || qs.get("user_id");
+      if(id3 && String(id3).trim()) return String(id3).trim();
+
+      return null;
+    }catch(e){
+      return null;
+    }
   }
 
   function authHeaders(){
@@ -298,7 +315,7 @@ h1{
   function mapErrorMessage(msg){
     const s = String(msg||"");
     if(s.includes("tg_user_id") && s.includes("required")){
-      return "Не удалось определить пользователя Telegram. Откройте WebApp из Telegram и попробуйте снова.";
+      return "Не удалось определить пользователя Telegram. Попробуйте открыть WebApp из кнопки в боте. Если проблема остаётся (Desktop), добавьте к ссылке параметр ?uid=ВАШ_ID.";
     }
     return s;
   }
@@ -316,7 +333,7 @@ h1{
 
     const tgUserId = getTgUserId();
     if(!tgUserId){
-      show("startErr", "Не удалось определить пользователя Telegram. Откройте WebApp из Telegram и попробуйте снова.");
+      show("startErr", "Не удалось определить пользователя Telegram. Попробуйте открыть WebApp из кнопки в боте. Если проблема остаётся (Desktop), добавьте к ссылке параметр ?uid=ВАШ_ID.");
       return;
     }
 
@@ -501,6 +518,8 @@ h1{
   }
 
   document.addEventListener("DOMContentLoaded", () => {
+    try{ window.Telegram?.WebApp?.ready?.(); }catch(e){}
+    try{ window.Telegram?.WebApp?.expand?.(); }catch(e){}
     loadTokenIntoUI();
     $("btnSaveToken").addEventListener("click", saveToken);
     $("btnStart").addEventListener("click", () => startAnalysis().catch(e => show("startErr", mapErrorMessage(e.message))));
