@@ -3,112 +3,134 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Top Analizator (Admin)</title>
+  <title>AstraBot — Анализ рынка (Admin)</title>
   <style>
-    body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:0;background:#0b1220;color:#e6edf3}
-    .wrap{max-width:980px;margin:0 auto;padding:14px}
-    .card{background:#0f1a33;border:1px solid rgba(255,255,255,.08);border-radius:14px;padding:12px;margin:10px 0}
-    input,textarea,button{width:100%;padding:10px;border-radius:10px;border:1px solid rgba(255,255,255,.12);background:#0b1220;color:#e6edf3}
-    textarea{min-height:110px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}
+    :root{--bg:#0b1220;--card:#0f1a33;--br:rgba(255,255,255,.10);--txt:#e6edf3;--mut:#9fb1c1;--ok:#7ee787;--bad:#ff6b6b;}
+    body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:0;background:var(--bg);color:var(--txt)}
+    .wrap{max-width:1060px;margin:0 auto;padding:14px}
+    .topbar{display:flex;align-items:center;justify-content:space-between;gap:10px}
+    .btnlink{background:transparent;border:1px solid var(--br);color:var(--txt);padding:8px 10px;border-radius:12px;cursor:pointer}
+    .card{background:var(--card);border:1px solid var(--br);border-radius:16px;padding:14px;margin:12px 0}
+    h2,h3{margin:0 0 10px 0}
+    label{display:block;font-size:13px;color:var(--mut);margin:0 0 6px 2px}
+    input,select,button,textarea{width:100%;padding:10px;border-radius:12px;border:1px solid var(--br);background:#0b1220;color:var(--txt);box-sizing:border-box}
+    textarea{min-height:90px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}
     button{cursor:pointer}
     .row{display:flex;gap:10px;flex-wrap:wrap}
-    .row>div{flex:1;min-width:210px}
-    .muted{color:#9fb1c1;font-size:13px}
+    .row>div{flex:1;min-width:220px}
+    .muted{color:var(--mut);font-size:13px}
+    .pill{display:inline-block;padding:3px 10px;border-radius:999px;background:rgba(255,255,255,.08);font-size:12px}
+    .ok{color:var(--ok)} .bad{color:var(--bad)}
+    .hidden{display:none}
     table{width:100%;border-collapse:collapse}
     th,td{border-bottom:1px solid rgba(255,255,255,.08);padding:8px;text-align:left;vertical-align:top}
-    .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:rgba(255,255,255,.08);font-size:12px}
-    .err{color:#ff6b6b}
-    .ok{color:#7ee787}
+    th{color:var(--mut);font-size:12px;font-weight:600}
+    .actions{display:flex;gap:8px;flex-wrap:wrap}
+    .actions button{width:auto}
+    .modalBack{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;padding:16px}
+    .modal{max-width:520px;width:100%;background:var(--card);border:1px solid var(--br);border-radius:18px;padding:16px}
   </style>
 </head>
 <body>
 <div class="wrap">
-  <h2>🏆 Top Analizator (Admin)</h2>
+  <div class="topbar">
+    <h2>📊 AstraBot — Анализ рынка</h2>
+    <button class="btnlink" onclick="openModal()">Открыть расширенную аналитику</button>
+  </div>
 
   <div class="card">
+    <h3>Доступ</h3>
     <div class="row">
       <div>
-        <label>Admin token (X-Admin-Token)</label>
-        <input id="token" placeholder="вставь токен"/>
-        <div class="muted">Токен хранится в localStorage только в этом браузере.</div>
+        <label>Админ‑токен</label>
+        <input id="token" placeholder="вставь X-Admin-Token"/>
+        <div class="muted">Хранится локально в браузере (localStorage).</div>
       </div>
-      <div style="max-width:220px">
+      <div style="max-width:260px">
         <label>&nbsp;</label>
         <button onclick="saveToken()">Сохранить</button>
-        <button style="margin-top:8px" onclick="loadJobs()">Обновить jobs</button>
       </div>
     </div>
     <div id="tokenHint" class="muted"></div>
   </div>
 
   <div class="card">
-    <h3>Запуск парсинга (run_full_job)</h3>
+    <h3>1) Запуск анализа</h3>
     <div class="row">
       <div>
         <label>Город</label>
         <input id="city" value="Астрахань"/>
       </div>
       <div>
-        <label>Ниша</label>
-        <input id="niche" value="школа танцев"/>
+        <label>Ниши (через запятую)</label>
+        <input id="niches" value="школа танцев"/>
+        <div class="muted">Сейчас используем первую нишу как основную (расширим позже).</div>
+      </div>
+      <div style="max-width:260px">
+        <label>Глубина обзора</label>
+        <select id="depth">
+          <option value="10">Быстрый обзор (до 10)</option>
+          <option value="30" selected>Стандартный анализ (до 30)</option>
+          <option value="50">Расширенный анализ (до 50)</option>
+        </select>
       </div>
     </div>
     <div class="row">
-      <div>
-        <label>Limit</label>
-        <input id="limit" type="number" value="5"/>
-      </div>
-      <div>
-        <label>Yandex retries</label>
-        <input id="yandex_retries" type="number" value="0"/>
-      </div>
-      <div style="max-width:220px">
+      <div style="max-width:260px">
         <label>&nbsp;</label>
-        <button onclick="runJob()">Запустить</button>
+        <button onclick="startAnalysis()">Начать анализ</button>
+      </div>
+      <div>
+        <label>Текущий запуск</label>
+        <input id="jobId" placeholder="job_id появится здесь" readonly/>
       </div>
     </div>
     <div id="runOut" class="muted"></div>
   </div>
 
-  <div class="card">
-    <h3>Jobs</h3>
-    <div id="jobsOut" class="muted">—</div>
+  <div class="card" id="progressCard">
+    <h3>2) Прогресс</h3>
+    <div id="progressOut" class="muted">—</div>
+    <div class="actions" style="margin-top:10px">
+      <button onclick="pollNow()">Обновить</button>
+      <button onclick="openSelection()">Перейти к выбору конкурентов</button>
+    </div>
   </div>
 
-  <div class="card">
-    <h3>Job detail</h3>
-    <div class="row">
-      <div>
-        <label>Job ID</label>
-        <input id="jobId" placeholder="вставь job_id и нажми Загрузить"/>
-      </div>
-      <div style="max-width:220px">
-        <label>&nbsp;</label>
-        <button onclick="loadJob()">Загрузить</button>
-        <button style="margin-top:8px" onclick="extractSocials()">Extract TG/IG</button>
-      </div>
+  <div class="card hidden" id="selectCard">
+    <h3>3) Выбор конкурентов</h3>
+    <div class="muted">Отметь нужные компании — дальнейший анализ запустится только по выбранным.</div>
+    <div class="actions" style="margin:10px 0">
+      <button onclick="selectAll(true)">Выбрать всех</button>
+      <button onclick="selectAll(false)">Снять всех</button>
+      <button onclick="saveSelection()">Сохранить выбор</button>
     </div>
+    <div style="margin:10px 0">
+      <label>Поиск</label>
+      <input id="search" placeholder="название / район" oninput="loadPlaces()"/>
+    </div>
+    <div id="placesTable" class="muted">—</div>
+    <div class="actions" style="margin-top:10px">
+      <button onclick="runEnrichSelected()">Продолжить анализ выбранных</button>
+    </div>
+    <div id="enrichOut" class="muted" style="margin-top:10px"></div>
+  </div>
 
-    <div class="row">
-      <div>
-        <label>State</label>
-        <textarea id="stateOut" readonly>{}</textarea>
-      </div>
-      <div>
-        <label>Places (mi_places)</label>
-        <textarea id="placesOut" readonly>[]</textarea>
-      </div>
-    </div>
+</div>
 
-    <div>
-      <label>Places table (TG/IG focus)</label>
-      <div id="placesTable" class="muted">—</div>
+<div class="modalBack" id="modalBack" onclick="closeModal(event)">
+  <div class="modal">
+    <h3>Расширенная аналитика</h3>
+    <div class="muted" style="margin:8px 0 14px 0">
+      Полная версия платформы будет доступна скоро — там появятся графики, сравнения конкурентов и AI‑инсайты.
     </div>
+    <button onclick="closeModal()">Понятно</button>
   </div>
 </div>
 
 <script>
 const API = "/api/admin";
+
 function getToken(){ return localStorage.getItem("admin_token") || ""; }
 function saveToken(){
   const t = document.getElementById("token").value.trim();
@@ -118,109 +140,193 @@ function saveToken(){
 function hint(){
   const t = getToken();
   document.getElementById("token").value = t;
-  document.getElementById("tokenHint").innerHTML = t ? "<span class='ok'>✓ token сохранён</span>" : "<span class='err'>✗ token не задан</span>";
+  document.getElementById("tokenHint").innerHTML = t ? "Токен сохранён." : "<span class='bad'>Токен не задан.</span>";
 }
 hint();
 
-async function apiFetch(path, opts={}){
-  const headers = Object.assign({}, opts.headers || {}, {"X-Admin-Token": getToken()});
-  const r = await fetch(API + path, Object.assign({}, opts, {headers}));
-  const text = await r.text();
-  let data = null;
-  try { data = JSON.parse(text); } catch(e) {}
-  if(!r.ok){
-    throw new Error((data && (data.detail||data.error)) ? (data.detail||data.error) : text);
-  }
-  return data;
+function headers(){
+  const t = getToken();
+  if(!t) throw new Error("admin token is empty");
+  return {"Content-Type":"application/json","X-Admin-Token":t};
 }
 
-async function loadJobs(){
+function openModal(){ document.getElementById("modalBack").style.display="flex"; }
+function closeModal(e){
+  if(e && e.target && e.target.id !== "modalBack") return;
+  document.getElementById("modalBack").style.display="none";
+}
+
+function setJob(id){
+  document.getElementById("jobId").value = id || "";
+  if(id){ localStorage.setItem("last_job_id", id); }
+}
+(function(){
+  const last = localStorage.getItem("last_job_id");
+  if(last) setJob(last);
+})();
+
+async function startAnalysis(){
   try{
-    const data = await apiFetch("/jobs?limit=50");
-    const jobs = data.jobs || [];
-    if(!jobs.length){ document.getElementById("jobsOut").innerText = "пока пусто"; return; }
-    let html = "<table><thead><tr><th>Updated</th><th>Status</th><th>Progress</th><th>Job ID</th></tr></thead><tbody>";
-    for(const j of jobs){
-      const upd = j.updated_at || "";
-      const st = j.status || "";
-      const prog = (j.done||0)+"/"+(j.total||0)+" (failed "+(j.failed||0)+")";
-      html += `<tr><td>${upd}</td><td><span class="pill">${st}</span></td><td>${prog}</td><td><a href="#" onclick="pickJob('${j.job_id}');return false;">${j.job_id}</a></td></tr>`;
-    }
-    html += "</tbody></table>";
-    document.getElementById("jobsOut").innerHTML = html;
+    const city = document.getElementById("city").value.trim();
+    const niches = document.getElementById("niches").value.split(",").map(s=>s.trim()).filter(Boolean);
+    const depth = parseInt(document.getElementById("depth").value,10);
+
+    if(!city) return out("runOut","<span class='bad'>Укажи город.</span>");
+    if(!niches.length) return out("runOut","<span class='bad'>Укажи нишу.</span>");
+
+    // Временно: используем первую нишу как основную (в mi_jobs.queries уже можно хранить список — расширим в leads v7)
+    const payload = {tg_user_id: 1, city: city, niche: niches[0], limit: depth, yandex_retries: 1};
+
+    out("runOut","Запускаю анализ…");
+    const r = await fetch(API+"/run_job", {method:"POST", headers:headers(), body:JSON.stringify(payload)});
+    const j = await r.json();
+    if(!r.ok || !j.ok) return out("runOut","<span class='bad'>Ошибка запуска: "+escapeHtml(JSON.stringify(j))+"</span>");
+    setJob(j.job_id);
+    out("runOut","✅ Запуск создан: <span class='pill'>"+j.job_id+"</span>");
+    pollNow();
   }catch(e){
-    document.getElementById("jobsOut").innerHTML = "<span class='err'>"+e.message+"</span>";
+    out("runOut","<span class='bad'>"+escapeHtml(String(e))+"</span>");
   }
 }
 
-function pickJob(id){
-  document.getElementById("jobId").value = id;
-  loadJob();
+function phaseLabel(state){
+  const meta = (state && state.meta) || {};
+  const phase = (meta.phase || state.status || "").toString();
+  // Магические названия без источников
+  if(phase.includes("queued")) return "Подготовка…";
+  if(phase.includes("yandex")) return "Сбор и обогащение данных…";
+  if(phase.includes("done") || phase.includes("finished")) return "Готово";
+  return phase ? phase : "В работе…";
 }
 
-async function runJob(){
-  const payload = {
-    tg_user_id: 1,
-    city: document.getElementById("city").value.trim(),
-    niche: document.getElementById("niche").value.trim(),
-    limit: parseInt(document.getElementById("limit").value||"0",10) || 5,
-    yandex_retries: parseInt(document.getElementById("yandex_retries").value||"0",10) || 0
-  };
+async function pollNow(){
+  const jobId = document.getElementById("jobId").value.trim();
+  if(!jobId) return out("progressOut","—");
   try{
-    const data = await apiFetch("/run_job", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)});
-    document.getElementById("runOut").innerText = "OK: "+JSON.stringify(data);
-    if(data && data.job_id){ document.getElementById("jobId").value = data.job_id; }
-    await loadJobs();
+    const r = await fetch(API+"/job/"+encodeURIComponent(jobId), {headers:headers()});
+    const j = await r.json();
+    if(!r.ok || !j.ok) return out("progressOut","<span class='bad'>Ошибка: "+escapeHtml(JSON.stringify(j))+"</span>");
+
+    const st = j.state || {};
+    const total = st.total ?? 0;
+    const done = st.done ?? 0;
+    const failed = st.failed ?? 0;
+    const status = phaseLabel(st);
+
+    let pct = total>0 ? Math.min(100, Math.round((done/total)*100)) : 0;
+
+    out("progressOut",
+      "<div class='pill'>"+escapeHtml(status)+"</div> "+
+      "<div style='margin-top:10px'>"+
+      "Обработано: <b>"+done+"</b> / <b>"+total+"</b> &nbsp; Ошибок: <b>"+failed+"</b> &nbsp; ("+pct+"%)"+
+      "</div>"
+    );
   }catch(e){
-    document.getElementById("runOut").innerHTML = "<span class='err'>"+e.message+"</span>";
+    out("progressOut","<span class='bad'>"+escapeHtml(String(e))+"</span>");
   }
 }
 
-async function loadJob(){
-  const id = document.getElementById("jobId").value.trim();
-  if(!id) return;
+function openSelection(){
+  document.getElementById("selectCard").classList.remove("hidden");
+  loadPlaces();
+  window.scrollTo({top: document.body.scrollHeight, behavior:"smooth"});
+}
+
+let placesCache = [];
+async function loadPlaces(){
+  const jobId = document.getElementById("jobId").value.trim();
+  if(!jobId) return;
+  const search = document.getElementById("search").value.trim();
   try{
-    const data = await apiFetch("/job/"+encodeURIComponent(id)+"?include_raw=false");
-    document.getElementById("stateOut").value = JSON.stringify(data.state||{}, null, 2);
-    document.getElementById("placesOut").value = JSON.stringify(data.places||[], null, 2);
-    renderPlacesTable(data.places||[]);
+    const url = API+"/job/"+encodeURIComponent(jobId)+"/places?limit=2000&search="+encodeURIComponent(search);
+    const r = await fetch(url, {headers:headers()});
+    const j = await r.json();
+    if(!r.ok || !j.ok) return out("placesTable","<span class='bad'>Ошибка: "+escapeHtml(JSON.stringify(j))+"</span>");
+    placesCache = j.places || [];
+    renderPlaces();
   }catch(e){
-    document.getElementById("stateOut").value = "{}";
-    document.getElementById("placesOut").value = "[]";
-    document.getElementById("placesTable").innerHTML = "<span class='err'>"+e.message+"</span>";
+    out("placesTable","<span class='bad'>"+escapeHtml(String(e))+"</span>");
   }
 }
 
-function renderPlacesTable(places){
-  if(!places.length){ document.getElementById("placesTable").innerText = "—"; return; }
-  let html = "<table><thead><tr><th>place_key</th><th>site</th><th>Telegram</th><th>Instagram</th><th>other socials</th></tr></thead><tbody>";
-  for(const p of places){
-    const pk = p.place_key || "";
-    const sites = (p.site_urls||[]);
-    const site = Array.isArray(sites) ? (sites[0]||"") : (sites||"");
-    const tg = (p.tg_links||[]);
-    const ig = (p.ig_links||[]);
-    const tgCell = Array.isArray(tg) && tg.length ? tg.map(u=>`<div><a href="${u}" target="_blank">${u}</a></div>`).join("") : "<span class='muted'>—</span>";
-    const igCell = Array.isArray(ig) && ig.length ? ig.map(u=>`<div><a href="${u}" target="_blank">${u}</a></div>`).join("") : "<span class='muted'>—</span>";
-    const other = (p.social_links||[]);
-    const otherText = Array.isArray(other) ? other.filter(x=>typeof x==="string").slice(0,6).join("\n") : "";
-    html += `<tr><td>${pk}</td><td>${site}</td><td>${tgCell}</td><td>${igCell}</td><td><pre style="white-space:pre-wrap;margin:0">${otherText||""}</pre></td></tr>`;
+function renderPlaces(){
+  if(!placesCache.length) return out("placesTable","Пока нет списка конкурентов. Вернись на шаг 2 и обнови прогресс.");
+  let html = "<table><thead><tr>"+
+    "<th></th><th>Компания</th><th>Контакты</th><th>Ссылки</th></tr></thead><tbody>";
+  for(const p of placesCache){
+    const checked = p.selected ? "checked" : "";
+    const title = p.title || ("place_key "+p.place_key);
+    const addr = p.address || "";
+    const tg = p.tg ? "<div>📨 <a href='"+escapeAttr(p.tg)+"' target='_blank'>Telegram</a></div>" : "<div class='muted'>Telegram: —</div>";
+    const ig = p.ig ? "<div>📷 <a href='"+escapeAttr(p.ig)+"' target='_blank'>Instagram</a></div>" : "<div class='muted'>Instagram: —</div>";
+    const site = p.website ? "<div>🌐 <a href='"+escapeAttr(p.website)+"' target='_blank'>Сайт</a></div>" : "<div class='muted'>Сайт: —</div>";
+
+    html += "<tr>"+
+      "<td><input type='checkbox' data-pk='"+escapeAttr(p.place_key)+"' "+checked+" onchange='toggleOne(this)'/></td>"+
+      "<td><div><b>"+escapeHtml(title)+"</b></div><div class='muted'>"+escapeHtml(addr)+"</div><div class='muted'>"+escapeHtml(p.place_key)+"</div></td>"+
+      "<td>"+site+"</td>"+
+      "<td>"+tg+ig+"</td>"+
+    "</tr>";
   }
   html += "</tbody></table>";
-  document.getElementById("placesTable").innerHTML = html;
+  out("placesTable", html);
 }
 
-async function extractSocials(){
-  const id = document.getElementById("jobId").value.trim();
-  if(!id) return;
-  try{
-    const data = await apiFetch("/extract_socials", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({job_id:id, taplink_fetch:true})});
-    alert("Updated: "+data.updated+" (errors: "+(data.errors||[]).length+")");
-    await loadJob();
-  }catch(e){
-    alert("ERR: "+e.message);
+function toggleOne(cb){
+  const pk = cb.getAttribute("data-pk");
+  const v = cb.checked;
+  for(const p of placesCache){
+    if(p.place_key===pk){ p.selected = v; break; }
   }
 }
+
+function selectAll(v){
+  for(const p of placesCache){ p.selected = !!v; }
+  renderPlaces();
+}
+
+async function saveSelection(){
+  const jobId = document.getElementById("jobId").value.trim();
+  if(!jobId) return;
+
+  const keys = placesCache.filter(p=>p.selected).map(p=>p.place_key);
+  try{
+    out("enrichOut","Сохраняю выбор…");
+    const payload = {place_keys: keys, selected: true, replace: true};
+    const r = await fetch(API+"/job/"+encodeURIComponent(jobId)+"/places/select", {
+      method:"POST", headers:headers(), body:JSON.stringify(payload)
+    });
+    const j = await r.json();
+    if(!r.ok || !j.ok) return out("enrichOut","<span class='bad'>Ошибка: "+escapeHtml(JSON.stringify(j))+"</span>");
+    out("enrichOut","✅ Выбор сохранён. Выбрано: <b>"+keys.length+"</b>");
+  }catch(e){
+    out("enrichOut","<span class='bad'>"+escapeHtml(String(e))+"</span>");
+  }
+}
+
+async function runEnrichSelected(){
+  const jobId = document.getElementById("jobId").value.trim();
+  if(!jobId) return;
+  try{
+    out("enrichOut","Запускаю детальный анализ выбранных…");
+    const r = await fetch(API+"/job/"+encodeURIComponent(jobId)+"/enrich_selected", {
+      method:"POST",
+      headers:headers(),
+      body:JSON.stringify({max_urls_per_place: 5, timeout_sec: 25.0, write_raw: true})
+    });
+    const j = await r.json();
+    if(!r.ok || !j.ok) return out("enrichOut","<span class='bad'>Ошибка: "+escapeHtml(JSON.stringify(j))+"</span>");
+    out("enrichOut","✅ Готово. Обновлено: <b>"+(j.updated||0)+"</b>. Просканировано компаний: <b>"+(j.scanned_places||0)+"</b>.");
+    // refresh list to show TG/IG
+    loadPlaces();
+  }catch(e){
+    out("enrichOut","<span class='bad'>"+escapeHtml(String(e))+"</span>");
+  }
+}
+
+function out(id, html){ document.getElementById(id).innerHTML = html; }
+function escapeHtml(s){ return (s||"").toString().replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;"); }
+function escapeAttr(s){ return escapeHtml(s).replaceAll("'","%27").replaceAll('"',"%22"); }
 </script>
 </body>
 </html>
