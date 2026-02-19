@@ -301,6 +301,218 @@ def job_detail(
     return {"ok": True, "state": state, "places": places, "raw_items": raw_items}
 
 
+
+@router.get("/job/{job_id}/places")
+def job_places(
+    job_id: str,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+    limit: int = Query(default=2000, ge=1, le=5000),
+    only_selected: bool = Query(default=False),
+    search: Optional[str] = Query(default=None),
+):
+    """Return competitors list for selection UI (RU WebApp).
+    Joins mi_places with mi_job_places.selected (selection layer).
+    """
+    _require_admin(x_admin_token)
+    if sb is None:
+        raise HTTPException(status_code=500, detail="Supabase client is not configured")
+
+    # Load selections (may be empty for legacy jobs)
+    sel_rows = (
+        sb.table("mi_job_places")
+        .select("place_key,selected,source,note")
+        .eq("job_id", job_id)
+        .limit(limit)
+        .execute()
+    ).data or []
+
+    sel_map: Dict[str, Dict[str, Any]] = {}
+    for r in sel_rows:
+        pk = str((r or {}).get("place_key") or "").strip()
+        if not pk:
+            continue
+        sel_map[pk] = {
+            "selected": bool((r or {}).get("selected", True)),
+            "source": (r or {}).get("source") or "auto",
+            "note": (r or {}).get("note"),
+        }
+
+    # Load places
+    places = (
+        sb.table("mi_places")
+        .select("place_key,best_2gis,best_yandex,site_urls,tg_links,ig_links,created_at")
+        .eq("job_id", job_id)
+        .order("created_at", desc=False)
+        .limit(limit)
+        .execute()
+    ).data or []
+
+    def _pick_title(best_2gis: Any, best_yandex: Any) -> str:
+        for obj in (best_2gis, best_yandex):
+            if isinstance(obj, dict):
+                for k in ("title", "name", "companyName"):
+                    v = obj.get(k)
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+        return ""
+
+    def _pick_address(best_2gis: Any, best_yandex: Any) -> str:
+        for obj in (best_2gis, best_yandex):
+            if isinstance(obj, dict):
+                for k in ("address", "addressText", "fullAddress", "address_name"):
+                    v = obj.get(k)
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+                a = obj.get("address")
+                if isinstance(a, dict):
+                    v = a.get("address") or a.get("text")
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+        return ""
+
+    out: List[Dict[str, Any]] = []
+    s = (search or "").strip().lower()
+    for p in places:
+        pk = str((p or {}).get("place_key") or "").strip()
+        if not pk:
+            continue
+
+        meta = sel_map.get(pk) or {"selected": True, "source": "auto", "note": None}
+        if only_selected and not meta.get("selected", True):
+            continue
+
+        best_2gis = (p or {}).get("best_2gis")
+        best_yandex = (p or {}).get("best_yandex")
+        title = _pick_title(best_2gis, best_yandex)
+        addr = _pick_address(best_2gis, best_yandex)
+
+        if s:
+            hay = f"{title} {addr} {pk}".lower()
+            if s not in hay:
+                continue
+
+        # website/tg/ig (first link only for UI convenience)
+        website = None
+        site_urls = (p or {}).get("site_urls")
+        if isinstance(site_urls, list) and site_urls:
+            website = site_urls[0]
+        elif isinstance(site_urls, dict):
+            # if stored as dict with list inside
+            for v in site_urls.values():
+                if isinstance(v, list) and v:
+                    website = v[0]
+                    break
+
+        tg = None
+        tg_links = (p or {}).get("tg_links")
+        if isinstance(tg_links, list) and tg_links:
+            tg = tg_links[0]
+
+        ig = None
+        ig_links = (p or {}).get("ig_links")
+        if isinstance(ig_links, list) and ig_links:
+            ig = ig_links[0]
+
+        out.append(
+            {
+                "place_key": pk,
+                "selected": bool(meta.get("selected", True)),
+                "source": meta.get("source") or "auto",
+                "note": meta.get("note"),
+                "title": title,
+                "address": addr,
+                "website": website,
+                "tg": tg,
+                "ig": ig,
+            }
+        )
+
+    return {"ok": True, "job_id": job_id, "places": out, "selection_count": len(sel_rows)}
+
+
+@router.post("/job/{job_id}/places/select")
+def job_places_select(
+    job_id: str,
+    payload: Dict[str, Any] = Body(...),
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    """Persist selection in mi_job_places.
+    Payload:
+      { "place_keys": [...], "selected": true|false, "replace": true|false }
+    If replace=true:
+      - sets all rows in this job to opposite, then applies selected to provided place_keys.
+    """
+    _require_admin(x_admin_token)
+    if sb is None:
+        raise HTTPException(status_code=500, detail="Supabase client is not configured")
+
+    place_keys = payload.get("place_keys") or payload.get("selected_place_keys") or []
+    if not isinstance(place_keys, list):
+        raise HTTPException(status_code=400, detail="place_keys must be a list")
+
+    selected = payload.get("selected")
+    if selected is None:
+        selected = True
+    selected = bool(selected)
+
+    replace = bool(payload.get("replace") or False)
+
+    # Normalize keys
+    keys = list(dict.fromkeys([str(x).strip() for x in place_keys if str(x).strip()]))
+
+    affected = 0
+    if replace:
+        # Set all to opposite first
+        sb.table("mi_job_places").update({"selected": (not selected)}).eq("job_id", job_id).execute()
+
+    if keys:
+        rows = [{"job_id": job_id, "place_key": pk, "selected": selected, "source": "auto"} for pk in keys]
+        sb.table("mi_job_places").upsert(rows, on_conflict="job_id,place_key").execute()
+        affected = len(rows)
+
+    return {"ok": True, "job_id": job_id, "affected": affected, "replace": replace, "selected": selected}
+
+
+@router.post("/job/{job_id}/enrich_selected")
+async def enrich_selected(
+    job_id: str,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+    max_urls_per_place: int = Body(default=5, embed=True),
+    timeout_sec: float = Body(default=25.0, embed=True),
+    write_raw: bool = Body(default=True, embed=True),
+):
+    """Run site/social enrichment ONLY for selected competitors (mi_job_places.selected=true)."""
+    _require_admin(x_admin_token)
+    if sb is None:
+        raise HTTPException(status_code=500, detail="Supabase client is not configured")
+
+    rows = (
+        sb.table("mi_job_places")
+        .select("place_key")
+        .eq("job_id", job_id)
+        .eq("selected", True)
+        .limit(5000)
+        .execute()
+    ).data or []
+    keys = [str((r or {}).get("place_key") or "").strip() for r in rows]
+    keys = [k for k in keys if k]
+
+    if not keys:
+        return {"ok": True, "job_id": job_id, "updated": 0, "scanned_places": 0, "scanned_urls": 0, "raw_affected": 0, "errors": [], "note": "no selected places"}
+
+    # Reuse existing logic by calling enrich_sites with place_keys filter
+    return await enrich_sites(
+        job_id=job_id,
+        place_keys=keys,
+        x_admin_token=x_admin_token,
+        max_places=len(keys),
+        max_urls_per_place=max_urls_per_place,
+        timeout_sec=timeout_sec,
+        write_raw=write_raw,
+    )
+
+
+
 @router.post("/run_job")
 async def run_job(
     payload: Dict[str, Any] = Body(...),
@@ -322,6 +534,7 @@ async def run_job(
 @router.post("/enrich_sites")
 async def enrich_sites(
     job_id: str = Body(..., embed=True),
+    place_keys: Optional[List[str]] = Body(default=None, embed=True),
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
     max_places: int = Body(default=2000, embed=True),
     max_urls_per_place: int = Body(default=5, embed=True),
@@ -348,13 +561,14 @@ async def enrich_sites(
 
     city = _get_job_city(job_id)
 
-    places = (
+    q = (
         sb.table("mi_places")
         .select("job_id,place_key,site_urls,social_links,tg_links,ig_links")
         .eq("job_id", job_id)
-        .limit(max_places)
-        .execute()
-    ).data or []
+    )
+    if place_keys:
+        q = q.in_("place_key", [str(x) for x in place_keys if x])
+    places = q.limit(max_places).execute().data or []
 
     run_id = f"admin_site_extract_{int(time.time())}"
 
