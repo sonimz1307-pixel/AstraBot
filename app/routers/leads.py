@@ -1061,6 +1061,12 @@ def _collect_place_internal(
         payload_min = {
             "job_id": str(job_id),
             "place_key": str(place_key),
+
+            # ✅ сохраняем источники для WebApp (название/адрес и т.д.)
+            "best_2gis": base_item,
+            "best_yandex": best_y,
+
+            # как было
             "site_urls": site_urls,
             "social_links": social_links,
         }
