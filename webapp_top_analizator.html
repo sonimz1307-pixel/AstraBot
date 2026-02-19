@@ -29,29 +29,27 @@
     .actions button{width:auto}
     .modalBack{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;padding:16px}
     .modal{max-width:520px;width:100%;background:var(--card);border:1px solid var(--br);border-radius:18px;padding:16px}
-  </style>
+  
+  .subtitle{margin-top:6px;color:var(--muted);font-size:14px}
+  .top-actions{display:flex;gap:10px;align-items:center}
+  .icon-btn{width:44px;height:44px;border-radius:14px;border:1px solid var(--br);background:rgba(0,0,0,.15);color:var(--fg);font-size:18px;cursor:pointer}
+  .icon-btn:active{transform:translateY(1px)}
+  .progress-bar{width:100%;height:12px;border-radius:999px;border:1px solid var(--br);background:rgba(255,255,255,.06);overflow:hidden;margin-top:10px}
+  .progress-fill{height:100%;width:0%;background:linear-gradient(90deg, rgba(138,180,248,.9), rgba(168,199,250,.9));}
+
+</style>
 </head>
 <body>
 <div class="wrap">
   <div class="topbar">
-    <h2>📊 AstraBot — Анализ рынка</h2>
-    <button class="btnlink" onclick="openModal()">Открыть расширенную аналитику</button>
-  </div>
-
-  <div class="card">
-    <h3>Доступ</h3>
-    <div class="row">
-      <div>
-        <label>Админ‑токен</label>
-        <input id="token" placeholder="вставь X-Admin-Token"/>
-        <div class="muted">Хранится локально в браузере (localStorage).</div>
-      </div>
-      <div style="max-width:260px">
-        <label>&nbsp;</label>
-        <button onclick="saveToken()">Сохранить</button>
-      </div>
+    <div>
+      <h2>📊 AstraBot — Анализ рынка</h2>
+      <div class="subtitle">AI-движок анализа локального рынка</div>
     </div>
-    <div id="tokenHint" class="muted"></div>
+    <div class="top-actions">
+      <button class="btnlink" onclick="openModal()">Открыть расширенную аналитику</button>
+      <button class="icon-btn" onclick="toggleSettings()" title="Настройки">⚙</button>
+    </div>
   </div>
 
   <div class="card">
@@ -64,8 +62,7 @@
       <div>
         <label>Ниши (через запятую)</label>
         <input id="niches" value="школа танцев"/>
-        <div class="muted">Сейчас используем первую нишу как основную (расширим позже).</div>
-      </div>
+</div>
       <div style="max-width:260px">
         <label>Глубина обзора</label>
         <select id="depth">
@@ -81,8 +78,8 @@
         <button onclick="startAnalysis()">Начать анализ</button>
       </div>
       <div>
-        <label>Текущий запуск</label>
-        <input id="jobId" placeholder="job_id появится здесь" readonly/>
+        <label>Текущий анализ</label>
+        <input id="jobId" placeholder="ID анализа появится после запуска" readonly/>
       </div>
     </div>
     <div id="runOut" class="muted"></div>
@@ -90,9 +87,12 @@
 
   <div class="card" id="progressCard">
     <h3>2) Прогресс</h3>
-    <div id="progressOut" class="muted">—</div>
+    <div id="progressStatus">
+      <div id="progressText" class="muted">Ожидание запуска…</div>
+      <div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
+      <div id="progressNumbers" class="muted" style="margin-top:10px"></div>
+    </div>
     <div class="actions" style="margin-top:10px">
-      <button onclick="pollNow()">Обновить</button>
       <button onclick="openSelection()">Перейти к выбору конкурентов</button>
     </div>
   </div>
@@ -116,6 +116,24 @@
     <div id="enrichOut" class="muted" style="margin-top:10px"></div>
   </div>
 
+
+
+  <div class="card hidden" id="settingsPanel">
+    <h3>Настройки доступа</h3>
+    <div class="row">
+      <div>
+        <label>Админ‑токен</label>
+        <input id="token" placeholder="Вставьте X-Admin-Token"/>
+        <div class="muted">Хранится локально в браузере.</div>
+      </div>
+      <div style="max-width:260px">
+        <label>&nbsp;</label>
+        <button onclick="saveToken()">Сохранить</button>
+      </div>
+    </div>
+    <div id="tokenHint" class="muted"></div>
+  </div>
+
 </div>
 
 <div class="modalBack" id="modalBack" onclick="closeModal(event)">
@@ -130,12 +148,25 @@
 
 <script>
 const API = "/api/admin";
+let progressInterval = null;
 
 function getToken(){ return localStorage.getItem("admin_token") || ""; }
 function saveToken(){
   const t = document.getElementById("token").value.trim();
   localStorage.setItem("admin_token", t);
   hint();
+
+
+function toggleSettings(){
+  const el = document.getElementById("settingsPanel");
+  if(!el) return;
+  el.classList.toggle("hidden");
+  // прокручиваем к настройкам, если открыли
+  if(!el.classList.contains("hidden")){
+    el.scrollIntoView({behavior:"smooth", block:"start"});
+  }
+}
+
 }
 function hint(){
   const t = getToken();
@@ -143,6 +174,18 @@ function hint(){
   document.getElementById("tokenHint").innerHTML = t ? "Токен сохранён." : "<span class='bad'>Токен не задан.</span>";
 }
 hint();
+
+
+function toggleSettings(){
+  const el = document.getElementById("settingsPanel");
+  if(!el) return;
+  el.classList.toggle("hidden");
+  // прокручиваем к настройкам, если открыли
+  if(!el.classList.contains("hidden")){
+    el.scrollIntoView({behavior:"smooth", block:"start"});
+  }
+}
+
 
 function headers(){
   const t = getToken();
@@ -174,7 +217,6 @@ async function startAnalysis(){
     if(!city) return out("runOut","<span class='bad'>Укажи город.</span>");
     if(!niches.length) return out("runOut","<span class='bad'>Укажи нишу.</span>");
 
-    // Временно: используем первую нишу как основную (в mi_jobs.queries уже можно хранить список — расширим в leads v7)
     const payload = {tg_user_id: 1, city: city, niche: niches[0], limit: depth, yandex_retries: 1};
 
     out("runOut","Запускаю анализ…");
@@ -183,7 +225,7 @@ async function startAnalysis(){
     if(!r.ok || !j.ok) return out("runOut","<span class='bad'>Ошибка запуска: "+escapeHtml(JSON.stringify(j))+"</span>");
     setJob(j.job_id);
     out("runOut","✅ Запуск создан: <span class='pill'>"+j.job_id+"</span>");
-    pollNow();
+    startProgressPolling(j.job_id);
   }catch(e){
     out("runOut","<span class='bad'>"+escapeHtml(String(e))+"</span>");
   }
@@ -199,11 +241,85 @@ function phaseLabel(state){
   return phase ? phase : "В работе…";
 }
 
-async function pollNow(){
+async 
+function updateProgressUI(st){
+  const total = st?.total ?? 0;
+  const done = st?.done ?? 0;
+  const failed = st?.failed ?? 0;
+  let pct = total>0 ? Math.min(100, Math.round((done/total)*100)) : 0;
+
+  // Текст “магическими” фазами
+  let text = "Ожидание запуска…";
+  if(total===0 && done===0){
+    text = "🔍 Подготавливаем анализ…";
+  }else if(pct < 30){
+    text = "🔍 Ищем компании…";
+  }else if(pct < 70){
+    text = "📊 Обрабатываем данные…";
+  }else if(pct < 100){
+    text = "📱 Анализируем присутствие в соцсетях…";
+  }else{
+    text = "✅ Анализ завершён";
+  }
+
+  const fill = document.getElementById("progressFill");
+  const txt = document.getElementById("progressText");
+  const nums = document.getElementById("progressNumbers");
+  if(fill) fill.style.width = pct + "%";
+  if(txt) txt.innerText = text;
+  if(nums){
+    if(total>0){
+      nums.innerHTML = "Обработано: <b>"+done+"</b> / <b>"+total+"</b> &nbsp; Ошибок: <b>"+failed+"</b> &nbsp; ("+pct+"%)";
+    }else{
+      nums.innerHTML = "";
+    }
+  }
+}
+
+function stopProgressPolling(){
+  if(progressInterval){
+    clearInterval(progressInterval);
+    progressInterval = null;
+  }
+}
+
+function startProgressPolling(jobId){
+  stopProgressPolling();
+  // сразу один раз
+  pollNow();
+  // дальше раз в 4 секунды
+  progressInterval = setInterval(pollNow, 4000);
+}
+
+function pollNow(){
   const jobId = document.getElementById("jobId").value.trim();
-  if(!jobId) return out("progressOut","—");
-  try{
-    const r = await fetch(API+"/job/"+encodeURIComponent(jobId), {headers:headers()});
+  if(!jobId){
+    updateProgressUI({total:0, done:0, failed:0});
+    return;
+  }
+  fetch(API+"/job/"+encodeURIComponent(jobId), {headers:headers()})
+    .then(async (r)=>({r, j: await r.json()}))
+    .then(({r,j})=>{
+      if(!r.ok || !j.ok){
+        document.getElementById("progressText").innerText = "⚠️ Не удалось получить статус";
+        document.getElementById("progressNumbers").innerHTML = "<span class='bad'>Ошибка: "+escapeHtml(JSON.stringify(j))+"</span>";
+        return;
+      }
+      const st = j.state || {};
+      updateProgressUI(st);
+      const total = st.total ?? 0;
+      const done = st.done ?? 0;
+      if(total>0 && done>=total){
+        stopProgressPolling();
+      }
+    })
+    .catch((e)=>{
+      document.getElementById("progressText").innerText = "⚠️ Не удалось получить статус";
+      document.getElementById("progressNumbers").innerHTML = "<span class='bad'>"+escapeHtml(String(e))+"</span>";
+    });
+}
+
+);
     const j = await r.json();
     if(!r.ok || !j.ok) return out("progressOut","<span class='bad'>Ошибка: "+escapeHtml(JSON.stringify(j))+"</span>");
 
