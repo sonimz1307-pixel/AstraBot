@@ -4427,7 +4427,7 @@ async def webhook(secret: str, request: Request):
             "_now": _now,
             "sb_clear_user_state": sb_clear_user_state,
             "poll_interval_sec": 2.0,
-            "timeout_sec": 300,
+            "timeout_sec": 1200,
         },
     )
     if handled:
