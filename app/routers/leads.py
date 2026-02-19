@@ -403,6 +403,16 @@ async def _orchestrate_full_job(
         if max_places is not None and max_places > 0 and len(place_keys) > max_places:
             place_keys = place_keys[:max_places]
 
+        
+        # Ensure selection layer rows exist (mi_job_places) for UI selection step.
+        # Safe: if table is not created yet, we silently skip.
+        try:
+            if place_keys:
+                rows = [{"job_id": job_id, "place_key": pk, "selected": True, "source": "auto"} for pk in place_keys]
+                sb.table("mi_job_places").upsert(rows, on_conflict="job_id,place_key").execute()
+        except Exception:
+            pass
+
         _job_state_upsert(
             sb,
             job_id,
@@ -1058,6 +1068,16 @@ def _collect_place_internal(
         # Stable upsert: only known columns in mi_places (avoid schema-cache 400s)
         sb.table("mi_places").upsert(payload_min, on_conflict="job_id,place_key").execute()
         _log_evt("MI_PLACES_UPSERT_OK", job_id=str(job_id), place_key=str(place_key), mode="minimal")
+        # Ensure selection row exists for this place (for single-place collects / retries)
+        try:
+            sb.table("mi_job_places").upsert(
+                {"job_id": str(job_id), "place_key": str(place_key), "selected": True, "source": "auto"},
+                on_conflict="job_id,place_key",
+            ).execute()
+        except Exception:
+            pass
+
+
 
         return {
             "job_id": str(job_id),
