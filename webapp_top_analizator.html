@@ -3,452 +3,400 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>AstraBot — Анализ рынка (Admin)</title>
+  <title>AstraBot — Анализ рынка</title>
   <style>
-    :root{--bg:#0b1220;--card:#0f1a33;--br:rgba(255,255,255,.10);--txt:#e6edf3;--mut:#9fb1c1;--ok:#7ee787;--bad:#ff6b6b;}
-    body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:0;background:var(--bg);color:var(--txt)}
-    .wrap{max-width:1060px;margin:0 auto;padding:14px}
-    .topbar{display:flex;align-items:center;justify-content:space-between;gap:10px}
-    .btnlink{background:transparent;border:1px solid var(--br);color:var(--txt);padding:8px 10px;border-radius:12px;cursor:pointer}
-    .card{background:var(--card);border:1px solid var(--br);border-radius:16px;padding:14px;margin:12px 0}
-    h2,h3{margin:0 0 10px 0}
-    label{display:block;font-size:13px;color:var(--mut);margin:0 0 6px 2px}
-    input,select,button,textarea{width:100%;padding:10px;border-radius:12px;border:1px solid var(--br);background:#0b1220;color:var(--txt);box-sizing:border-box}
-    textarea{min-height:90px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}
-    button{cursor:pointer}
-    .row{display:flex;gap:10px;flex-wrap:wrap}
-    .row>div{flex:1;min-width:220px}
-    .muted{color:var(--mut);font-size:13px}
-    .pill{display:inline-block;padding:3px 10px;border-radius:999px;background:rgba(255,255,255,.08);font-size:12px}
-    .ok{color:var(--ok)} .bad{color:var(--bad)}
-    .hidden{display:none}
-    table{width:100%;border-collapse:collapse}
-    th,td{border-bottom:1px solid rgba(255,255,255,.08);padding:8px;text-align:left;vertical-align:top}
-    th{color:var(--mut);font-size:12px;font-weight:600}
-    .actions{display:flex;gap:8px;flex-wrap:wrap}
-    .actions button{width:auto}
-    .modalBack{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;padding:16px}
-    .modal{max-width:520px;width:100%;background:var(--card);border:1px solid var(--br);border-radius:18px;padding:16px}
-  
-  .subtitle{margin-top:6px;color:var(--muted);font-size:14px}
-  .top-actions{display:flex;gap:10px;align-items:center}
-  .icon-btn{width:44px;height:44px;border-radius:14px;border:1px solid var(--br);background:rgba(0,0,0,.15);color:var(--fg);font-size:18px;cursor:pointer}
-  .icon-btn:active{transform:translateY(1px)}
-  .progress-bar{width:100%;height:12px;border-radius:999px;border:1px solid var(--br);background:rgba(255,255,255,.06);overflow:hidden;margin-top:10px}
-  .progress-fill{height:100%;width:0%;background:linear-gradient(90deg, rgba(138,180,248,.9), rgba(168,199,250,.9));}
-
-</style>
+    :root{
+      --bg:#0b1220; --card:#0f1a33; --br:rgba(255,255,255,.10);
+      --txt:#e6edf3; --mut:#9fb1c1; --ok:#7ee787; --bad:#ff6b6b;
+    }
+    *{box-sizing:border-box}
+    body{margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; background:var(--bg); color:var(--txt);}
+    .wrap{max-width:760px; margin:0 auto; padding:16px;}
+    .header{display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:12px;}
+    .title{font-size:26px; font-weight:800; line-height:1.1; margin:0;}
+    .subtitle{margin:6px 0 0; color:var(--mut); font-size:13px;}
+    .top-actions{display:flex; gap:10px; align-items:center;}
+    .btn, button{border:1px solid var(--br); background:rgba(255,255,255,.04); color:var(--txt);
+      padding:12px 14px; border-radius:14px; cursor:pointer; font-weight:650;}
+    .btn:active{transform:translateY(1px)}
+    .btn.primary{width:100%; padding:14px 16px; margin-top:10px;}
+    .card{border:1px solid var(--br); background:linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02));
+      border-radius:18px; padding:14px; margin:12px 0;}
+    h2{font-size:18px; margin:0 0 10px;}
+    label{display:block; font-size:12px; color:var(--mut); margin:10px 0 6px;}
+    input, select{width:100%; padding:12px 12px; border-radius:14px; border:1px solid var(--br);
+      background:rgba(0,0,0,.20); color:var(--txt); outline:none;}
+    .hint{color:var(--mut); font-size:12px; margin-top:8px;}
+    .ok{color:var(--ok); font-size:12px; margin-top:8px;}
+    .err{color:var(--bad); font-size:12px; margin-top:8px;}
+    .row{display:flex; gap:10px; flex-wrap:wrap;}
+    .row > *{flex:1 1 240px;}
+    .progress{height:10px; border-radius:999px; border:1px solid var(--br); background:rgba(255,255,255,.04); overflow:hidden;}
+    .fill{height:100%; width:0%; background:rgba(255,255,255,.55);}
+    .small{font-size:12px; color:var(--mut); margin-top:8px;}
+    .places{margin-top:10px;}
+    .place-item{display:flex; align-items:flex-start; gap:10px; padding:10px; border:1px solid var(--br);
+      border-radius:14px; background:rgba(0,0,0,.18); margin-top:8px;}
+    .place-main{flex:1}
+    .place-title{font-weight:750; line-height:1.2;}
+    .place-sub{color:var(--mut); font-size:12px; margin-top:4px;}
+    .pill{display:inline-block; padding:3px 8px; border:1px solid var(--br); border-radius:999px; font-size:11px; color:var(--mut); margin-left:6px;}
+    .linkrow{margin-top:6px; display:flex; gap:8px; flex-wrap:wrap;}
+    .linkrow a{color:var(--txt); text-decoration:none; border:1px solid var(--br); border-radius:999px; padding:4px 8px; font-size:12px; background:rgba(255,255,255,.04);}
+  </style>
 </head>
 <body>
+  <div class="wrap">
+    <div class="header">
+      <div>
+        <h1 class="title">📊 AstraBot — Анализ рынка</h1>
+        <p class="subtitle">AI-движок анализа локального рынка</p>
+      </div>
+      <div class="top-actions">
+        <button class="btn" id="btnPro" type="button">Открыть расширенную аналитику</button>
+      </div>
+    </div>
 
     <section class="card" id="accessCard">
       <h2>Доступ</h2>
-      <div class="row">
-        <label for="adminToken">Админ-токен</label>
-        <input id="adminToken" type="password" placeholder="Вставьте X-Admin-Token" autocomplete="off"/>
-        <button class="btn" onclick="saveToken()">Сохранить</button>
-        <div class="hint">Хранится локально в браузере (localStorage).</div>
-        <div class="err" id="tokenErr" style="display:none;"></div>
-        <div class="ok" id="tokenOk" style="display:none;"></div>
-      </div>
+      <label for="token">Админ-токен</label>
+      <input id="token" type="password" placeholder="Вставьте X-Admin-Token" autocomplete="off"/>
+      <button class="btn" id="btnSaveToken" type="button">Сохранить</button>
+      <div class="hint">Хранится локально в браузере (localStorage).</div>
+      <div class="err" id="tokenErr" style="display:none;"></div>
+      <div class="ok" id="tokenOk" style="display:none;"></div>
     </section>
 
-<div class="wrap">
-  <div class="topbar">
-    <div>
-      <h2>📊 AstraBot — Анализ рынка</h2>
-      <div class="subtitle">AI-движок анализа локального рынка</div>
-    </div>
-    <div class="top-actions">
-      <button class="btnlink" onclick="openModal()">Открыть расширенную аналитику</button>
-</div>
-  </div>
+    <section class="card">
+      <h2>1) Запуск анализа</h2>
 
-  <div class="card">
-    <h3>1) Запуск анализа</h3>
-    <div class="row">
-      <div>
-        <label>Город</label>
-        <input id="city" value="Астрахань"/>
+      <label for="city">Город</label>
+      <input id="city" value="Астрахань" />
+
+      <label for="niches">Ниши (через запятую)</label>
+      <input id="niches" value="школа танцев" />
+
+      <label for="depth">Глубина обзора</label>
+      <select id="depth">
+        <option value="10">Быстрый обзор (до 10)</option>
+        <option value="30" selected>Стандартный анализ (до 30)</option>
+        <option value="50">Расширенный анализ (до 50)</option>
+      </select>
+
+      <button class="btn primary" id="btnStart" type="button">Начать анализ</button>
+
+      <div class="small" style="margin-top:10px;">
+        Текущий анализ: <b id="jobIdText">ID анализа появится после запуска</b>
       </div>
-      <div>
-        <label>Ниши (через запятую)</label>
-        <input id="niches" value="школа танцев"/>
-</div>
-      <div style="max-width:260px">
-        <label>Глубина обзора</label>
-        <select id="depth">
-          <option value="10">Быстрый обзор (до 10)</option>
-          <option value="30" selected>Стандартный анализ (до 30)</option>
-          <option value="50">Расширенный анализ (до 50)</option>
-        </select>
+      <div class="err" id="startErr" style="display:none;"></div>
+      <div class="ok" id="startOk" style="display:none;"></div>
+    </section>
+
+    <section class="card">
+      <h2>2) Прогресс</h2>
+      <div id="progressText" class="small">Ожидание запуска…</div>
+      <div class="progress" aria-label="progress"><div class="fill" id="progressFill"></div></div>
+      <div class="small" id="progressMeta"></div>
+      <button class="btn" id="btnGoSelect" type="button" style="margin-top:10px;">Перейти к выбору конкурентов</button>
+    </section>
+
+    <section class="card" id="selectCard" style="display:none;">
+      <h2>3) Выбор конкурентов</h2>
+      <div class="hint">Отметьте компании, которые нужно обогатить и проанализировать глубже.</div>
+      <div class="row" style="margin-top:10px;">
+        <button class="btn" id="btnSelectAll" type="button">Выбрать всех</button>
+        <button class="btn" id="btnUnselectAll" type="button">Снять выбор</button>
       </div>
-    </div>
-    <div class="row">
-      <div style="max-width:260px">
-        <label>&nbsp;</label>
-        <button onclick="startAnalysis()">Начать анализ</button>
-      </div>
-      <div>
-        <label>Текущий анализ</label>
-        <input id="jobId" placeholder="ID анализа появится после запуска" readonly/>
-      </div>
-    </div>
-    <div id="runOut" class="muted"></div>
+      <div class="places" id="places"></div>
+      <button class="btn primary" id="btnEnrichSelected" type="button" style="margin-top:12px;">Продолжить анализ выбранных</button>
+      <div class="err" id="selectErr" style="display:none;"></div>
+      <div class="ok" id="selectOk" style="display:none;"></div>
+    </section>
   </div>
-
-  <div class="card" id="progressCard">
-    <h3>2) Прогресс</h3>
-    <div id="progressStatus">
-      <div id="progressText" class="muted">Ожидание запуска…</div>
-      <div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
-      <div id="progressNumbers" class="muted" style="margin-top:10px"></div>
-    </div>
-    <div class="actions" style="margin-top:10px">
-      <button onclick="openSelection()">Перейти к выбору конкурентов</button>
-    </div>
-  </div>
-
-  <div class="card hidden" id="selectCard">
-    <h3>3) Выбор конкурентов</h3>
-    <div class="muted">Отметь нужные компании — дальнейший анализ запустится только по выбранным.</div>
-    <div class="actions" style="margin:10px 0">
-      <button onclick="selectAll(true)">Выбрать всех</button>
-      <button onclick="selectAll(false)">Снять всех</button>
-      <button onclick="saveSelection()">Сохранить выбор</button>
-    </div>
-    <div style="margin:10px 0">
-      <label>Поиск</label>
-      <input id="search" placeholder="название / район" oninput="loadPlaces()"/>
-    </div>
-    <div id="placesTable" class="muted">—</div>
-    <div class="actions" style="margin-top:10px">
-      <button onclick="runEnrichSelected()">Продолжить анализ выбранных</button>
-    </div>
-    <div id="enrichOut" class="muted" style="margin-top:10px"></div>
-  </div>
-
-
-
-  <div class="card hidden" id="settingsPanel">
-    <h3>Настройки доступа</h3>
-    <div class="row">
-      <div>
-        <label>Админ‑токен</label>
-        <input id="token" placeholder="Вставьте X-Admin-Token"/>
-        <div class="muted">Хранится локально в браузере.</div>
-      </div>
-      <div style="max-width:260px">
-        <label>&nbsp;</label>
-        <button onclick="saveToken()">Сохранить</button>
-      </div>
-    </div>
-    <div id="tokenHint" class="muted"></div>
-  </div>
-
-</div>
-
-<div class="modalBack" id="modalBack" onclick="closeModal(event)">
-  <div class="modal">
-    <h3>Расширенная аналитика</h3>
-    <div class="muted" style="margin:8px 0 14px 0">
-      Полная версия платформы будет доступна скоро — там появятся графики, сравнения конкурентов и AI‑инсайты.
-    </div>
-    <button onclick="closeModal()">Понятно</button>
-  </div>
-</div>
 
 <script>
-const API = "/api/admin";
-let progressInterval = null;
-
-function getToken(){ return localStorage.getItem("admin_token") || ""; }
-function saveToken(){
-  const t = document.getElementById("token").value.trim();
-  localStorage.setItem("admin_token", t);
-  hint();
-}
-
-);
-  }
-}
-
-}
-function hint(){
-  const t = getToken();
-  document.getElementById("token").value = t;
-  document.getElementById("tokenHint").innerHTML = t ? "Токен сохранён." : "<span class='bad'>Токен не задан.</span>";
-}
-hint();
-
-
-function toggleSettings(){
-  const el = document.getElementById("settingsPanel");
-  if(!el) return;
-  el.classList.toggle("hidden");
-  // прокручиваем к настройкам, если открыли
-  if(!el.classList.contains("hidden")){
-    el.scrollIntoView({behavior:"smooth", block:"start"});
-  }
-}
-
-
-function headers(){
-  const t = getToken();
-  if(!t) throw new Error("admin token is empty");
-  return {"Content-Type":"application/json","X-Admin-Token":t};
-}
-
-function openModal(){ document.getElementById("modalBack").style.display="flex"; }
-function closeModal(e){
-  if(e && e.target && e.target.id !== "modalBack") return;
-  document.getElementById("modalBack").style.display="none";
-}
-
-function setJob(id){
-  document.getElementById("jobId").value = id || "";
-  if(id){ localStorage.setItem("last_job_id", id); }
-}
 (function(){
-  const last = localStorage.getItem("last_job_id");
-  if(last) setJob(last);
-})();
+  const LS_KEY = "admin_token";
+  let currentJobId = "";
+  let pollTimer = null;
+  let placesCache = [];
 
-async function startAnalysis(){
-  try{
-    const city = document.getElementById("city").value.trim();
-    const niches = document.getElementById("niches").value.split(",").map(s=>s.trim()).filter(Boolean);
-    const depth = parseInt(document.getElementById("depth").value,10);
-
-    if(!city) return out("runOut","<span class='bad'>Укажи город.</span>");
-    if(!niches.length) return out("runOut","<span class='bad'>Укажи нишу.</span>");
-
-    const payload = {tg_user_id: 1, city: city, niche: niches[0], limit: depth, yandex_retries: 1};
-
-    out("runOut","Запускаю анализ…");
-    const r = await fetch(API+"/run_job", {method:"POST", headers:headers(), body:JSON.stringify(payload)});
-    const j = await r.json();
-    if(!r.ok || !j.ok) return out("runOut","<span class='bad'>Ошибка запуска: "+escapeHtml(JSON.stringify(j))+"</span>");
-    setJob(j.job_id);
-    out("runOut","✅ Запуск создан: <span class='pill'>"+j.job_id+"</span>");
-    startProgressPolling(j.job_id);
-  }catch(e){
-    out("runOut","<span class='bad'>"+escapeHtml(String(e))+"</span>");
+  // --- helpers
+  function $(id){ return document.getElementById(id); }
+  function show(id, msg){
+    const el = $(id);
+    if(!el) return;
+    el.style.display = msg ? "block" : "none";
+    if(msg) el.textContent = msg;
   }
-}
-
-function phaseLabel(state){
-  const meta = (state && state.meta) || {};
-  const phase = (meta.phase || state.status || "").toString();
-  // Магические названия без источников
-  if(phase.includes("queued")) return "Подготовка…";
-  if(phase.includes("yandex")) return "Сбор и обогащение данных…";
-  if(phase.includes("done") || phase.includes("finished")) return "Готово";
-  return phase ? phase : "В работе…";
-}
-
-async 
-function updateProgressUI(st){
-  const total = st?.total ?? 0;
-  const done = st?.done ?? 0;
-  const failed = st?.failed ?? 0;
-  let pct = total>0 ? Math.min(100, Math.round((done/total)*100)) : 0;
-
-  // Текст “магическими” фазами
-  let text = "Ожидание запуска…";
-  if(total===0 && done===0){
-    text = "🔍 Подготавливаем анализ…";
-  }else if(pct < 30){
-    text = "🔍 Ищем компании…";
-  }else if(pct < 70){
-    text = "📊 Обрабатываем данные…";
-  }else if(pct < 100){
-    text = "📱 Анализируем присутствие в соцсетях…";
-  }else{
-    text = "✅ Анализ завершён";
+  function setProgress(pct){
+    pct = Math.max(0, Math.min(100, pct||0));
+    $("progressFill").style.width = pct + "%";
+  }
+  function getToken(){ return (localStorage.getItem(LS_KEY) || "").trim(); }
+  function setToken(t){ localStorage.setItem(LS_KEY, (t||"").trim()); }
+  function authHeaders(){
+    const t = getToken();
+    return t ? {"X-Admin-Token": t} : {};
   }
 
-  const fill = document.getElementById("progressFill");
-  const txt = document.getElementById("progressText");
-  const nums = document.getElementById("progressNumbers");
-  if(fill) fill.style.width = pct + "%";
-  if(txt) txt.innerText = text;
-  if(nums){
-    if(total>0){
-      nums.innerHTML = "Обработано: <b>"+done+"</b> / <b>"+total+"</b> &nbsp; Ошибок: <b>"+failed+"</b> &nbsp; ("+pct+"%)";
-    }else{
-      nums.innerHTML = "";
+  async function apiFetch(url, opts){
+    opts = opts || {};
+    opts.headers = Object.assign({"Content-Type":"application/json"}, opts.headers||{}, authHeaders());
+    const res = await fetch(url, opts);
+    const text = await res.text();
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch(e){ data = {raw:text}; }
+    if(!res.ok){
+      const msg = (data && (data.detail || data.error || data.message)) ? (data.detail || data.error || data.message) : ("HTTP " + res.status);
+      const err = new Error(msg);
+      err.status = res.status;
+      err.data = data;
+      throw err;
+    }
+    return data;
+  }
+
+  // --- token UI
+  function loadTokenIntoUI(){
+    $("token").value = getToken();
+  }
+  function saveToken(){
+    const t = $("token").value.trim();
+    setToken(t);
+    show("tokenErr", t ? "" : "Токен не задан.");
+    show("tokenOk", t ? "Токен сохранён." : "");
+  }
+
+  // --- start
+  function parseNiches(raw){
+    return (raw||"")
+      .split(",")
+      .map(s => s.trim())
+      .filter(Boolean);
+  }
+
+  async function startAnalysis(){
+    show("startErr", "");
+    show("startOk", "");
+    const city = $("city").value.trim();
+    const niches = parseNiches($("niches").value);
+    const limit = parseInt($("depth").value, 10) || 30;
+    if(!city){ show("startErr", "Укажите город."); return; }
+    if(niches.length===0){ show("startErr", "Укажите хотя бы одну нишу."); return; }
+
+    $("jobIdText").textContent = "Запускаем…";
+    $("progressText").textContent = "🔍 Запуск анализа…";
+    setProgress(2);
+    $("progressMeta").textContent = "";
+
+    // Совместимость с текущим API:
+    // query = первая ниша, queries = массив (json)
+    const payload = {
+      city: city,
+      query: niches[0],
+      queries: niches,
+      limit: limit
+    };
+
+    const data = await apiFetch("/api/leads/run_full_job", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+
+    const jobId = data.job_id || data.id || data.jobId;
+    if(!jobId){
+      throw new Error("Не получили ID анализа от сервера.");
+    }
+    currentJobId = jobId;
+    $("jobIdText").textContent = jobId;
+    show("startOk", "Анализ запущен.");
+    startPolling();
+  }
+
+  // --- polling
+  function humanStage(pct){
+    if(pct < 20) return "🔍 Ищем компании…";
+    if(pct < 70) return "📊 Обрабатываем данные…";
+    if(pct < 95) return "📱 Анализируем присутствие в соцсетях…";
+    return "✅ Завершаем…";
+  }
+
+  async function pollOnce(){
+    if(!currentJobId) return;
+    // пробуем job endpoint
+    const data = await apiFetch(`/api/admin/job/${currentJobId}`, { method:"GET" });
+    const st = data.state || data.job_state || data.status || {};
+    const total = Number(st.total || 0);
+    const done = Number(st.done || 0);
+    const failed = Number(st.failed || 0);
+
+    let pct = 0;
+    if(total > 0) pct = Math.round((done / total) * 100);
+    else pct = (st.status === "completed" || data.status === "completed") ? 100 : 5;
+
+    setProgress(pct);
+    $("progressText").textContent = humanStage(pct);
+    if(total > 0){
+      $("progressMeta").textContent = `Обработано: ${done}/${total}` + (failed ? ` • Ошибок: ${failed}` : "");
+    } else {
+      $("progressMeta").textContent = "";
+    }
+
+    // если закончилось — остановим таймер
+    const status = String(st.status || data.status || "").toLowerCase();
+    if((total>0 && done>=total) || status === "completed" || status === "done" || status === "finished"){
+      $("progressText").textContent = "✅ Анализ завершён";
+      setProgress(100);
+      if(pollTimer){ clearInterval(pollTimer); pollTimer = null; }
     }
   }
-}
 
-function stopProgressPolling(){
-  if(progressInterval){
-    clearInterval(progressInterval);
-    progressInterval = null;
+  function startPolling(){
+    if(pollTimer){ clearInterval(pollTimer); pollTimer = null; }
+    pollOnce().catch(()=>{});
+    pollTimer = setInterval(() => { pollOnce().catch(()=>{}); }, 4000);
   }
-}
 
-function startProgressPolling(jobId){
-  stopProgressPolling();
-  // сразу один раз
-  pollNow();
-  // дальше раз в 4 секунды
-  progressInterval = setInterval(pollNow, 4000);
-}
+  // --- selection
+  function renderPlaces(list){
+    const root = $("places");
+    root.innerHTML = "";
+    if(!list || list.length===0){
+      root.innerHTML = '<div class="hint">Пока нет списка компаний. Запустите анализ и подождите, затем нажмите “Перейти к выбору конкурентов”.</div>';
+      return;
+    }
+    for(const p of list){
+      const title = p.title || p.name || p.place_title || p.place_name || "Компания";
+      const addr = p.address || p.addr || p.place_address || "";
+      const selected = (p.selected !== undefined) ? !!p.selected : true;
+      const placeKey = p.place_key || p.placeKey || "";
+      const tg = (p.tg_links && p.tg_links.length) ? p.tg_links : (p.tg_links || []);
+      const ig = (p.ig_links && p.ig_links.length) ? p.ig_links : (p.ig_links || []);
+      const site = (p.site_urls && p.site_urls.length) ? p.site_urls : (p.site_urls || []);
 
-function pollNow(){
-  const jobId = document.getElementById("jobId").value.trim();
-  if(!jobId){
-    updateProgressUI({total:0, done:0, failed:0});
-    return;
+      const el = document.createElement("div");
+      el.className = "place-item";
+      el.innerHTML = `
+        <input type="checkbox" class="chk" ${selected ? "checked" : ""} data-place-key="${escapeHtml(placeKey)}"/>
+        <div class="place-main">
+          <div class="place-title">${escapeHtml(title)} ${p.source ? `<span class="pill">${escapeHtml(p.source)}</span>` : ""}</div>
+          <div class="place-sub">${escapeHtml(addr)}</div>
+          <div class="linkrow">
+            ${mkLinks(site, "Сайт")}
+            ${mkLinks(tg, "TG")}
+            ${mkLinks(ig, "IG")}
+          </div>
+        </div>
+      `;
+      root.appendChild(el);
+    }
   }
-  fetch(API+"/job/"+encodeURIComponent(jobId), {headers:headers()})
-    .then(async (r)=>({r, j: await r.json()}))
-    .then(({r,j})=>{
-      if(!r.ok || !j.ok){
-        document.getElementById("progressText").innerText = "⚠️ Не удалось получить статус";
-        document.getElementById("progressNumbers").innerHTML = "<span class='bad'>Ошибка: "+escapeHtml(JSON.stringify(j))+"</span>";
-        return;
-      }
-      const st = j.state || {};
-      updateProgressUI(st);
-      const total = st.total ?? 0;
-      const done = st.done ?? 0;
-      if(total>0 && done>=total){
-        stopProgressPolling();
-      }
-    })
-    .catch((e)=>{
-      document.getElementById("progressText").innerText = "⚠️ Не удалось получить статус";
-      document.getElementById("progressNumbers").innerHTML = "<span class='bad'>"+escapeHtml(String(e))+"</span>";
-    });
-}
 
-);
-    const j = await r.json();
-    if(!r.ok || !j.ok) return out("progressOut","<span class='bad'>Ошибка: "+escapeHtml(JSON.stringify(j))+"</span>");
-
-    const st = j.state || {};
-    const total = st.total ?? 0;
-    const done = st.done ?? 0;
-    const failed = st.failed ?? 0;
-    const status = phaseLabel(st);
-
-    let pct = total>0 ? Math.min(100, Math.round((done/total)*100)) : 0;
-
-    out("progressOut",
-      "<div class='pill'>"+escapeHtml(status)+"</div> "+
-      "<div style='margin-top:10px'>"+
-      "Обработано: <b>"+done+"</b> / <b>"+total+"</b> &nbsp; Ошибок: <b>"+failed+"</b> &nbsp; ("+pct+"%)"+
-      "</div>"
-    );
-  }catch(e){
-    out("progressOut","<span class='bad'>"+escapeHtml(String(e))+"</span>");
+  function mkLinks(arr, label){
+    if(!arr) return "";
+    const list = Array.isArray(arr) ? arr : [arr];
+    const first = list.filter(Boolean).slice(0,2);
+    return first.map(u => `<a href="${escapeAttr(u)}" target="_blank" rel="noreferrer">${label}</a>`).join("");
   }
-}
 
-function openSelection(){
-  document.getElementById("selectCard").classList.remove("hidden");
-  loadPlaces();
-  window.scrollTo({top: document.body.scrollHeight, behavior:"smooth"});
-}
+  function escapeHtml(s){ return String(s||"").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  function escapeAttr(s){ return escapeHtml(s); }
 
-let placesCache = [];
-async function loadPlaces(){
-  const jobId = document.getElementById("jobId").value.trim();
-  if(!jobId) return;
-  const search = document.getElementById("search").value.trim();
-  try{
-    const url = API+"/job/"+encodeURIComponent(jobId)+"/places?limit=2000&search="+encodeURIComponent(search);
-    const r = await fetch(url, {headers:headers()});
-    const j = await r.json();
-    if(!r.ok || !j.ok) return out("placesTable","<span class='bad'>Ошибка: "+escapeHtml(JSON.stringify(j))+"</span>");
-    placesCache = j.places || [];
-    renderPlaces();
-  }catch(e){
-    out("placesTable","<span class='bad'>"+escapeHtml(String(e))+"</span>");
+  async function loadPlaces(){
+    show("selectErr","");
+    show("selectOk","");
+    if(!currentJobId){ show("selectErr","Сначала запустите анализ."); return; }
+
+    $("selectCard").style.display = "block";
+    $("selectCard").scrollIntoView({behavior:"smooth", block:"start"});
+
+    // пробуем новый endpoint places
+    let data = null;
+    try{
+      data = await apiFetch(`/api/admin/job/${currentJobId}/places`, {method:"GET"});
+    }catch(e){
+      // fallback: из /job/{id}
+      const job = await apiFetch(`/api/admin/job/${currentJobId}`, {method:"GET"});
+      data = job.places || job.mi_places || [];
+    }
+
+    placesCache = data.places || data || [];
+    renderPlaces(placesCache);
   }
-}
 
-function renderPlaces(){
-  if(!placesCache.length) return out("placesTable","Пока нет списка конкурентов. Вернись на шаг 2 и обнови прогресс.");
-  let html = "<table><thead><tr>"+
-    "<th></th><th>Компания</th><th>Контакты</th><th>Ссылки</th></tr></thead><tbody>";
-  for(const p of placesCache){
-    const checked = p.selected ? "checked" : "";
-    const title = p.title || ("place_key "+p.place_key);
-    const addr = p.address || "";
-    const tg = p.tg ? "<div>📨 <a href='"+escapeAttr(p.tg)+"' target='_blank'>Telegram</a></div>" : "<div class='muted'>Telegram: —</div>";
-    const ig = p.ig ? "<div>📷 <a href='"+escapeAttr(p.ig)+"' target='_blank'>Instagram</a></div>" : "<div class='muted'>Instagram: —</div>";
-    const site = p.website ? "<div>🌐 <a href='"+escapeAttr(p.website)+"' target='_blank'>Сайт</a></div>" : "<div class='muted'>Сайт: —</div>";
-
-    html += "<tr>"+
-      "<td><input type='checkbox' data-pk='"+escapeAttr(p.place_key)+"' "+checked+" onchange='toggleOne(this)'/></td>"+
-      "<td><div><b>"+escapeHtml(title)+"</b></div><div class='muted'>"+escapeHtml(addr)+"</div><div class='muted'>"+escapeHtml(p.place_key)+"</div></td>"+
-      "<td>"+site+"</td>"+
-      "<td>"+tg+ig+"</td>"+
-    "</tr>";
+  async function applySelectAll(val){
+    const chks = Array.from(document.querySelectorAll(".chk"));
+    chks.forEach(c => c.checked = val);
+    await saveSelection(true);
   }
-  html += "</tbody></table>";
-  out("placesTable", html);
-}
 
-function toggleOne(cb){
-  const pk = cb.getAttribute("data-pk");
-  const v = cb.checked;
-  for(const p of placesCache){
-    if(p.place_key===pk){ p.selected = v; break; }
-  }
-}
+  async function saveSelection(replace){
+    // replace=true: выставить selected по всем переданным place_keys
+    const chks = Array.from(document.querySelectorAll(".chk"));
+    const place_keys = chks.map(c => c.getAttribute("data-place-key")).filter(Boolean);
+    const selected_place_keys = chks.filter(c => c.checked).map(c => c.getAttribute("data-place-key")).filter(Boolean);
 
-function selectAll(v){
-  for(const p of placesCache){ p.selected = !!v; }
-  renderPlaces();
-}
+    const payload = {
+      replace: !!replace,
+      place_keys: place_keys,
+      selected_place_keys: selected_place_keys
+    };
 
-async function saveSelection(){
-  const jobId = document.getElementById("jobId").value.trim();
-  if(!jobId) return;
-
-  const keys = placesCache.filter(p=>p.selected).map(p=>p.place_key);
-  try{
-    out("enrichOut","Сохраняю выбор…");
-    const payload = {place_keys: keys, selected: true, replace: true};
-    const r = await fetch(API+"/job/"+encodeURIComponent(jobId)+"/places/select", {
-      method:"POST", headers:headers(), body:JSON.stringify(payload)
-    });
-    const j = await r.json();
-    if(!r.ok || !j.ok) return out("enrichOut","<span class='bad'>Ошибка: "+escapeHtml(JSON.stringify(j))+"</span>");
-    out("enrichOut","✅ Выбор сохранён. Выбрано: <b>"+keys.length+"</b>");
-  }catch(e){
-    out("enrichOut","<span class='bad'>"+escapeHtml(String(e))+"</span>");
-  }
-}
-
-async function runEnrichSelected(){
-  const jobId = document.getElementById("jobId").value.trim();
-  if(!jobId) return;
-  try{
-    out("enrichOut","Запускаю детальный анализ выбранных…");
-    const r = await fetch(API+"/job/"+encodeURIComponent(jobId)+"/enrich_selected", {
+    await apiFetch(`/api/admin/job/${currentJobId}/places/select`, {
       method:"POST",
-      headers:headers(),
-      body:JSON.stringify({max_urls_per_place: 5, timeout_sec: 25.0, write_raw: true})
+      body: JSON.stringify(payload)
     });
-    const j = await r.json();
-    if(!r.ok || !j.ok) return out("enrichOut","<span class='bad'>Ошибка: "+escapeHtml(JSON.stringify(j))+"</span>");
-    out("enrichOut","✅ Готово. Обновлено: <b>"+(j.updated||0)+"</b>. Просканировано компаний: <b>"+(j.scanned_places||0)+"</b>.");
-    // refresh list to show TG/IG
-    loadPlaces();
-  }catch(e){
-    out("enrichOut","<span class='bad'>"+escapeHtml(String(e))+"</span>");
   }
-}
 
-function out(id, html){ document.getElementById(id).innerHTML = html; }
-function escapeHtml(s){ return (s||"").toString().replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;"); }
-function escapeAttr(s){ return escapeHtml(s).replaceAll("'","%27").replaceAll('"',"%22"); }
+  async function enrichSelected(){
+    show("selectErr","");
+    show("selectOk","");
+    if(!currentJobId){ show("selectErr","Сначала запустите анализ."); return; }
+
+    // сохраняем текущий выбор
+    try{
+      await saveSelection(true);
+    }catch(e){
+      show("selectErr", "Не удалось сохранить выбор: " + e.message);
+      return;
+    }
+
+    // запускаем enrichment
+    try{
+      await apiFetch(`/api/admin/job/${currentJobId}/enrich_selected`, {
+        method:"POST",
+        body: JSON.stringify({})
+      });
+      show("selectOk","Запущен детальный анализ выбранных компаний.");
+      startPolling();
+    }catch(e){
+      show("selectErr", e.message);
+    }
+  }
+
+  // --- pro modal (stub)
+  function openPro(){
+    alert("Расширенная аналитика скоро будет доступна. Здесь появятся графики, сравнения и AI-инсайты.");
+  }
+
+  // --- wire events (не onclick, чтобы не ломалось в WebView)
+  document.addEventListener("DOMContentLoaded", () => {
+    loadTokenIntoUI();
+    $("btnSaveToken").addEventListener("click", saveToken);
+    $("btnStart").addEventListener("click", () => startAnalysis().catch(e => show("startErr", e.message)));
+    $("btnGoSelect").addEventListener("click", () => loadPlaces().catch(e => show("selectErr", e.message)));
+    $("btnSelectAll").addEventListener("click", () => applySelectAll(true).catch(e => show("selectErr", e.message)));
+    $("btnUnselectAll").addEventListener("click", () => applySelectAll(false).catch(e => show("selectErr", e.message)));
+    $("btnEnrichSelected").addEventListener("click", enrichSelected);
+    $("btnPro").addEventListener("click", openPro);
+
+    // message if token empty
+    if(!getToken()){
+      show("tokenErr","Токен не задан.");
+    }
+  });
+})();
 </script>
 </body>
 </html>
