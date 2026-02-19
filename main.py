@@ -4,6 +4,7 @@ import time
 import asyncio
 import re
 import json
+import urllib.parse
 import hashlib
 import hmac
 import logging
@@ -1260,9 +1261,25 @@ def _main_menu_for(user_id: int) -> dict:
 
 
 
-def _pro_menu_keyboard() -> dict:
+def _with_uid(url: str, user_id: int) -> str:
+    """Append ?uid=<user_id> to a URL (preserving existing query params)."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+        # do not overwrite if already present
+        if "uid" not in qs and "tg_user_id" not in qs and "user_id" not in qs:
+            qs["uid"] = [str(user_id)]
+        new_query = urllib.parse.urlencode(qs, doseq=True)
+        return urllib.parse.urlunparse(parsed._replace(query=new_query))
+    except Exception:
+        # best-effort fallback
+        joiner = "&" if ("?" in url) else "?"
+        return f"{url}{joiner}uid={user_id}"
+
+
+def _pro_menu_keyboard(user_id: int) -> dict:
     rows = [
-        [{"text": "🏆 Top Analizator", "web_app": {"url": WEBAPP_TOP_ANALIZATOR_URL}}],
+        [{"text": "🏆 Top Analizator", "web_app": {"url": _with_uid(WEBAPP_TOP_ANALIZATOR_URL, user_id)}}],
         [{"text": "⬅️ Назад"}],
     ]
     return {
@@ -1273,7 +1290,7 @@ def _pro_menu_keyboard() -> dict:
     }
 
 def _pro_menu_for(user_id: int) -> dict:
-    return _pro_menu_keyboard()
+    return _pro_menu_keyboard(user_id)
 
 def _help_menu_for(user_id: int) -> dict:
     """Главное меню + экстренная кнопка сброса генерации (показываем ТОЛЬКО в «Помощь»)."""
@@ -4427,7 +4444,7 @@ async def webhook(secret: str, request: Request):
             "_now": _now,
             "sb_clear_user_state": sb_clear_user_state,
             "poll_interval_sec": 2.0,
-            "timeout_sec": 3600,
+            "timeout_sec": 1200,
         },
     )
     if handled:
