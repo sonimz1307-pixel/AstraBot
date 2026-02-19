@@ -40,6 +40,19 @@
 </style>
 </head>
 <body>
+
+    <section class="card" id="accessCard">
+      <h2>Доступ</h2>
+      <div class="row">
+        <label for="adminToken">Админ-токен</label>
+        <input id="adminToken" type="password" placeholder="Вставьте X-Admin-Token" autocomplete="off"/>
+        <button class="btn" onclick="saveToken()">Сохранить</button>
+        <div class="hint">Хранится локально в браузере (localStorage).</div>
+        <div class="err" id="tokenErr" style="display:none;"></div>
+        <div class="ok" id="tokenOk" style="display:none;"></div>
+      </div>
+    </section>
+
 <div class="wrap">
   <div class="topbar">
     <div>
@@ -48,8 +61,7 @@
     </div>
     <div class="top-actions">
       <button class="btnlink" onclick="openModal()">Открыть расширенную аналитику</button>
-      <button class="icon-btn" onclick="toggleSettings()" title="Настройки">⚙</button>
-    </div>
+</div>
   </div>
 
   <div class="card">
@@ -157,13 +169,7 @@ function saveToken(){
   hint();
 }
 
-function toggleSettings(){
-  const el = document.getElementById("settingsPanel");
-  if(!el) return;
-  el.classList.toggle("hidden");
-  // прокручиваем к настройкам, если открыли
-  if(!el.classList.contains("hidden")){
-    el.scrollIntoView({behavior:"smooth", block:"start"});
+);
   }
 }
 
