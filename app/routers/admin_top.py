@@ -1,75 +1,26 @@
 import os
 import re
+import time
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+import hashlib
+from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Body, Query
 
 from db_supabase import supabase as sb
 
-def _load_yandex_raw_candidates(job_id: str, place_key: str) -> List[str]:
-    """
-    Pull extra candidate links from mi_raw_items(apify_yandex) for this place.
-    This is crucial because mi_places.social_links might be empty and site_urls might miss taplink/urls.
-    """
-    if sb is None:
-        return []
-    try:
-        rows = (
-            sb.table("mi_raw_items")
-            .select("item")
-            .eq("job_id", job_id)
-            .eq("place_key", place_key)
-            .eq("source", "apify_yandex")
-            .order("created_at", desc=True)
-            .limit(1)
-            .execute()
-        ).data or []
-        if not rows:
-            return []
-        item = (rows[0] or {}).get("item")
-
-        cands: List[str] = []
-
-        # The stored "item" might be a list (dataset items) or a dict
-        if isinstance(item, list) and item:
-            first = item[0]
-        else:
-            first = item
-
-        if isinstance(first, dict):
-            for key in ("website", "url", "yandexUrl"):
-                v = first.get(key)
-                if isinstance(v, str) and v:
-                    cands.append(v)
-
-            urls = first.get("urls")
-            if isinstance(urls, list):
-                for u in urls:
-                    if isinstance(u, str) and u:
-                        cands.append(u)
-
-            sl = first.get("socialLinks")
-            if isinstance(sl, list):
-                for it in sl:
-                    if isinstance(it, dict):
-                        u = it.get("url")
-                        r = it.get("readable")
-                        if isinstance(u, str) and u:
-                            cands.append(u)
-                        if isinstance(r, str) and r:
-                            cands.append(r)
-
-        return list(dict.fromkeys(cands))
-    except Exception:
-        return []
-
+# Reuse existing extraction services (already used in leads.py pipeline)
+from app.services.socials_extract import fetch_and_extract_website_data
+from app.services.mi_storage import insert_raw_items
 
 router = APIRouter()
 LOG = logging.getLogger("uvicorn.error")
 
 
+# -----------------------------
+# Auth
+# -----------------------------
 def _require_admin(x_admin_token: Optional[str]) -> None:
     expected = os.getenv("ADMIN_TOKEN")
     if not expected:
@@ -78,6 +29,9 @@ def _require_admin(x_admin_token: Optional[str]) -> None:
         raise HTTPException(status_code=403, detail="forbidden")
 
 
+# -----------------------------
+# Normalizers (canonical tg/ig)
+# -----------------------------
 def _norm_tg(url_or_handle: str) -> Optional[str]:
     if not url_or_handle:
         return None
@@ -90,7 +44,6 @@ def _norm_tg(url_or_handle: str) -> Optional[str]:
     m = re.search(r"(?:https?://)?(?:www\.)?(t\.me|telegram\.me)/([A-Za-z0-9_]{4,})", s)
     if m:
         return f"https://t.me/{m.group(2)}"
-
     return None
 
 
@@ -130,68 +83,152 @@ def _extract_from_any(obj: Any) -> List[str]:
     return out
 
 
-
-async def _fetch_site_links(url: str) -> Tuple[List[str], Optional[Dict[str, Any]]]:
-    """Best-effort: download site HTML and regex tg/ig links (non-taplink too)."""
-    if not url:
-        return [], None
-    u = str(url).strip()
-
-    # Skip Yandex maps pages (often captcha/blocked) to avoid noise.
-    if re.search(r"(?:^|//)(?:www\.)?yandex\.(ru|com|eu)/maps", u):
-        return [], {"url": u, "skipped": "yandex_maps"}
-
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; AstraBot/1.0)"}
-    t0 = time.time()
+# -----------------------------
+# DB helpers
+# -----------------------------
+def _get_job_city(job_id: str) -> str:
+    if sb is None:
+        return "unknown"
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
-            r = await client.get(u, headers=headers)
-            html = r.text or ""
-            found: List[str] = []
-            # Telegram
-            found += re.findall(r"(https?://t\.me/[A-Za-z0-9_]{4,})", html)
-            found += re.findall(r"(?:https?://)?(?:www\.)?(?:telegram\.me|t\.me)/([A-Za-z0-9_]{4,})", html)
-            # Instagram
-            found += re.findall(r"(https?://(?:www\.)?instagram\.com/[A-Za-z0-9_.]+)", html)
-            meta = {"url": u, "status": r.status_code, "len": len(html), "elapsed_ms": int((time.time()-t0)*1000)}
-            # Normalize handles captured without scheme
-            normed: List[str] = []
-            for x in found:
-                if isinstance(x, tuple):
-                    x = x[0]
-                if isinstance(x, str) and x and x.startswith("t.me/"):
-                    x = "https://" + x
-                if isinstance(x, str) and x and re.fullmatch(r"[A-Za-z0-9_]{4,}", x):
-                    x = "https://t.me/" + x
-                if isinstance(x, str) and x:
-                    normed.append(x)
-            return list(dict.fromkeys(normed)), meta
-    except Exception as e:
-        return [], {"url": u, "error": f"{type(e).__name__}: {e}"}
+        r = sb.table("mi_jobs").select("city").eq("id", job_id).limit(1).execute().data or []
+        city = (r[0] or {}).get("city") if r else None
+        return (city or "unknown").strip().lower()
+    except Exception:
+        return "unknown"
 
-async def _fetch_taplink_links(url: str) -> Tuple[List[str], Optional[Dict[str, Any]]]:
-    if not url:
-        return [], None
-    u = str(url).strip()
-    if "taplink" not in u:
-        return [], None
 
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; AstraBot/1.0)"}
+def _load_yandex_raw_candidates(job_id: str, place_key: str) -> List[str]:
+    """
+    Pull extra candidate links from mi_raw_items(apify_yandex) for this place.
+    Important: mi_places.social_links can be empty, while Yandex raw often includes taplink/urls/socialLinks.
+    """
+    if sb is None:
+        return []
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
-            r = await client.get(u, headers=headers)
-            html = r.text or ""
-            found: List[str] = []
-            found += re.findall(r"(https?://t\.me/[A-Za-z0-9_]{4,})", html)
-            found += re.findall(r"(https?://(?:www\.)?instagram\.com/[A-Za-z0-9_.]+)", html)
-            meta = {"url": u, "status": r.status_code, "len": len(html)}
-            # dedup
-            found = list(dict.fromkeys(found))
-            return found, meta
-    except Exception as e:
-        return [], {"url": u, "error": f"{type(e).__name__}: {e}"}
+        rows = (
+            sb.table("mi_raw_items")
+            .select("item")
+            .eq("job_id", job_id)
+            .eq("place_key", place_key)
+            .eq("source", "apify_yandex")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        ).data or []
+        if not rows:
+            return []
+        item = (rows[0] or {}).get("item")
+
+        # item can be list(dataset items) or dict
+        if isinstance(item, list) and item:
+            first = item[0]
+        else:
+            first = item
+
+        cands: List[str] = []
+        if isinstance(first, dict):
+            for key in ("website", "url", "yandexUrl"):
+                v = first.get(key)
+                if isinstance(v, str) and v:
+                    cands.append(v)
+
+            urls = first.get("urls")
+            if isinstance(urls, list):
+                for u in urls:
+                    if isinstance(u, str) and u:
+                        cands.append(u)
+
+            sl = first.get("socialLinks")
+            if isinstance(sl, list):
+                for it in sl:
+                    if isinstance(it, dict):
+                        u = it.get("url")
+                        r = it.get("readable")
+                        if isinstance(u, str) and u:
+                            cands.append(u)
+                        if isinstance(r, str) and r:
+                            cands.append(r)
+
+        # de-dup
+        return list(dict.fromkeys([x.strip() for x in cands if isinstance(x, str) and x.strip()]))
+    except Exception:
+        return []
 
 
+def _site_extract_item_id(place_key: str, url: str) -> str:
+    h = hashlib.sha1((place_key + "|" + (url or "")).encode("utf-8")).hexdigest()[:16]
+    return f"site:{h}"
+
+
+def _merge_social_links(existing: Any, socials: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Keep mi_places.social_links as dict:
+      {
+        "telegram": ["https://t.me/..."],
+        "instagram": ["https://instagram.com/..."],
+        "other": [...]
+      }
+    """
+    out: Dict[str, Any] = {}
+    if isinstance(existing, dict):
+        out = dict(existing)
+    elif isinstance(existing, list):
+        # legacy: list of urls -> shove into "other"
+        out = {"other": [str(x) for x in existing if isinstance(x, str) and x]}
+    else:
+        out = {}
+
+    tg: List[str] = []
+    ig: List[str] = []
+    other: List[str] = []
+
+    # from existing dict
+    for v in _extract_from_any(out.get("telegram")):
+        nt = _norm_tg(v)
+        if nt and nt not in tg:
+            tg.append(nt)
+    for v in _extract_from_any(out.get("instagram")):
+        ni = _norm_ig(v)
+        if ni and ni not in ig:
+            ig.append(ni)
+    for v in _extract_from_any(out.get("other")):
+        if isinstance(v, str) and v and v not in other:
+            other.append(v)
+
+    # from extracted socials payloads
+    for s in socials or []:
+        if not isinstance(s, dict):
+            continue
+        url = s.get("url")
+        platform = (s.get("platform") or "").lower()
+        if not isinstance(url, str) or not url:
+            continue
+        if platform == "telegram":
+            nt = _norm_tg(url)
+            if nt and nt not in tg:
+                tg.append(nt)
+        elif platform == "instagram":
+            ni = _norm_ig(url)
+            if ni and ni not in ig:
+                ig.append(ni)
+        else:
+            if url not in other:
+                other.append(url)
+
+    out["telegram"] = tg
+    out["instagram"] = ig
+    if other:
+        out["other"] = other
+    elif "other" in out:
+        # keep clean if empty
+        if not out.get("other"):
+            out.pop("other", None)
+    return out
+
+
+# -----------------------------
+# Admin API
+# -----------------------------
 @router.get("/jobs")
 def list_jobs(
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
@@ -231,7 +268,6 @@ def job_detail(
     ).data
     state = (st[0] if st else None)
 
-    # tg_links/ig_links may not exist yet — if so, Supabase will error. We fallback to base select.
     try:
         places = (
             sb.table("mi_places")
@@ -283,93 +319,177 @@ async def run_job(
         return r.json()
 
 
-@router.post("/extract_socials")
-async def extract_socials(
+@router.post("/enrich_sites")
+async def enrich_sites(
     job_id: str = Body(..., embed=True),
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
     max_places: int = Body(default=2000, embed=True),
-    taplink_fetch: bool = Body(default=True, embed=True),
-    site_fetch: bool = Body(default=True, embed=True),
+    max_urls_per_place: int = Body(default=5, embed=True),
+    timeout_sec: float = Body(default=25.0, embed=True),
+    write_raw: bool = Body(default=True, embed=True),
 ):
-    """Extract canonical Telegram/Instagram links for all places in a job."""
+    """
+    Reuse existing parsers:
+      - taplink_extract.py (via fetch_and_extract_website_data)
+      - socials_extract.py (generic website extraction)
+
+    For each place:
+      candidates = mi_places.site_urls + mi_places.social_links + yandex raw urls/socialLinks
+      For each candidate website (http/https):
+        fetch_and_extract_website_data(url) -> socials/phones/emails
+      Persist:
+        - mi_raw_items (source=site_extract) if write_raw=True
+        - mi_places.social_links merged
+        - mi_places.tg_links/ig_links filled (canonical)
+    """
     _require_admin(x_admin_token)
     if sb is None:
         raise HTTPException(status_code=500, detail="Supabase client is not configured")
 
+    city = _get_job_city(job_id)
+
     places = (
         sb.table("mi_places")
-        .select("job_id,place_key,site_urls,social_links")
+        .select("job_id,place_key,site_urls,social_links,tg_links,ig_links")
         .eq("job_id", job_id)
         .limit(max_places)
         .execute()
     ).data or []
 
+    run_id = f"admin_site_extract_{int(time.time())}"
+
     updated = 0
+    scanned_places = 0
+    scanned_urls = 0
+    raw_affected = 0
     errors: List[Dict[str, Any]] = []
 
     for p in places:
-        place_key = str(p.get("place_key") or "")
-        site_urls = p.get("site_urls")
-        social_links = p.get("social_links")
-
-        candidates: List[str] = []
-        candidates += _extract_from_any(site_urls)
-        candidates += _extract_from_any(social_links)
-        candidates += _load_yandex_raw_candidates(job_id, place_key)
-
-        if taplink_fetch:
-            for u in list(dict.fromkeys(candidates)):
-                if "taplink" in str(u):
-                    extra, _meta = await _fetch_taplink_links(str(u))
-                    candidates += extra
-
-        tg_set: List[str] = []
-        ig_set: List[str] = []
-        for c in candidates:
-            tg = _norm_tg(c)
-            if tg and tg not in tg_set:
-                tg_set.append(tg)
-            ig = _norm_ig(c)
-            if ig and ig not in ig_set:
-                ig_set.append(ig)
-
-        if not tg_set and not ig_set:
+        place_key = str(p.get("place_key") or "").strip()
+        if not place_key:
             continue
 
-        # Try updating tg_links/ig_links
+        candidates: List[str] = []
+        candidates += _extract_from_any(p.get("site_urls"))
+        candidates += _extract_from_any(p.get("social_links"))
+        candidates += _load_yandex_raw_candidates(job_id, place_key)
+
+        # keep only http(s) URLs; de-dup; limit
+        urls = []
+        for c in candidates:
+            if not isinstance(c, str):
+                continue
+            u = c.strip()
+            if not u:
+                continue
+            if u.startswith("//"):
+                u = "https:" + u
+            if not u.startswith(("http://", "https://")):
+                continue
+            # ignore yandex maps (captcha noise)
+            if re.search(r"(?:^|//)(?:www\.)?yandex\.(ru|com|eu)/maps", u):
+                continue
+            if u not in urls:
+                urls.append(u)
+            if len(urls) >= max_urls_per_place:
+                break
+
+        if not urls:
+            continue
+
+        scanned_places += 1
+
+        extracted_items: List[Dict[str, Any]] = []
+        merged_socials: List[Dict[str, Any]] = []
+        merged_phones: List[str] = []
+        merged_emails: List[str] = []
+
+        for u in urls:
+            scanned_urls += 1
+            data = await fetch_and_extract_website_data(u, timeout=float(timeout_sec))
+            # normalize failure payloads too
+            if not isinstance(data, dict):
+                data = {"ok": False, "website": u, "error": "bad_response"}
+
+            socials = data.get("socials") or []
+            phones = data.get("phones") or []
+            emails = data.get("emails") or []
+
+            if isinstance(socials, list):
+                for s in socials:
+                    if isinstance(s, dict):
+                        merged_socials.append(s)
+
+            if isinstance(phones, list):
+                for ph in phones:
+                    if isinstance(ph, str) and ph and ph not in merged_phones:
+                        merged_phones.append(ph)
+
+            if isinstance(emails, list):
+                for em in emails:
+                    if isinstance(em, str) and em and em not in merged_emails:
+                        merged_emails.append(em)
+
+            extracted_items.append(
+                {
+                    "id": _site_extract_item_id(place_key, u),
+                    "place_key": place_key,
+                    "website": data.get("website") or u,
+                    "ok": bool(data.get("ok")),
+                    "source_type": data.get("source_type"),
+                    "socials": socials,
+                    "phones": phones,
+                    "emails": emails,
+                    "important_pages": data.get("important_pages") or [],
+                    "error": data.get("error"),
+                    "ts": int(time.time()),
+                }
+            )
+
+        # Merge into social_links dict
+        social_links_new = _merge_social_links(p.get("social_links"), merged_socials)
+        tg_links = social_links_new.get("telegram") or []
+        ig_links = social_links_new.get("instagram") or []
+
+        # Persist raw (site_extract)
+        if write_raw:
+            try:
+                r = insert_raw_items(
+                    job_id=job_id,
+                    place_key=place_key,
+                    source="site_extract",
+                    city=city,
+                    queries=["site_extract"],
+                    actor_id="site_extract",
+                    run_id=run_id,
+                    items=extracted_items,
+                )
+                raw_affected += int((r or {}).get("affected") or 0)
+            except Exception as e:
+                errors.append({"place_key": place_key, "error": f"raw_save: {type(e).__name__}: {e}"})
+
+        # Persist mi_places update
         try:
             sb.table("mi_places").upsert(
                 {
                     "job_id": job_id,
                     "place_key": place_key,
-                    "tg_links": tg_set,
-                    "ig_links": ig_set,
+                    "social_links": social_links_new,
+                    "tg_links": tg_links,
+                    "ig_links": ig_links,
                 },
                 on_conflict="job_id,place_key",
             ).execute()
             updated += 1
-            continue
         except Exception as e:
-            # Fallback: merge into social_links only
-            try:
-                merged = []
-                merged += _extract_from_any(social_links)
-                merged += tg_set + ig_set
-                merged = list(dict.fromkeys([m for m in merged if isinstance(m, str) and m]))
+            errors.append({"place_key": place_key, "error": f"mi_places_upsert: {type(e).__name__}: {e}"})
 
-                sb.table("mi_places").upsert(
-                    {
-                        "job_id": job_id,
-                        "place_key": place_key,
-                        "social_links": merged,
-                    },
-                    on_conflict="job_id,place_key",
-                ).execute()
-                updated += 1
-                errors.append(
-                    {"place_key": place_key, "warn": f"tg_links/ig_links not written: {type(e).__name__}: {e}"}
-                )
-            except Exception as e2:
-                errors.append({"place_key": place_key, "error": f"{type(e2).__name__}: {e2}"})
-
-    return {"ok": True, "job_id": job_id, "updated": updated, "errors": errors}
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "updated": updated,
+        "scanned_places": scanned_places,
+        "scanned_urls": scanned_urls,
+        "raw_affected": raw_affected,
+        "errors": errors,
+    }
