@@ -59,7 +59,7 @@ async def run_kling3_task_and_wait(
     end_image_bytes: Optional[bytes] = None,
     # Polling
     poll_interval_sec: float = 2.0,
-    timeout_sec: int = 1200,
+    timeout_sec: int = 3600,
 ) -> Tuple[str, Dict[str, Any], Optional[str]]:
     """Create Kling 3.0 task and wait until Completed/Failed."""
     try:
