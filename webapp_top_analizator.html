@@ -6,51 +6,157 @@
   <title>AstraBot — Анализ рынка</title>
   <style>
     :root{
-      --bg:#0b1220; --card:#0f1a33; --br:rgba(255,255,255,.10);
-      --txt:#e6edf3; --mut:#9fb1c1; --ok:#7ee787; --bad:#ff6b6b;
+      --bg0:#060a14;
+      --bg1:#0b1220;
+      --card1:rgba(255,255,255,.06);
+      --card2:rgba(255,255,255,.03);
+      --br:rgba(255,255,255,.10);
+      --txt:#e6edf3;
+      --mut:#9fb1c1;
+      --ok:#7ee787;
+      --bad:#ff6b6b;
+      --accent:rgba(255,255,255,.65);
+      --shadow: 0 18px 50px rgba(0,0,0,.45);
+      --shadow2: 0 10px 26px rgba(0,0,0,.35);
+      --r: 18px;
     }
+
     *{box-sizing:border-box}
-    body{margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; background:var(--bg); color:var(--txt);}
-    .wrap{max-width:760px; margin:0 auto; padding:16px;}
-    .header{display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:12px;}
-    .title{font-size:26px; font-weight:800; line-height:1.1; margin:0;}
-    .subtitle{margin:6px 0 0; color:var(--mut); font-size:13px;}
+    html,body{height:100%}
+    body{
+      margin:0;
+      font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+      color:var(--txt);
+      background:
+        radial-gradient(900px 500px at 15% -10%, rgba(64,106,255,.26), transparent 60%),
+        radial-gradient(700px 420px at 95% 10%, rgba(0,255,204,.12), transparent 55%),
+        radial-gradient(600px 420px at 60% 110%, rgba(255,0,153,.10), transparent 60%),
+        linear-gradient(180deg, var(--bg0), var(--bg1));
+    }
+
+    .wrap{max-width:760px; margin:0 auto; padding:16px 14px 26px;}
+    .header{
+      display:flex; align-items:flex-start; justify-content:space-between; gap:12px;
+      padding:8px 2px 6px;
+    }
+    .brand{
+      display:flex; gap:10px; align-items:flex-start;
+    }
+    .logo{
+      width:34px; height:34px; border-radius:12px;
+      display:grid; place-items:center;
+      background: linear-gradient(180deg, rgba(255,255,255,.14), rgba(255,255,255,.06));
+      border:1px solid var(--br);
+      box-shadow: var(--shadow2);
+      flex:0 0 auto;
+      font-size:18px;
+    }
+    h1{
+      font-size:26px; font-weight:850; line-height:1.08; margin:0;
+      letter-spacing:.2px;
+    }
+    .subtitle{margin:6px 0 0; color:var(--mut); font-size:13px; max-width:360px;}
     .top-actions{display:flex; gap:10px; align-items:center;}
-    .btn, button{border:1px solid var(--br); background:rgba(255,255,255,.04); color:var(--txt);
-      padding:12px 14px; border-radius:14px; cursor:pointer; font-weight:650;}
+    .btn{
+      border:1px solid var(--br);
+      background: linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.03));
+      color:var(--txt);
+      padding:12px 14px;
+      border-radius:14px;
+      cursor:pointer;
+      font-weight:700;
+      box-shadow: 0 8px 18px rgba(0,0,0,.25);
+      transition: transform .06s ease, filter .12s ease;
+    }
     .btn:active{transform:translateY(1px)}
-    .btn.primary{width:100%; padding:14px 16px; margin-top:10px;}
-    .card{border:1px solid var(--br); background:linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02));
-      border-radius:18px; padding:14px; margin:12px 0;}
-    h2{font-size:18px; margin:0 0 10px;}
+    .btn:hover{filter:brightness(1.06)}
+    .btn.primary{
+      width:100%;
+      padding:14px 16px;
+      border-radius:16px;
+      background: linear-gradient(180deg, rgba(255,255,255,.12), rgba(255,255,255,.04));
+    }
+
+    .card{
+      border:1px solid var(--br);
+      background:
+        radial-gradient(600px 200px at 0% 0%, rgba(255,255,255,.10), transparent 60%),
+        linear-gradient(180deg, var(--card1), var(--card2));
+      border-radius: var(--r);
+      padding:14px 14px 14px;
+      margin:12px 0;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(6px);
+    }
+
+    h2{font-size:18px; margin:0 0 10px; letter-spacing:.2px;}
     label{display:block; font-size:12px; color:var(--mut); margin:10px 0 6px;}
-    input, select{width:100%; padding:12px 12px; border-radius:14px; border:1px solid var(--br);
-      background:rgba(0,0,0,.20); color:var(--txt); outline:none;}
+
+    input, select{
+      width:100%;
+      padding:12px 12px;
+      border-radius:14px;
+      border:1px solid rgba(255,255,255,.12);
+      background: rgba(0,0,0,.22);
+      color:var(--txt);
+      outline:none;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.02);
+    }
+    input::placeholder{color:rgba(159,177,193,.7)}
     .hint{color:var(--mut); font-size:12px; margin-top:8px;}
     .ok{color:var(--ok); font-size:12px; margin-top:8px;}
     .err{color:var(--bad); font-size:12px; margin-top:8px;}
+    .small{font-size:12px; color:var(--mut); margin-top:8px;}
+
     .row{display:flex; gap:10px; flex-wrap:wrap;}
     .row > *{flex:1 1 240px;}
-    .progress{height:10px; border-radius:999px; border:1px solid var(--br); background:rgba(255,255,255,.04); overflow:hidden;}
-    .fill{height:100%; width:0%; background:rgba(255,255,255,.55);}
-    .small{font-size:12px; color:var(--mut); margin-top:8px;}
+
+    .progress{
+      height:10px; border-radius:999px; border:1px solid var(--br);
+      background: rgba(255,255,255,.05);
+      overflow:hidden;
+      box-shadow: inset 0 0 0 1px rgba(0,0,0,.25);
+    }
+    .fill{height:100%; width:0%; background: var(--accent);}
+
     .places{margin-top:10px;}
-    .place-item{display:flex; align-items:flex-start; gap:10px; padding:10px; border:1px solid var(--br);
-      border-radius:14px; background:rgba(0,0,0,.18); margin-top:8px;}
+    .place-item{
+      display:flex; align-items:flex-start; gap:10px;
+      padding:10px 10px;
+      border:1px solid var(--br);
+      border-radius:14px;
+      background: rgba(0,0,0,.18);
+      margin-top:8px;
+    }
     .place-main{flex:1}
-    .place-title{font-weight:750; line-height:1.2;}
+    .place-title{font-weight:780; line-height:1.2;}
     .place-sub{color:var(--mut); font-size:12px; margin-top:4px;}
-    .pill{display:inline-block; padding:3px 8px; border:1px solid var(--br); border-radius:999px; font-size:11px; color:var(--mut); margin-left:6px;}
+    .pill{
+      display:inline-block; padding:3px 8px; border:1px solid var(--br);
+      border-radius:999px; font-size:11px; color:var(--mut); margin-left:6px;
+      background: rgba(255,255,255,.03);
+    }
     .linkrow{margin-top:6px; display:flex; gap:8px; flex-wrap:wrap;}
-    .linkrow a{color:var(--txt); text-decoration:none; border:1px solid var(--br); border-radius:999px; padding:4px 8px; font-size:12px; background:rgba(255,255,255,.04);}
+    .linkrow a{
+      color:var(--txt); text-decoration:none; border:1px solid var(--br);
+      border-radius:999px; padding:4px 8px; font-size:12px;
+      background: rgba(255,255,255,.04);
+    }
+
+    input[type="checkbox"]{
+      width:20px; height:20px; margin-top:2px; accent-color: rgba(255,255,255,.85);
+    }
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="header">
-      <div>
-        <h1 class="title">📊 AstraBot — Анализ рынка</h1>
-        <p class="subtitle">AI-движок анализа локального рынка</p>
+      <div class="brand">
+        <div class="logo">📊</div>
+        <div>
+          <h1>AstraBot — Анализ рынка</h1>
+          <p class="subtitle">AI-движок анализа локального рынка</p>
+        </div>
       </div>
       <div class="top-actions">
         <button class="btn" id="btnPro" type="button">Открыть расширенную аналитику</button>
@@ -61,7 +167,7 @@
       <h2>Доступ</h2>
       <label for="token">Админ-токен</label>
       <input id="token" type="password" placeholder="Вставьте X-Admin-Token" autocomplete="off"/>
-      <button class="btn" id="btnSaveToken" type="button">Сохранить</button>
+      <button class="btn" id="btnSaveToken" type="button" style="margin-top:10px;">Сохранить</button>
       <div class="hint">Хранится локально в браузере (localStorage).</div>
       <div class="err" id="tokenErr" style="display:none;"></div>
       <div class="ok" id="tokenOk" style="display:none;"></div>
@@ -121,7 +227,6 @@
   let pollTimer = null;
   let placesCache = [];
 
-  // --- helpers
   function $(id){ return document.getElementById(id); }
   function show(id, msg){
     const el = $(id);
@@ -133,8 +238,21 @@
     pct = Math.max(0, Math.min(100, pct||0));
     $("progressFill").style.width = pct + "%";
   }
+
   function getToken(){ return (localStorage.getItem(LS_KEY) || "").trim(); }
   function setToken(t){ localStorage.setItem(LS_KEY, (t||"").trim()); }
+
+  function getTgUserId(){
+    try{
+      return window.Telegram && window.Telegram.WebApp
+        && window.Telegram.WebApp.initDataUnsafe
+        && window.Telegram.WebApp.initDataUnsafe.user
+        && window.Telegram.WebApp.initDataUnsafe.user.id
+        ? window.Telegram.WebApp.initDataUnsafe.user.id
+        : null;
+    }catch(e){ return null; }
+  }
+
   function authHeaders(){
     const t = getToken();
     return t ? {"X-Admin-Token": t} : {};
@@ -157,42 +275,50 @@
     return data;
   }
 
-  // --- token UI
-  function loadTokenIntoUI(){
-    $("token").value = getToken();
-  }
   function saveToken(){
     const t = $("token").value.trim();
     setToken(t);
     show("tokenErr", t ? "" : "Токен не задан.");
     show("tokenOk", t ? "Токен сохранён." : "");
   }
+  function loadTokenIntoUI(){ $("token").value = getToken(); }
 
-  // --- start
   function parseNiches(raw){
-    return (raw||"")
-      .split(",")
-      .map(s => s.trim())
-      .filter(Boolean);
+    return (raw||"").split(",").map(s => s.trim()).filter(Boolean);
+  }
+
+  function mapErrorMessage(msg){
+    const s = String(msg||"");
+    if(s.includes("tg_user_id") && s.includes("required")){
+      return "Не удалось определить пользователя Telegram. Откройте WebApp из Telegram и попробуйте снова.";
+    }
+    return s;
   }
 
   async function startAnalysis(){
     show("startErr", "");
     show("startOk", "");
+
     const city = $("city").value.trim();
     const niches = parseNiches($("niches").value);
     const limit = parseInt($("depth").value, 10) || 30;
+
     if(!city){ show("startErr", "Укажите город."); return; }
     if(niches.length===0){ show("startErr", "Укажите хотя бы одну нишу."); return; }
+
+    const tgUserId = getTgUserId();
+    if(!tgUserId){
+      show("startErr", "Не удалось определить пользователя Telegram. Откройте WebApp из Telegram и попробуйте снова.");
+      return;
+    }
 
     $("jobIdText").textContent = "Запускаем…";
     $("progressText").textContent = "🔍 Запуск анализа…";
     setProgress(2);
     $("progressMeta").textContent = "";
 
-    // Совместимость с текущим API:
-    // query = первая ниша, queries = массив (json)
     const payload = {
+      tg_user_id: tgUserId,
       city: city,
       query: niches[0],
       queries: niches,
@@ -205,16 +331,14 @@
     });
 
     const jobId = data.job_id || data.id || data.jobId;
-    if(!jobId){
-      throw new Error("Не получили ID анализа от сервера.");
-    }
+    if(!jobId) throw new Error("Не получили ID анализа от сервера.");
+
     currentJobId = jobId;
     $("jobIdText").textContent = jobId;
     show("startOk", "Анализ запущен.");
     startPolling();
   }
 
-  // --- polling
   function humanStage(pct){
     if(pct < 20) return "🔍 Ищем компании…";
     if(pct < 70) return "📊 Обрабатываем данные…";
@@ -224,26 +348,25 @@
 
   async function pollOnce(){
     if(!currentJobId) return;
-    // пробуем job endpoint
     const data = await apiFetch(`/api/admin/job/${currentJobId}`, { method:"GET" });
-    const st = data.state || data.job_state || data.status || {};
+    const st = data.state || data.job_state || {};
     const total = Number(st.total || 0);
     const done = Number(st.done || 0);
     const failed = Number(st.failed || 0);
 
     let pct = 0;
     if(total > 0) pct = Math.round((done / total) * 100);
-    else pct = (st.status === "completed" || data.status === "completed") ? 100 : 5;
+    else pct = (String(st.status||"").toLowerCase() === "completed") ? 100 : 5;
 
     setProgress(pct);
     $("progressText").textContent = humanStage(pct);
+
     if(total > 0){
       $("progressMeta").textContent = `Обработано: ${done}/${total}` + (failed ? ` • Ошибок: ${failed}` : "");
     } else {
       $("progressMeta").textContent = "";
     }
 
-    // если закончилось — остановим таймер
     const status = String(st.status || data.status || "").toLowerCase();
     if((total>0 && done>=total) || status === "completed" || status === "done" || status === "finished"){
       $("progressText").textContent = "✅ Анализ завершён";
@@ -258,7 +381,16 @@
     pollTimer = setInterval(() => { pollOnce().catch(()=>{}); }, 4000);
   }
 
-  // --- selection
+  function escapeHtml(s){ return String(s||"").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  function escapeAttr(s){ return escapeHtml(s); }
+
+  function mkLinks(arr, label){
+    if(!arr) return "";
+    const list = Array.isArray(arr) ? arr : [arr];
+    const first = list.filter(Boolean).slice(0,2);
+    return first.map(u => `<a href="${escapeAttr(u)}" target="_blank" rel="noreferrer">${label}</a>`).join("");
+  }
+
   function renderPlaces(list){
     const root = $("places");
     root.innerHTML = "";
@@ -271,9 +403,9 @@
       const addr = p.address || p.addr || p.place_address || "";
       const selected = (p.selected !== undefined) ? !!p.selected : true;
       const placeKey = p.place_key || p.placeKey || "";
-      const tg = (p.tg_links && p.tg_links.length) ? p.tg_links : (p.tg_links || []);
-      const ig = (p.ig_links && p.ig_links.length) ? p.ig_links : (p.ig_links || []);
-      const site = (p.site_urls && p.site_urls.length) ? p.site_urls : (p.site_urls || []);
+      const tg = p.tg_links || [];
+      const ig = p.ig_links || [];
+      const site = p.site_urls || [];
 
       const el = document.createElement("div");
       el.className = "place-item";
@@ -293,16 +425,6 @@
     }
   }
 
-  function mkLinks(arr, label){
-    if(!arr) return "";
-    const list = Array.isArray(arr) ? arr : [arr];
-    const first = list.filter(Boolean).slice(0,2);
-    return first.map(u => `<a href="${escapeAttr(u)}" target="_blank" rel="noreferrer">${label}</a>`).join("");
-  }
-
-  function escapeHtml(s){ return String(s||"").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-  function escapeAttr(s){ return escapeHtml(s); }
-
   async function loadPlaces(){
     show("selectErr","");
     show("selectOk","");
@@ -311,18 +433,29 @@
     $("selectCard").style.display = "block";
     $("selectCard").scrollIntoView({behavior:"smooth", block:"start"});
 
-    // пробуем новый endpoint places
     let data = null;
     try{
       data = await apiFetch(`/api/admin/job/${currentJobId}/places`, {method:"GET"});
+      placesCache = data.places || data || [];
     }catch(e){
-      // fallback: из /job/{id}
       const job = await apiFetch(`/api/admin/job/${currentJobId}`, {method:"GET"});
-      data = job.places || job.mi_places || [];
+      placesCache = job.places || job.mi_places || [];
     }
 
-    placesCache = data.places || data || [];
     renderPlaces(placesCache);
+  }
+
+  async function saveSelection(replace){
+    const chks = Array.from(document.querySelectorAll(".chk"));
+    const place_keys = chks.map(c => c.getAttribute("data-place-key")).filter(Boolean);
+    const selected_place_keys = chks.filter(c => c.checked).map(c => c.getAttribute("data-place-key")).filter(Boolean);
+
+    const payload = { replace: !!replace, place_keys, selected_place_keys };
+
+    await apiFetch(`/api/admin/job/${currentJobId}/places/select`, {
+      method:"POST",
+      body: JSON.stringify(payload)
+    });
   }
 
   async function applySelectAll(val){
@@ -331,38 +464,18 @@
     await saveSelection(true);
   }
 
-  async function saveSelection(replace){
-    // replace=true: выставить selected по всем переданным place_keys
-    const chks = Array.from(document.querySelectorAll(".chk"));
-    const place_keys = chks.map(c => c.getAttribute("data-place-key")).filter(Boolean);
-    const selected_place_keys = chks.filter(c => c.checked).map(c => c.getAttribute("data-place-key")).filter(Boolean);
-
-    const payload = {
-      replace: !!replace,
-      place_keys: place_keys,
-      selected_place_keys: selected_place_keys
-    };
-
-    await apiFetch(`/api/admin/job/${currentJobId}/places/select`, {
-      method:"POST",
-      body: JSON.stringify(payload)
-    });
-  }
-
   async function enrichSelected(){
     show("selectErr","");
     show("selectOk","");
     if(!currentJobId){ show("selectErr","Сначала запустите анализ."); return; }
 
-    // сохраняем текущий выбор
     try{
       await saveSelection(true);
     }catch(e){
-      show("selectErr", "Не удалось сохранить выбор: " + e.message);
+      show("selectErr", "Не удалось сохранить выбор: " + mapErrorMessage(e.message));
       return;
     }
 
-    // запускаем enrichment
     try{
       await apiFetch(`/api/admin/job/${currentJobId}/enrich_selected`, {
         method:"POST",
@@ -371,30 +484,25 @@
       show("selectOk","Запущен детальный анализ выбранных компаний.");
       startPolling();
     }catch(e){
-      show("selectErr", e.message);
+      show("selectErr", mapErrorMessage(e.message));
     }
   }
 
-  // --- pro modal (stub)
   function openPro(){
-    alert("Расширенная аналитика скоро будет доступна. Здесь появятся графики, сравнения и AI-инсайты.");
+    alert("Расширенная аналитика скоро будет доступна. Здесь появятся графики, сравнение конкурентов и AI-инсайты.");
   }
 
-  // --- wire events (не onclick, чтобы не ломалось в WebView)
   document.addEventListener("DOMContentLoaded", () => {
     loadTokenIntoUI();
     $("btnSaveToken").addEventListener("click", saveToken);
-    $("btnStart").addEventListener("click", () => startAnalysis().catch(e => show("startErr", e.message)));
-    $("btnGoSelect").addEventListener("click", () => loadPlaces().catch(e => show("selectErr", e.message)));
-    $("btnSelectAll").addEventListener("click", () => applySelectAll(true).catch(e => show("selectErr", e.message)));
-    $("btnUnselectAll").addEventListener("click", () => applySelectAll(false).catch(e => show("selectErr", e.message)));
+    $("btnStart").addEventListener("click", () => startAnalysis().catch(e => show("startErr", mapErrorMessage(e.message))));
+    $("btnGoSelect").addEventListener("click", () => loadPlaces().catch(e => show("selectErr", mapErrorMessage(e.message))));
+    $("btnSelectAll").addEventListener("click", () => applySelectAll(true).catch(e => show("selectErr", mapErrorMessage(e.message))));
+    $("btnUnselectAll").addEventListener("click", () => applySelectAll(false).catch(e => show("selectErr", mapErrorMessage(e.message))));
     $("btnEnrichSelected").addEventListener("click", enrichSelected);
     $("btnPro").addEventListener("click", openPro);
 
-    // message if token empty
-    if(!getToken()){
-      show("tokenErr","Токен не задан.");
-    }
+    if(!getToken()) show("tokenErr","Токен не задан.");
   });
 })();
 </script>
