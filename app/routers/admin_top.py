@@ -169,17 +169,65 @@ def _merge_social_links(existing: Any, socials: List[Dict[str, Any]]) -> Dict[st
         "instagram": ["https://instagram.com/..."],
         "other": [...]
       }
+
+    `socials` is a list of dicts from site_extract, like:
+      {"url": "...", "platform": "vk|whatsapp|telegram|instagram", ...}
     """
-    out: Dict[str, Any] = {}
+    # start from existing
     if isinstance(existing, dict):
-        out = dict(existing)
+        out: Dict[str, Any] = dict(existing)
     elif isinstance(existing, list):
         # legacy: list of urls -> shove into "other"
         out = {"other": [str(x) for x in existing if isinstance(x, str) and x]}
     else:
         out = {}
 
+    out.setdefault("telegram", [])
+    out.setdefault("instagram", [])
+    out.setdefault("other", [])
+
+    def _push(bucket: str, url: str) -> None:
+        nu = _norm_url_any(url)
+        if not nu:
+            return
+        arr = out.get(bucket)
+        if not isinstance(arr, list):
+            arr = []
+            out[bucket] = arr
+        if nu not in arr:
+            arr.append(nu)
+
+    for s in socials or []:
+        if not isinstance(s, dict):
+            continue
+        url = s.get("url")
+        if not isinstance(url, str) or not url.strip():
+            continue
+
+        platform = (s.get("platform") or "").lower().strip()
+
+        # prefer explicit platform tag
+        if platform in ("telegram", "tg"):
+            _push("telegram", url)
+            continue
+        if platform in ("instagram", "ig"):
+            _push("instagram", url)
+            continue
+
+        # infer by url
+        u0 = url.lower()
+        if "t.me/" in u0 or "telegram.me/" in u0:
+            _push("telegram", url)
+        elif "instagram.com/" in u0:
+            _push("instagram", url)
+        else:
+            _push("other", url)
+
+    return out
+
+
 def _norm_url_any(u: str) -> Optional[str]:
+(u: str) -> Optional[str]:
     if not isinstance(u, str):
         return None
     u = u.strip()
