@@ -53,15 +53,7 @@ def _job_state_get(sb, job_id: str) -> Dict[str, Any]:
 
 def _job_state_try_claim(sb, job_id: str) -> bool:
     """Atomically claim a queued job to avoid multiple workers executing the same BackgroundTask.
-
-    IMPORTANT:
-    Supabase/PostgREST may return an empty `data` payload for UPDATE even when the update succeeded
-    (depending on Prefer:return headers / client version). If we rely on `resp.data`, we can get a
-    false negative and silently skip orchestration.
-
-    Strategy:
-      1) Perform UPDATE ... WHERE job_id=? AND status='queued' and force a returned representation via .select().
-      2) If the client still returns empty data, fall back to reading the row and verifying status == 'running'.
+    Returns True if we changed status queued -> running, False otherwise.
     """
     try:
         resp = (
@@ -69,17 +61,9 @@ def _job_state_try_claim(sb, job_id: str) -> bool:
             .update({"status": "running"})
             .eq("job_id", job_id)
             .eq("status", "queued")
-            .select("job_id,status")
             .execute()
         )
-
-        data = getattr(resp, "data", None)
-        if data:
-            return True
-
-        # Fallback: re-read and verify (best effort)
-        st = _job_state_get(sb, job_id)
-        return (st.get("status") == "running")
+        return bool(getattr(resp, "data", None))
     except Exception:
         # If we cannot claim (db hiccup), be conservative and do NOT run.
         return False
@@ -395,10 +379,6 @@ async def _orchestrate_full_job(
             "locationQuery": city,
             "query": [niche],
         }
-
-        # ✅ 2GIS paid option: fetch contacts from each place card (phones/websites/social links)
-        add_contacts = (os.getenv("APIFY_2GIS_ADD_CONTACTS", "1").strip().lower() in ("1", "true", "yes", "on"))
-        actor_input["addContacts"] = add_contacts
         if actor_input_2gis_override:
             actor_input.update(actor_input_2gis_override)
         if limit is not None:
