@@ -15,6 +15,7 @@ from app.services.socials_extract import fetch_and_extract_website_data
 from app.services.market_model_builder import build_brand_model_from_yandex_items
 from app.services.apify_client import run_actor_sync_get_dataset_items, run_actor_fire_and_poll_get_dataset_items, ApifyError
 from app.services.mi_storage import create_job, insert_raw_items, get_supabase
+from app.services.mi_tasks import enqueue_task
 
 router = APIRouter()
 
@@ -681,27 +682,24 @@ async def run_full_job(payload: Dict[str, Any] = Body(...), background_tasks: Ba
     )
 
     # 3) start background orchestration
-    if background_tasks is None:
-        background_tasks = BackgroundTasks()
-
-    background_tasks.add_task(
-        _orchestrate_full_job,
-        job_id=job_id,
-        tg_user_id=tg_user_id,
-        city=city,
-        niche=niche,
-        limit=limit,
-        yandex_max_items=yandex_max_items,
-        yandex_actor_id=actor_id_yandex,
-        actor_id_2gis=actor_id_2gis,
-        actor_input_2gis_override=actor_input_2gis_override,
-        max_places=max_places,
-        max_seconds=max_seconds,
-        yandex_retries=yandex_retries,
-        sleep_ms=sleep_ms,
-    )
-
-    return {"ok": True, "job_id": job_id, "state": "queued"}
+        # Enqueue heavy parsing to external worker (no blocking in bot/API)
+    enqueue_task(job_id=str(job_id), task_type="run_full_job", payload={
+        "job_id": str(job_id),
+        "tg_user_id": tg_user_id,
+        "city": city,
+        "niche": niche,
+        "limit": limit,
+        "yandex_max_items": yandex_max_items,
+        "max_places": max_places,
+        "max_seconds": max_seconds,
+        "yandex_retries": yandex_retries,
+        "sleep_ms": sleep_ms,
+        "actor_id_2gis": actor_id_2gis,
+        "yandex_actor_id": yandex_actor_id,
+        "actor_input_2gis_override": actor_input_2gis_override,
+        "actor_input_yandex_override": actor_input_yandex_override,
+    })
+return {"ok": True, "job_id": job_id, "state": "queued"}
 
 
 
