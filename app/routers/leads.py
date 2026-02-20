@@ -682,24 +682,28 @@ async def run_full_job(payload: Dict[str, Any] = Body(...), background_tasks: Ba
     )
 
     # 3) start background orchestration
-        # Enqueue heavy parsing to external worker (no blocking in bot/API)
-    enqueue_task(job_id=str(job_id), task_type="run_full_job", payload={
-        "job_id": str(job_id),
-        "tg_user_id": tg_user_id,
-        "city": city,
-        "niche": niche,
-        "limit": limit,
-        "yandex_max_items": yandex_max_items,
-        "max_places": max_places,
-        "max_seconds": max_seconds,
-        "yandex_retries": yandex_retries,
-        "sleep_ms": sleep_ms,
-        "actor_id_2gis": actor_id_2gis,
-        "yandex_actor_id": yandex_actor_id,
-        "actor_input_2gis_override": actor_input_2gis_override,
-        "actor_input_yandex_override": actor_input_yandex_override,
-    })
-return {"ok": True, "job_id": job_id, "state": "queued"}
+    # Enqueue heavy parsing to external worker (no blocking in bot/API)
+    enqueue_task(
+        job_id=str(job_id),
+        task_type="run_full_job",
+        payload={
+            "job_id": str(job_id),
+            "tg_user_id": tg_user_id,
+            "city": city,
+            "niche": niche,
+            "limit": limit,
+            "yandex_max_items": yandex_max_items,
+            "max_places": max_places,
+            "max_seconds": max_seconds,
+            "yandex_retries": yandex_retries,
+            "sleep_ms": sleep_ms,
+            "actor_id_2gis": actor_id_2gis,
+            "yandex_actor_id": actor_id_yandex,
+            "actor_input_2gis_override": actor_input_2gis_override,
+        },
+    )
+
+    return {"ok": True, "job_id": job_id, "state": "queued"}
 
 
 
