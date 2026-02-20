@@ -3,6 +3,7 @@ import re
 import time
 import logging
 import hashlib
+import math
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -412,12 +413,109 @@ def _build_canonical(
     if isinstance(besty, dict) and besty:
         sources["best_yandex"] = True
 
-    canonical = {
+    
+    # --- ratings / reviews (for analytics) ---
+    def _as_float(v: Any) -> Optional[float]:
+        try:
+            if v is None:
+                return None
+            if isinstance(v, (int, float)):
+                return float(v)
+            s = str(v).strip().replace(",", ".")
+            return float(s) if s else None
+        except Exception:
+            return None
+
+    def _as_int(v: Any) -> Optional[int]:
+        try:
+            if v is None:
+                return None
+            if isinstance(v, bool):
+                return None
+            if isinstance(v, int):
+                return int(v)
+            if isinstance(v, float):
+                return int(v)
+            s = str(v).strip()
+            # extract digits
+            m = re.search(r"-?\d+", s)
+            return int(m.group(0)) if m else None
+        except Exception:
+            return None
+
+    def _pick(d: Dict[str, Any], keys: List[str]) -> Any:
+        for k in keys:
+            if k in d and d.get(k) is not None:
+                return d.get(k)
+        return None
+
+    def _extract_one_rating(obj: Dict[str, Any], src: str) -> Optional[Dict[str, Any]]:
+        if not isinstance(obj, dict) or not obj:
+            return None
+
+        # Common possible keys across different datasets/actors
+        rating_val = _as_float(_pick(obj, ["rating", "ratingValue", "rating_value", "stars", "score"]))
+        reviews_cnt = _as_int(_pick(obj, ["reviewsCount", "reviewCount", "reviews_count", "reviews", "reviewsTotal", "reviews_total", "reviewsQty", "reviews_qty"]))
+
+        # Some actors put rating inside nested objects
+        if rating_val is None:
+            nested = obj.get("rating") if isinstance(obj.get("rating"), dict) else None
+            if isinstance(nested, dict):
+                rating_val = _as_float(_pick(nested, ["value", "rating", "score"]))
+                if reviews_cnt is None:
+                    reviews_cnt = _as_int(_pick(nested, ["count", "reviewsCount", "reviews"]))
+
+        if rating_val is None and reviews_cnt is None:
+            return None
+
+        out = {"value": rating_val, "reviews": reviews_cnt}
+        # Keep source in the object for transparency
+        out["source"] = src
+        return out
+
+    ratings: Dict[str, Any] = {}
+    r2 = _extract_one_rating(best2, "2gis")
+    ry = _extract_one_rating(besty, "yandex")
+    if r2:
+        ratings["2gis"] = r2
+    if ry:
+        ratings["yandex"] = ry
+
+    # Compute a simple comparable strength score for sorting:
+    # score = rating * log(1 + reviews). If reviews unknown -> rating only.
+    def _strength(r: Dict[str, Any]) -> Optional[float]:
+        try:
+            val = r.get("value")
+            if val is None:
+                return None
+            cnt = r.get("reviews")
+            if cnt is None or cnt < 0:
+                return float(val)
+            return float(val) * math.log1p(float(cnt))
+        except Exception:
+            return None
+
+    rating_summary: Dict[str, Any] = {}
+    if ratings:
+        scored = []
+        for k, r in ratings.items():
+            s = _strength(r)
+            scored.append((k, s, r.get("reviews") or 0, r.get("value")))
+        scored.sort(key=lambda x: ((x[1] is not None), x[1] or -1, x[2], x[3] or 0), reverse=True)
+        best_key = scored[0][0]
+        rating_summary = {
+            "best_source": best_key,
+            "best": ratings.get(best_key),
+            "score": scored[0][1],
+        }
+canonical = {
         "name": name,
         "address": address,
         "website": website,
         "phones": ph_out,
         "emails": em_out,
+        "ratings": ratings,
+        "rating_summary": rating_summary,
         "tg": tg,
         "ig": ig,
         "vk": vk,
