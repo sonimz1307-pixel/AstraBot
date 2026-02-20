@@ -508,7 +508,7 @@ def _build_canonical(
             "best": ratings.get(best_key),
             "score": scored[0][1],
         }
-canonical = {
+    canonical = {
         "name": name,
         "address": address,
         "website": website,
