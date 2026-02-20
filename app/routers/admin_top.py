@@ -3,7 +3,6 @@ import re
 import time
 import logging
 import hashlib
-import math
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -13,7 +12,6 @@ from db_supabase import supabase as sb
 
 # Reuse existing extraction services (already used in leads.py pipeline)
 from app.services.socials_extract import fetch_and_extract_website_data
-from app.services.extract_utils import clean_url, force_https_if_bare, detect_social
 from app.services.mi_storage import insert_raw_items
 
 router = APIRouter()
@@ -170,361 +168,63 @@ def _merge_social_links(existing: Any, socials: List[Dict[str, Any]]) -> Dict[st
         "instagram": ["https://instagram.com/..."],
         "other": [...]
       }
-
-    `socials` is a list of dicts from site_extract, like:
-      {"url": "...", "platform": "vk|whatsapp|telegram|instagram", ...}
     """
-    # start from existing
+    out: Dict[str, Any] = {}
     if isinstance(existing, dict):
-        out: Dict[str, Any] = dict(existing)
+        out = dict(existing)
     elif isinstance(existing, list):
         # legacy: list of urls -> shove into "other"
         out = {"other": [str(x) for x in existing if isinstance(x, str) and x]}
     else:
         out = {}
 
-    out.setdefault("telegram", [])
-    out.setdefault("instagram", [])
-    out.setdefault("other", [])
+    tg: List[str] = []
+    ig: List[str] = []
+    other: List[str] = []
 
-    def _push(bucket: str, url: str) -> None:
-        nu = _norm_url_any(url)
-        if not nu:
-            return
-        arr = out.get(bucket)
-        if not isinstance(arr, list):
-            arr = []
-            out[bucket] = arr
-        if nu not in arr:
-            arr.append(nu)
+    # from existing dict
+    for v in _extract_from_any(out.get("telegram")):
+        nt = _norm_tg(v)
+        if nt and nt not in tg:
+            tg.append(nt)
+    for v in _extract_from_any(out.get("instagram")):
+        ni = _norm_ig(v)
+        if ni and ni not in ig:
+            ig.append(ni)
+    for v in _extract_from_any(out.get("other")):
+        if isinstance(v, str) and v and v not in other:
+            other.append(v)
 
+    # from extracted socials payloads
     for s in socials or []:
         if not isinstance(s, dict):
             continue
         url = s.get("url")
-        if not isinstance(url, str) or not url.strip():
+        platform = (s.get("platform") or "").lower()
+        if not isinstance(url, str) or not url:
             continue
-
-        platform = (s.get("platform") or "").lower().strip()
-
-        # prefer explicit platform tag
-        if platform in ("telegram", "tg"):
-            _push("telegram", url)
-            continue
-        if platform in ("instagram", "ig"):
-            _push("instagram", url)
-            continue
-
-        # infer by url
-        u0 = url.lower()
-        if "t.me/" in u0 or "telegram.me/" in u0:
-            _push("telegram", url)
-        elif "instagram.com/" in u0:
-            _push("instagram", url)
+        if platform == "telegram":
+            nt = _norm_tg(url)
+            if nt and nt not in tg:
+                tg.append(nt)
+        elif platform == "instagram":
+            ni = _norm_ig(url)
+            if ni and ni not in ig:
+                ig.append(ni)
         else:
-            _push("other", url)
+            if url not in other:
+                other.append(url)
 
+    out["telegram"] = tg
+    out["instagram"] = ig
+    if other:
+        out["other"] = other
+    elif "other" in out:
+        # keep clean if empty
+        if not out.get("other"):
+            out.pop("other", None)
     return out
 
-
-def _norm_url_any(u: str) -> Optional[str]:
-    if not isinstance(u, str):
-        return None
-    u = u.strip()
-    if not u:
-        return None
-    if u.startswith("//"):
-        u = "https:" + u
-    elif u.startswith("@"):
-        u = "https://t.me/" + u[1:]
-    elif not u.startswith(("http://", "https://")):
-        u = force_https_if_bare(u)
-    u = clean_url(u) or ""
-    u = u.strip()
-    if u.endswith("/"):
-        u = u[:-1]
-    return u or None
-def _guess_name(best: Any) -> str:
-    if not isinstance(best, dict):
-        return ""
-    for k in ("name", "title", "org_name", "caption", "displayName", "display_name"):
-        v = best.get(k)
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-    # sometimes nested
-    for path in (("organization","name"), ("company","name"), ("data","name"), ("data","title")):
-        cur = best
-        ok = True
-        for pk in path:
-            if isinstance(cur, dict) and pk in cur:
-                cur = cur[pk]
-            else:
-                ok = False
-                break
-        if ok and isinstance(cur, str) and cur.strip():
-            return cur.strip()
-    return ""
-
-
-def _guess_address(best: Any) -> str:
-    if not isinstance(best, dict):
-        return ""
-    for k in ("address_name", "address", "full_address", "fullAddress", "addressName"):
-        v = best.get(k)
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-    for path in (("address","full"), ("address","text"), ("data","address")):
-        cur = best
-        ok = True
-        for pk in path:
-            if isinstance(cur, dict) and pk in cur:
-                cur = cur[pk]
-            else:
-                ok = False
-                break
-        if ok and isinstance(cur, str) and cur.strip():
-            return cur.strip()
-    return ""
-
-
-def _build_canonical(
-    place_row: Dict[str, Any],
-    social_links: Dict[str, Any],
-    phones: List[str],
-    emails: List[str],
-    extracted_items: List[Dict[str, Any]],
-) -> Dict[str, Any]:
-    best2 = place_row.get("best_2gis") or {}
-    besty = place_row.get("best_yandex") or {}
-
-    name = _guess_name(best2) or _guess_name(besty) or ""
-    address = _guess_address(best2) or _guess_address(besty) or ""
-
-    def _is_bad_website(u: str) -> bool:
-        # exclude directory/landing pages that are not the company's website
-        if re.search(r"(?:^|//)(?:www\.)?yandex\.(ru|com|eu)/maps", u):
-            return True
-        if re.search(r"(?:^|//)(?:www\.)?2gis\.(ru|com)", u):
-            return True
-        return False
-
-    def _norm_good_website(u: Any) -> Optional[str]:
-        if not isinstance(u, str):
-            return None
-        nu = _norm_url_any(u)
-        if not nu:
-            return None
-        if _is_bad_website(nu):
-            return None
-        return nu
-
-    # website preference: first ok extracted -> else from site_urls
-    website = ""
-    for it in extracted_items:
-        if isinstance(it, dict) and it.get("ok"):
-            w = it.get("website")
-            nw = _norm_good_website(w)
-            if nw:
-                website = nw
-                break
-    if not website:
-        for w in _extract_from_any(place_row.get("site_urls")):
-            nw = _norm_good_website(w)
-            if nw:
-                website = nw
-                break
-
-    tg: List[str] = []
-    ig: List[str] = []
-    vk: List[str] = []
-    whatsapp: List[str] = []
-    other: List[str] = []
-
-    for u in _extract_from_any(social_links.get("telegram")):
-        nu = _norm_url_any(u)
-        if nu and nu not in tg:
-            tg.append(nu)
-    for u in _extract_from_any(social_links.get("instagram")):
-        nu = _norm_url_any(u)
-        if nu and nu not in ig:
-            ig.append(nu)
-
-    # other urls: classify
-    for u in _extract_from_any(social_links.get("other")):
-        nu = _norm_url_any(u)
-        if not nu:
-            continue
-        if "t.me/" in nu:
-            if nu not in tg:
-                tg.append(nu)
-        elif "instagram.com/" in nu:
-            if nu not in ig:
-                ig.append(nu)
-        elif "vk.com/" in nu or "vkontakte.ru/" in nu:
-            if nu not in vk:
-                vk.append(nu)
-        elif "wa.me/" in nu or "whatsapp.com/" in nu:
-            if nu not in whatsapp:
-                whatsapp.append(nu)
-        else:
-            if nu not in other:
-                other.append(nu)
-
-    def _norm_phone(ph: str) -> Optional[str]:
-        s = (ph or "").strip()
-        if not s:
-            return None
-        # keep only + and digits
-        s = re.sub(r"[^0-9+]", "", s)
-        if not s.startswith("+"):
-            # allow 7XXXXXXXXXX -> +7XXXXXXXXXX
-            if len(s) == 11 and s.startswith("7"):
-                s = "+" + s
-        # accept RU style +7XXXXXXXXXX
-        if s.startswith("+7") and len(s) == 12:
-            return s
-        # accept generic E.164-ish (basic guard)
-        if s.startswith("+") and 10 <= len(s) <= 16:
-            return s
-        return None
-
-    # normalize phones/emails (dedupe, keep non-empty)
-    ph_out: List[str] = []
-    for ph in phones or []:
-        if isinstance(ph, str):
-            pph = _norm_phone(ph)
-            if pph and pph not in ph_out:
-                ph_out.append(pph)
-            if len(ph_out) >= 5:
-                break
-
-    em_out: List[str] = []
-    for em in emails or []:
-        if isinstance(em, str):
-            eem = em.strip().lower()
-            if eem and eem not in em_out:
-                em_out.append(eem)
-
-    sources: Dict[str, Any] = {}
-    if extracted_items:
-        sources["site_extract"] = True
-    if isinstance(best2, dict) and best2:
-        sources["best_2gis"] = True
-    if isinstance(besty, dict) and besty:
-        sources["best_yandex"] = True
-
-    
-    # --- ratings / reviews (for analytics) ---
-    def _as_float(v: Any) -> Optional[float]:
-        try:
-            if v is None:
-                return None
-            if isinstance(v, (int, float)):
-                return float(v)
-            s = str(v).strip().replace(",", ".")
-            return float(s) if s else None
-        except Exception:
-            return None
-
-    def _as_int(v: Any) -> Optional[int]:
-        try:
-            if v is None:
-                return None
-            if isinstance(v, bool):
-                return None
-            if isinstance(v, int):
-                return int(v)
-            if isinstance(v, float):
-                return int(v)
-            s = str(v).strip()
-            # extract digits
-            m = re.search(r"-?\d+", s)
-            return int(m.group(0)) if m else None
-        except Exception:
-            return None
-
-    def _pick(d: Dict[str, Any], keys: List[str]) -> Any:
-        for k in keys:
-            if k in d and d.get(k) is not None:
-                return d.get(k)
-        return None
-
-    def _extract_one_rating(obj: Dict[str, Any], src: str) -> Optional[Dict[str, Any]]:
-        if not isinstance(obj, dict) or not obj:
-            return None
-
-        # Common possible keys across different datasets/actors
-        rating_val = _as_float(_pick(obj, ["rating", "ratingValue", "rating_value", "stars", "score"]))
-        reviews_cnt = _as_int(_pick(obj, ["reviewsCount", "reviewCount", "reviews_count", "reviews", "reviewsTotal", "reviews_total", "reviewsQty", "reviews_qty"]))
-
-        # Some actors put rating inside nested objects
-        if rating_val is None:
-            nested = obj.get("rating") if isinstance(obj.get("rating"), dict) else None
-            if isinstance(nested, dict):
-                rating_val = _as_float(_pick(nested, ["value", "rating", "score"]))
-                if reviews_cnt is None:
-                    reviews_cnt = _as_int(_pick(nested, ["count", "reviewsCount", "reviews"]))
-
-        if rating_val is None and reviews_cnt is None:
-            return None
-
-        out = {"value": rating_val, "reviews": reviews_cnt}
-        # Keep source in the object for transparency
-        out["source"] = src
-        return out
-
-    ratings: Dict[str, Any] = {}
-    r2 = _extract_one_rating(best2, "2gis")
-    ry = _extract_one_rating(besty, "yandex")
-    if r2:
-        ratings["2gis"] = r2
-    if ry:
-        ratings["yandex"] = ry
-
-    # Compute a simple comparable strength score for sorting:
-    # score = rating * log(1 + reviews). If reviews unknown -> rating only.
-    def _strength(r: Dict[str, Any]) -> Optional[float]:
-        try:
-            val = r.get("value")
-            if val is None:
-                return None
-            cnt = r.get("reviews")
-            if cnt is None or cnt < 0:
-                return float(val)
-            return float(val) * math.log1p(float(cnt))
-        except Exception:
-            return None
-
-    rating_summary: Dict[str, Any] = {}
-    if ratings:
-        scored = []
-        for k, r in ratings.items():
-            s = _strength(r)
-            scored.append((k, s, r.get("reviews") or 0, r.get("value")))
-        scored.sort(key=lambda x: ((x[1] is not None), x[1] or -1, x[2], x[3] or 0), reverse=True)
-        best_key = scored[0][0]
-        rating_summary = {
-            "best_source": best_key,
-            "best": ratings.get(best_key),
-            "score": scored[0][1],
-        }
-    canonical = {
-        "name": name,
-        "address": address,
-        "website": website,
-        "phones": ph_out,
-        "emails": em_out,
-        "ratings": ratings,
-        "rating_summary": rating_summary,
-        "tg": tg,
-        "ig": ig,
-        "vk": vk,
-        "whatsapp": whatsapp,
-        "other": other,
-        "sources": sources,
-        "ts": int(time.time()),
-    }
-    return canonical
 
 # -----------------------------
 # Admin API
@@ -773,6 +473,39 @@ def job_places_select(
     return {"ok": True, "job_id": job_id, "affected": affected, "replace": replace, "selected": selected}
 
 
+
+async def _enrich_selected_internal(
+    *,
+    job_id: str,
+    max_urls_per_place: int,
+    timeout_sec: float,
+    write_raw: bool,
+):
+    if sb is None:
+        raise HTTPException(status_code=500, detail="Supabase client is not configured")
+
+    rows = (
+        sb.table("mi_job_places")
+        .select("place_key")
+        .eq("job_id", job_id)
+        .eq("selected", True)
+        .limit(5000)
+        .execute()
+    ).data or []
+    keys = [str((r or {}).get("place_key") or "").strip() for r in rows]
+    keys = [k for k in keys if k]
+
+    if not keys:
+        return {"ok": True, "job_id": job_id, "updated": 0, "scanned_places": 0, "scanned_urls": 0, "raw_affected": 0, "errors": [], "note": "no selected places"}
+
+    return await enrich_sites(
+        job_id=job_id,
+        place_keys=keys,
+        max_urls_per_place=max_urls_per_place,
+        timeout_sec=timeout_sec,
+        write_raw=write_raw,
+    )
+
 @router.post("/job/{job_id}/enrich_selected")
 async def enrich_selected(
     job_id: str,
@@ -863,7 +596,7 @@ async def enrich_sites(
 
     q = (
         sb.table("mi_places")
-        .select("job_id,place_key,site_urls,social_links,tg_links,ig_links,best_2gis,best_yandex,canonical")
+        .select("job_id,place_key,site_urls,social_links,tg_links,ig_links")
         .eq("job_id", job_id)
     )
     if place_keys:
@@ -888,66 +621,27 @@ async def enrich_sites(
         candidates += _extract_from_any(p.get("social_links"))
         candidates += _load_yandex_raw_candidates(job_id, place_key)
 
-        # keep only website-like URLs; normalize; de-dup; limit
-        urls: List[str] = []
-        seen = set()
-
+        # keep only http(s) URLs; de-dup; limit
+        urls = []
         for c in candidates:
             if not isinstance(c, str):
                 continue
             u = c.strip()
             if not u:
                 continue
-
-            # Support bare domains like "taplink.cc/xxx" or "example.com"
             if u.startswith("//"):
                 u = "https:" + u
-            elif not u.startswith(("http://", "https://")):
-                u = force_https_if_bare(u)
-
             if not u.startswith(("http://", "https://")):
                 continue
-
-            # Drop tracking params, fragments, etc.
-            u = clean_url(u)
-            if not u:
-                continue
-
-            # Skip pure social links; we only fetch websites/landings
-            try:
-                if detect_social(u):
-                    continue
-            except Exception:
-                pass
-
             # ignore yandex maps (captcha noise)
             if re.search(r"(?:^|//)(?:www\.)?yandex\.(ru|com|eu)/maps", u):
                 continue
-
-            if u not in seen:
-                seen.add(u)
+            if u not in urls:
                 urls.append(u)
-
             if len(urls) >= max_urls_per_place:
                 break
+
         if not urls:
-            # Still build canonical from directory cards (2GIS/Yandex) + existing stored links
-            social_links_existing = p.get("social_links")
-            if not isinstance(social_links_existing, dict):
-                social_links_existing = {}
-            canonical = _build_canonical(p, social_links_existing, [], [], [])
-            try:
-                sb.table("mi_places").upsert(
-                    {
-                        "job_id": job_id,
-                        "place_key": place_key,
-                        "canonical": canonical,
-                    },
-                    on_conflict="job_id,place_key",
-                ).execute()
-                updated += 1
-            except Exception as e:
-                errors.append({"place_key": place_key, "error": f"mi_places_canonical_only: {type(e).__name__}: {e}"})
             continue
 
         scanned_places += 1
@@ -1004,10 +698,6 @@ async def enrich_sites(
         tg_links = social_links_new.get("telegram") or []
         ig_links = social_links_new.get("instagram") or []
 
-        # Build canonical merged card (post-enrichment)
-        canonical = _build_canonical(p, social_links_new, merged_phones, merged_emails, extracted_items)
-
-
         # Persist raw (site_extract)
         if write_raw:
             try:
@@ -1034,7 +724,6 @@ async def enrich_sites(
                     "social_links": social_links_new,
                     "tg_links": tg_links,
                     "ig_links": ig_links,
-                    "canonical": canonical,
                 },
                 on_conflict="job_id,place_key",
             ).execute()
