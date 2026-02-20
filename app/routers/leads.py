@@ -342,6 +342,7 @@ async def _orchestrate_full_job(
     yandex_actor_id: str,
     actor_id_2gis: str,
     actor_input_2gis_override: Dict[str, Any] | None = None,
+    actor_input_yandex_override: Dict[str, Any] | None = None,
     max_places: int | None = None,
     max_seconds: int | None = None,
     yandex_retries: int = 1,
@@ -484,6 +485,7 @@ async def _orchestrate_full_job(
                         place_key=pk,
                         actor_id=yandex_actor_id,
                         max_items=yandex_max_items,
+                    actor_input_yandex_override=actor_input_yandex_override,
                     )
                     last_err = None
                     _log_evt("YANDEX_PLACE_OK", job_id=str(job_id), place_key=str(pk), run_id=(result.get('apify') or {}).get('run_id') if isinstance(result, dict) else None)
@@ -945,6 +947,7 @@ def _collect_place_internal(
     place_key: str,
     actor_id: str,
     max_items: int = 6,
+    actor_input_yandex_override: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """
     Internal single-place pipeline (sync):
@@ -988,6 +991,8 @@ def _collect_place_internal(
             "maxItems": int(max_items),
             "query": yandex_query,
         }
+        if actor_input_yandex_override:
+            actor_input.update(actor_input_yandex_override)
         run_id = None
         try:
             # Fire-and-poll (recommended for long Yandex actors)
