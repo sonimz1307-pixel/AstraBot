@@ -227,7 +227,6 @@ def _merge_social_links(existing: Any, socials: List[Dict[str, Any]]) -> Dict[st
 
 
 def _norm_url_any(u: str) -> Optional[str]:
-(u: str) -> Optional[str]:
     if not isinstance(u, str):
         return None
     u = u.strip()
@@ -244,8 +243,6 @@ def _norm_url_any(u: str) -> Optional[str]:
     if u.endswith("/"):
         u = u[:-1]
     return u or None
-
-
 def _guess_name(best: Any) -> str:
     if not isinstance(best, dict):
         return ""
@@ -392,53 +389,6 @@ def _build_canonical(
         "ts": int(time.time()),
     }
     return canonical
-    tg: List[str] = []
-    ig: List[str] = []
-    other: List[str] = []
-
-    # from existing dict
-    for v in _extract_from_any(out.get("telegram")):
-        nt = _norm_tg(v)
-        if nt and nt not in tg:
-            tg.append(nt)
-    for v in _extract_from_any(out.get("instagram")):
-        ni = _norm_ig(v)
-        if ni and ni not in ig:
-            ig.append(ni)
-    for v in _extract_from_any(out.get("other")):
-        if isinstance(v, str) and v and v not in other:
-            other.append(v)
-
-    # from extracted socials payloads
-    for s in socials or []:
-        if not isinstance(s, dict):
-            continue
-        url = s.get("url")
-        platform = (s.get("platform") or "").lower()
-        if not isinstance(url, str) or not url:
-            continue
-        if platform == "telegram":
-            nt = _norm_tg(url)
-            if nt and nt not in tg:
-                tg.append(nt)
-        elif platform == "instagram":
-            ni = _norm_ig(url)
-            if ni and ni not in ig:
-                ig.append(ni)
-        else:
-            if url not in other:
-                other.append(url)
-
-    out["telegram"] = tg
-    out["instagram"] = ig
-    if other:
-        out["other"] = other
-    elif "other" in out:
-        # keep clean if empty
-        if not out.get("other"):
-            out.pop("other", None)
-    return out
-
 
 # -----------------------------
 # Admin API
