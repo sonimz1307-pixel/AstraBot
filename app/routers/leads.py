@@ -379,6 +379,10 @@ async def _orchestrate_full_job(
             "locationQuery": city,
             "query": [niche],
         }
+
+        # ✅ 2GIS paid option: fetch contacts from each place card (phones/websites/social links)
+        add_contacts = (os.getenv("APIFY_2GIS_ADD_CONTACTS", "1").strip().lower() in ("1", "true", "yes", "on"))
+        actor_input["addContacts"] = add_contacts
         if actor_input_2gis_override:
             actor_input.update(actor_input_2gis_override)
         if limit is not None:
