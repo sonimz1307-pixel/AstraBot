@@ -179,6 +179,171 @@ def _merge_social_links(existing: Any, socials: List[Dict[str, Any]]) -> Dict[st
     else:
         out = {}
 
+def _norm_url_any(u: str) -> Optional[str]:
+    if not isinstance(u, str):
+        return None
+    u = u.strip()
+    if not u:
+        return None
+    if u.startswith("//"):
+        u = "https:" + u
+    elif u.startswith("@"):
+        u = "https://t.me/" + u[1:]
+    elif not u.startswith(("http://", "https://")):
+        u = force_https_if_bare(u)
+    u = clean_url(u) or ""
+    u = u.strip()
+    if u.endswith("/"):
+        u = u[:-1]
+    return u or None
+
+
+def _guess_name(best: Any) -> str:
+    if not isinstance(best, dict):
+        return ""
+    for k in ("name", "title", "org_name", "caption", "displayName", "display_name"):
+        v = best.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    # sometimes nested
+    for path in (("organization","name"), ("company","name"), ("data","name"), ("data","title")):
+        cur = best
+        ok = True
+        for pk in path:
+            if isinstance(cur, dict) and pk in cur:
+                cur = cur[pk]
+            else:
+                ok = False
+                break
+        if ok and isinstance(cur, str) and cur.strip():
+            return cur.strip()
+    return ""
+
+
+def _guess_address(best: Any) -> str:
+    if not isinstance(best, dict):
+        return ""
+    for k in ("address_name", "address", "full_address", "fullAddress", "addressName"):
+        v = best.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    for path in (("address","full"), ("address","text"), ("data","address")):
+        cur = best
+        ok = True
+        for pk in path:
+            if isinstance(cur, dict) and pk in cur:
+                cur = cur[pk]
+            else:
+                ok = False
+                break
+        if ok and isinstance(cur, str) and cur.strip():
+            return cur.strip()
+    return ""
+
+
+def _build_canonical(
+    place_row: Dict[str, Any],
+    social_links: Dict[str, Any],
+    phones: List[str],
+    emails: List[str],
+    extracted_items: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    best2 = place_row.get("best_2gis") or {}
+    besty = place_row.get("best_yandex") or {}
+
+    name = _guess_name(best2) or _guess_name(besty) or ""
+    address = _guess_address(best2) or _guess_address(besty) or ""
+
+    # website preference: first ok extracted -> else from site_urls
+    website = ""
+    for it in extracted_items:
+        if isinstance(it, dict) and it.get("ok"):
+            w = it.get("website")
+            nw = _norm_url_any(w) if isinstance(w, str) else None
+            if nw:
+                website = nw
+                break
+    if not website:
+        for w in _extract_from_any(place_row.get("site_urls")):
+            nw = _norm_url_any(w)
+            if nw:
+                website = nw
+                break
+
+    tg: List[str] = []
+    ig: List[str] = []
+    vk: List[str] = []
+    whatsapp: List[str] = []
+    other: List[str] = []
+
+    for u in _extract_from_any(social_links.get("telegram")):
+        nu = _norm_url_any(u)
+        if nu and nu not in tg:
+            tg.append(nu)
+    for u in _extract_from_any(social_links.get("instagram")):
+        nu = _norm_url_any(u)
+        if nu and nu not in ig:
+            ig.append(nu)
+
+    # other urls: classify
+    for u in _extract_from_any(social_links.get("other")):
+        nu = _norm_url_any(u)
+        if not nu:
+            continue
+        if "t.me/" in nu:
+            if nu not in tg:
+                tg.append(nu)
+        elif "instagram.com/" in nu:
+            if nu not in ig:
+                ig.append(nu)
+        elif "vk.com/" in nu or "vkontakte.ru/" in nu:
+            if nu not in vk:
+                vk.append(nu)
+        elif "wa.me/" in nu or "whatsapp.com/" in nu:
+            if nu not in whatsapp:
+                whatsapp.append(nu)
+        else:
+            if nu not in other:
+                other.append(nu)
+
+    # normalize phones/emails (dedupe, keep non-empty)
+    ph_out: List[str] = []
+    for ph in phones or []:
+        if isinstance(ph, str):
+            pph = ph.strip()
+            if pph and pph not in ph_out:
+                ph_out.append(pph)
+
+    em_out: List[str] = []
+    for em in emails or []:
+        if isinstance(em, str):
+            eem = em.strip().lower()
+            if eem and eem not in em_out:
+                em_out.append(eem)
+
+    sources: Dict[str, Any] = {}
+    if extracted_items:
+        sources["site_extract"] = True
+    if isinstance(best2, dict) and best2:
+        sources["best_2gis"] = True
+    if isinstance(besty, dict) and besty:
+        sources["best_yandex"] = True
+
+    canonical = {
+        "name": name,
+        "address": address,
+        "website": website,
+        "phones": ph_out,
+        "emails": em_out,
+        "tg": tg,
+        "ig": ig,
+        "vk": vk,
+        "whatsapp": whatsapp,
+        "other": other,
+        "sources": sources,
+        "ts": int(time.time()),
+    }
+    return canonical
     tg: List[str] = []
     ig: List[str] = []
     other: List[str] = []
@@ -564,7 +729,7 @@ async def enrich_sites(
 
     q = (
         sb.table("mi_places")
-        .select("job_id,place_key,site_urls,social_links,tg_links,ig_links")
+        .select("job_id,place_key,site_urls,social_links,tg_links,ig_links,best_2gis,best_yandex,canonical")
         .eq("job_id", job_id)
     )
     if place_keys:
@@ -688,6 +853,10 @@ async def enrich_sites(
         tg_links = social_links_new.get("telegram") or []
         ig_links = social_links_new.get("instagram") or []
 
+        # Build canonical merged card (post-enrichment)
+        canonical = _build_canonical(p, social_links_new, merged_phones, merged_emails, extracted_items)
+
+
         # Persist raw (site_extract)
         if write_raw:
             try:
@@ -714,6 +883,7 @@ async def enrich_sites(
                     "social_links": social_links_new,
                     "tg_links": tg_links,
                     "ig_links": ig_links,
+                    "canonical": canonical,
                 },
                 on_conflict="job_id,place_key",
             ).execute()
