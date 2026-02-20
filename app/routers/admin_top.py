@@ -12,6 +12,7 @@ from db_supabase import supabase as sb
 
 # Reuse existing extraction services (already used in leads.py pipeline)
 from app.services.socials_extract import fetch_and_extract_website_data
+from app.services.extract_utils import clean_url, force_https_if_bare, detect_social
 from app.services.mi_storage import insert_raw_items
 
 router = APIRouter()
@@ -588,26 +589,48 @@ async def enrich_sites(
         candidates += _extract_from_any(p.get("social_links"))
         candidates += _load_yandex_raw_candidates(job_id, place_key)
 
-        # keep only http(s) URLs; de-dup; limit
-        urls = []
+        # keep only website-like URLs; normalize; de-dup; limit
+        urls: List[str] = []
+        seen = set()
+
         for c in candidates:
             if not isinstance(c, str):
                 continue
             u = c.strip()
             if not u:
                 continue
+
+            # Support bare domains like "taplink.cc/xxx" or "example.com"
             if u.startswith("//"):
                 u = "https:" + u
+            elif not u.startswith(("http://", "https://")):
+                u = force_https_if_bare(u)
+
             if not u.startswith(("http://", "https://")):
                 continue
+
+            # Drop tracking params, fragments, etc.
+            u = clean_url(u)
+            if not u:
+                continue
+
+            # Skip pure social links; we only fetch websites/landings
+            try:
+                if detect_social(u):
+                    continue
+            except Exception:
+                pass
+
             # ignore yandex maps (captcha noise)
             if re.search(r"(?:^|//)(?:www\.)?yandex\.(ru|com|eu)/maps", u):
                 continue
-            if u not in urls:
+
+            if u not in seen:
+                seen.add(u)
                 urls.append(u)
+
             if len(urls) >= max_urls_per_place:
                 break
-
         if not urls:
             continue
 
