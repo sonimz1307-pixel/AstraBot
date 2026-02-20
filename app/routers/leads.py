@@ -543,6 +543,7 @@ async def _orchestrate_full_job(
             "filterRating": "rating_rating_excellent",
             "locationQuery": city,
             "query": [niche],
+             "includeContacts": True,
         }
         if actor_input_2gis_override:
             actor_input.update(actor_input_2gis_override)
