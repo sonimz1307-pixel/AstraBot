@@ -299,18 +299,36 @@ def _build_canonical(
     name = _guess_name(best2) or _guess_name(besty) or ""
     address = _guess_address(best2) or _guess_address(besty) or ""
 
+    def _is_bad_website(u: str) -> bool:
+        # exclude directory/landing pages that are not the company's website
+        if re.search(r"(?:^|//)(?:www\.)?yandex\.(ru|com|eu)/maps", u):
+            return True
+        if re.search(r"(?:^|//)(?:www\.)?2gis\.(ru|com)", u):
+            return True
+        return False
+
+    def _norm_good_website(u: Any) -> Optional[str]:
+        if not isinstance(u, str):
+            return None
+        nu = _norm_url_any(u)
+        if not nu:
+            return None
+        if _is_bad_website(nu):
+            return None
+        return nu
+
     # website preference: first ok extracted -> else from site_urls
     website = ""
     for it in extracted_items:
         if isinstance(it, dict) and it.get("ok"):
             w = it.get("website")
-            nw = _norm_url_any(w) if isinstance(w, str) else None
+            nw = _norm_good_website(w)
             if nw:
                 website = nw
                 break
     if not website:
         for w in _extract_from_any(place_row.get("site_urls")):
-            nw = _norm_url_any(w)
+            nw = _norm_good_website(w)
             if nw:
                 website = nw
                 break
@@ -351,13 +369,33 @@ def _build_canonical(
             if nu not in other:
                 other.append(nu)
 
+    def _norm_phone(ph: str) -> Optional[str]:
+        s = (ph or "").strip()
+        if not s:
+            return None
+        # keep only + and digits
+        s = re.sub(r"[^0-9+]", "", s)
+        if not s.startswith("+"):
+            # allow 7XXXXXXXXXX -> +7XXXXXXXXXX
+            if len(s) == 11 and s.startswith("7"):
+                s = "+" + s
+        # accept RU style +7XXXXXXXXXX
+        if s.startswith("+7") and len(s) == 12:
+            return s
+        # accept generic E.164-ish (basic guard)
+        if s.startswith("+") and 10 <= len(s) <= 16:
+            return s
+        return None
+
     # normalize phones/emails (dedupe, keep non-empty)
     ph_out: List[str] = []
     for ph in phones or []:
         if isinstance(ph, str):
-            pph = ph.strip()
+            pph = _norm_phone(ph)
             if pph and pph not in ph_out:
                 ph_out.append(pph)
+            if len(ph_out) >= 5:
+                break
 
     em_out: List[str] = []
     for em in emails or []:
@@ -795,6 +833,23 @@ async def enrich_sites(
             if len(urls) >= max_urls_per_place:
                 break
         if not urls:
+            # Still build canonical from directory cards (2GIS/Yandex) + existing stored links
+            social_links_existing = p.get("social_links")
+            if not isinstance(social_links_existing, dict):
+                social_links_existing = {}
+            canonical = _build_canonical(p, social_links_existing, [], [], [])
+            try:
+                sb.table("mi_places").upsert(
+                    {
+                        "job_id": job_id,
+                        "place_key": place_key,
+                        "canonical": canonical,
+                    },
+                    on_conflict="job_id,place_key",
+                ).execute()
+                updated += 1
+            except Exception as e:
+                errors.append({"place_key": place_key, "error": f"mi_places_canonical_only: {type(e).__name__}: {e}"})
             continue
 
         scanned_places += 1
