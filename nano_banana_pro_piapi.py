@@ -1,36 +1,43 @@
 """
 nano_banana_pro_piapi.py
 
-Nano Banana Pro (PiAPI) feature handler — designed to keep main.py changes minimal.
+Nano Banana Pro (PiAPI / Gemini) — Image-to-Image (input.image_urls) with default 2K.
 
-State in user session:
-st["nano_banana_pro"] = {
-  "step": "need_photo" | "need_prompt",
-  "image_url": str | None,
-  "resolution": "1K"|"2K" (optional, default "1K")
-}
+IMPORTANT:
+PiAPI OpenAPI for nano-banana-pro expects input.image_urls = list of PUBLIC URLs.
+So we must provide PiAPI a URL it can fetch.
 
-Product rules:
-- Only 1K / 2K
-- Cost: 2 tokens per generation
-- Mode: i2i via input.image_urls
+This module supports 2 ways to build a public URL:
+1) Telegram File URL (recommended): provide telegram_file_id (best).
+   - We call Telegram getFile API to obtain file_path
+   - Then build URL: https://api.telegram.org/file/bot<TOKEN>/<file_path>
+2) Data-URL fallback (base64) if you don't pass telegram_file_id.
+   - Not guaranteed by spec, but can work with some backends.
+
+Product rules you requested:
+- resolutions: 1K / 2K only (default 2K)
+- cost: handled in main (2 tokens) — this file only does generation.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Callable, List, Literal
+from typing import Any, Dict, List, Optional, Tuple, Literal
 import os
 import json
 import time
+import base64
 
 import httpx
 
 
-PIAPI_BASE_URL = os.getenv("PIAPI_BASE_URL") or "https://api.piapi.ai"
-PIAPI_API_KEY = os.getenv("PIAPI_API_KEY") or ""
+PIAPI_BASE_URL = os.getenv("PIAPI_BASE_URL", "https://api.piapi.ai").rstrip("/")
+PIAPI_API_KEY = (os.getenv("PIAPI_API_KEY") or "").strip()
+
+TELEGRAM_BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+TELEGRAM_API_BASE = os.getenv("TELEGRAM_API_BASE", "https://api.telegram.org").rstrip("/")
 
 ALLOWED_RESOLUTIONS = ("1K", "2K")
-TOKENS_COST = 2.0
+DEFAULT_RESOLUTION = "2K"
 
 
 class NanoBananaProError(RuntimeError):
@@ -67,20 +74,22 @@ def _extract_output_urls(task_json: Dict[str, Any]) -> List[str]:
         for u in many:
             if isinstance(u, str) and u.strip():
                 urls.append(u.strip())
-    # de-dup
-    seen=set()
-    uniq=[]
+    # de-dup preserve order
+    seen = set()
+    uniq: List[str] = []
     for u in urls:
         if u not in seen:
-            uniq.append(u); seen.add(u)
+            uniq.append(u)
+            seen.add(u)
     return uniq
 
 
-async def _piapi_create_task(*, prompt: str, image_urls: List[str], resolution: str = "1K") -> Dict[str, Any]:
+async def _piapi_create_task(*, prompt: str, image_urls: List[str], resolution: str = DEFAULT_RESOLUTION) -> Dict[str, Any]:
     if resolution not in ALLOWED_RESOLUTIONS:
         raise NanoBananaProError(f"resolution must be one of {ALLOWED_RESOLUTIONS}")
     if not image_urls:
         raise NanoBananaProError("image_urls is required for i2i")
+
     payload: Dict[str, Any] = {
         "model": "gemini",
         "task_type": "nano-banana-pro",
@@ -95,11 +104,12 @@ async def _piapi_create_task(*, prompt: str, image_urls: List[str], resolution: 
     url = f"{PIAPI_BASE_URL}/api/v1/task"
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(url, headers=_piapi_headers(), json=payload)
-    data = r.json() if r.headers.get("content-type","").startswith("application/json") else {"raw": r.text}
+
+    data = r.json() if (r.headers.get("content-type", "").startswith("application/json")) else {"raw": r.text}
     if r.status_code >= 400:
-        raise NanoBananaProError(f"PiAPI HTTP {r.status_code}: {json.dumps(data, ensure_ascii=False)[:1200]}")
+        raise NanoBananaProError(f"PiAPI HTTP {r.status_code}: {json.dumps(data, ensure_ascii=False)[:1500]}")
     if isinstance(data, dict) and data.get("code") not in (None, 200):
-        raise NanoBananaProError(f"PiAPI error code={data.get('code')}: {json.dumps(data, ensure_ascii=False)[:1200]}")
+        raise NanoBananaProError(f"PiAPI error code={data.get('code')}: {json.dumps(data, ensure_ascii=False)[:1500]}")
     return data
 
 
@@ -107,11 +117,12 @@ async def _piapi_get_task(task_id: str) -> Dict[str, Any]:
     url = f"{PIAPI_BASE_URL}/api/v1/task/{task_id}"
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.get(url, headers=_piapi_headers())
-    data = r.json() if r.headers.get("content-type","").startswith("application/json") else {"raw": r.text}
+
+    data = r.json() if (r.headers.get("content-type", "").startswith("application/json")) else {"raw": r.text}
     if r.status_code >= 400:
-        raise NanoBananaProError(f"PiAPI HTTP {r.status_code}: {json.dumps(data, ensure_ascii=False)[:1200]}")
+        raise NanoBananaProError(f"PiAPI HTTP {r.status_code}: {json.dumps(data, ensure_ascii=False)[:1500]}")
     if isinstance(data, dict) and data.get("code") not in (None, 200):
-        raise NanoBananaProError(f"PiAPI error code={data.get('code')}: {json.dumps(data, ensure_ascii=False)[:1200]}")
+        raise NanoBananaProError(f"PiAPI error code={data.get('code')}: {json.dumps(data, ensure_ascii=False)[:1500]}")
     return data
 
 
@@ -128,7 +139,7 @@ async def _piapi_wait(task_id: str, *, timeout_s: float = 240.0, poll_s: float =
 
 
 async def _download_bytes(url: str) -> bytes:
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with httpx.AsyncClient(timeout=180) as client:
         r = await client.get(url)
         r.raise_for_status()
         return r.content
@@ -139,142 +150,88 @@ async def _sleep(seconds: float) -> None:
     await asyncio.sleep(seconds)
 
 
-# ---------- Public handler (keep main.py minimal) ----------
+# ---------- Telegram URL builder (recommended) ----------
 
-async def handle_update(
+async def _tg_get_file_path(file_id: str) -> str:
+    """
+    Calls Telegram getFile and returns file_path.
+    Requires TELEGRAM_BOT_TOKEN.
+    """
+    if not TELEGRAM_BOT_TOKEN:
+        raise NanoBananaProError("TELEGRAM_BOT_TOKEN is not set (needed to build Telegram file URL).")
+
+    url = f"{TELEGRAM_API_BASE}/bot{TELEGRAM_BOT_TOKEN}/getFile"
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(url, params={"file_id": file_id})
+    r.raise_for_status()
+    data = r.json()
+    if not data.get("ok"):
+        raise NanoBananaProError(f"Telegram getFile failed: {data}")
+    fp = ((data.get("result") or {}) if isinstance(data.get("result"), dict) else {}).get("file_path") or ""
+    if not fp:
+        raise NanoBananaProError(f"Telegram getFile: missing file_path: {data}")
+    return fp
+
+
+async def _tg_file_url(file_id: str) -> str:
+    fp = await _tg_get_file_path(file_id)
+    return f"{TELEGRAM_API_BASE}/file/bot{TELEGRAM_BOT_TOKEN}/{fp}"
+
+
+def _data_url_from_bytes(img_bytes: bytes) -> str:
+    # fallback; not guaranteed by spec
+    b64 = base64.b64encode(img_bytes).decode("ascii")
+    return f"data:image/jpeg;base64,{b64}"
+
+
+# ---------- Public API used by main.py ----------
+
+async def handle_nano_banana_pro(
+    source_image_bytes: bytes,
+    prompt: str,
     *,
-    kind: Literal["photo", "text"],
-    chat_id: int,
-    user_id: int,
-    st: Dict[str, Any],
-    # inputs:
-    image_url: Optional[str] = None,
-    text: Optional[str] = None,
-    # callbacks from main:
-    send_message: Callable[..., Any],
-    send_photo_bytes: Callable[..., Any],
-    # billing callbacks:
-    ensure_user_row: Callable[[int], Any],
-    get_balance: Callable[[int], Any],
-    add_tokens: Callable[..., Any],
-    topup_keyboard: Callable[[], dict],
-    # ui:
-    menu_keyboard: Callable[[], dict],
-) -> bool:
+    resolution: str = DEFAULT_RESOLUTION,   # default 2K
+    output_format: str = "jpg",
+    telegram_file_id: Optional[str] = None,  # preferred: gives PiAPI a proper URL
+) -> Tuple[bytes, str]:
     """
-    Returns True if the update was handled (and main should return).
+    Returns (out_bytes, ext).
     """
 
-    if st.get("mode") != "nano_banana_pro":
-        return False
+    res = (resolution or DEFAULT_RESOLUTION).strip().upper()
+    if res not in ALLOWED_RESOLUTIONS:
+        res = DEFAULT_RESOLUTION
 
-    nb = st.get("nano_banana_pro") or {"step": "need_photo", "image_url": None, "resolution": "1K"}
-    step = (nb.get("step") or "need_photo")
+    prompt = (prompt or "").strip()
+    if not prompt:
+        raise NanoBananaProError("Empty prompt")
 
-    if kind == "photo":
-        if not image_url:
-            await send_message(chat_id, "Не вижу ссылку на фото. Пришли фото ещё раз.", reply_markup=menu_keyboard())
-            return True
-        # accept photo
-        nb["image_url"] = image_url
-        nb["step"] = "need_prompt"
-        st["nano_banana_pro"] = nb
-        await send_message(
-            chat_id,
-            "🍌 Nano Banana Pro ✅ Фото принял.\nТеперь напиши одним сообщением, что изменить.\n\nСтоимость: 2 токена.",
-            reply_markup=menu_keyboard(),
-        )
-        return True
+    # Build a URL PiAPI can fetch
+    if telegram_file_id:
+        src_url = await _tg_file_url(telegram_file_id)
+    else:
+        # fallback: data URL (may or may not work on PiAPI side)
+        src_url = _data_url_from_bytes(source_image_bytes)
 
-    # kind == "text"
-    nav_text = (text or "").strip()
-    if not nav_text:
-        await send_message(chat_id, "Напиши текстом, что изменить (фон/стиль/детали).", reply_markup=menu_keyboard())
-        return True
+    created = await _piapi_create_task(prompt=prompt, image_urls=[src_url], resolution=res)
+    task_id = ((created.get("data") or {}) if isinstance(created, dict) else {}).get("task_id")
+    if not task_id:
+        raise NanoBananaProError(f"PiAPI didn't return task_id: {json.dumps(created, ensure_ascii=False)[:800]}")
 
-    # Ignore nav/commands
-    if nav_text in ("⬅ Назад", "Назад") or nav_text.startswith("/"):
-        return False
+    done = await _piapi_wait(task_id, timeout_s=240, poll_s=2)
 
-    if step != "need_prompt":
-        await send_message(
-            chat_id,
-            "Сначала пришли ФОТО для Nano Banana Pro.\nОткрой «Фото будущего» → «🍌 Nano Banana Pro».",
-            reply_markup=menu_keyboard(),
-        )
-        return True
+    if _status_lower(done) == "failed":
+        err = (((done.get("data") or {}) if isinstance(done, dict) else {}) or {}).get("error") or {}
+        msg = ""
+        if isinstance(err, dict):
+            msg = err.get("message") or ""
+        raise NanoBananaProError(msg or "PiAPI task failed")
 
-    src_url = nb.get("image_url")
-    if not src_url:
-        await send_message(
-            chat_id,
-            "Не хватает фото. Открой «Фото будущего» → «🍌 Nano Banana Pro» и пришли фото заново.",
-            reply_markup=menu_keyboard(),
-        )
-        return True
+    urls = _extract_output_urls(done)
+    if not urls:
+        raise NanoBananaProError("PiAPI completed but no output image_url(s)")
 
-    # billing
-    ensure_user_row(user_id)
-    try:
-        bal = float(get_balance(user_id) or 0)
-    except Exception:
-        bal = 0.0
+    out_bytes = await _download_bytes(urls[0])
 
-    cost = TOKENS_COST
-    if bal < cost:
-        await send_message(
-            chat_id,
-            f"Недостаточно токенов 😕\nНужно: {int(cost)} токена для Nano Banana Pro.",
-            reply_markup=topup_keyboard(),
-        )
-        return True
-
-    # deduct before request
-    try:
-        add_tokens(user_id, -cost, reason="nano_banana_pro")
-    except TypeError:
-        add_tokens(user_id, -int(cost), reason="nano_banana_pro")
-
-    await send_message(chat_id, "🍌 Nano Banana Pro — генерирую…", reply_markup=menu_keyboard())
-
-    try:
-        resolution = str(nb.get("resolution") or "1K")
-        if resolution not in ALLOWED_RESOLUTIONS:
-            resolution = "1K"
-
-        created = await _piapi_create_task(prompt=nav_text, image_urls=[src_url], resolution=resolution)
-        task_id = ((created.get("data") or {}) if isinstance(created, dict) else {}).get("task_id")
-        if not task_id:
-            raise NanoBananaProError(f"PiAPI didn't return task_id: {json.dumps(created, ensure_ascii=False)[:800]}")
-
-        done = await _piapi_wait(task_id, timeout_s=240, poll_s=2)
-        if _status_lower(done) == "failed":
-            err = (((done.get("data") or {}) if isinstance(done, dict) else {}) or {}).get("error") or {}
-            msg = ""
-            if isinstance(err, dict):
-                msg = err.get("message") or ""
-            raise NanoBananaProError(msg or "PiAPI task failed")
-
-        urls = _extract_output_urls(done)
-        if not urls:
-            raise NanoBananaProError("PiAPI completed but no output image_url(s)")
-
-        out_bytes = await _download_bytes(urls[0])
-        await send_photo_bytes(chat_id, out_bytes, caption="🍌 Nano Banana Pro — готово", reply_markup=menu_keyboard())
-
-    except Exception as e:
-        # refund
-        try:
-            try:
-                add_tokens(user_id, cost, reason="nano_banana_pro_refund")
-            except TypeError:
-                add_tokens(user_id, int(cost), reason="nano_banana_pro_refund")
-        except Exception:
-            pass
-
-        await send_message(chat_id, f"Ошибка Nano Banana Pro: {e}", reply_markup=menu_keyboard())
-        return True
-
-    # reset after success
-    st["nano_banana_pro"] = {"step": "need_photo", "image_url": None, "resolution": "1K"}
-    return True
+    ext = "png" if output_format.lower() == "png" else "jpg"
+    return out_bytes, ext
