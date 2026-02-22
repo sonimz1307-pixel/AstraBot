@@ -4805,6 +4805,7 @@ async def webhook(secret: str, request: Request):
             step = (nbp.get("step") or "need_photo")
             if step == "need_photo":
                 nbp["photo_bytes"] = img_bytes
+                nbp["photo_file_id"] = file_id
                 nbp["step"] = "need_prompt"
                 st["nano_banana_pro"] = nbp
                 st["ts"] = _now()
@@ -5256,6 +5257,7 @@ async def webhook(secret: str, request: Request):
             step = (nbp.get("step") or "need_photo")
             if step == "need_photo":
                 nbp["photo_bytes"] = img_bytes
+                nbp["photo_file_id"] = file_id
                 nbp["step"] = "need_prompt"
                 st["nano_banana_pro"] = nbp
                 st["ts"] = _now()
@@ -5559,6 +5561,7 @@ async def webhook(secret: str, request: Request):
                     user_prompt,
                     resolution=(nbp.get("resolution") or "2K"),
                     output_format="jpg",
+                    telegram_file_id=nbp.get("photo_file_id"),
                 )
 
                 _dl_set_bytes(chat_id, user_id, token, out_bytes)
