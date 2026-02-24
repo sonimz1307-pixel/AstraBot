@@ -1779,6 +1779,38 @@ async def http_download_bytes(url: str, timeout: float = 180) -> bytes:
     r.raise_for_status()
     return r.content
 
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
+
+async def elevenlabs_tts_mp3_bytes(
+    text: str,
+    voice_id: str,
+    model_id: str = "eleven_multilingual_v2",
+) -> bytes:
+    if not ELEVENLABS_API_KEY:
+        raise RuntimeError("ELEVENLABS_API_KEY не задан в переменных окружения.")
+
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+    headers = {
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "Accept": "audio/mpeg",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "text": text,
+        "model_id": model_id,
+        "voice_settings": {
+            "stability": 0.5,
+            "similarity_boost": 0.75,
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        r = await client.post(url, headers=headers, json=payload)
+
+    if r.status_code >= 400:
+        raise RuntimeError(f"ElevenLabs TTS ({r.status_code}): {r.text[:2000]}")
+
+    return r.content
 
 # ---------------- Prompts ----------------
 
