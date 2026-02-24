@@ -24,6 +24,7 @@ from nano_banana_pro_piapi import handle_nano_banana_pro
 from yookassa_flow import create_yookassa_payment
 from kling3_pricing import calculate_kling3_price
 from kling3_telegram_handler import handle_kling3_wait_prompt
+from app.routers.tts import router as tts_router
 
 app = FastAPI()
 # --- static files (/static/...) ---
@@ -34,6 +35,7 @@ from app.routers.admin_top import router as admin_top_router
 app.include_router(leads_router, prefix="/api/leads", tags=["leads"])
 app.include_router(kling3_router, prefix="/api/kling3", tags=["kling3"])
 app.include_router(admin_top_router, prefix="/api/admin", tags=["admin"])
+app.include_router(tts_router)
 
 APP_VERSION = "v7-suno-callback-dedup-fix"
 try:
