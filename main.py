@@ -4623,7 +4623,42 @@ async def webhook(secret: str, request: Request):
             reply_markup=_tts_gender_keyboard(),
         )
         return {"ok": True}
-    
+    # ---- TTS: choose gender ----
+    if incoming_text == "👨 Мужские голоса":
+        st["mode"] = "tts_choose_voice"
+        st["tts"] = {"gender": "male"}
+        st["ts"] = _now()
+        await tg_send_message(
+            chat_id,
+            "Выбери мужской голос:",
+            reply_markup=_tts_voices_keyboard("male"),
+        )
+        return {"ok": True}
+
+    if incoming_text == "👩 Женские голоса":
+        st["mode"] = "tts_choose_voice"
+        st["tts"] = {"gender": "female"}
+        st["ts"] = _now()
+        await tg_send_message(
+            chat_id,
+            "Выбери женский голос:",
+            reply_markup=_tts_voices_keyboard("female"),
+        )
+        return {"ok": True}
+
+    # ---- TTS: choose concrete voice ----
+    if incoming_text in _TTS_BY_BTN:
+        v = _TTS_BY_BTN[incoming_text]
+        st["mode"] = "tts_wait_text"
+        st["tts"] = {"voice_id": v["voice_id"], "name": v["name"]}
+        st["ts"] = _now()
+        await tg_send_message(
+            chat_id,
+            f"✅ Голос выбран: {v['name']}\n\nТеперь пришли текст — я озвучу его.",
+            reply_markup=_help_menu_for(user_id),
+        )
+        return {"ok": True}
+        
     if incoming_text in ("Фото будущего", "📸 Фото будущего"):
         # Подменю: объединённая точка входа в фото-режимы
         await tg_send_message(
