@@ -1308,6 +1308,47 @@ def _tts_gender_keyboard() -> dict:
         "one_time_keyboard": False,
         "selective": False,
     }
+# ---- TTS voices (curated) ----
+_TTS_VOICES_MALE = [
+    {"voice_id": "huXlXYhtMIZkTYxM93t6", "name": "Масон"},
+    {"voice_id": "kwajW3Xh5svCeKU5ky2S", "name": "Дмитрий"},
+    {"voice_id": "gJEfHTTiifXEDmO687lC", "name": "Принц Нур"},
+    {"voice_id": "oKxkBkm5a8Bmrd1Whf2c", "name": "Нур"},
+    {"voice_id": "3EuKHIEZbSzrHGNmdYsx", "name": "Николай"},
+]
+
+_TTS_VOICES_FEMALE = [
+    {"voice_id": "IO0VLmDxIb8N5msewtV4", "name": "Анна"},
+    {"voice_id": "gCqVHuQpLDMkHrGiG95I", "name": "Татьяна"},
+    {"voice_id": "OowtKaZH9N7iuGbsd00l", "name": "Вероника"},
+]
+
+# Быстрый индекс по названию кнопки -> voice
+_TTS_BY_BTN = {}
+for _v in (_TTS_VOICES_MALE + _TTS_VOICES_FEMALE):
+    _TTS_BY_BTN[f"🎙 {_v['name']}"] = _v
+
+
+def _tts_voices_keyboard(gender: str) -> dict:
+    voices = _TTS_VOICES_MALE if gender == "male" else _TTS_VOICES_FEMALE
+
+    rows = []
+    row = []
+    for v in voices:
+        row.append({"text": f"🎙 {v['name']}"})
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+
+    rows.append([{"text": "⬅️ Назад"}])
+    return {
+        "keyboard": rows,
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+        "selective": False,
+    }
     
 def _help_menu_for(user_id: int) -> dict:
     """Главное меню + экстренная кнопка сброса генерации (показываем ТОЛЬКО в «Помощь»)."""
