@@ -20,11 +20,10 @@ from veo_flow import run_veo_text_to_video, run_veo_image_to_video
 from veo_billing import calc_veo_charge, format_veo_charge_line
 from billing_db import ensure_user_row, get_balance, add_tokens
 from nano_banana import run_nano_banana
-from nano_banana_pro_piapi import handle_nano_banana_pro 
+from nano_banana_pro import handle_nano_banana_pro
 from yookassa_flow import create_yookassa_payment
 from kling3_pricing import calculate_kling3_price
 from kling3_telegram_handler import handle_kling3_wait_prompt
-from app.routers.tts import router as tts_router
 
 app = FastAPI()
 # --- static files (/static/...) ---
@@ -35,7 +34,6 @@ from app.routers.admin_top import router as admin_top_router
 app.include_router(leads_router, prefix="/api/leads", tags=["leads"])
 app.include_router(kling3_router, prefix="/api/kling3", tags=["kling3"])
 app.include_router(admin_top_router, prefix="/api/admin", tags=["admin"])
-app.include_router(tts_router)
 
 APP_VERSION = "v7-suno-callback-dedup-fix"
 try:
@@ -1053,7 +1051,7 @@ async def _ai_maybe_summarize(st: Dict[str, Any]):
     st["ai_ts"] = _now()
 
 
-def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photosession", "t2i", "two_photos", "nano_banana", "kling_mc", "kling_i2v", "suno_music", "veo_t2v", "veo_i2v"]):
+def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photosession", "t2i", "two_photos", "nano_banana", "kling_mc", "kling_i2v", "suno_music", "veo_t2v", "veo_i2v", "tts_choose_gender", "tts_choose_voice", "tts_wait_text"]):
     st = _ensure_state(chat_id, user_id)
     st["mode"] = mode
     st["ts"] = _now()
@@ -1244,6 +1242,7 @@ def _sunoapi_extract_tracks(task_json: dict) -> list[dict]:
 def _main_menu_keyboard(is_admin: bool = False) -> dict:
     rows = [
         [{"text": "ИИ (чат)"}, {"text": "Фото будущего"}],
+        [{"text": "🔊 Озвучить текст"}],
         [
             {"text": "🎬 Видео будущего", "web_app": {"url": WEBAPP_KLING_URL}},
             {"text": "🎵 Музыка будущего", "web_app": {"url": WEBAPP_MUSIC_URL}},
@@ -1297,6 +1296,94 @@ def _pro_menu_keyboard(user_id: int) -> dict:
 
 def _pro_menu_for(user_id: int) -> dict:
     return _pro_menu_keyboard(user_id)
+
+
+
+# ---------------- TTS (ElevenLabs) quick voices catalog (Pattern A) ----------------
+
+TTS_BTN = "🔊 Озвучить текст"
+TTS_BTN_MALE = "👨 Мужские голоса"
+TTS_BTN_FEMALE = "👩 Женские голоса"
+TTS_BTN_BACK = "⬅️ Назад"
+TTS_BTN_MENU = "🏠 В меню"
+
+# Твой "каталог" (10–30 голосов). Сейчас: базовый набор RU.
+# Можно расширять без изменений UI — просто добавляй сюда новые записи.
+TTS_VOICES_MALE = [
+    {"voice_id": "huXlXYhtMIZkTYxM93t6", "name": "Масон"},
+    {"voice_id": "kwajW3Xh5svCeKU5ky2S", "name": "Дмитрий"},
+    {"voice_id": "3EuKHIEZbSzrHGNmdYsx", "name": "Николай"},
+    {"voice_id": "gJEfHTTiifXEDmO687lC", "name": "Принц Нур"},
+    {"voice_id": "oKxkBkm5a8Bmrd1Whf2c", "name": "Нур"},
+]
+
+TTS_VOICES_FEMALE = [
+    {"voice_id": "IO0VLmDxIb8N5msewtV4", "name": "Анна"},
+    {"voice_id": "gCqVHuQpLDMkHrGiG95I", "name": "Татьяна"},
+    {"voice_id": "OowtKaZH9N7iuGbsd00l", "name": "Вероника"},
+]
+
+def _tts_gender_kb() -> dict:
+    return {
+        "keyboard": [
+            [{"text": TTS_BTN_MALE}, {"text": TTS_BTN_FEMALE}],
+            [{"text": TTS_BTN_MENU}],
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+    }
+
+def _tts_voice_kb(gender: str) -> dict:
+    gender = (gender or "").lower().strip()
+    voices = TTS_VOICES_FEMALE if gender == "female" else TTS_VOICES_MALE
+    rows = []
+    for v in voices:
+        rows.append([{"text": f"🎙 {v['name']}"}])
+    rows.append([{"text": TTS_BTN_BACK}, {"text": TTS_BTN_MENU}])
+    return {"keyboard": rows, "resize_keyboard": True, "one_time_keyboard": False}
+
+def _tts_action_kb() -> dict:
+    return {
+        "keyboard": [
+            [{"text": "🎚 Сменить голос"}, {"text": TTS_BTN_MENU}],
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+    }
+
+def _tts_find_voice_by_button(text: str) -> Optional[dict]:
+    t = (text or "").strip()
+    if t.startswith("🎙"):
+        name = t.replace("🎙", "").strip()
+        for v in (TTS_VOICES_MALE + TTS_VOICES_FEMALE):
+            if v.get("name") == name:
+                return v
+    return None
+
+async def eleven_tts_generate_mp3(*, text: str, voice_id: str, model_id: str = "eleven_multilingual_v2") -> bytes:
+    """Minimal ElevenLabs REST call (no SDK). Returns MP3 bytes."""
+    api_key = (os.getenv("ELEVENLABS_API_KEY") or "").strip()
+    if not api_key:
+        raise RuntimeError("ELEVENLABS_API_KEY не задан в переменных окружения.")
+    if not voice_id:
+        raise RuntimeError("voice_id пустой.")
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+    headers = {
+        "xi-api-key": api_key,
+        "accept": "audio/mpeg",
+        "content-type": "application/json",
+    }
+    payload = {
+        "text": text,
+        "model_id": model_id,
+        # по умолчанию норм; если нужно — можно добавить voice_settings
+        # "voice_settings": {"stability": 0.5, "similarity_boost": 0.8}
+    }
+    async with httpx.AsyncClient(timeout=120) as client:
+        r = await client.post(url, headers=headers, json=payload)
+    if r.status_code >= 400:
+        raise RuntimeError(f"ElevenLabs TTS error ({r.status_code}): {r.text[:500]}")
+    return r.content
 
 def _help_menu_for(user_id: int) -> dict:
     """Главное меню + экстренная кнопка сброса генерации (показываем ТОЛЬКО в «Помощь»)."""
@@ -4578,6 +4665,104 @@ async def webhook(secret: str, request: Request):
         await tg_send_message(chat_id, "Ок. Режим «ИИ (чат)».", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
 
+
+
+    # ---------------- TTS (Text → Speech) ----------------
+    if incoming_text in (TTS_BTN, "Озвучить текст", "Text to Speech", "TTS"):
+        st.setdefault("tts", {})
+        st["tts"]["gender"] = ""
+        st["tts"]["voice_id"] = ""
+        st["tts"]["voice_name"] = ""
+        st["ts"] = _now()
+        _set_mode(chat_id, user_id, "tts_choose_gender")
+        await tg_send_message(
+            chat_id,
+            "🔊 Озвучка текста (ElevenLabs)
+
+Выбери группу голосов:",
+            reply_markup=_tts_gender_kb(),
+        )
+        return {"ok": True}
+
+    # TTS navigation only when we're in TTS modes
+    if str(st.get("mode") or "").startswith("tts_"):
+        if incoming_text == TTS_BTN_MENU:
+            st.pop("tts", None)
+            _set_mode(chat_id, user_id, "chat")
+            await tg_send_message(chat_id, "Ок. Вернул в меню.", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+
+        if incoming_text == TTS_BTN_BACK:
+            # back: voice list -> gender
+            st["tts"] = st.get("tts") or {}
+            st["tts"]["voice_id"] = ""
+            st["tts"]["voice_name"] = ""
+            st["ts"] = _now()
+            _set_mode(chat_id, user_id, "tts_choose_gender")
+            await tg_send_message(chat_id, "Выбери группу голосов:", reply_markup=_tts_gender_kb())
+            return {"ok": True}
+
+        if incoming_text == TTS_BTN_MALE:
+            st.setdefault("tts", {})
+            st["tts"]["gender"] = "male"
+            st["ts"] = _now()
+            _set_mode(chat_id, user_id, "tts_choose_voice")
+            await tg_send_message(chat_id, "Выбери мужской голос:", reply_markup=_tts_voice_kb("male"))
+            return {"ok": True}
+
+        if incoming_text == TTS_BTN_FEMALE:
+            st.setdefault("tts", {})
+            st["tts"]["gender"] = "female"
+            st["ts"] = _now()
+            _set_mode(chat_id, user_id, "tts_choose_voice")
+            await tg_send_message(chat_id, "Выбери женский голос:", reply_markup=_tts_voice_kb("female"))
+            return {"ok": True}
+
+        if incoming_text == "🎚 Сменить голос":
+            _set_mode(chat_id, user_id, "tts_choose_gender")
+            await tg_send_message(chat_id, "Выбери группу голосов:", reply_markup=_tts_gender_kb())
+            return {"ok": True}
+
+        v = _tts_find_voice_by_button(incoming_text)
+        if v:
+            st.setdefault("tts", {})
+            st["tts"]["voice_id"] = v["voice_id"]
+            st["tts"]["voice_name"] = v["name"]
+            st["ts"] = _now()
+            _set_mode(chat_id, user_id, "tts_wait_text")
+            await tg_send_message(
+                chat_id,
+                f"✅ Голос выбран: {v['name']}
+
+Пришли текст одним сообщением — я озвучу и пришлю MP3.",
+                reply_markup=_tts_action_kb(),
+            )
+            return {"ok": True}
+
+        # In wait_text mode: any non-empty text => generate audio
+        if st.get("mode") == "tts_wait_text" and incoming_text:
+            voice_id = str((st.get("tts") or {}).get("voice_id") or "").strip()
+            voice_name = str((st.get("tts") or {}).get("voice_name") or "").strip()
+            if not voice_id:
+                _set_mode(chat_id, user_id, "tts_choose_gender")
+                await tg_send_message(chat_id, "Сначала выбери голос.", reply_markup=_tts_gender_kb())
+                return {"ok": True}
+
+            await tg_send_chat_action(chat_id, "upload_audio")
+            try:
+                _busy_start(int(user_id), "TTS")
+                mp3_bytes = await eleven_tts_generate_mp3(text=incoming_text, voice_id=voice_id)
+                fname = "tts.mp3"
+                cap = f"🔊 Озвучка: {voice_name}" if voice_name else "🔊 Озвучка"
+                try:
+                    await tg_send_audio_bytes(chat_id, mp3_bytes, filename=fname, caption=cap, reply_markup=_tts_action_kb())
+                except Exception:
+                    await tg_send_document_bytes(chat_id, mp3_bytes, filename=fname, mime="audio/mpeg", caption=cap, reply_markup=_tts_action_kb())
+            except Exception as e:
+                await tg_send_message(chat_id, f"❌ Не смог озвучить: {e}", reply_markup=_tts_action_kb())
+            finally:
+                _busy_end(int(user_id))
+            return {"ok": True}
 
     if incoming_text == "Нейро фотосессии":
         _set_mode(chat_id, user_id, "photosession")
