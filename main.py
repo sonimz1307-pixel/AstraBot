@@ -4677,9 +4677,7 @@ async def webhook(secret: str, request: Request):
         _set_mode(chat_id, user_id, "tts_choose_gender")
         await tg_send_message(
             chat_id,
-            "🔊 Озвучка текста (ElevenLabs)
-
-Выбери группу голосов:",
+            "🔊 Озвучка текста (ElevenLabs)\n\nВыбери группу голосов:",
             reply_markup=_tts_gender_kb(),
         )
         return {"ok": True}
