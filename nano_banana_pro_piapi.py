@@ -126,15 +126,50 @@ async def _piapi_get_task(task_id: str) -> Dict[str, Any]:
     return data
 
 
-async def _piapi_wait(task_id: str, *, timeout_s: float = 240.0, poll_s: float = 2.0) -> Dict[str, Any]:
-    deadline = time.time() + timeout_s
+async def _piapi_wait(task_id: str, *, timeout_s: float = 240.0, poll_s: float = 5.0) -> Dict[str, Any]:
+    """
+    Waits for PiAPI task to finish with polite polling.
+
+    - Default poll_s=5s (was 2s) to reduce PiAPI rate limits (HTTP 429).
+    - Uses gradual backoff up to 10s.
+    - If PiAPI returns 429, backs off and retries.
+    """
+    import asyncio
+
+    deadline = time.time() + float(timeout_s)
     last: Dict[str, Any] = {}
+
+    # Start with user-provided poll_s (min 3s), then backoff gently up to 10s.
+    poll = max(3.0, float(poll_s))
+    poll_max = 10.0
+
     while time.time() < deadline:
-        last = await _piapi_get_task(task_id)
+        try:
+            last = await _piapi_get_task(task_id)
+        except NanoBananaProError as e:
+            msg = str(e)
+
+            # Rate limit: backoff and retry
+            if "HTTP 429" in msg:
+                await asyncio.sleep(poll)
+                poll = min(poll + 1.0, poll_max)
+                continue
+
+            # Transient server errors / timeouts: backoff and retry
+            if "HTTP 5" in msg or "Timeout" in msg:
+                await asyncio.sleep(poll)
+                poll = min(poll + 1.0, poll_max)
+                continue
+
+            raise
+
         s = _status_lower(last)
         if s in ("completed", "failed", "canceled", "cancelled"):
             return last
-        await _sleep(poll_s)
+
+        await asyncio.sleep(poll)
+        poll = min(poll + 0.5, poll_max)
+
     raise NanoBananaProError("Timeout waiting PiAPI task")
 
 
@@ -218,7 +253,7 @@ async def handle_nano_banana_pro(
     if not task_id:
         raise NanoBananaProError(f"PiAPI didn't return task_id: {json.dumps(created, ensure_ascii=False)[:800]}")
 
-    done = await _piapi_wait(task_id, timeout_s=240, poll_s=2)
+    done = await _piapi_wait(task_id, timeout_s=240, poll_s=5)
 
     if _status_lower(done) == "failed":
         err = (((done.get("data") or {}) if isinstance(done, dict) else {}) or {}).get("error") or {}
