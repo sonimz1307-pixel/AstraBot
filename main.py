@@ -3399,6 +3399,54 @@ async def webhook(secret: str, request: Request):
                 except Exception:
                     pass
 
+            # ---- BILLING: Suno fixed price ----
+            suno_cost_tokens = 2
+            suno_charged = False
+            if ai_choice == "suno":
+                try:
+                    ensure_user_row(user_id)
+                    bal = int(get_balance(user_id) or 0)
+                except Exception:
+                    bal = 0
+            
+                if bal < suno_cost_tokens:
+                    # Persist settings so user can top up and retry even after restart
+                    try:
+                        sb_set_user_state(user_id, "music_wait_text", settings)
+                    except Exception:
+                        pass
+            
+                    await tg_send_message(
+                        chat_id,
+                        f"❌ Недостаточно токенов для Suno.\nНужно: {suno_cost_tokens}\nБаланс: {bal}",
+                        reply_markup=_topup_balance_inline_kb(),
+                    )
+                    return {"ok": True}
+            
+                try:
+                    add_tokens(
+                        user_id,
+                        -suno_cost_tokens,
+                        reason="suno_music",
+                        meta={
+                            "ai": "suno",
+                            "provider": str(settings.get("provider") or ""),
+                            "cost_tokens": suno_cost_tokens,
+                        },
+                    )
+                    suno_charged = True
+                except TypeError:
+                    add_tokens(
+                        user_id,
+                        -int(suno_cost_tokens),
+                        reason="suno_music",
+                        meta={
+                            "ai": "suno",
+                            "provider": str(settings.get("provider") or ""),
+                            "cost_tokens": int(suno_cost_tokens),
+                        },
+                    )
+                    suno_charged = True
             await tg_send_message(chat_id, "⏳ Запускаю генерацию музыки…")
             try:
                 # provider selection:
@@ -3599,6 +3647,15 @@ async def webhook(secret: str, request: Request):
                         await tg_send_message(chat_id, "\n".join(extra_lines), reply_markup=None)
                 _clear_music_ctx()
             except Exception as e:
+                # refund Suno tokens if we charged but failed
+                try:
+                    if "suno_charged" in locals() and suno_charged:
+                        try:
+                            add_tokens(user_id, suno_cost_tokens, reason="suno_music_refund")
+                        except TypeError:
+                            add_tokens(user_id, int(suno_cost_tokens), reason="suno_music_refund")
+                except Exception:
+                    pass
                 await tg_send_message(chat_id, f"❌ Ошибка PiAPI (music): {e}\n\nГенерация остановлена. Нажмите «Музыка будущего», чтобы попробовать снова.")
                 _clear_music_ctx()
             return {"ok": True}
@@ -3763,6 +3820,54 @@ async def webhook(secret: str, request: Request):
                 except Exception:
                     pass
 
+            # ---- BILLING: Suno fixed price ----
+            suno_cost_tokens = 2
+            suno_charged = False
+            if ai_choice == "suno":
+                try:
+                    ensure_user_row(user_id)
+                    bal = int(get_balance(user_id) or 0)
+                except Exception:
+                    bal = 0
+            
+                if bal < suno_cost_tokens:
+                    # Persist settings so user can top up and retry even after restart
+                    try:
+                        sb_set_user_state(user_id, "music_wait_text", settings)
+                    except Exception:
+                        pass
+            
+                    await tg_send_message(
+                        chat_id,
+                        f"❌ Недостаточно токенов для Suno.\nНужно: {suno_cost_tokens}\nБаланс: {bal}",
+                        reply_markup=_topup_balance_inline_kb(),
+                    )
+                    return {"ok": True}
+            
+                try:
+                    add_tokens(
+                        user_id,
+                        -suno_cost_tokens,
+                        reason="suno_music",
+                        meta={
+                            "ai": "suno",
+                            "provider": str(settings.get("provider") or ""),
+                            "cost_tokens": suno_cost_tokens,
+                        },
+                    )
+                    suno_charged = True
+                except TypeError:
+                    add_tokens(
+                        user_id,
+                        -int(suno_cost_tokens),
+                        reason="suno_music",
+                        meta={
+                            "ai": "suno",
+                            "provider": str(settings.get("provider") or ""),
+                            "cost_tokens": int(suno_cost_tokens),
+                        },
+                    )
+                    suno_charged = True
             await tg_send_message(chat_id, "⏳ Запускаю генерацию музыки…")
             try:
                 # provider selection:
@@ -3963,6 +4068,15 @@ async def webhook(secret: str, request: Request):
                         await tg_send_message(chat_id, "\n".join(extra_lines), reply_markup=None)
                 _clear_music_ctx()
             except Exception as e:
+                # refund Suno tokens if we charged but failed
+                try:
+                    if "suno_charged" in locals() and suno_charged:
+                        try:
+                            add_tokens(user_id, suno_cost_tokens, reason="suno_music_refund")
+                        except TypeError:
+                            add_tokens(user_id, int(suno_cost_tokens), reason="suno_music_refund")
+                except Exception:
+                    pass
                 await tg_send_message(chat_id, f"❌ Ошибка PiAPI (music): {e}\n\nГенерация остановлена. Нажмите «Музыка будущего», чтобы попробовать снова.")
                 _clear_music_ctx()
             return {"ok": True}
@@ -4278,6 +4392,53 @@ async def webhook(secret: str, request: Request):
             "config": {"service_mode": settings.get("service_mode") or "public"},
         }
 
+        # ---- BILLING: Suno fixed price ----
+        suno_cost_tokens = 2
+        suno_charged = False
+        try:
+            ensure_user_row(user_id)
+            bal = int(get_balance(user_id) or 0)
+        except Exception:
+            bal = 0
+        
+        if bal < suno_cost_tokens:
+            # Persist settings so user can top up and retry even after restart
+            try:
+                sb_set_user_state(user_id, "music_wait_text", settings)
+            except Exception:
+                pass
+        
+            await tg_send_message(
+                chat_id,
+                f"❌ Недостаточно токенов для Suno.\nНужно: {suno_cost_tokens}\nБаланс: {bal}",
+                reply_markup=_topup_balance_inline_kb(),
+            )
+            return {"ok": True}
+        
+        try:
+            add_tokens(
+                user_id,
+                -suno_cost_tokens,
+                reason="suno_music",
+                meta={
+                    "ai": "suno",
+                    "provider": str(settings.get("provider") or ""),
+                    "cost_tokens": suno_cost_tokens,
+                },
+            )
+            suno_charged = True
+        except TypeError:
+            add_tokens(
+                user_id,
+                -int(suno_cost_tokens),
+                reason="suno_music",
+                meta={
+                    "ai": "suno",
+                    "provider": str(settings.get("provider") or ""),
+                    "cost_tokens": int(suno_cost_tokens),
+                },
+            )
+            suno_charged = True
         await tg_send_message(chat_id, "⏳ Запускаю генерацию музыки…")
         try:
             provider = str(settings.get("provider") or settings.get("api") or settings.get("ai_provider") or settings.get("aiProvider") or "").lower().strip()
@@ -4375,6 +4536,15 @@ async def webhook(secret: str, request: Request):
             await tg_send_message(chat_id, "\n".join(lines), reply_markup=_main_menu_for(user_id))
             _clear_music_ctx()
         except Exception as e:
+            # refund Suno tokens if we charged but failed
+            try:
+                if 'suno_charged' in locals() and suno_charged:
+                    try:
+                        add_tokens(user_id, suno_cost_tokens, reason='suno_music_refund')
+                    except TypeError:
+                        add_tokens(user_id, int(suno_cost_tokens), reason='suno_music_refund')
+            except Exception:
+                pass
             await tg_send_message(chat_id, f"❌ Ошибка PiAPI/Suno: {e}", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
     if incoming_text in ("💰 Баланс", "Баланс", "💰Баланс"):
