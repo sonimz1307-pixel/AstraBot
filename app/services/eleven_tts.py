@@ -1,40 +1,31 @@
-from __future__ import annotations
-
-from typing import Any, Dict, List
-
-from elevenlabs.client import ElevenLabs
+import httpx
 
 
 class ElevenTTS:
-    """Thin async-friendly wrapper around ElevenLabs SDK.
-
-    SDK methods are sync, but they're fast; if you need strict async, run in threadpool.
-    """
-
     def __init__(self, *, api_key: str):
-        self.client = ElevenLabs(api_key=api_key)
+        self.api_key = api_key
 
-    async def list_voices(self) -> List[Dict[str, Any]]:
-        # Using SDK list voices. Field set can vary by SDK version.
-        voices = self.client.voices.get_all()
-        out: List[Dict[str, Any]] = []
-        for v in getattr(voices, "voices", voices) or []:
-            out.append({
-                "voice_id": getattr(v, "voice_id", None) or getattr(v, "id", None),
-                "name": getattr(v, "name", None),
-                "category": getattr(v, "category", None),
-                "labels": getattr(v, "labels", None),
-                "preview_url": getattr(v, "preview_url", None),
-            })
-        # Keep only entries with ids
-        return [x for x in out if x.get("voice_id")]
+    async def list_voices(self):
+        url = "https://api.elevenlabs.io/v1/voices"
+        headers = {"xi-api-key": self.api_key}
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(url, headers=headers)
+            r.raise_for_status()
+            data = r.json()
+        return data.get("voices", [])
 
-    async def tts(self, *, text: str, voice_id: str, model_id: str, output_format: str) -> bytes:
-        audio = self.client.text_to_speech.convert(
-            text=text,
-            voice_id=voice_id,
-            model_id=model_id,
-            output_format=output_format,
-        )
-        # SDK returns bytes-like
-        return bytes(audio)
+    async def tts(self, *, text: str, voice_id: str, model_id: str, output_format: str):
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+        headers = {
+            "xi-api-key": self.api_key,
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "text": text,
+            "model_id": model_id,
+        }
+
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(url, headers=headers, json=payload)
+            r.raise_for_status()
+            return r.content
