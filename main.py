@@ -1476,7 +1476,37 @@ async def tg_send_document_bytes(
         if r.status_code >= 400:
             raise RuntimeError(f"Telegram sendDocument HTTP {r.status_code}: {r.text[:1200]}")
 
+async def tg_send_audio_bytes(
+    chat_id: int,
+    audio_bytes: bytes,
+    filename: str = "tts.mp3",
+    caption: str | None = None,
+    reply_markup: dict | None = None,
+):
+    """Send MP3 bytes as Telegram audio."""
+    if not TELEGRAM_BOT_TOKEN:
+        return
+    if not audio_bytes:
+        raise RuntimeError("Empty audio bytes for sendAudio")
 
+    files = {"audio": (filename, audio_bytes, "audio/mpeg")}
+    data = {"chat_id": str(chat_id)}
+    if caption:
+        data["caption"] = caption
+    if reply_markup is not None:
+        data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+
+    async with httpx.AsyncClient(timeout=240) as client:
+        r = await client.post(f"{TELEGRAM_API_BASE}/sendAudio", data=data, files=files)
+
+    # Если Telegram вернул ошибку — поднимем исключение
+    try:
+        j = r.json()
+        if isinstance(j, dict) and not j.get("ok", False):
+            raise RuntimeError(f"Telegram sendAudio error: {j}")
+    except Exception:
+        if r.status_code >= 400:
+            raise RuntimeError(f"Telegram sendAudio HTTP {r.status_code}: {r.text[:1200]}")
 
 async def tg_send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None):
     if not TELEGRAM_BOT_TOKEN:
