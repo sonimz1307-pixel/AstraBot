@@ -6432,7 +6432,49 @@ async def webhook(secret: str, request: Request):
 
             await tg_send_message(chat_id, "Пришли фото, затем одним сообщением текст.", reply_markup=_main_menu_for(user_id))
             return {"ok": True}
+            
+        # ---- TTS: waiting for text ----
+        if st.get("mode") == "tts_wait_text":
+            tts = st.get("tts") or {}
+            voice_id = (tts.get("voice_id") or "").strip()
+            voice_name = (tts.get("name") or "голос").strip()
 
+            user_text = (incoming_text or "").strip()
+            if not user_text:
+                await tg_send_message(chat_id, "Пришли текст одним сообщением — я озвучу.", reply_markup=_help_menu_for(user_id))
+                return {"ok": True}
+
+            await tg_send_message(chat_id, f"🔊 Озвучиваю ({voice_name})…", reply_markup=None)
+
+            try:
+                mp3_bytes = await elevenlabs_tts_mp3_bytes(
+                    text=user_text,
+                    voice_id=voice_id,
+                    model_id="eleven_multilingual_v2",
+                )
+
+                await tg_send_audio_bytes(
+                    chat_id,
+                    mp3_bytes,
+                    filename="tts.mp3",
+                    caption=f"✅ Озвучка — {voice_name}",
+                    reply_markup=_main_menu_for(user_id),
+                )
+
+                st["mode"] = "idle"
+                st["tts"] = {}
+                st["ts"] = _now()
+                return {"ok": True}
+
+            except Exception as e:
+                await tg_send_message(
+                    chat_id,
+                    f"❌ Не получилось озвучить: {e}",
+                    reply_markup=_help_menu_for(user_id),
+                )
+                st["ts"] = _now()
+                return {"ok": True}
+                
         # CHAT: обычный текстовый ответ (с памятью только для режима ИИ-чата)
         if st.get("mode") == "chat":
             # update summary if we have enough trimmed messages
