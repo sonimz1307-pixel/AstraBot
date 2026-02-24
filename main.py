@@ -1248,7 +1248,7 @@ def _main_menu_keyboard(is_admin: bool = False) -> dict:
             {"text": "🎬 Видео будущего", "web_app": {"url": WEBAPP_KLING_URL}},
             {"text": "🎵 Музыка будущего", "web_app": {"url": WEBAPP_MUSIC_URL}},
         ],
-        [{"text": "Для Pro"}],
+        [{"text": "🔊 Озвучить текст"}, {"text": "Для Pro"}],
         [{"text": "💰 Баланс"}, {"text": "Помощь"}],
     ]
     if is_admin:
