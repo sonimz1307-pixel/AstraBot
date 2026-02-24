@@ -1297,7 +1297,18 @@ def _pro_menu_keyboard(user_id: int) -> dict:
 
 def _pro_menu_for(user_id: int) -> dict:
     return _pro_menu_keyboard(user_id)
-
+    
+def _tts_gender_keyboard() -> dict:
+    return {
+        "keyboard": [
+            [{"text": "👨 Мужские голоса"}, {"text": "👩 Женские голоса"}],
+            [{"text": "⬅️ Назад"}],
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+        "selective": False,
+    }
+    
 def _help_menu_for(user_id: int) -> dict:
     """Главное меню + экстренная кнопка сброса генерации (показываем ТОЛЬКО в «Помощь»)."""
     base = _main_menu_keyboard(_is_admin(user_id))
@@ -4564,6 +4575,14 @@ async def webhook(secret: str, request: Request):
         )
         return {"ok": True}
 
+    if incoming_text in ("🔊 Озвучить текст", "Озвучить текст"):
+        await tg_send_message(
+            chat_id,
+            "🔊 Озвучка текста\n\nВыбери группу голосов:",
+            reply_markup=_tts_gender_keyboard(),
+        )
+        return {"ok": True}
+    
     if incoming_text in ("Фото будущего", "📸 Фото будущего"):
         # Подменю: объединённая точка входа в фото-режимы
         await tg_send_message(
