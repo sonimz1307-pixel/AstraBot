@@ -6,186 +6,117 @@
   <title>Видео будущего — настройки</title>
   <style>
     :root{
-      --bg0:#060611;
-      --bg1:#070b18;
-      --card: rgba(255,255,255,.06);
-      --card2: rgba(10,18,40,.50);
-      --text:#eef2ff;
-      --muted:rgba(220,232,255,.72);
-      --stroke:rgba(175,195,255,.18);
-      --stroke2:rgba(255,255,255,.10);
-      --accentA:#6d5bff;
-      --accentB:#2ea6ff;
-      --accentC:#ff4fd8;
-      --danger:#ff4d6d;
-
+      --bg:#060b16;
+      --card:#0b1430;
+      --card2:#0a1228;
+      --text:#e8eefc;
+      --muted:#9fb0d4;
+      --stroke:rgba(170,190,255,.16);
+      --accent:#2ea6ff;
+      --accent2:#1f6feb;
+      --danger:#ff4d4d;
+      --shadow:0 12px 30px rgba(0,0,0,.35);
       --radius:18px;
-      --shadow: 0 18px 50px rgba(0,0,0,.45);
-      --glow: 0 0 0 1px rgba(160,180,255,.14), 0 18px 60px rgba(46,166,255,.10);
     }
-
     *{ box-sizing:border-box; }
     body{
       margin:0;
       font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "Apple Color Emoji","Segoe UI Emoji";
+      background: radial-gradient(1200px 500px at 30% -10%, rgba(46,166,255,.18), transparent 60%),
+                  radial-gradient(900px 450px at 110% 0%, rgba(31,111,235,.22), transparent 55%),
+                  var(--bg);
       color:var(--text);
-      background:
-        radial-gradient(900px 520px at 18% -10%, rgba(109,91,255,.22), transparent 60%),
-        radial-gradient(860px 520px at 105% 0%, rgba(46,166,255,.22), transparent 55%),
-        radial-gradient(760px 520px at 80% 120%, rgba(255,79,216,.10), transparent 55%),
-        linear-gradient(180deg, var(--bg0), var(--bg1) 60%, #060611);
-      padding: 18px 16px 110px;
+      padding: 18px 16px 88px;
     }
     .wrap{ max-width: 520px; margin: 0 auto; }
-
-    /* ===== Top header ===== */
-    .top{
-      display:flex;
-      align-items:flex-start;
-      justify-content:space-between;
-      gap:12px;
-      margin: 6px 0 12px;
-    }
-    .titleBox{
-      display:flex;
-      flex-direction:column;
-      gap:6px;
-    }
     .title{
       display:flex; align-items:center; gap:10px;
-      font-weight:900; letter-spacing:.2px;
+      font-weight:800; letter-spacing:.2px;
       font-size: 20px;
-      margin: 0;
-      line-height:1.15;
+      margin: 6px 0 14px;
       flex-wrap: wrap;
     }
-    .sub{
-      font-size: 12px;
-      color: var(--muted);
-      line-height: 1.35;
-    }
-    .badges{
-      display:flex;
-      flex-wrap:wrap;
-      gap:8px;
-      justify-content:flex-end;
-      padding-top:2px;
-    }
     .badge{
-      font-size:12px;
-      color: rgba(235,245,255,.88);
-      border:1px solid rgba(180,200,255,.18);
-      padding:5px 10px;
-      border-radius:999px;
-      background: rgba(255,255,255,.04);
-      backdrop-filter: blur(10px);
-      box-shadow: 0 10px 30px rgba(0,0,0,.22);
-      white-space: nowrap;
-    }
-    .badge.strong{
-      border-color: rgba(46,166,255,.28);
-      background: linear-gradient(180deg, rgba(46,166,255,.12), rgba(109,91,255,.10));
+      font-size:12px; color:var(--muted);
+      border:1px solid var(--stroke);
+      padding:4px 10px; border-radius:999px;
+      background: rgba(255,255,255,.02);
     }
 
-    /* ===== Cards ===== */
     .card{
-      position: relative;
+      background: linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02));
+      border:1px solid var(--stroke);
       border-radius: var(--radius);
       padding: 14px 14px 12px;
-      margin: 10px 0;
-      border: 1px solid var(--stroke);
-      background:
-        radial-gradient(900px 240px at 10% 0%, rgba(46,166,255,.10), transparent 55%),
-        radial-gradient(900px 240px at 90% 0%, rgba(255,79,216,.08), transparent 55%),
-        rgba(255,255,255,.05);
-      backdrop-filter: blur(14px);
       box-shadow: var(--shadow);
-      overflow: hidden;
-    }
-    .card::before{
-      content:"";
-      position:absolute;
-      inset:-1px;
-      pointer-events:none;
-      border-radius: var(--radius);
-      background: linear-gradient(135deg, rgba(109,91,255,.22), rgba(46,166,255,.16), rgba(255,79,216,.12));
-      opacity:.35;
-      mask:
-        linear-gradient(#000 0 0) content-box,
-        linear-gradient(#000 0 0);
-      -webkit-mask:
-        linear-gradient(#000 0 0) content-box,
-        linear-gradient(#000 0 0);
-      padding:1px;
-      -webkit-mask-composite: xor;
-      mask-composite: exclude;
+      margin: 10px 0;
     }
     .card h3{
       margin:0 0 10px;
-      font-size:12px;
-      font-weight:900;
-      color: rgba(220,232,255,.70);
-      letter-spacing:.28px;
+      font-size:14px;
+      font-weight:700;
+      color: var(--muted);
+      letter-spacing:.25px;
       text-transform: uppercase;
     }
 
-    .hint{
-      margin-top: 8px;
-      font-size: 12px;
-      color: rgba(220,232,255,.66);
-      line-height: 1.35;
-    }
-
-    /* ===== Segmented controls ===== */
+    /* Segmented controls */
     .seg{
       display:grid;
       grid-template-columns: 1fr 1fr;
       gap:10px;
     }
-    .seg.cols3{ grid-template-columns: 1fr 1fr 1fr; }
+    .seg.cols3{
+      grid-template-columns: 1fr 1fr 1fr;
+    }
     .seg input{ display:none; }
     .seg label{
       cursor:pointer;
       user-select:none;
+      background: rgba(255,255,255,.03);
+      border:1px solid var(--stroke);
       border-radius: 14px;
       padding: 12px 12px;
       display:flex;
       flex-direction:column;
       gap:4px;
-      border:1px solid var(--stroke2);
-      background: rgba(0,0,0,.12);
-      transition: transform .06s ease, border-color .15s ease, background .15s ease, box-shadow .15s ease, filter .15s ease;
+      transition: transform .06s ease, border-color .15s ease, background .15s ease, box-shadow .15s ease;
     }
     .seg label:active{ transform: scale(.99); }
-    .seg .name{ font-weight:900; font-size:15px; letter-spacing:.15px; }
-    .seg .desc{ font-size:12px; color: rgba(220,232,255,.70); line-height:1.25; }
+    .seg .name{ font-weight:800; font-size:15px; }
+    .seg .desc{ font-size:12px; color: var(--muted); line-height:1.25; }
 
     .seg input:checked + label{
-      border-color: rgba(146,128,255,.45);
-      background:
-        radial-gradient(280px 120px at 15% 0%, rgba(109,91,255,.25), transparent 60%),
-        radial-gradient(280px 120px at 85% 0%, rgba(46,166,255,.22), transparent 60%),
-        rgba(255,255,255,.06);
-      box-shadow: var(--glow);
+      border-color: rgba(46,166,255,.55);
+      background: linear-gradient(180deg, rgba(46,166,255,.18), rgba(31,111,235,.10));
+      box-shadow: 0 10px 22px rgba(46,166,255,.12);
     }
-    .seg label:hover{ filter: brightness(1.06); }
 
-    .row{ display:flex; gap:10px; flex-wrap:wrap; }
+    .row{
+      display:flex; gap:10px; flex-wrap:wrap;
+    }
 
-    /* ===== Select ===== */
+    /* Select */
     select{
       width:100%;
       padding: 12px 12px;
       border-radius: 14px;
-      border:1px solid var(--stroke2);
+      border:1px solid var(--stroke);
       background: rgba(0,0,0,.18);
       color: var(--text);
       outline:none;
       font-size: 15px;
     }
-    select:focus{ border-color: rgba(46,166,255,.55); box-shadow: 0 0 0 3px rgba(46,166,255,.10); }
+    select:focus{ border-color: rgba(46,166,255,.55); }
 
-    /* ===== Toggle ===== */
+    .hint{
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.35;
+    }
+
+    /* Toggle */
     .toggle{
       display:flex;
       align-items:center;
@@ -193,176 +124,91 @@
       gap:12px;
       padding: 10px 12px;
       border-radius: 14px;
-      border:1px solid var(--stroke2);
-      background: rgba(0,0,0,.12);
+      border:1px solid var(--stroke);
+      background: rgba(255,255,255,.03);
       margin-top: 10px;
     }
-    .toggle .tname{ font-weight:900; font-size: 14px; letter-spacing:.1px; }
+    .toggle .tname{
+      font-weight:800;
+      font-size: 14px;
+    }
     .toggle .tdesc{
       font-size: 12px;
-      color: rgba(220,232,255,.68);
+      color: var(--muted);
       margin-top: 2px;
       line-height: 1.25;
     }
-    .toggle .left{ display:flex; flex-direction:column; gap:2px; }
+    .toggle .left{
+      display:flex;
+      flex-direction:column;
+      gap:2px;
+    }
     .toggle input[type="checkbox"]{
       width: 22px; height: 22px;
-      accent-color: var(--accentB);
+      accent-color: var(--accent);
     }
-    .toggle input[type="checkbox"][disabled]{ opacity: .35; cursor: not-allowed; }
+    .toggle input[type="checkbox"][disabled]{
+      opacity: .35;
+      cursor: not-allowed;
+    }
     .disabled-note{
       font-size: 11px;
-      color: rgba(220,232,255,.62);
+      color: rgba(190,205,240,.75);
       margin-top: 6px;
     }
 
-    /* ===== Advanced details ===== */
+    /* Advanced details */
     details.adv{
       margin-top:10px;
-      border:1px dashed rgba(200,220,255,.22);
+      border:1px dashed rgba(170,190,255,.22);
       border-radius: 14px;
       padding: 10px 12px;
-      background: rgba(0,0,0,.10);
+      background: rgba(0,0,0,.12);
     }
     details.adv summary{
       cursor:pointer;
-      font-weight:900;
-      color: rgba(240,246,255,.92);
+      font-weight:800;
+      color: rgba(200,220,255,.95);
       list-style:none;
     }
     details.adv summary::-webkit-details-marker{ display:none; }
+    .adv .hint{ margin-top: 8px; }
 
-    /* ===== Provider buttons (compact pills) ===== */
-    .seg.providerSeg{ grid-template-columns: 1fr 1fr; gap: 10px; }
-
-    .seg.providerSeg label{
-      height: 64px;
-      padding: 10px 12px;
-      border-radius: 14px;
-      overflow: hidden;
-      position: relative;
-      display:flex;
-      align-items:center;
-      justify-content: space-between;
-      gap: 10px;
-      background: rgba(0,0,0,.12);
-      border: 1px solid rgba(255,255,255,.10);
-    }
-
-    .seg.providerSeg label .pimg{
-      width: 30px;
-      height: 30px;
-      object-fit: contain;
-      display:block;
-      transform: none;
-      filter: none;
-      border-radius: 8px;
-      background: rgba(255,255,255,.06);
-      border: 1px solid rgba(255,255,255,.10);
-      padding: 4px;
-    }
-
-    .seg.providerSeg label .poverlay{ display:none; }
-
-    .seg.providerSeg label .ptxt{
-      position: static;
-      flex: 1;
-      display:flex;
-      align-items:center;
-      justify-content: space-between;
-      gap: 10px;
-      min-width: 0;
-    }
-
-    .seg.providerSeg label .pname{
-      font-weight: 950;
-      font-size: 15px;
-      letter-spacing: .2px;
-      text-shadow: none;
-      color: var(--text);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .seg.providerSeg label .pnote{
-      font-size: 11px;
-      color: rgba(240,248,255,.92);
-      padding: 4px 8px;
-      border-radius: 999px;
-      border: 1px solid rgba(190,210,255,.18);
-      background: rgba(255,255,255,.06);
-      text-shadow: none;
-      white-space: nowrap;
-      flex: 0 0 auto;
-    }
-
-    .seg.providerSeg input:checked + label{
-      border-color: rgba(146,128,255,.55);
-      background:
-        radial-gradient(340px 120px at 15% 0%, rgba(109,91,255,.22), transparent 60%),
-        radial-gradient(340px 120px at 85% 0%, rgba(46,166,255,.18), transparent 60%),
-        rgba(255,255,255,.06);
-      box-shadow: 0 0 0 1px rgba(146,128,255,.18), 0 24px 70px rgba(109,91,255,.14);
-    }
-/* ===== Bottom bar ===== */
+    /* Bottom action bar */
     .bar{
       position: fixed;
       left:0; right:0; bottom:0;
       padding: 12px 14px calc(12px + env(safe-area-inset-bottom));
-      background: linear-gradient(180deg, rgba(6,6,17,0), rgba(6,6,17,.88) 25%, rgba(6,6,17,.96));
-      backdrop-filter: blur(12px);
-      border-top: 1px solid rgba(255,255,255,.06);
+      background: linear-gradient(180deg, rgba(6,11,22,0), rgba(6,11,22,.88) 25%, rgba(6,11,22,.96));
+      backdrop-filter: blur(10px);
     }
     .bar .inner{ max-width: 520px; margin:0 auto; }
-    .summary{
-      display:flex;
-      align-items:center;
-      justify-content:space-between;
-      gap:10px;
-      padding: 10px 12px;
-      border-radius: 14px;
-      border: 1px solid rgba(255,255,255,.10);
-      background: rgba(0,0,0,.14);
-      color: rgba(235,245,255,.90);
-      font-size: 12px;
-      margin-bottom:10px;
-      box-shadow: 0 16px 40px rgba(0,0,0,.30);
-    }
-    .summary .left{ display:flex; flex-direction:column; gap:2px; }
-    .summary .line{ opacity:.95; }
-    .summary .tokens{ font-weight: 900; letter-spacing:.2px; }
-    .summary .tokens b{
-      background: linear-gradient(90deg, rgba(109,91,255,.95), rgba(46,166,255,.95), rgba(255,79,216,.90));
-      -webkit-background-clip:text;
-      background-clip:text;
-      color: transparent;
-    }
-
     .btn{
       width:100%;
       border:0;
       border-radius: 16px;
       padding: 14px 14px;
-      font-weight: 950;
+      font-weight: 900;
       font-size: 16px;
       cursor:pointer;
       color: #071022;
-      background: linear-gradient(90deg, var(--accentA), var(--accentB), var(--accentC));
-      box-shadow: 0 18px 55px rgba(46,166,255,.16), 0 10px 35px rgba(109,91,255,.12);
+      background: linear-gradient(180deg, var(--accent), var(--accent2));
+      box-shadow: 0 14px 28px rgba(31,111,235,.18);
       transition: transform .06s ease, filter .15s ease;
     }
     .btn:active{ transform: scale(.99); }
-    .btn:hover{ filter: brightness(1.05); }
-    .btn[disabled]{ filter: grayscale(.5) brightness(.85); cursor:not-allowed; }
+    .btn[disabled]{
+      filter: grayscale(.4) brightness(.8);
+      cursor:not-allowed;
+    }
 
     .toast{
       margin-top:10px;
       padding: 10px 12px;
       border-radius: 14px;
-      border:1px solid rgba(255,255,255,.10);
-      background: rgba(255,255,255,.05);
-      color: rgba(220,232,255,.74);
+      border:1px solid var(--stroke);
+      background: rgba(255,255,255,.03);
+      color: var(--muted);
       font-size: 12px;
       display:none;
     }
@@ -372,31 +218,88 @@
       margin-top:10px;
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
       font-size: 12px;
-      color: rgba(205,224,255,.90);
-      opacity:.92;
+      color: rgba(180,200,255,.85);
+      opacity:.9;
       display:none;
       word-break: break-word;
       white-space: pre-wrap;
     }
     .debug.show{ display:block; }
+
+    /* ===================== Provider image buttons ===================== */
+    .seg.providerSeg{
+      grid-template-columns: 1fr 1fr;
+    }
+
+    .seg.providerSeg label{
+      padding: 0;
+      height: 112px;
+      border-radius: 14px;
+      overflow: hidden;
+      position: relative;
+      background: rgba(255,255,255,.02);
+    }
+
+    .seg.providerSeg label .pimg{
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      transform: scale(1.02);
+      filter: saturate(1.05);
+    }
+
+    .seg.providerSeg label .poverlay{
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(180deg, rgba(0,0,0,.08), rgba(0,0,0,.38) 70%, rgba(0,0,0,.50));
+    }
+
+    .seg.providerSeg label .ptxt{
+      position: absolute;
+      left: 12px;
+      bottom: 10px;
+      right: 12px;
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .seg.providerSeg label .pname{
+      font-weight: 900;
+      font-size: 16px;
+      letter-spacing: .2px;
+      text-shadow: 0 6px 18px rgba(0,0,0,.55);
+      color: var(--text);
+    }
+
+    .seg.providerSeg label .pnote{
+      font-size: 11px;
+      color: rgba(220,235,255,.9);
+      padding: 4px 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(170,190,255,.20);
+      background: rgba(0,0,0,.22);
+      backdrop-filter: blur(6px);
+      text-shadow: 0 6px 18px rgba(0,0,0,.35);
+    }
+
+    .seg.providerSeg input:checked + label{
+      border-color: rgba(46,166,255,.55);
+      background: linear-gradient(180deg, rgba(46,166,255,.18), rgba(31,111,235,.10));
+      box-shadow: 0 10px 22px rgba(46,166,255,.12);
+    }
+
+    .seg.providerSeg label:hover{
+      filter: brightness(1.05);
+    }
   </style>
 
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
   <div class="wrap">
-
-    <!-- Header -->
-    <div class="top">
-      <div class="titleBox">
-        <div class="title">Генерация видео</div>
-        <div class="sub">Выбери провайдера и параметры. Промпт и файлы — как обычно в боте.</div>
-      </div>
-      <div class="badges" aria-label="Служебные бейджи">
-        <span class="badge strong" id="providerBadge" title="Текущий провайдер">Kling</span>
-        <span class="badge" id="platformBadge" title="Платформа">telegram</span>
-      </div>
-    </div>
 
     <!-- Provider switch Kling / Veo 3 -->
     <div class="card">
@@ -421,7 +324,7 @@
           </div>
         </label>
       </div>
-      <div class="hint">Нажми “Сохранить” — WebApp отправит настройки в бота и закроется.</div>
+      <div class="hint">Выбери провайдера, затем настройки и нажми “Сохранить”.</div>
     </div>
 
     <!-- ===================== KLING BLOCK ===================== -->
@@ -432,7 +335,7 @@
           <input id="kling_v16" type="radio" name="kling_version" value="1_6" checked>
           <label for="kling_v16">
             <span class="name">Standard</span>
-            <span class="desc">Kling 1.6 (как было)</span>
+            <span class="desc">Kling 1.6 (текущий)</span>
           </label>
 
           <input id="kling_v30" type="radio" name="kling_version" value="3_0">
@@ -441,15 +344,15 @@
             <span class="desc">720/1080 + audio</span>
           </label>
         </div>
-        <div class="hint">PRO 3.0 — PiAPI. Standard — без изменений по логике.</div>
+        <div class="hint">PRO 3.0 — PiAPI. Standard — как было (ничего не ломаем).</div>
       </div>
 
       <div class="card" id="kling3Options" style="display:none;">
         <h3>Kling PRO 3.0 — настройки</h3>
-
         <div style="margin-top:10px;">
-          <span class="badge" style="display:inline-block;margin-bottom:8px;">Режим</span>
+          <label class="badge" style="display:inline-block;margin-bottom:8px;">Режим</label>
         </div>
+
 
         <div class="seg" role="radiogroup" aria-label="Режим Kling 3.0">
           <input id="k3_mode_i2v" type="radio" name="kling3_gen_mode" value="i2v" checked>
@@ -466,8 +369,10 @@
         </div>
 
         <div style="margin-top:14px;">
-          <span class="badge" style="display:inline-block;margin-bottom:8px;">Качество</span>
+          <label class="badge" style="display:inline-block;margin-bottom:8px;">Качество</label>
         </div>
+
+
 
         <div class="seg" role="radiogroup" aria-label="Разрешение Kling 3.0">
           <input id="k3_720" type="radio" name="kling3_resolution" value="720" checked>
@@ -485,7 +390,7 @@
 
         <div class="row" style="margin-top:12px;">
           <div style="flex:1; min-width: 180px;">
-            <span class="badge" style="display:inline-block;margin-bottom:8px;">Формат</span>
+            <label class="badge" style="display:inline-block;margin-bottom:8px;">Формат</label>
             <select id="kling3_aspect">
               <option value="16:9" selected>16:9 (горизонтально)</option>
               <option value="9:16">9:16 (вертикально)</option>
@@ -496,7 +401,7 @@
         <div class="toggle" style="margin-top:12px;">
           <div class="left">
             <div class="tname">Multi-shot</div>
-            <div class="tdesc">Сценарий из нескольких планов. В тексте используй планы/шоты.</div>
+            <div class="tdesc">Сценарий из нескольких планов (запуск по промпту). В тексте используй планы/шоты.</div>
           </div>
           <input id="kling3_multishot" type="checkbox">
         </div>
@@ -511,7 +416,7 @@
 
         <div class="row" style="margin-top:10px;">
           <div style="flex:1; min-width: 180px;">
-            <span class="badge" style="display:inline-block;margin-bottom:8px;">Длительность (3–15 сек)</span>
+            <label class="badge" style="display:inline-block;margin-bottom:8px;">Длительность (3–15 сек)</label>
             <select id="kling3_duration">
               <option value="3">3</option>
               <option value="4">4</option>
@@ -532,7 +437,6 @@
 
         <div class="hint">Эти настройки применяются только если выбран Kling PRO 3.0.</div>
       </div>
-
       <div class="card" id="klingFlowCard">
         <h3>Тип генерации</h3>
         <div class="seg" role="radiogroup" aria-label="Тип генерации">
@@ -551,7 +455,7 @@
         <div class="hint">Для Motion Control длительность задаётся референс-видео (3–30 сек).</div>
       </div>
 
-      <div class="card" id="klingModeCard">
+      <div class="card">
         <h3>Качество</h3>
         <div class="seg" role="radiogroup" aria-label="Качество">
           <input id="mode_std" type="radio" name="mode" value="std" checked>
@@ -605,7 +509,7 @@
         </div>
       </div>
 
-      <div class="card" id="klingModeCard_veo">
+      <div class="card" id="klingModeCard">
         <h3>Режим</h3>
         <div class="seg" role="radiogroup" aria-label="Режим Veo">
           <input id="veo_flow_text" type="radio" name="veo_flow" value="text" checked>
@@ -679,14 +583,6 @@
 
   <div class="bar">
     <div class="inner">
-      <div class="summary" aria-label="Итог">
-        <div class="left">
-          <div class="line" id="summaryLine">Kling • Standard</div>
-          <div class="tokens" id="totalTokens">Итого: <b>—</b></div>
-        </div>
-        <div class="badge" id="rateBadge" title="Ставка">—</div>
-      </div>
-
       <button class="btn" id="saveBtn" type="button">Сохранить и вернуться в бот</button>
       <div class="toast" id="toast">Готово ✅ Если окно не закрылось — закрой его крестиком (×).</div>
     </div>
@@ -711,6 +607,7 @@
     function getKling3GenMode(){ return qs('input[name="kling3_gen_mode"]:checked')?.value || "i2v"; }
     function getKling3Aspect(){ return qs('#kling3_aspect')?.value || "16:9"; }
     function getKling3PreferMultiShots(){ return !!qs('#kling3_multishot')?.checked; }
+
 
     // Veo getters
     function getVeoModel(){ return qs('input[name="veo_model"]:checked')?.value || "fast"; } // fast|pro
@@ -797,6 +694,7 @@
       if (klingBlock) klingBlock.style.display = (provider === 'kling') ? 'block' : 'none';
       if (veoBlock) veoBlock.style.display   = (provider === 'veo')   ? 'block' : 'none';
 
+      // ⚠️ В “красивом” макете бейджей нет — поэтому ничего не трогаем, чтобы не падало.
       const pb = qs('#providerBadge');
       if (pb) pb.textContent = (provider === 'kling') ? 'Kling' : 'Veo';
 
@@ -807,103 +705,16 @@
       }
     }
 
-    function calcSummary(){
-      const provider = getProvider();
-      const summaryLine = qs('#summaryLine');
-      const totalTokens = qs('#totalTokens');
-      const rateBadge = qs('#rateBadge');
-
-      let line = '';
-      let rateText = '—';
-      let tokens = null;
-
-      if (provider === 'kling'){
-        const kv = getKlingVersion();
-        if (kv === '1_6'){
-          const flow = getFlow();
-          const mode = getMode();
-          const rate = (mode === 'pro') ? 2 : 1;
-
-          if (flow === 'i2v'){
-            const dur = parseInt((qs('#duration')?.value || "10"), 10);
-            tokens = dur * rate;
-            rateText = rate + ' ток/сек';
-            line = `Kling 1.6 • ${flow.toUpperCase()} • ${mode.toUpperCase()} • ${dur} сек`;
-          } else {
-            // motion: duration comes from reference video (unknown here)
-            tokens = null;
-            rateText = rate + ' ток/сек';
-            line = `Kling 1.6 • MOTION • ${mode.toUpperCase()} • длительность по референсу`;
-          }
-        } else {
-          const res = getKling3Resolution();
-          const audio = !!qs('#kling3_audio')?.checked;
-          const dur = parseInt((qs('#kling3_duration')?.value || "5"), 10);
-          const aspect = getKling3Aspect();
-          const genMode = getKling3GenMode().toUpperCase();
-
-          const rate = (audio && res === '1080') ? 3 : 2;
-          tokens = dur * rate;
-          rateText = rate + ' ток/сек';
-          line = `Kling 3.0 • ${genMode} • ${res}p${audio ? '+audio' : ''} • ${dur} сек • ${aspect}`;
-        }
-      } else {
-        const model = getVeoModel();
-        const flow = getVeoFlow().toUpperCase();
-        const dur = parseInt((qs('#veo_duration')?.value || "8"), 10);
-        const aspect = (qs('#veo_aspect')?.value || "16:9");
-        const audio = !!qs('#veo_audio')?.checked;
-
-        const rate = (model === 'pro')
-          ? (audio ? 3 : 2)
-          : (audio ? 2 : 1);
-
-        tokens = dur * rate;
-        rateText = rate + ' ток/сек';
-        line = `Veo ${model === 'pro' ? '3.1' : 'Fast'} • ${flow} • ${dur} сек • ${aspect}${audio ? ' • audio' : ''}`;
-      }
-
-      if (summaryLine) summaryLine.textContent = line || '—';
-      if (rateBadge) rateBadge.textContent = rateText;
-
-      if (totalTokens){
-        totalTokens.innerHTML = (tokens === null)
-          ? 'Итого: <b>—</b>'
-          : `Итого: <b>${tokens} токенов</b>`;
-      }
-    }
-
     // Events
-    qsa('input[name="provider"]').forEach(el => el.addEventListener('change', () => { updateProviderUI(); calcSummary(); }));
-    qsa('input[name="flow"]').forEach(el => el.addEventListener('change', () => { updateKlingUI(); calcSummary(); }));
-    qsa('input[name="mode"]').forEach(el => el.addEventListener('change', () => { updateTokenRateHint(); calcSummary(); }));
-
-    // ✅ Fixed: no re-attaching handlers on every version switch
-    qsa('input[name="kling_version"]').forEach(el => el.addEventListener('change', () => {
-      updateKlingUI();
-      updateTokenRateHint();
-      calcSummary();
-    }));
-
-    qsa('input[name="kling3_gen_mode"]').forEach(el => el.addEventListener('change', () => { updateKlingUI(); calcSummary(); }));
-    qsa('input[name="kling3_resolution"]').forEach(el => el.addEventListener('change', () => { calcSummary(); }));
-    qsa('#kling3_aspect')?.addEventListener('change', calcSummary);
-    qsa('#kling3_duration')?.addEventListener('change', calcSummary);
-    qs('#kling3_multishot')?.addEventListener('change', calcSummary);
-    qs('#kling3_audio')?.addEventListener('change', calcSummary);
-    qs('#duration')?.addEventListener('change', calcSummary);
-
+    qsa('input[name="provider"]').forEach(el => el.addEventListener('change', updateProviderUI));
+    qsa('input[name="flow"]').forEach(el => el.addEventListener('change', updateKlingUI));
+    qsa('input[name="mode"]').forEach(el => el.addEventListener('change', updateTokenRateHint));
+    qsa('input[name="kling_version"]').forEach(el => el.addEventListener('change', () => { updateKlingUI();     qsa('input[name="kling3_gen_mode"]').forEach(el => el.addEventListener('change', updateKlingUI));
+updateTokenRateHint(); }));
     qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () => {
       updateVeoPriceHint();
       setVeoAdvancedEnabled(getVeoModel() === 'pro');
-      calcSummary();
     }));
-    qsa('input[name="veo_flow"]').forEach(el => el.addEventListener('change', calcSummary));
-    qs('#veo_duration')?.addEventListener('change', calcSummary);
-    qs('#veo_aspect')?.addEventListener('change', calcSummary);
-    qs('#veo_audio')?.addEventListener('change', calcSummary);
-    qs('#veo_use_last_frame')?.addEventListener('change', calcSummary);
-    qs('#veo_use_refs')?.addEventListener('change', calcSummary);
 
     // Init
     updateProviderUI();
@@ -911,7 +722,6 @@
     updateTokenRateHint();
     updateVeoPriceHint();
     setVeoAdvancedEnabled(getVeoModel() === 'pro');
-    calcSummary();
 
     // Telegram init (safe)
     const tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
