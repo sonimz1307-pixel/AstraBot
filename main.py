@@ -4383,7 +4383,7 @@ async def webhook(secret: str, request: Request):
     if incoming_text == "Для Pro":
         await tg_send_message(
             chat_id,
-            "Раздел Pro. Открывай Top Analizator:",
+            "Раздел Pro. Открывай Top Analizator: В РАЗРАБОТКЕ",
             reply_markup=_pro_menu_for(user_id),
         )
         return {"ok": True}
