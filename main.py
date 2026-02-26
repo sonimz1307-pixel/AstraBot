@@ -4732,7 +4732,7 @@ async def webhook(secret: str, request: Request):
 
     if incoming_text in ("ИИ (чат)", "🧠 ИИ (чат)", "🧠 ИИ чат"):
         _set_mode(chat_id, user_id, "chat")
-        await tg_send_message(chat_id, "Ок. Режим «ИИ (чат)».", reply_markup=_main_menu_for(user_id))
+        await tg_send_message(chat_id, "Ок. Режим «ИИ (чат) Задай любой вопрос и я отвечу на него, так же я могу помочь с написанием промтов для ваших идей».", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
 
 
