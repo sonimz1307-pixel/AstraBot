@@ -1516,7 +1516,48 @@ async def tg_send_message(chat_id: int, text: str, reply_markup: Optional[dict] 
         payload["reply_markup"] = reply_markup
     async with httpx.AsyncClient(timeout=30) as client:
         await client.post(f"{TELEGRAM_API_BASE}/sendMessage", json=payload)
+        
+async def _admin_broadcast_send(admin_chat_id: int, text: str) -> Tuple[int, int]:
+    """
+    Рассылка текста по всем пользователям из Supabase таблицы bot_users (telegram_user_id).
+    Возвращает (ok_count, fail_count).
+    """
+    if sb is None:
+        await tg_send_message(admin_chat_id, "❌ Supabase не настроен (sb=None).")
+        return (0, 0)
 
+    # Получаем список telegram_user_id
+    try:
+        resp = sb.table("bot_users").select("telegram_user_id").execute()
+        rows = getattr(resp, "data", None) or []
+        user_ids = []
+        for r in rows:
+            try:
+                uid = int(r.get("telegram_user_id"))
+                user_ids.append(uid)
+            except Exception:
+                continue
+    except Exception as e:
+        await tg_send_message(admin_chat_id, f"❌ Не смог получить список пользователей: {e}")
+        return (0, 0)
+
+    if not user_ids:
+        await tg_send_message(admin_chat_id, "⚠️ Пользователей для рассылки нет (bot_users пуст).")
+        return (0, 0)
+
+    ok = 0
+    fail = 0
+
+    # Рассылаем с небольшим интервалом, чтобы не упереться в лимиты Telegram
+    for uid in user_ids:
+        try:
+            await tg_send_message(uid, text)
+            ok += 1
+        except Exception:
+            fail += 1
+        await asyncio.sleep(0.05)
+
+    return (ok, fail)
 
 async def tg_send_photo_bytes(
     chat_id: int,
