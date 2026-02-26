@@ -1252,7 +1252,7 @@ def _main_menu_keyboard(is_admin: bool = False) -> dict:
         [{"text": "💰 Баланс"}, {"text": "Помощь"}],
     ]
     if is_admin:
-        rows.append([{"text": "📊 Статистика"}])
+        rows.append([{"text": "📊 Статистика"}, {"text": "📣 Рассылка"}])
 
     return {
         "keyboard": rows,
