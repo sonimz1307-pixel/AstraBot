@@ -48,7 +48,7 @@
       border:1px solid var(--stroke);
       border-radius: var(--radius);
       padding: 14px 14px 12px;
-      box-shadow: var(--shadow);
+      box-shadow: 0 8px 18px rgba(0,0,0,.45);
       margin: 10px 0;
     }
     .card h3{
@@ -175,32 +175,51 @@
     .adv .hint{ margin-top: 8px; }
 
     /* Bottom action bar */
+    
     .bar{
       position: fixed;
       left:0; right:0; bottom:0;
-      padding: 12px 14px calc(12px + env(safe-area-inset-bottom));
-      background: linear-gradient(180deg, rgba(6,11,22,0), rgba(6,11,22,.88) 25%, rgba(6,11,22,.96));
-      backdrop-filter: blur(10px);
+      padding: 14px 16px calc(14px + env(safe-area-inset-bottom));
+      background: linear-gradient(180deg, rgba(6,11,22,0), rgba(0,0,0,.85) 35%, rgba(0,0,0,.96));
+      backdrop-filter: blur(14px);
     }
+
     .bar .inner{ max-width: 520px; margin:0 auto; }
+    
     .btn{
       width:100%;
       border:0;
-      border-radius: 16px;
-      padding: 14px 14px;
+      border-radius: 18px;
+      padding: 16px 16px;
       font-weight: 900;
       font-size: 16px;
       cursor:pointer;
-      color: #071022;
-      background: linear-gradient(180deg, var(--accent), var(--accent2));
-      box-shadow: 0 14px 28px rgba(31,111,235,.18);
-      transition: transform .06s ease, filter .15s ease;
+      color: #000;
+      background: linear-gradient(90deg, #ffcc00, #ff8800, #ffcc00);
+      background-size: 200% 200%;
+      box-shadow: 
+        0 0 12px rgba(255,170,0,.6),
+        0 0 24px rgba(255,140,0,.4),
+        0 12px 28px rgba(0,0,0,.45);
+      transition: transform .08s ease, filter .2s ease;
+      animation: neonFlow 3s ease infinite;
+      letter-spacing:.3px;
+    }
+    @keyframes neonFlow{
+      0%{ background-position: 0% 50%; }
+      50%{ background-position: 100% 50%; }
+      100%{ background-position: 0% 50%; }
     }
     .btn:active{ transform: scale(.99); }
+    
     .btn[disabled]{
-      filter: grayscale(.4) brightness(.8);
+      background: linear-gradient(90deg, #777, #555);
+      box-shadow:none;
+      filter: grayscale(.6) brightness(.8);
       cursor:not-allowed;
+      animation:none;
     }
+
 
     .toast{
       margin-top:10px;
@@ -233,8 +252,8 @@
 
     .seg.providerSeg label{
       padding: 0;
-      height: 112px;
-      border-radius: 14px;
+      height: 74px;
+      border-radius: 16px;
       overflow: hidden;
       position: relative;
       background: rgba(255,255,255,.02);
@@ -258,7 +277,7 @@
     .seg.providerSeg label .ptxt{
       position: absolute;
       left: 12px;
-      bottom: 10px;
+      bottom: 8px;
       right: 12px;
       display: flex;
       align-items: baseline;
@@ -268,14 +287,14 @@
 
     .seg.providerSeg label .pname{
       font-weight: 900;
-      font-size: 16px;
+      font-size: 14px;
       letter-spacing: .2px;
       text-shadow: 0 6px 18px rgba(0,0,0,.55);
       color: var(--text);
     }
 
     .seg.providerSeg label .pnote{
-      font-size: 11px;
+      font-size: 10px;
       color: rgba(220,235,255,.9);
       padding: 4px 8px;
       border-radius: 999px;
@@ -302,8 +321,8 @@
   <div class="wrap">
 
     <!-- Provider switch Kling / Veo 3 -->
-    <div class="card">
-      <h3>Провайдер</h3>
+    <div class="card" style="padding:12px 12px 10px;">
+      <h3 style="margin-bottom:8px;">Провайдер</h3>
       <div class="seg providerSeg" role="radiogroup" aria-label="Провайдер">
         <input id="provider_kling" type="radio" name="provider" value="kling" checked>
         <label for="provider_kling" aria-label="Kling">
@@ -367,6 +386,7 @@
             <span class="desc">Только промпт</span>
           </label>
         </div>
+        <div class="hint" style="margin-top:10px;"><b>Text → Video</b>: напиши текст → получи видео.<br><b>Image → Video</b>: загрузи фото → опиши действия → получи видео.</div>
 
         <div style="margin-top:14px;">
           <label class="badge" style="display:inline-block;margin-bottom:8px;">Качество</label>
@@ -524,6 +544,8 @@
             <span class="desc">Фото + промпт</span>
           </label>
         </div>
+        <div class="hint" style="margin-top:10px;"><b>Text → Video</b>: напиши текст → получи видео.<br><b>Image → Video</b>: загрузи фото → опиши действия → получи видео.</div>
+
         <div class="hint">Промпт ты введёшь в боте, WebApp сейчас задаёт только параметры.</div>
       </div>
 
@@ -702,19 +724,26 @@
         updateKlingUI();
       } else {
         setVeoAdvancedEnabled(getVeoModel() === 'pro');
+    updateCostUI();
       }
     }
 
     // Events
-    qsa('input[name="provider"]').forEach(el => el.addEventListener('change', updateProviderUI));
-    qsa('input[name="flow"]').forEach(el => el.addEventListener('change', updateKlingUI));
-    qsa('input[name="mode"]').forEach(el => el.addEventListener('change', updateTokenRateHint));
-    qsa('input[name="kling_version"]').forEach(el => el.addEventListener('change', () => { updateKlingUI();     qsa('input[name="kling3_gen_mode"]').forEach(el => el.addEventListener('change', updateKlingUI));
-updateTokenRateHint(); }));
-    qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () => {
+    qsa('input[name="provider"]').forEach(el => el.addEventListener('change', () => { updateProviderUI(); updateCostUI(); }));
+    qsa('input[name="flow"]').forEach(el => el.addEventListener('change', () => { updateKlingUI(); updateCostUI(); }));
+    qsa('input[name="mode"]').forEach(el => el.addEventListener('change', () => { updateTokenRateHint(); updateCostUI(); }));
+    qsa('input[name="kling_version"]').forEach(el => el.addEventListener('change', () => { updateKlingUI(); updateTokenRateHint(); updateCostUI(); }));
+qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () => {
       updateVeoPriceHint();
       setVeoAdvancedEnabled(getVeoModel() === 'pro');
+    updateCostUI();
+      updateCostUI();
     }));
+
+    // Cost UI bindings (covers selects / toggles not listed above)
+    qsa('select, input[type=\"checkbox\"], input[type=\"radio\"]').forEach(el => {
+      el.addEventListener('change', () => { try{ updateCostUI(); }catch(e){} });
+    });
 
     // Init
     updateProviderUI();
@@ -722,6 +751,7 @@ updateTokenRateHint(); }));
     updateTokenRateHint();
     updateVeoPriceHint();
     setVeoAdvancedEnabled(getVeoModel() === 'pro');
+    updateCostUI();
 
     // Telegram init (safe)
     const tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
@@ -736,6 +766,74 @@ updateTokenRateHint(); }));
       }catch(e){}
     } else {
       if (platformBadge) platformBadge.textContent = 'browser';
+    }
+
+
+    function pluralizeToken(n){
+      const n10 = n % 10, n100 = n % 100;
+      if (n10 === 1 && n100 !== 11) return 'токен';
+      if (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14)) return 'токена';
+      return 'токенов';
+    }
+
+    function calcTokenCost(){
+      const provider = getProvider();
+
+      // KLING
+      if (provider === 'kling'){
+        const kling_version = getKlingVersion();
+
+        // Kling 1.6 (legacy)
+        if (kling_version === '1_6'){
+          const flow = getFlow();
+          const mode = getMode();
+          const rate = (mode === 'pro') ? 2 : 1;
+
+          if (flow === 'i2v'){
+            const durEl = qs('#duration');
+            const seconds = durEl ? parseInt(durEl.value, 10) : 10;
+            const tokens = rate * seconds;
+            return { known:true, tokens, note:'' };
+          }
+
+          // motion: depends on reference video length
+          return { known:false, tokens:null, note:'по длительности референс-видео' };
+        }
+
+        // Kling PRO 3.0
+        const enable_audio = !!qs('#kling3_audio')?.checked;
+        const seconds = parseInt((qs('#kling3_duration')?.value || "5"), 10);
+        const rate = enable_audio ? 3 : 2;
+        const tokens = rate * seconds;
+        return { known:true, tokens, note:'' };
+      }
+
+      // VEO
+      const model = getVeoModel(); // fast|pro
+      const seconds = parseInt((qs('#veo_duration')?.value || "8"), 10);
+      const audio = !!qs('#veo_audio')?.checked;
+
+      let rate = 1;
+      if (model === 'fast'){
+        rate = audio ? 2 : 1;
+      } else {
+        rate = audio ? 3 : 2;
+      }
+      const tokens = rate * seconds;
+      return { known:true, tokens, note:'' };
+    }
+
+    function updateCostUI(){
+      const btn = qs('#saveBtn');
+      if (!btn) return;
+
+      const c = calcTokenCost();
+      if (c.known){
+        const n = c.tokens || 0;
+        btn.textContent = `Сохранить • спишется ${n} ${pluralizeToken(n)}`;
+      } else {
+        btn.textContent = `Сохранить • списание ${c.note || 'зависит от длительности'}`;
+      }
     }
 
     function showDebug(payload){
