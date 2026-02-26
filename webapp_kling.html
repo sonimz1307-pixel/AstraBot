@@ -314,8 +314,33 @@
       filter: brightness(1.05);
     }
   
-    /* ===================== Desktop button fix ===================== */
-    @media (min-width: 768px){
+    /* ===================== Desktop (Telegram Desktop) button fix ===================== */
+    /* Telegram Desktop often renders a narrow viewport (<768px), so min-width media queries won't trigger.
+       We switch to desktop styling via a runtime class + pointer:fine fallback. */
+    .is-desktop .bar .inner,
+    @media (pointer: fine){
+      /* (this block header will be ignored by CSS parser if kept like this) */
+    }
+
+    .is-desktop .bar .inner{
+      display:flex;
+      justify-content:center;
+    }
+    .is-desktop .btn{
+      width:auto;
+      min-width:300px;
+      max-width:420px;
+      padding:14px 26px;
+      font-size:15px;
+      border-radius:16px;
+      white-space: normal;
+      line-height: 1.15;
+      text-align:center;
+    }
+    .is-desktop body{ padding-bottom: 96px; }
+
+    /* Fallback for desktop browsers even if we fail to set the class */
+    @media (pointer: fine){
       .bar .inner{
         display:flex;
         justify-content:center;
@@ -324,20 +349,12 @@
         width:auto;
         min-width:300px;
         max-width:420px;
-        padding:14px 28px;
+        padding:14px 26px;
         font-size:15px;
         border-radius:16px;
-      }
-    }
-
-    @media (min-width: 1200px){
-      .bar{
-        padding: 18px 0 calc(18px + env(safe-area-inset-bottom));
-      }
-      .btn{
-        box-shadow:
-          0 0 8px rgba(255,170,0,.4),
-          0 10px 24px rgba(0,0,0,.35);
+        white-space: normal;
+        line-height: 1.15;
+        text-align:center;
       }
     }
 
@@ -783,6 +800,16 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
 
     // Telegram init (safe)
     const tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
+    // Mark desktop environments (Telegram Desktop often has a narrow viewport, so we can't rely on min-width media queries)
+    try{
+      const p = (tg && tg.platform) ? String(tg.platform).toLowerCase() : "";
+      const isPointerFine = window.matchMedia && window.matchMedia('(pointer: fine)').matches;
+      const isDesktopPlatform = (p === 'tdesktop' || p === 'macos' || p === 'windows' || p === 'web' || p === 'weba' || p === 'webk' || p === 'webz');
+      if (isPointerFine || isDesktopPlatform){
+        document.documentElement.classList.add('is-desktop');
+      }
+    }catch(e){}
+
     const platformBadge = qs('#platformBadge');
     if (tg){
       try{
