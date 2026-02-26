@@ -4510,7 +4510,38 @@ async def webhook(secret: str, request: Request):
         await tg_send_message(chat_id, "Главное меню.", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
 
+    # ---- Admin broadcast: waiting for text ----
+    if st.get("mode") == "admin_broadcast_wait_text":
+        # защита: только админ может выполнять рассылку
+        if not _is_admin(user_id):
+            st["mode"] = ""
+            st["ts"] = _now()
+            await tg_send_message(chat_id, "Нет доступа.", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+        # отмена
+        if (incoming_text or "").strip().lower() in ("отмена", "/cancel"):
+            st["mode"] = ""
+            st["ts"] = _now()
+            await tg_send_message(chat_id, "✅ Рассылка отменена.", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
 
+        text_to_send = (incoming_text or "").strip()
+        if not text_to_send:
+            await tg_send_message(chat_id, "Пришли текст одним сообщением (или напиши «отмена»).", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+
+        # выходим из режима, чтобы повторно не сработало
+        st["mode"] = ""
+        st["ts"] = _now()
+
+        await tg_send_message(chat_id, "⏳ Начал рассылку...", reply_markup=_main_menu_for(user_id))
+
+        async def _run_broadcast():
+            ok, fail = await _admin_broadcast_send(chat_id, text_to_send)
+            await tg_send_message(chat_id, f"📣 Рассылка завершена.\n✅ Отправлено: {ok}\n❌ Ошибок: {fail}", reply_markup=_main_menu_for(user_id))
+
+        asyncio.create_task(_run_broadcast())
+        return {"ok": True}
     
     # ---- SUNO Music: ждём текст (описание или лирику) ----
     if st.get("mode") == "suno_music" and incoming_text:
