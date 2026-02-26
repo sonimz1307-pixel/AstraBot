@@ -4336,6 +4336,7 @@ async def webhook(secret: str, request: Request):
             )
 
         return {"ok": True}
+        
     # ----- Admin stats -----
     if incoming_text == "📊 Статистика":
         if not _is_admin(user_id):
@@ -4377,7 +4378,23 @@ async def webhook(secret: str, request: Request):
             reply_markup=_help_menu_for(user_id),
         )
         return {"ok": True}
+        
+    # ----- Admin broadcast (start) -----
+    if incoming_text == "📣 Рассылка":
+        if not _is_admin(user_id):
+            await tg_send_message(chat_id, "Нет доступа.", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
 
+        st = _ensure_state(chat_id, user_id)
+        st["mode"] = "admin_broadcast_wait_text"
+        st["ts"] = _now()
+
+        await tg_send_message(
+            chat_id,
+            "📣 Рассылка\n\nПришли одним сообщением текст для рассылки.\n\nЧтобы отменить — напиши: отмена",
+            reply_markup=_main_menu_for(user_id),
+        )
+        return {"ok": True}
 
     # ----- Pro menu -----
     if incoming_text == "Для Pro":
