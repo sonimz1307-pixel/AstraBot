@@ -313,6 +313,34 @@
     .seg.providerSeg label:hover{
       filter: brightness(1.05);
     }
+  
+    /* ===================== Desktop button fix ===================== */
+    @media (min-width: 768px){
+      .bar .inner{
+        display:flex;
+        justify-content:center;
+      }
+      .btn{
+        width:auto;
+        min-width:300px;
+        max-width:420px;
+        padding:14px 28px;
+        font-size:15px;
+        border-radius:16px;
+      }
+    }
+
+    @media (min-width: 1200px){
+      .bar{
+        padding: 18px 0 calc(18px + env(safe-area-inset-bottom));
+      }
+      .btn{
+        box-shadow:
+          0 0 8px rgba(255,170,0,.4),
+          0 10px 24px rgba(0,0,0,.35);
+      }
+    }
+
   </style>
 
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
