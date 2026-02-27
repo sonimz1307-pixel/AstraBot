@@ -137,18 +137,33 @@
       }
     }
 
+        function getUid(){
+      try{
+        const u = new URL(window.location.href);
+        return (u.searchParams.get("uid") || u.searchParams.get("user_id") || "").trim();
+      }catch(e){
+        return "";
+      }
+    }
+
     function buildAuthHeaders(extra){
       const h = Object.assign({}, extra || {});
       const initData = getInitData();
       const adminToken = getAdminToken();
+      const uid = getUid();
+
+      // always pass uid if present (for desktop/edge cases where initData is empty)
+      if(uid){
+        h["X-UID"] = uid;
+      }
 
       if(initData){
         h["X-TG-INITDATA"] = initData;
       }else if(adminToken){
-        // fallback: Desktop doesn't give initData
+        // fallback: Desktop doesn't give initData, use server-side ADMIN_TOKEN if configured
         h["X-ADMIN-TOKEN"] = adminToken;
       }else{
-        // nothing, will 401 with missing initData/admin token
+        // nothing else; backend may still allow X-UID if ADMIN_IDS contains uid
       }
       return h;
     }
@@ -170,7 +185,16 @@
       const st = document.getElementById("me_status");
       const len = (getInitData() || "").length;
       const at = getAdminToken();
-      _setStatus(st, "initData length = " + len + "\nadmin_token present = " + (at ? "yes" : "no"), (len>0 || at) ? "ok" : "err");
+      const uid = getUid();
+      const tgDetected = !!(window.Telegram && window.Telegram.WebApp);
+      _setStatus(
+        st,
+        "Telegram WebApp detected = " + (tgDetected ? "yes" : "no") +
+        "\ninitData length = " + len +
+        "\nuid param = " + (uid ? uid : "no") +
+        "\nadmin_token present = " + (at ? "yes" : "no"),
+        (len>0 || at || uid) ? "ok" : "err"
+      );
     }
 
     async function checkMe(){
