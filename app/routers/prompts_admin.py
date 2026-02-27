@@ -217,7 +217,12 @@ async def create_item(
                 content,
                 file_options={
                     "content-type": preview.content_type or "image/png",
-                    "upsert": True,
+                    # supabase-py storage client builds HTTP headers from file_options.
+                    # Some versions call `.encode()` on option values directly.
+                    # If we pass a boolean here, it may crash with:
+                    #   "'bool' object has no attribute 'encode'"
+                    # So we normalize to a lowercase string.
+                    "upsert": "true",
                 },
             )
             try:
