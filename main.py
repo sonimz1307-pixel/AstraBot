@@ -1305,6 +1305,8 @@ def _pro_menu_keyboard(user_id: int) -> dict:
         [{"text": "📚 Промпты", "web_app": {"url": _with_uid(WEBAPP_PROMPTS_URL, user_id)}}],
         [{"text": "⬅️ Назад"}],
     ]
+    if _is_admin(user_id):
+        rows.insert(2, [{"text": "🛠 Админка промптов", "web_app": {"url": _with_uid(WEBAPP_PROMPTS_ADMIN_URL, user_id)}}])
     return {
         "keyboard": rows,
         "resize_keyboard": True,
