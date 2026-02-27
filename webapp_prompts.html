@@ -1,0 +1,184 @@
+<!doctype html><html lang="ru"><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>AstraBot • Промпты</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{--bg:#0b0f1a;--text:#e8eefc;--muted:#9fb0d6;--line:rgba(255,255,255,.08);--shadow:0 12px 30px rgba(0,0,0,.35);--r:16px}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(1200px 700px at 20% -10%, rgba(255,176,0,.18), transparent 60%),radial-gradient(900px 600px at 90% 0%, rgba(255,106,0,.16), transparent 55%),var(--bg);color:var(--text);font:14px/1.35 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;padding:14px 12px 18px}
+.wrap{max-width:980px;margin:0 auto}
+.topbar{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border:1px solid var(--line);border-radius:18px;background:linear-gradient(180deg, rgba(18,26,42,.92), rgba(12,16,28,.92));box-shadow:var(--shadow);position:sticky;top:10px;z-index:10;backdrop-filter:blur(10px)}
+.brand{display:flex;gap:10px;align-items:center}
+.logo{width:34px;height:34px;border-radius:12px;background:linear-gradient(135deg, rgba(255,176,0,.95), rgba(255,106,0,.95));box-shadow:0 10px 22px rgba(255,136,0,.16)}
+.title{font-weight:800;font-size:15px}
+.sub{color:var(--muted);font-size:12px;margin-top:2px}
+.tabs{display:flex;gap:8px;flex-wrap:wrap}
+.tab{border:1px solid var(--line);background:rgba(255,255,255,.03);color:var(--text);padding:8px 10px;border-radius:999px;cursor:pointer;font-weight:700}
+.tab.active{border-color:rgba(255,176,0,.55);background:linear-gradient(135deg, rgba(255,176,0,.18), rgba(255,106,0,.12))}
+.section{margin-top:14px}
+.h{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin:14px 2px 10px}
+.h h2{margin:0;font-size:14px}
+.hint{color:var(--muted);font-size:12px}
+.groups,.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.group{border:1px solid var(--line);background:linear-gradient(180deg, rgba(18,26,42,.85), rgba(12,16,28,.85));border-radius:var(--r);padding:12px;cursor:pointer;display:flex;gap:10px;align-items:center}
+.gimg{width:44px;height:44px;border-radius:14px;background:rgba(255,255,255,.06);border:1px solid var(--line);overflow:hidden;display:flex;align-items:center;justify-content:center;color:var(--muted);font-weight:800}
+.gimg img{width:100%;height:100%;object-fit:cover;display:block}
+.gtitle{font-weight:800}
+.gmeta{color:var(--muted);font-size:12px;margin-top:2px}
+.card{border:1px solid var(--line);background:linear-gradient(180deg, rgba(18,26,42,.88), rgba(12,16,28,.88));border-radius:var(--r);overflow:hidden;cursor:pointer}
+.thumb{aspect-ratio:1/1;background:rgba(255,255,255,.04);display:flex;align-items:center;justify-content:center;color:var(--muted);overflow:hidden}
+.thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.cbody{padding:10px 10px 12px}
+.ctitle{font-weight:800}
+.cmini{color:var(--muted);font-size:12px;margin-top:3px}
+.backrow{display:flex;gap:10px;margin:10px 2px 0}
+.btn{border:1px solid var(--line);background:rgba(255,255,255,.03);color:var(--text);padding:10px 12px;border-radius:14px;cursor:pointer;font-weight:800}
+.btn.primary{border-color:rgba(255,176,0,.55);background:linear-gradient(135deg, rgba(255,176,0,.22), rgba(255,106,0,.14))}
+.empty{border:1px dashed rgba(255,255,255,.14);border-radius:var(--r);padding:14px;color:var(--muted);background:rgba(255,255,255,.02)}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.58);display:none;align-items:center;justify-content:center;padding:16px;z-index:50}
+.modal.open{display:flex}
+.sheet{width:min(720px,100%);border-radius:22px;border:1px solid var(--line);background:linear-gradient(180deg, rgba(18,26,42,.96), rgba(10,14,24,.96));overflow:hidden}
+.sheetTop{display:flex;justify-content:space-between;gap:10px;align-items:center;padding:12px;border-bottom:1px solid var(--line)}
+.x{width:36px;height:36px;border-radius:12px;display:flex;align-items:center;justify-content:center;border:1px solid var(--line);cursor:pointer;background:rgba(255,255,255,.03)}
+.sheetBody{padding:12px}
+.prompt{margin-top:10px;border:1px solid var(--line);border-radius:16px;background:rgba(0,0,0,.18);padding:10px;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;max-height:44vh;overflow:auto}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px}
+.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:16px;background:rgba(18,26,42,.95);border:1px solid var(--line);padding:10px 12px;border-radius:14px;display:none;z-index:60}
+.toast.show{display:block}
+@media(min-width:820px){.groups,.grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+</style></head><body>
+<div class="wrap">
+  <div class="topbar">
+    <div class="brand"><div class="logo"></div><div><div class="title">📚 Промпты</div><div class="sub">Каталог готовых шаблонов</div></div></div>
+    <div class="tabs" id="tabs"></div>
+  </div>
+
+  <div class="section" id="viewGroups">
+    <div class="h"><h2 id="groupsTitle">Категории</h2><div class="hint">Выбери подборку</div></div>
+    <div id="groups" class="groups"></div>
+    <div id="groupsEmpty" class="empty" style="display:none;">Пока нет подборок. Добавь данные в Supabase.</div>
+  </div>
+
+  <div class="section" id="viewItems" style="display:none;">
+    <div class="h"><h2 id="itemsTitle">Промпты</h2><div class="hint">Нажми на карточку → скопируй промпт</div></div>
+    <div class="backrow"><div class="btn" id="btnBack">← Назад к подборкам</div><div class="btn primary" id="btnToTop">↑ В начало</div></div>
+    <div style="height:10px"></div>
+    <div id="items" class="grid"></div>
+    <div id="itemsEmpty" class="empty" style="display:none;">Пока нет промптов в этой подборке.</div>
+  </div>
+</div>
+
+<div class="modal" id="modal">
+  <div class="sheet">
+    <div class="sheetTop"><div><div style="font-weight:900" id="mTitle">Промпт</div><div style="color:var(--muted);font-size:12px;margin-top:2px" id="mHint"></div></div><div class="x" id="mClose">✕</div></div>
+    <div class="sheetBody">
+      <div class="prompt" id="mPrompt"></div>
+      <div class="row"><div class="btn primary" id="mCopy">📋 Скопировать</div></div>
+      <div style="color:var(--muted);font-size:12px;margin-top:8px">Сейчас всё бесплатно.</div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast">Скопировано</div>
+
+<script>
+const tg = window.Telegram?.WebApp; try{tg?.ready(); tg?.expand();}catch(e){}
+const API = location.origin + "/api/prompts";
+const elTabs=document.getElementById("tabs");
+const elGroups=document.getElementById("groups");
+const elGroupsEmpty=document.getElementById("groupsEmpty");
+const elGroupsTitle=document.getElementById("groupsTitle");
+const viewGroups=document.getElementById("viewGroups");
+const viewItems=document.getElementById("viewItems");
+const elItems=document.getElementById("items");
+const elItemsEmpty=document.getElementById("itemsEmpty");
+const elItemsTitle=document.getElementById("itemsTitle");
+const btnBack=document.getElementById("btnBack");
+const btnToTop=document.getElementById("btnToTop");
+const modal=document.getElementById("modal");
+const mClose=document.getElementById("mClose");
+const mTitle=document.getElementById("mTitle");
+const mHint=document.getElementById("mHint");
+const mPrompt=document.getElementById("mPrompt");
+const mCopy=document.getElementById("mCopy");
+const toast=document.getElementById("toast");
+let state={categories:[],activeCategory:"photo",groups:[],activeGroup:null,items:[]};
+function toastShow(t){toast.textContent=t||"Готово";toast.classList.add("show");setTimeout(()=>toast.classList.remove("show"),1200);}
+function esc(s){return (s??"").toString();}
+async function apiGet(url){const r=await fetch(url,{headers:{"Accept":"application/json"}});return await r.json();}
+function renderTabs(){
+  elTabs.innerHTML="";
+  const fallback=[{slug:"photo",title:"Фото"},{slug:"video",title:"Видео"},{slug:"ai",title:"ИИ"}];
+  const cats=state.categories.length?state.categories:fallback;
+  cats.forEach(c=>{
+    const b=document.createElement("div");
+    b.className="tab"+(c.slug===state.activeCategory?" active":"");
+    b.textContent=c.title||c.slug;
+    b.onclick=()=>selectCategory(c.slug,c.title||c.slug);
+    elTabs.appendChild(b);
+  });
+}
+async function loadCategories(){
+  const j=await apiGet(API+"/categories");
+  if(j.ok && Array.isArray(j.items) && j.items.length) state.categories=j.items.map(x=>({slug:x.slug,title:x.title}));
+  else state.categories=[];
+  renderTabs();
+}
+async function selectCategory(slug,title){
+  state.activeCategory=slug; state.activeGroup=null; renderTabs();
+  viewItems.style.display="none"; viewGroups.style.display="";
+  elGroupsTitle.textContent="Подборки • "+(title||slug);
+  const j=await apiGet(API+"/groups?category="+encodeURIComponent(slug));
+  state.groups=(j.ok && Array.isArray(j.items))?j.items:[];
+  renderGroups();
+}
+function renderGroups(){
+  elGroups.innerHTML="";
+  if(!state.groups.length){elGroupsEmpty.style.display="";return;}
+  elGroupsEmpty.style.display="none";
+  state.groups.forEach(g=>{
+    const d=document.createElement("div"); d.className="group"; d.onclick=()=>openGroup(g);
+    const img=document.createElement("div"); img.className="gimg";
+    if(g.cover_url){const im=document.createElement("img"); im.src=g.cover_url; img.appendChild(im);} else img.textContent="★";
+    const txt=document.createElement("div"); txt.innerHTML=`<div class="gtitle">${esc(g.title)}</div><div class="gmeta">Открой → выбери промпт</div>`;
+    d.appendChild(img); d.appendChild(txt); elGroups.appendChild(d);
+  });
+}
+async function openGroup(g){
+  state.activeGroup=g; elItemsTitle.textContent=esc(g.title);
+  const j=await apiGet(API+"/items?group_id="+encodeURIComponent(g.id));
+  state.items=(j.ok && Array.isArray(j.items))?j.items:[];
+  renderItems();
+  viewGroups.style.display="none"; viewItems.style.display=""; window.scrollTo({top:0,behavior:"smooth"});
+}
+function renderItems(){
+  elItems.innerHTML="";
+  if(!state.items.length){elItemsEmpty.style.display="";return;}
+  elItemsEmpty.style.display="none";
+  state.items.forEach(p=>{
+    const c=document.createElement("div"); c.className="card"; c.onclick=()=>openPrompt(p);
+    const t=document.createElement("div"); t.className="thumb";
+    if(p.preview_url){const im=document.createElement("img"); im.src=p.preview_url; t.appendChild(im);} else t.textContent="preview";
+    const b=document.createElement("div"); b.className="cbody";
+    const mh=p.model_hint?(" • "+p.model_hint):"";
+    b.innerHTML=`<div class="ctitle">${esc(p.title||"Промпт")}</div><div class="cmini">Открыть${mh}</div>`;
+    c.appendChild(t); c.appendChild(b); elItems.appendChild(c);
+  });
+}
+let modalPrompt=null;
+function openPrompt(p){
+  modalPrompt=p; mTitle.textContent=p.title||"Промпт"; mHint.textContent=p.model_hint?("Подходит для: "+p.model_hint):"";
+  mPrompt.textContent=p.prompt_text||""; modal.classList.add("open");
+}
+function closeModal(){modal.classList.remove("open");}
+mClose.onclick=closeModal; modal.onclick=(e)=>{if(e.target===modal)closeModal();};
+mCopy.onclick=async()=>{
+  const text=modalPrompt?.prompt_text||"";
+  try{await navigator.clipboard.writeText(text); toastShow("Скопировано");}
+  catch(e){const ta=document.createElement("textarea"); ta.value=text; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove(); toastShow("Скопировано");}
+};
+btnBack.onclick=()=>{viewItems.style.display="none"; viewGroups.style.display=""; window.scrollTo({top:0,behavior:"smooth"});};
+btnToTop.onclick=()=>window.scrollTo({top:0,behavior:"smooth"});
+(async function init(){await loadCategories(); await selectCategory("photo","Фото");})();
+</script>
+</body></html>
