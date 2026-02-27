@@ -1,203 +1,253 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>AstraBot • Админка Промптов</title>
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
-<style>
-body{margin:0;font-family:Arial, sans-serif;background:linear-gradient(135deg,#0f172a,#1e293b);color:#fff;}
-.container{max-width:900px;margin:auto;padding:20px;}
-h1{margin-bottom:18px;}
-.block{background:#1e293b;padding:20px;border-radius:12px;margin-bottom:18px;}
-input,textarea,select{width:100%;padding:10px;margin-top:8px;margin-bottom:15px;border-radius:8px;border:none;background:#0f172a;color:#fff;box-sizing:border-box;}
-button{padding:10px 15px;border:none;border-radius:8px;background:#f59e0b;color:#000;font-weight:bold;cursor:pointer;}
-button:hover{opacity:.9;}
-.status{margin-top:10px;font-size:14px;white-space:pre-wrap;}
-.success{color:#22c55e;}
-.error{color:#ef4444;}
-.muted{color:#94a3b8;font-size:12px;}
-.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;}
-.pill{display:inline-block;padding:6px 10px;border-radius:999px;background:#0b1220;color:#cbd5e1;font-size:12px;border:1px solid rgba(148,163,184,.2)}
-</style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AstraBot • Админка Промптов</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root{
+      --bg1:#0f172a;
+      --bg2:#1e293b;
+      --field:#0b1220;
+      --text:#ffffff;
+      --muted:#94a3b8;
+      --ok:#22c55e;
+      --err:#ef4444;
+      --accent:#f59e0b;
+    }
+    body{margin:0;font-family:Arial,sans-serif;background:linear-gradient(135deg,var(--bg1),var(--bg2));color:var(--text);}
+    .container{max-width:980px;margin:0 auto;padding:18px;}
+    h1{margin:6px 0 18px;font-size:24px;}
+    h2{margin:0 0 12px;font-size:18px;}
+    .block{background:rgba(30,41,59,.92);border:1px solid rgba(148,163,184,.18);padding:16px;border-radius:14px;margin-bottom:16px;box-shadow:0 8px 28px rgba(0,0,0,.18);}
+    .row{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+    @media(max-width:760px){.row{grid-template-columns:1fr;}}
+    input,textarea,select{width:100%;padding:10px 12px;margin-top:6px;margin-bottom:10px;border-radius:10px;border:1px solid rgba(148,163,184,.18);background:var(--field);color:var(--text);outline:none;box-sizing:border-box;}
+    textarea{resize:vertical;}
+    label{display:block;font-size:12px;color:var(--muted);margin-top:8px;}
+    button{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 14px;border:none;border-radius:10px;background:var(--accent);color:#000;font-weight:700;cursor:pointer;}
+    button.secondary{background:transparent;color:var(--text);border:1px solid rgba(148,163,184,.25);font-weight:600;}
+    button:disabled{opacity:.6;cursor:not-allowed;}
+    .status{margin-top:10px;font-size:13px;color:var(--muted);white-space:pre-wrap;word-break:break-word;}
+    .status.ok{color:var(--ok);}
+    .status.err{color:var(--err);}
+    .hint{font-size:12px;color:var(--muted);margin-top:6px;}
+    .topbar{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px;}
+    .pill{font-size:12px;color:var(--muted);border:1px solid rgba(148,163,184,.18);padding:6px 10px;border-radius:999px;background:rgba(15,23,42,.35);}
+  </style>
 </head>
 <body>
-<div class="container">
+  <div class="container">
+    <div class="topbar">
+      <h1>📚 Админка промптов</h1>
+      <div class="pill" id="tg_info">Telegram WebApp: ...</div>
+    </div>
 
-<div class="row" style="justify-content:space-between;">
-  <h1 style="margin:0;">📚 Админка Промптов</h1>
-  <div class="pill" id="init_badge">Telegram WebApp: ?</div>
-</div>
-<div class="muted" id="debug_info" style="margin:10px 0 18px;"></div>
+    <div class="block">
+      <h2>Проверка доступа</h2>
+      <div class="row">
+        <div>
+          <button class="secondary" onclick="checkMe()">Проверить /me</button>
+          <div class="hint">Если тут 401 — значит initData не доезжает, и будет использован ADMIN_TOKEN (если передан в URL).</div>
+        </div>
+        <div>
+          <button class="secondary" onclick="showAuthInfo()">Показать auth info</button>
+          <div class="hint">Покажет длину initData и факт наличия admin_token.</div>
+        </div>
+      </div>
+      <div id="me_status" class="status"></div>
+    </div>
 
-<div class="block">
-  <h2 style="margin-top:0;">Проверка доступа</h2>
-  <div class="row">
-    <button type="button" onclick="checkMe()">Проверить /me</button>
-    <button type="button" onclick="showInitLen()">Показать длину initData</button>
+    <div class="block">
+      <h2>Создать подборку</h2>
+
+      <label for="group_category">Категория</label>
+      <select id="group_category">
+        <option value="photo">Фото</option>
+        <option value="video">Видео</option>
+        <option value="ai">ИИ</option>
+      </select>
+
+      <label for="group_title">Название подборки</label>
+      <input id="group_title" placeholder="Например: Anime" />
+
+      <label for="group_cover">URL обложки (необязательно)</label>
+      <input id="group_cover" placeholder="https://..." />
+
+      <button id="btn_create_group" onclick="createGroup()">Создать подборку</button>
+      <div id="group_status" class="status"></div>
+    </div>
+
+    <div class="block">
+      <h2>Создать промпт</h2>
+
+      <label for="item_group_id">ID подборки (UUID)</label>
+      <input id="item_group_id" placeholder="Например: 6b8f... (UUID)" />
+
+      <label for="item_title">Название промпта</label>
+      <input id="item_title" placeholder="Например: Cyberpunk portrait" />
+
+      <label for="item_prompt">Текст промпта</label>
+      <textarea id="item_prompt" rows="6" placeholder="Опиши промпт..."></textarea>
+
+      <label for="item_preview">Превью (png/jpg/webp, необязательно)</label>
+      <input type="file" id="item_preview" accept=".png,.jpg,.jpeg,.webp" />
+
+      <button id="btn_create_item" onclick="createItem()">Добавить промпт</button>
+      <div id="item_status" class="status"></div>
+    </div>
+
+    <div class="hint">@NeiroAstraBot</div>
   </div>
-  <div id="me_status" class="status"></div>
-</div>
 
-<div class="block">
-  <h2 style="margin-top:0;">Создать подборку</h2>
-  <select id="group_category">
-    <option value="photo">Фото</option>
-    <option value="video">Видео</option>
-    <option value="ai">ИИ</option>
-  </select>
+  <script>
+    const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
 
-  <input id="group_title" placeholder="Название подборки" />
-  <input id="group_cover" placeholder="URL обложки (необязательно)" />
-
-  <button type="button" onclick="createGroup()">Создать подборку</button>
-  <div id="group_status" class="status"></div>
-</div>
-
-<div class="block">
-  <h2 style="margin-top:0;">Создать промпт</h2>
-
-  <input id="item_group_id" placeholder="ID подборки (UUID)" />
-  <input id="item_title" placeholder="Название промпта" />
-  <textarea id="item_prompt" rows="6" placeholder="Текст промпта"></textarea>
-  <input type="file" id="item_preview" />
-
-  <button type="button" onclick="createItem()">Добавить промпт</button>
-  <div id="item_status" class="status"></div>
-</div>
-
-</div>
-
-<script>
-const tg = window.Telegram?.WebApp;
-
-function qs(name){
-  try { return new URLSearchParams(location.search).get(name) || ""; }
-  catch(e){ return ""; }
-}
-
-const ADMIN_TOKEN_FROM_URL = qs('admin_token'); // опционально (если решишь добавить в URL только для админов)
-
-function getInitData(){
-  try {
-    return (tg && typeof tg.initData === 'string') ? tg.initData : "";
-  } catch(e){
-    return "";
-  }
-}
-
-function buildHeaders(){
-  const h = {};
-  const init = getInitData();
-  if (init) h["X-TG-INITDATA"] = init;
-  if (ADMIN_TOKEN_FROM_URL) h["X-ADMIN-TOKEN"] = ADMIN_TOKEN_FROM_URL;
-  return h;
-}
-
-function setStatus(el, cls, text){
-  el.className = "status" + (cls ? (" " + cls) : "");
-  el.innerText = text;
-}
-
-function showInitLen(){
-  const el = document.getElementById('me_status');
-  const len = (getInitData() || "").length;
-  setStatus(el, len>0 ? "success" : "error", "initData length = " + len);
-}
-
-async function checkMe(){
-  const el = document.getElementById('me_status');
-  setStatus(el, "", "Проверка...\n");
-  try{
-    const res = await fetch('/api/prompts_admin/me', { headers: buildHeaders() });
-    const text = await res.text();
-    let json = null;
-    try{ json = JSON.parse(text); }catch(e){}
-    if(res.ok){
-      setStatus(el, "success", "✅ OK\n" + (json ? JSON.stringify(json, null, 2) : text));
-    }else{
-      setStatus(el, "error", `❌ HTTP ${res.status}\n` + (json ? JSON.stringify(json, null, 2) : text));
+    function _setStatus(el, text, kind){
+      el.className = "status" + (kind ? (" " + kind) : "");
+      el.innerText = text || "";
     }
-  }catch(e){
-    setStatus(el, "error", "❌ Ошибка сети: " + (e?.message || String(e)));
-  }
-}
 
-async function createGroup(){
-  const status = document.getElementById('group_status');
-  setStatus(status, "", "Создание...");
-
-  const formData = new FormData();
-  formData.append('category_slug', document.getElementById('group_category').value);
-  formData.append('title', document.getElementById('group_title').value);
-  formData.append('cover_url', document.getElementById('group_cover').value);
-
-  try{
-    const res = await fetch('/api/prompts_admin/create_group', { method:'POST', headers: buildHeaders(), body: formData });
-    const text = await res.text();
-    let data=null; try{data=JSON.parse(text);}catch(e){}
-
-    if(res.ok && data && data.ok){
-      setStatus(status, 'success', '✅ Создано. ID: ' + (data.item?.id || '')); 
-    } else {
-      const detail = (data && (data.detail || data.error)) ? (data.detail || data.error) : text;
-      setStatus(status, 'error', `❌ HTTP ${res.status}: ` + detail);
+    function _extractErr(data){
+      if(!data) return "no response";
+      return data.error || data.detail || data.message || JSON.stringify(data);
     }
-  }catch(e){
-    setStatus(status, 'error', '❌ Ошибка сети: ' + (e?.message || String(e)));
-  }
-}
 
-async function createItem(){
-  const status = document.getElementById('item_status');
-  setStatus(status, "", "Загрузка...");
-
-  const formData = new FormData();
-  formData.append('group_id', document.getElementById('item_group_id').value);
-  formData.append('title', document.getElementById('item_title').value);
-  formData.append('prompt_text', document.getElementById('item_prompt').value);
-
-  const file = document.getElementById('item_preview').files[0];
-  if(file) formData.append('preview', file);
-
-  try{
-    const res = await fetch('/api/prompts_admin/create_item', { method:'POST', headers: buildHeaders(), body: formData });
-    const text = await res.text();
-    let data=null; try{data=JSON.parse(text);}catch(e){}
-
-    if(res.ok && data && data.ok){
-      setStatus(status, 'success', '✅ Промпт добавлен. ID: ' + (data.item?.id || ''));
-    } else {
-      const detail = (data && (data.detail || data.error)) ? (data.detail || data.error) : text;
-      setStatus(status, 'error', `❌ HTTP ${res.status}: ` + detail);
+    async function _readJsonSafe(res){
+      try{
+        return await res.json();
+      }catch(e){
+        const t = await res.text().catch(()=> "");
+        return { error: "bad json", detail: t || String(e) };
+      }
     }
-  }catch(e){
-    setStatus(status, 'error', '❌ Ошибка сети: ' + (e?.message || String(e)));
-  }
-}
 
-(function init(){
-  // Важно: на Desktop initData иногда появляется только после ready().
-  try{
-    if(tg){
-      tg.ready();
-      tg.expand();
+    function getInitData(){
+      if(!tg) return "";
+      return tg.initData || "";
     }
-  }catch(e){}
 
-  const badge = document.getElementById('init_badge');
-  const dbg = document.getElementById('debug_info');
+    function getAdminToken(){
+      try{
+        const u = new URL(window.location.href);
+        return (u.searchParams.get("admin_token") || "").trim();
+      }catch(e){
+        return "";
+      }
+    }
 
-  const p = (tg && tg.platform) ? tg.platform : 'unknown';
-  const v = (tg && tg.version) ? tg.version : 'unknown';
+    function buildAuthHeaders(extra){
+      const h = Object.assign({}, extra || {});
+      const initData = getInitData();
+      const adminToken = getAdminToken();
 
-  // Дадим Telegram 200мс на инициализацию
-  setTimeout(()=>{
-    const len = (getInitData() || '').length;
-    badge.innerText = `Telegram WebApp: ${len>0 ? 'ok' : 'initData len=0'}`;
-    dbg.innerText = `platform=${p}  version=${v}  initData.length=${len}`;
-  }, 200);
-})();
-</script>
+      if(initData){
+        h["X-TG-INITDATA"] = initData;
+      }else if(adminToken){
+        // fallback: Desktop doesn't give initData
+        h["X-ADMIN-TOKEN"] = adminToken;
+      }else{
+        // nothing, will 401 with missing initData/admin token
+      }
+      return h;
+    }
+
+    (function init(){
+      if(!tg){
+        document.getElementById("tg_info").innerText = "Telegram WebApp: not detected";
+        return;
+      }
+      try{ tg.ready(); }catch(e){}
+      try{ tg.expand(); }catch(e){}
+      const len = (tg.initData || "").length;
+      const hasAdmin = getAdminToken().length > 0;
+      document.getElementById("tg_info").innerText =
+        "Telegram WebApp: ok • initData len=" + len + " • admin_token=" + (hasAdmin ? "yes" : "no");
+    })();
+
+    function showAuthInfo(){
+      const st = document.getElementById("me_status");
+      const len = (getInitData() || "").length;
+      const at = getAdminToken();
+      _setStatus(st, "initData length = " + len + "\nadmin_token present = " + (at ? "yes" : "no"), (len>0 || at) ? "ok" : "err");
+    }
+
+    async function checkMe(){
+      const st = document.getElementById("me_status");
+      _setStatus(st, "Проверяю...", "");
+
+      const res = await fetch("/api/prompts_admin/me", {
+        method: "GET",
+        headers: buildAuthHeaders({})
+      });
+
+      const data = await _readJsonSafe(res);
+
+      if(res.ok && data && data.ok){
+        _setStatus(st, "✅ Доступ есть. user=" + JSON.stringify(data.user || {}), "ok");
+      }else{
+        _setStatus(st, "❌ /me: " + res.status + " • " + _extractErr(data), "err");
+      }
+    }
+
+    async function createGroup(){
+      const btn = document.getElementById("btn_create_group");
+      const status = document.getElementById("group_status");
+      btn.disabled = true;
+      _setStatus(status, "Создание...", "");
+
+      const formData = new FormData();
+      formData.append("category_slug", document.getElementById("group_category").value);
+      formData.append("title", (document.getElementById("group_title").value || "").trim());
+      const cover = (document.getElementById("group_cover").value || "").trim();
+      if(cover) formData.append("cover_url", cover);
+
+      const res = await fetch("/api/prompts_admin/create_group",{
+        method:"POST",
+        headers: buildAuthHeaders({}),
+        body: formData
+      });
+
+      const data = await _readJsonSafe(res);
+
+      if(res.ok && data && data.ok){
+        _setStatus(status, "✅ Создано. ID: " + (data.item && data.item.id ? data.item.id : "(no id)"), "ok");
+      }else{
+        _setStatus(status, "❌ " + res.status + " • " + _extractErr(data), "err");
+      }
+      btn.disabled = false;
+    }
+
+    async function createItem(){
+      const btn = document.getElementById("btn_create_item");
+      const status = document.getElementById("item_status");
+      btn.disabled = true;
+      _setStatus(status, "Загрузка...", "");
+
+      const formData = new FormData();
+      formData.append("group_id", (document.getElementById("item_group_id").value || "").trim());
+      formData.append("title", (document.getElementById("item_title").value || "").trim());
+      formData.append("prompt_text", (document.getElementById("item_prompt").value || "").trim());
+
+      const file = document.getElementById("item_preview").files[0];
+      if(file) formData.append("preview", file);
+
+      const res = await fetch("/api/prompts_admin/create_item",{
+        method:"POST",
+        headers: buildAuthHeaders({}),
+        body: formData
+      });
+
+      const data = await _readJsonSafe(res);
+
+      if(res.ok && data && data.ok){
+        _setStatus(status, "✅ Промпт добавлен. ID: " + (data.item && data.item.id ? data.item.id : "(no id)"), "ok");
+      }else{
+        _setStatus(status, "❌ " + res.status + " • " + _extractErr(data), "err");
+      }
+      btn.disabled = false;
+    }
+  </script>
 </body>
 </html>
