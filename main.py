@@ -1302,6 +1302,7 @@ def _with_uid(url: str, user_id: int) -> str:
 def _pro_menu_keyboard(user_id: int) -> dict:
     rows = [
         [{"text": "🏆 Top Analizator", "web_app": {"url": _with_uid(WEBAPP_TOP_ANALIZATOR_URL, user_id)}}],
+        [{"text": "📚 Промпты", "web_app": {"url": _with_uid(WEBAPP_PROMPTS_URL, user_id)}}],
         [{"text": "⬅️ Назад"}],
     ]
     return {
