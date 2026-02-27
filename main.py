@@ -547,11 +547,23 @@ async def webapp_music():
 async def webapp_top_analizator():
     with open(os.path.join(BASE_DIR, "webapp_top_analizator.html"), "r", encoding="utf-8") as f:
         return f.read()
+        
+@app.get("/webapp/prompts", response_class=HTMLResponse)
+async def webapp_prompts():
+    with open(os.path.join(BASE_DIR, "webapp_prompts.html"), "r", encoding="utf-8") as f:
+        return f.read()
 
+@app.get("/webapp/prompts_admin", response_class=HTMLResponse)
+async def webapp_prompts_admin():
+    with open(os.path.join(BASE_DIR, "webapp_prompts_admin.html"), "r", encoding="utf-8") as f:
+        return f.read()
+        
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 WEBAPP_KLING_URL = os.getenv("WEBAPP_KLING_URL", "https://astrabot-tchj.onrender.com/webapp/kling")
 WEBAPP_MUSIC_URL = os.getenv("WEBAPP_MUSIC_URL", "https://astrabot-tchj.onrender.com/webapp/music")
 WEBAPP_TOP_ANALIZATOR_URL = os.getenv("WEBAPP_TOP_ANALIZATOR_URL", "https://astrabot-tchj.onrender.com/webapp/top_analizator")
+WEBAPP_PROMPTS_URL = os.getenv("WEBAPP_PROMPTS_URL", "https://astrabot-tchj.onrender.com/webapp/prompts")
+WEBAPP_PROMPTS_ADMIN_URL = os.getenv("WEBAPP_PROMPTS_ADMIN_URL", "https://astrabot-tchj.onrender.com/webapp/prompts_admin")
 # --- YooKassa (cards/SBP) ---
 YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "").strip()
 YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "").strip()
