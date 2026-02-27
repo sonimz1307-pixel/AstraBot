@@ -5,7 +5,7 @@ import hmac
 import hashlib
 import time
 import urllib.parse
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from fastapi import APIRouter, Header, HTTPException, UploadFile, File, Form
 from db_supabase import supabase
@@ -18,20 +18,30 @@ ADMIN_IDS = set(
     if x.strip().isdigit()
 )
 
+# Token бота нужен только для проверки подписи Telegram WebApp initData
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+
+# Опциональный простой bypass (если на Desktop initData иногда пустой)
+# Включается только если задан ADMIN_TOKEN в env и клиент передал X-ADMIN-TOKEN.
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
+
 PROMPTS_BUCKET = os.getenv("PROMPTS_BUCKET", "prompts").strip()
+
 
 def _err(msg: str) -> Dict[str, Any]:
     return {"ok": False, "error": msg}
+
 
 def _ok(**kwargs) -> Dict[str, Any]:
     d = {"ok": True}
     d.update(kwargs)
     return d
 
+
 def _parse_init_data(init_data: str) -> Dict[str, str]:
     parsed = urllib.parse.parse_qsl(init_data, keep_blank_values=True)
     return {k: v for k, v in parsed}
+
 
 def _check_telegram_init_data(init_data: str) -> Dict[str, Any]:
     # Telegram WebApp initData verification
@@ -64,13 +74,23 @@ def _check_telegram_init_data(init_data: str) -> Dict[str, Any]:
     if user_raw:
         try:
             import json
+
             user = json.loads(user_raw)
         except Exception:
             user = {}
 
     return {"data": data, "user": user}
 
-def _require_admin(x_tg_initdata: str) -> Dict[str, Any]:
+
+def _require_admin(
+    x_tg_initdata: str,
+    x_admin_token: str,
+) -> Dict[str, Any]:
+    # 1) Если передан корректный ADMIN_TOKEN — допускаем без initData.
+    if ADMIN_TOKEN and x_admin_token and hmac.compare_digest(x_admin_token.strip(), ADMIN_TOKEN):
+        return {"data": {"auth": "admin_token"}, "user": {"id": None, "username": "admin_token"}}
+
+    # 2) Иначе — обычная проверка initData + admin ids
     verified = _check_telegram_init_data(x_tg_initdata)
     uid = verified.get("user", {}).get("id")
     if uid is None:
@@ -83,115 +103,107 @@ def _require_admin(x_tg_initdata: str) -> Dict[str, Any]:
         raise HTTPException(status_code=403, detail="forbidden")
     return verified
 
+
 @router.get("/me")
-def me(x_tg_initdata: str = Header("", alias="X-TG-INITDATA")) -> Dict[str, Any]:
-    v = _require_admin(x_tg_initdata)
-    return _ok(user=v.get("user", {}))
+def me(
+    x_tg_initdata: str = Header("", alias="X-TG-INITDATA"),
+    x_admin_token: str = Header("", alias="X-ADMIN-TOKEN"),
+) -> Dict[str, Any]:
+    v = _require_admin(x_tg_initdata, x_admin_token)
+    return _ok(user=v.get("user", {}), auth=v.get("data", {}).get("auth"))
+
 
 @router.post("/create_group")
-def create_group(
+async def create_group(
+    category_slug: str = Form(""),
+    title: str = Form(""),
+    cover_url: str = Form(""),
+    sort_order: int = Form(0),
     x_tg_initdata: str = Header("", alias="X-TG-INITDATA"),
-    category_slug: str = Form(...),
-    title: str = Form(...),
-    cover_url: Optional[str] = Form(None),
-    sort_order: int = Form(100),
+    x_admin_token: str = Header("", alias="X-ADMIN-TOKEN"),
 ) -> Dict[str, Any]:
-    _require_admin(x_tg_initdata)
-    if supabase is None:
-        return _err("Supabase disabled")
-    try:
-        cat = (
-            supabase.table("prompt_categories")
-            .select("id")
-            .eq("slug", category_slug)
-            .limit(1)
-            .execute()
-        )
-        if not cat.data:
-            return _err(f"category not found: {category_slug}")
-        category_id = cat.data[0]["id"]
+    _require_admin(x_tg_initdata, x_admin_token)
 
-        ins = (
-            supabase.table("prompt_groups")
-            .insert({
-                "category_id": category_id,
-                "title": title,
-                "cover_url": cover_url,
-                "sort_order": sort_order,
-            })
-            .execute()
-        )
-        return _ok(item=(ins.data or [None])[0])
+    category_slug = (category_slug or "").strip()
+    title = (title or "").strip()
+    cover_url = (cover_url or "").strip()
+
+    if not category_slug:
+        return _err("category_slug is required")
+    if not title:
+        return _err("title is required")
+
+    payload = {
+        "category_id": None,  # если у тебя category_id есть — можно маппить slug->id в отдельной таблице
+        "slug": category_slug,  # оставляем совместимость
+        "title": title,
+        "cover_url": cover_url or None,
+        "sort_order": int(sort_order or 0),
+    }
+
+    try:
+        r = supabase.table("prompt_groups").insert(payload).execute()
+        item = (r.data or [None])[0]
+        return _ok(item=item)
     except Exception as e:
-        return _err(f"failed: {e}")
+        return _err(f"db insert failed: {e}")
+
 
 @router.post("/create_item")
 async def create_item(
+    group_id: str = Form(""),
+    title: str = Form(""),
+    prompt_text: str = Form(""),
+    preview: UploadFile | None = File(None),
     x_tg_initdata: str = Header("", alias="X-TG-INITDATA"),
-    group_id: str = Form(...),
-    title: str = Form(...),
-    prompt_text: str = Form(...),
-    model_hint: str = Form(""),
-    sort_order: int = Form(100),
-    preview: Optional[UploadFile] = File(None),
+    x_admin_token: str = Header("", alias="X-ADMIN-TOKEN"),
 ) -> Dict[str, Any]:
-    _require_admin(x_tg_initdata)
-    if supabase is None:
-        return _err("Supabase disabled")
+    _require_admin(x_tg_initdata, x_admin_token)
 
-    preview_url: Optional[str] = None
+    group_id = (group_id or "").strip()
+    title = (title or "").strip()
+    prompt_text = (prompt_text or "").strip()
 
+    if not group_id:
+        return _err("group_id is required")
+    if not title:
+        return _err("title is required")
+    if not prompt_text:
+        return _err("prompt_text is required")
+
+    preview_url = None
     try:
         if preview is not None:
             content = await preview.read()
-            if not content:
-                return _err("empty file")
-            ext = (preview.filename or "").split(".")[-1].lower()
-            if ext not in ("png","jpg","jpeg","webp"):
-                ext = "png"
-            import secrets
-            path = f"{group_id}/{int(time.time())}_{secrets.token_hex(6)}.{ext}"
-
-            storage = supabase.storage.from_(PROMPTS_BUCKET)
-            storage.upload(
-                path,
-                content,
-                file_options={"content-type": preview.content_type or "image/png", "upsert": True},
-            )
-            try:
-                preview_url = storage.get_public_url(path)
-                if isinstance(preview_url, dict):
-                    preview_url = preview_url.get("publicUrl") or preview_url.get("public_url")
-            except Exception:
-                preview_url = None
-
-        ins = (
-            supabase.table("prompt_items")
-            .insert({
-                "group_id": group_id,
-                "title": title,
-                "preview_url": preview_url,
-                "prompt_text": prompt_text,
-                "model_hint": model_hint,
-                "is_pro": False,
-                "sort_order": sort_order,
-            })
-            .execute()
-        )
-        return _ok(item=(ins.data or [None])[0])
+            if content:
+                # Сохраняем в Supabase Storage
+                # bucket: PROMPTS_BUCKET
+                # path: previews/<group_id>/<timestamp>_<filename>
+                safe_name = (preview.filename or "preview").replace("/", "_")
+                path = f"previews/{group_id}/{int(time.time())}_{safe_name}"
+                supabase.storage.from_(PROMPTS_BUCKET).upload(
+                    path,
+                    content,
+                    {
+                        "content-type": preview.content_type or "application/octet-stream",
+                        "x-upsert": "true",
+                    },
+                )
+                preview_url = supabase.storage.from_(PROMPTS_BUCKET).get_public_url(path)
     except Exception as e:
-        return _err(f"failed: {e}")
+        # не фейлим создание промпта из-за превью
+        preview_url = None
 
-@router.post("/delete_item")
-def delete_item(
-    x_tg_initdata: str = Header("", alias="X-TG-INITDATA"),
-    item_id: str = Form(...),
-) -> Dict[str, Any]:
-    _require_admin(x_tg_initdata)
-    if supabase is None:
-        return _err("Supabase disabled")
+    payload = {
+        "group_id": group_id,
+        "title": title,
+        "prompt_text": prompt_text,
+        "preview_url": preview_url,
+    }
+
     try:
-        supabase.table("prompt_items").delete().eq("id", item_id).execute()
-        return _ok(deleted=True)
+        r = supabase.table("prompt_items").insert(payload).execute()
+        item = (r.data or [None])[0]
+        return _ok(item=item)
     except Exception as e:
-        return _err(f"failed: {e}")
+        return _err(f"db insert failed: {e}")
