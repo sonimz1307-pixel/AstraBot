@@ -1,1 +1,161 @@
-<html><body>admin</body></html>
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AstraBot • Админка Промптов</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+<style>
+body{
+    margin:0;
+    font-family:Arial, sans-serif;
+    background:linear-gradient(135deg,#0f172a,#1e293b);
+    color:#fff;
+}
+.container{
+    max-width:900px;
+    margin:auto;
+    padding:20px;
+}
+h1{margin-bottom:25px;}
+.block{
+    background:#1e293b;
+    padding:20px;
+    border-radius:12px;
+    margin-bottom:25px;
+}
+input,textarea,select{
+    width:100%;
+    padding:10px;
+    margin-top:8px;
+    margin-bottom:15px;
+    border-radius:8px;
+    border:none;
+    background:#0f172a;
+    color:#fff;
+}
+button{
+    padding:10px 15px;
+    border:none;
+    border-radius:8px;
+    background:#f59e0b;
+    color:#000;
+    font-weight:bold;
+    cursor:pointer;
+}
+button:hover{opacity:.9;}
+.status{margin-top:10px;font-size:14px;}
+.success{color:#22c55e;}
+.error{color:#ef4444;}
+</style>
+</head>
+<body>
+
+<div class="container">
+
+<h1>📚 Админка Промптов</h1>
+
+<div class="block">
+<h2>Создать подборку</h2>
+
+<select id="group_category">
+<option value="photo">Фото</option>
+<option value="video">Видео</option>
+<option value="ai">ИИ</option>
+</select>
+
+<input id="group_title" placeholder="Название подборки" />
+<input id="group_cover" placeholder="URL обложки (необязательно)" />
+
+<button onclick="createGroup()">Создать подборку</button>
+<div id="group_status" class="status"></div>
+</div>
+
+
+<div class="block">
+<h2>Создать промпт</h2>
+
+<input id="item_group_id" placeholder="ID подборки (UUID)" />
+<input id="item_title" placeholder="Название промпта" />
+<textarea id="item_prompt" rows="6" placeholder="Текст промпта"></textarea>
+<input type="file" id="item_preview" />
+
+<button onclick="createItem()">Добавить промпт</button>
+<div id="item_status" class="status"></div>
+</div>
+
+</div>
+
+<script>
+const tg = window.Telegram.WebApp;
+tg.expand();
+
+function getInitData(){
+    return tg.initData || "";
+}
+
+async function createGroup(){
+    const status = document.getElementById("group_status");
+    status.className = "status";
+    status.innerText = "Создание...";
+
+    const formData = new FormData();
+    formData.append("category_slug", document.getElementById("group_category").value);
+    formData.append("title", document.getElementById("group_title").value);
+    formData.append("cover_url", document.getElementById("group_cover").value);
+
+    const res = await fetch("/api/prompts_admin/create_group",{
+        method:"POST",
+        headers:{
+            "X-TG-INITDATA": getInitData()
+        },
+        body:formData
+    });
+
+    const data = await res.json();
+
+    if(data.ok){
+        status.className = "status success";
+        status.innerText = "✅ Создано. ID: " + data.item.id;
+    }else{
+        status.className = "status error";
+        status.innerText = "❌ Ошибка: " + data.error;
+    }
+}
+
+async function createItem(){
+    const status = document.getElementById("item_status");
+    status.className = "status";
+    status.innerText = "Загрузка...";
+
+    const formData = new FormData();
+    formData.append("group_id", document.getElementById("item_group_id").value);
+    formData.append("title", document.getElementById("item_title").value);
+    formData.append("prompt_text", document.getElementById("item_prompt").value);
+
+    const file = document.getElementById("item_preview").files[0];
+    if(file) formData.append("preview", file);
+
+    const res = await fetch("/api/prompts_admin/create_item",{
+        method:"POST",
+        headers:{
+            "X-TG-INITDATA": getInitData()
+        },
+        body:formData
+    });
+
+    const data = await res.json();
+
+    if(data.ok){
+        status.className = "status success";
+        status.innerText = "✅ Промпт добавлен.";
+    }else{
+        status.className = "status error";
+        status.innerText = "❌ Ошибка: " + data.error;
+    }
+}
+</script>
+
+</body>
+</html>
