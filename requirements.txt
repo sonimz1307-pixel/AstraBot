@@ -7,3 +7,4 @@ supabase==2.6.0
 aiohttp
 requests>=2.31.0
 python-multipart
+redis>=5.0.0
