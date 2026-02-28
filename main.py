@@ -6338,15 +6338,14 @@ async def webhook(secret: str, request: Request):
 
             bal = int(get_balance(int(user_id)) or 0)
             if bal < 1:
+                text = (
+                    "📸 Нейро-фотосессия стоит 1 токен.\n\n"
+                    f"Ваш баланс: {bal}\n\n"
+                    "Пополните баланс и продолжим генерацию 👇"
+                )
                 await tg_send_message(
                     chat_id,
-                    "📸 Нейро-фотосессия стоит 1 токен.
-
-"
-                    f"Ваш баланс: {bal}
-
-"
-                    "Пополните баланс и продолжим генерацию 👇",
+                    text,
                     reply_markup=_topup_balance_inline_kb(),
                 )
                 return {"ok": True}
