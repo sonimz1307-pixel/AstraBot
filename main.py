@@ -779,8 +779,9 @@ def sb_set_user_email(user_id: int, email: str) -> bool:
 # ₽ — расчётная стоимость в рублях
 # Токены — внутренняя единица сервиса
 TOPUP_PACKS = [
+    {"tokens": 5,   "stars": 33},
     {"tokens": 18,  "stars": 99},
-    {"tokens": 36,  "stars": 199},
+    {"tokens": 36,  "stars": 198},
     {"tokens": 72,  "stars": 399},
     {"tokens": 160, "stars": 799},
     {"tokens": 303, "stars": 1499},
@@ -797,7 +798,7 @@ def _find_pack_by_tokens(tokens: int) -> Optional[Dict[str, int]]:
     return None
 
 def _topup_balance_inline_kb() -> dict:
-    return {"inline_keyboard": [[{"text": "➕ Пополнить ⭐", "callback_data": "topup:menu"}]]}
+    return {"inline_keyboard": [[{"text": "➕ Пополнить ", "callback_data": "topup:menu"}]]}
 
 def _topup_packs_kb() -> dict:
     # 2 кнопки в ряд
@@ -806,7 +807,7 @@ def _topup_packs_kb() -> dict:
         tokens = int(p["tokens"])
         stars = int(p["stars"])
         btns.append({
-            "text": f"≈{int(round(stars * 1.82))}₽ • {tokens} токенов • {stars}⭐",
+            "text": f"≈{int(round(stars * 1.82))}₽ • {tokens} токенов",
             "callback_data": f"topup:pack:{tokens}"
         })
 
