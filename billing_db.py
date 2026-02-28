@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from uuid import uuid4
@@ -270,3 +271,40 @@ def refund_suno_generation(telegram_user_id: int, *, ref_id: str, error: str = "
         meta={"error": (error or "")[:300]},
     )
 
+# === PHOTOSESSION BILLING ===
+
+PHOTOSESSION_GENERATION_COST = 1  # фиксировано: 1 токен за генерацию
+
+
+def charge_photosession_generation(telegram_user_id: int, *, ref_id: str) -> None:
+    """
+    Списывает 1 токен за нейро-фотосессию.
+    Идемпотентность: если по (reason, ref_id) уже есть ledger — повторно не списываем.
+    """
+    if ledger_ref_exists(reason="photosession_generation", ref_id=ref_id):
+        return
+
+    add_tokens(
+        telegram_user_id,
+        -PHOTOSESSION_GENERATION_COST,
+        reason="photosession_generation",
+        ref_id=ref_id,
+        meta={"cost": PHOTOSESSION_GENERATION_COST},
+    )
+
+
+def refund_photosession_generation(telegram_user_id: int, *, ref_id: str, error: str = "") -> None:
+    """
+    Возвращает 1 токен при ошибке нейро-фотосессии.
+    Идемпотентность: если refund уже был — повторно не возвращаем.
+    """
+    if ledger_ref_exists(reason="photosession_refund", ref_id=ref_id):
+        return
+
+    add_tokens(
+        telegram_user_id,
+        +PHOTOSESSION_GENERATION_COST,
+        reason="photosession_refund",
+        ref_id=ref_id,
+        meta={"error": (error or "")[:300]},
+    )
