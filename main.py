@@ -13,6 +13,7 @@ from io import BytesIO
 from typing import Optional, Literal, Dict, Any, Tuple, List
 
 import httpx
+from queue_redis import enqueue_job
 from fastapi import FastAPI, Request, Response
 from fastapi.staticfiles import StaticFiles
 from db_supabase import track_user_activity, get_basic_stats, supabase as sb
@@ -3259,7 +3260,14 @@ async def webhook(secret: str, request: Request):
     user_id = int(from_user.get("id") or 0)
     # 📊 Supabase: user + DAU tracking (для любых сообщений/режимов)
     track_user_activity(from_user)
-
+    
+    # --- Queue test: /qtest ---
+    incoming_text = (message.get("text") or "").strip()
+    if incoming_text in ("/qtest", "qtest"):
+        job_id = uuid4().hex
+        await enqueue_job({"job_id": job_id, "type": "qtest", "chat_id": chat_id, "user_id": user_id})
+        await tg_send_message(chat_id, f"🧪 Задача поставлена в очередь. job_id={job_id}")
+        return {"ok": True}
 
     if not chat_id or not user_id:
         return {"ok": True}
