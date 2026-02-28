@@ -35,6 +35,26 @@
     .hint{font-size:12px;color:var(--muted);margin-top:6px;}
     .topbar{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px;}
     .pill{font-size:12px;color:var(--muted);border:1px solid rgba(148,163,184,.18);padding:6px 10px;border-radius:999px;background:rgba(15,23,42,.35);}
+  
+    .row{display:flex;gap:10px;align-items:center}
+    .btn-secondary{background:#243244;border:1px solid rgba(148,163,184,.25);color:var(--text);padding:12px 14px;border-radius:12px;cursor:pointer;white-space:nowrap}
+    .btn-secondary:hover{filter:brightness(1.08)}
+    .small{font-size:12px}
+    .modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:9999;padding:16px}
+    .modal{width:min(680px,100%);background:linear-gradient(180deg,var(--bg2),#0b1220);border:1px solid rgba(148,163,184,.18);border-radius:18px;box-shadow:0 30px 120px rgba(0,0,0,.6);overflow:hidden}
+    .modal-head{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid rgba(148,163,184,.15)}
+    .modal-title{font-weight:700}
+    .modal-close{background:transparent;border:0;color:var(--muted);font-size:18px;cursor:pointer}
+    .modal-body{padding:14px 16px}
+    .picker-top{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .picker-top select,.picker-top input{flex:1;min-width:180px}
+    .picker-list{margin-top:12px;max-height:52vh;overflow:auto;border:1px solid rgba(148,163,184,.15);border-radius:14px}
+    .picker-item{padding:10px 12px;border-bottom:1px solid rgba(148,163,184,.08);cursor:pointer}
+    .picker-item:last-child{border-bottom:0}
+    .picker-item:hover{background:rgba(245,158,11,.10)}
+    .picker-item .t{font-weight:600}
+    .picker-item .s{font-size:12px;color:var(--muted);margin-top:2px;word-break:break-all}
+
   </style>
 </head>
 <body>
@@ -83,7 +103,11 @@
       <h2>Создать промпт</h2>
 
       <label for="item_group_id">ID подборки (UUID)</label>
-      <input id="item_group_id" placeholder="Например: 6b8f... (UUID)" />
+      <div class="row">
+        <input id="item_group_id" placeholder="Например: 6b8f... (UUID)" />
+        <button class="btn-secondary" type="button" onclick="openGroupPicker()">Выбрать</button>
+      </div>
+      <div class="small muted">Можно выбрать из списка — откроется окно с подборками.</div>
 
       <label for="item_title">Название промпта</label>
       <input id="item_title" placeholder="Например: Cyberpunk portrait" />
@@ -101,7 +125,29 @@
     <div class="hint">@NeiroAstraBot</div>
   </div>
 
-  <script>
+  
+  <!-- Group picker modal -->
+  <div id="picker_backdrop" class="modal-backdrop" onclick="closeGroupPicker(event)">
+    <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal-head">
+        <div class="modal-title">Выбор подборки</div>
+        <button class="modal-close" type="button" onclick="closeGroupPicker()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="picker-top">
+          <select id="picker_category"></select>
+          <input id="picker_search" placeholder="Поиск по названию..." oninput="renderPickerList()" />
+        </div>
+        <div id="picker_status" class="status" style="margin-top:10px"></div>
+        <div id="picker_list" class="picker-list"></div>
+        <div class="small muted" style="margin-top:10px">
+          Клик по строке — подставит UUID в поле “ID подборки”.
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
     const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
 
     function _setStatus(el, text, kind){
@@ -113,6 +159,104 @@
       if(!data) return "no response";
       return data.error || data.detail || data.message || JSON.stringify(data);
     }
+
+
+    // ---------------- Group picker ----------------
+    let _pickerCategories = [];   // {slug,title}
+    let _pickerGroups = [];       // {id,title,cover_url,sort_order}
+    let _pickerFiltered = [];
+
+    function openGroupPicker(){
+      const bd = document.getElementById("picker_backdrop");
+      bd.style.display = "flex";
+      loadPickerCategories().then(() => {
+        const catSel = document.getElementById("picker_category");
+        // preselect: take category from "create group" form if exists
+        const createCat = document.getElementById("group_category");
+        if(createCat && createCat.value){
+          catSel.value = createCat.value;
+        }
+        loadPickerGroups();
+      });
+      // reset search
+      const q = document.getElementById("picker_search");
+      q.value = "";
+    }
+
+    function closeGroupPicker(ev){
+      if(ev && ev.target && ev.target.id !== "picker_backdrop") return;
+      const bd = document.getElementById("picker_backdrop");
+      bd.style.display = "none";
+    }
+
+    async function loadPickerCategories(){
+      const st = document.getElementById("picker_status");
+      _setStatus(st, "Загружаю категории...", "muted");
+      try{
+        const r = await fetch("/api/prompts/categories");
+        const data = await r.json();
+        if(!data.ok) throw new Error(_extractErr(data));
+        _pickerCategories = data.items || [];
+        const sel = document.getElementById("picker_category");
+        sel.innerHTML = "";
+        for(const c of _pickerCategories){
+          const opt = document.createElement("option");
+          opt.value = c.slug;
+          opt.textContent = c.title + " (" + c.slug + ")";
+          sel.appendChild(opt);
+        }
+        sel.onchange = () => loadPickerGroups();
+        _setStatus(st, "", "");
+      }catch(e){
+        _setStatus(st, "Ошибка категорий: " + (e?.message || e), "err");
+      }
+    }
+
+    async function loadPickerGroups(){
+      const st = document.getElementById("picker_status");
+      const cat = (document.getElementById("picker_category").value || "").trim();
+      if(!cat){
+        _setStatus(st, "Выбери категорию.", "err");
+        return;
+      }
+      _setStatus(st, "Загружаю подборки...", "muted");
+      try{
+        const r = await fetch("/api/prompts/groups?category=" + encodeURIComponent(cat));
+        const data = await r.json();
+        if(!data.ok) throw new Error(_extractErr(data));
+        _pickerGroups = data.items || [];
+        renderPickerList();
+        _setStatus(st, "Найдено: " + _pickerGroups.length, "ok");
+      }catch(e){
+        _setStatus(st, "Ошибка подборок: " + (e?.message || e), "err");
+      }
+    }
+
+    function renderPickerList(){
+      const q = (document.getElementById("picker_search").value || "").trim().toLowerCase();
+      _pickerFiltered = _pickerGroups.filter(g => !q || (g.title || "").toLowerCase().includes(q) || (g.id || "").toLowerCase().includes(q));
+      const list = document.getElementById("picker_list");
+      list.innerHTML = "";
+      if(!_pickerFiltered.length){
+        const div = document.createElement("div");
+        div.className = "picker-item";
+        div.innerHTML = '<div class="t">Ничего не найдено</div><div class="s">Попробуй другой запрос или категорию.</div>';
+        list.appendChild(div);
+        return;
+      }
+      for(const g of _pickerFiltered){
+        const div = document.createElement("div");
+        div.className = "picker-item";
+        div.onclick = () => {
+          document.getElementById("item_group_id").value = g.id;
+          closeGroupPicker();
+        };
+        div.innerHTML = '<div class="t">' + (g.title || "(без названия)") + '</div>' +
+                        '<div class="s">' + g.id + '</div>';
+        list.appendChild(div);
+      }
+    }
+
 
     async function _readJsonSafe(res){
       try{
