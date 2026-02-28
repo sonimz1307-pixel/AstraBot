@@ -10,6 +10,7 @@ import hmac
 import logging
 from io import BytesIO
 from typing import Optional, Literal, Dict, Any, Tuple, List
+from uuid import uuid4
 
 import httpx
 from fastapi import FastAPI, Request, Response
@@ -18,7 +19,14 @@ from db_supabase import track_user_activity, get_basic_stats, supabase as sb
 from kling_flow import run_motion_control_from_bytes, run_image_to_video_from_bytes
 from veo_flow import run_veo_text_to_video, run_veo_image_to_video
 from veo_billing import calc_veo_charge, format_veo_charge_line
-from billing_db import ensure_user_row, get_balance, add_tokens
+from billing_db import (
+    ensure_user_row,
+    get_balance,
+    add_tokens,
+    charge_photosession_generation,
+    refund_photosession_generation,
+)
+
 from nano_banana import run_nano_banana
 from nano_banana_pro import handle_nano_banana_pro
 from yookassa_flow import create_yookassa_payment
@@ -4848,7 +4856,7 @@ async def webhook(secret: str, request: Request):
         _set_mode(chat_id, user_id, "photosession")
         await tg_send_message(
             chat_id,
-            "Режим «Нейро фотосессии».\n"
+            "Режим «Нейро фотосессии» - Цена 1 токен.\n"
             "1) Пришли фото.\n"
             "2) Потом одним сообщением напиши задачу: локация/стиль/одежда/детали.\n"
             "Я постараюсь сохранить человека максимально 1к1 и сделать фото как профессиональную фотосессию.",
@@ -6326,6 +6334,29 @@ async def webhook(secret: str, request: Request):
                 f"Task: {user_task}"
             )
 
+# --- BILLING: 1 token for photosession generation ---
+ensure_user_row(int(user_id))
+
+bal = int(get_balance(int(user_id)) or 0)
+if bal < 1:
+    await tg_send_message(
+        chat_id,
+        "📸 Нейро-фотосессия стоит 1 токен.\n\n"
+        f"Ваш баланс: {bal}\n\n"
+        "Пополните баланс и продолжим генерацию 👇",
+        reply_markup=_topup_balance_inline_kb(),
+    )
+    return {"ok": True}
+
+charge_ref_id = uuid4().hex
+charged = False
+try:
+    charge_photosession_generation(int(user_id), ref_id=charge_ref_id)
+    charged = True
+except Exception as e:
+    await tg_send_message(chat_id, f"Не удалось списать токен: {e}", reply_markup=_main_menu_for(user_id))
+    return {"ok": True}
+
             # Placeholder + fake progress (только для генерации изображений)
             placeholder = _make_blur_placeholder(photo_bytes)
             token = _dl_init_slot(chat_id, user_id)
@@ -6371,6 +6402,12 @@ async def webhook(secret: str, request: Request):
                         pass
 
             except Exception as e:
+                if charged:
+                    try:
+                        refund_photosession_generation(int(user_id), ref_id=charge_ref_id, error=str(e))
+                    except Exception:
+                        pass
+
                 stop.set()
                 if prog_task:
                     try:
