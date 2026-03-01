@@ -42,12 +42,14 @@ from app.routers.kling3 import router as kling3_router
 from app.routers.admin_top import router as admin_top_router
 from app.routers.prompts import router as prompts_router
 from app.routers.prompts_admin import router as prompts_admin_router
+from app.routers.songwriter import router as songwriter_router
 app.include_router(leads_router, prefix="/api/leads", tags=["leads"])
 app.include_router(kling3_router, prefix="/api/kling3", tags=["kling3"])
 app.include_router(admin_top_router, prefix="/api/admin", tags=["admin"])
 app.include_router(prompts_router, prefix="/api/prompts", tags=["prompts"])
 app.include_router(prompts_admin_router, prefix="/api/prompts_admin", tags=["prompts_admin"])
 app.include_router(tts_router)
+app.include_router(songwriter_router)
 
 APP_VERSION = "v7-suno-callback-dedup-fix"
 try:
