@@ -15,13 +15,35 @@ TG_FILE = f"https://api.telegram.org/file/bot{BOT_TOKEN}" if BOT_TOKEN else None
 # --- Concurrency inside ONE worker instance (scale instances on Render too) ---
 MAX_CONCURRENCY = int(os.getenv("GEN_WORKER_CONCURRENCY", "5"))
 
+# progress behavior (Telegram edits)
+PROGRESS_STEP_SEC = float(os.getenv("PHOTOSESSION_PROGRESS_STEP_SEC", "3"))
+PROGRESS_SEQUENCE = os.getenv("PHOTOSESSION_PROGRESS_SEQ", "10,25,45,65,85,95").strip()
 
-async def tg_send_message(chat_id: int, text: str) -> None:
+
+async def tg_send_message(chat_id: int, text: str) -> Optional[int]:
+    """Send a message and return Telegram message_id (or None)."""
     if not TG_API:
         print("TELEGRAM_BOT_TOKEN not set; cannot send message")
+        return None
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        r = await client.post(f"{TG_API}/sendMessage", json={"chat_id": chat_id, "text": text})
+        try:
+            j = r.json()
+            if j.get("ok"):
+                return int((j.get("result") or {}).get("message_id") or 0) or None
+        except Exception:
+            pass
+    return None
+
+
+async def tg_edit_message_text(chat_id: int, message_id: int, text: str) -> None:
+    if not TG_API:
         return
     async with httpx.AsyncClient(timeout=20.0) as client:
-        await client.post(f"{TG_API}/sendMessage", json={"chat_id": chat_id, "text": text})
+        await client.post(
+            f"{TG_API}/editMessageText",
+            json={"chat_id": chat_id, "message_id": int(message_id), "text": text},
+        )
 
 
 async def tg_send_photo_bytes(chat_id: int, photo_bytes: bytes, *, caption: Optional[str] = None) -> None:
@@ -59,6 +81,21 @@ async def tg_file_url_by_id(file_id: str) -> str:
     return f"{TG_FILE}/{file_path}"
 
 
+def _parse_progress_seq() -> list[int]:
+    seq: list[int] = []
+    for part in (PROGRESS_SEQUENCE or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            v = int(part)
+            if 1 <= v <= 99:
+                seq.append(v)
+        except Exception:
+            pass
+    return seq or [10, 25, 45, 65, 85, 95]
+
+
 async def handle_job(job: Dict[str, Any]) -> None:
     """
     Реальные типы job добавляем по одному. Сейчас делаем: type="photosession".
@@ -92,7 +129,30 @@ async def handle_job(job: Dict[str, Any]) -> None:
         if not prompt:
             raise RuntimeError("photosession job missing prompt")
 
-        await tg_send_message(chat_id, "⏳ Нейро‑фотосессия: генерация началась…")
+        # progress message (edits)
+        msg_id = await tg_send_message(chat_id, "⏳ Нейро‑фотосессия: начинаю обработку…")
+
+        stop = asyncio.Event()
+        prog_task: Optional[asyncio.Task] = None
+
+        async def _progress_loop() -> None:
+            if not msg_id:
+                return
+            seq = _parse_progress_seq()
+            i = 0
+            while not stop.is_set():
+                pct = seq[min(i, len(seq) - 1)]
+                i += 1
+                try:
+                    await tg_edit_message_text(chat_id, msg_id, f"⏳ Нейро‑фотосессия: обработка… {pct}%")
+                except Exception:
+                    pass
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=PROGRESS_STEP_SEC)
+                except asyncio.TimeoutError:
+                    continue
+
+        prog_task = asyncio.create_task(_progress_loop())
 
         try:
             # ModelArk in your setup expects JSON body with image URLs.
@@ -108,6 +168,19 @@ async def handle_job(job: Dict[str, Any]) -> None:
                 source_image_url=source_url,
             )
 
+            stop.set()
+            if prog_task:
+                try:
+                    await prog_task
+                except Exception:
+                    pass
+
+            if msg_id:
+                try:
+                    await tg_edit_message_text(chat_id, msg_id, "✅ Нейро‑фотосессия: готово.")
+                except Exception:
+                    pass
+
             await tg_send_photo_bytes(chat_id, out_bytes, caption="✅ Готово")
             return
 
@@ -115,7 +188,13 @@ async def handle_job(job: Dict[str, Any]) -> None:
             err = str(e)[:800]
             print("photosession failed:", err)
 
-            # refund if billing is enabled and ref_id present
+            stop.set()
+            if prog_task:
+                try:
+                    await prog_task
+                except Exception:
+                    pass
+
             if charge_ref_id:
                 try:
                     from billing_db import refund_photosession_generation
@@ -123,6 +202,12 @@ async def handle_job(job: Dict[str, Any]) -> None:
                 except Exception as re_err:
                     print("refund failed:", re_err)
 
+            if msg_id:
+                try:
+                    await tg_edit_message_text(chat_id, msg_id, f"❌ Ошибка нейро‑фотосессии.\n{err}")
+                    return
+                except Exception:
+                    pass
             await tg_send_message(chat_id, f"❌ Ошибка нейро‑фотосессии.\n{err}")
             return
 
