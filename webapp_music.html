@@ -384,7 +384,7 @@
             ✨ Придумать текст песни (GPT)
           </button>
         </div>
-        <div class="hint" style="margin-top:8px">
+        <div data-songwriter-hint="1" style="display:none;" class="hint" style="margin-top:8px">
           Откроется мини‑чат. Ответь на вопросы — и я соберу черновик текста. Потом можно вставить его в «Текст» и доработать.
         </div>
 
@@ -696,6 +696,9 @@ function refreshSongwriterOpenButtons(){
   const show = (ai === "suno" && mode === "lyrics");
   document.querySelectorAll('[data-open-songwriter="1"]').forEach((b) => {
     b.style.display = show ? "" : "none";
+  });
+  document.querySelectorAll(\'[data-songwriter-hint="1"]\').forEach((el) => {
+    el.style.display = show ? "" : "none";
   });
 }
  // idea | lyrics
