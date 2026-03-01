@@ -378,6 +378,16 @@
       <div id="ideaBlock">
         <label for="desc">Описание идеи (коротко)</label>
         <textarea id="desc" placeholder="Жанр, настроение, тема, язык, референсы. Пример: Calm russian pop song about love, female vocal, catchy chorus"></textarea>
+
+        <div class="seg" style="margin-top:10px">
+          <button id="btnOpenSongwriterIdea" data-open-songwriter="1" class="segbtn" type="button" style="flex:1 1 100%;">
+            ✨ Придумать текст песни (GPT)
+          </button>
+        </div>
+        <div class="hint" style="margin-top:8px">
+          Откроется мини‑чат. Ответь на вопросы — и я соберу черновик текста. Потом можно вставить его в «Текст» и доработать.
+        </div>
+
         <div class="hint">Этот режим проще: ты даёшь идею — ИИ сам придумает структуру и слова.</div>
       </div>
 
@@ -387,6 +397,16 @@
 ...
 [Chorus]
 ..."></textarea>
+
+        <div class="seg" style="margin-top:10px">
+          <button id="btnOpenSongwriterLyrics" data-open-songwriter="1" class="segbtn" type="button" style="flex:1 1 100%;">
+            ✨ Придумать текст песни (GPT)
+          </button>
+        </div>
+        <div class="hint" style="margin-top:8px">
+          Откроется мини‑чат. Ответь на вопросы — и я соберу черновик текста. Потом можно вставить его в «Текст» и доработать.
+        </div>
+
         <div class="hint">
           Этот режим даёт больше контроля: ты сам задаёшь куплеты/припевы.
           <br/><b>Лучше пометки писать по-английски</b>: <code class="inline">[Verse]</code>, <code class="inline">[Chorus]</code>, <code class="inline">[Bridge]</code>.
@@ -506,6 +526,41 @@
     </div>
   </div>
 
+
+  <!-- Songwriter (GPT) modal -->
+  <div class="modal-backdrop" id="songwriterBackdrop" aria-hidden="true">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="Помощник по тексту песни">
+      <div class="modal-header">
+        <b>✨ Помощник: текст песни (GPT)</b>
+        <button class="icon-btn" id="btnCloseSongwriter" type="button">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="muted">
+          Здесь мини‑чат: отвечай на вопросы, проси варианты, правки, рифмы. Когда будет готово — нажми «Вставить в поле».
+        </div>
+
+        <div class="box" style="margin-top:12px;">
+          <div id="songwriterMsgs" style="max-height:320px; overflow:auto; padding:10px; border-radius:14px; background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.12);"></div>
+
+          <div style="margin-top:10px; display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
+            <textarea id="songwriterInput" placeholder="Напиши ответ или запрос (например: 'припев более цепляющий', 'сделай второй куплет', 'рифмуй на ...')" style="flex:1 1 220px; min-height:84px;"></textarea>
+            <button id="btnSongwriterSend" class="btn" type="button" style="flex:0 0 auto;">Отправить</button>
+          </div>
+
+          <div class="seg" style="margin-top:10px">
+            <button id="btnSongwriterInsert" class="segbtn" type="button" style="flex:1 1 180px;">📌 Вставить в поле текста</button>
+            <button id="btnSongwriterReset" class="segbtn" type="button" style="flex:1 1 180px;">🔄 Сбросить диалог</button>
+          </div>
+
+          <div class="hint" style="margin-top:8px">
+            Подсказка: сразу укажи жанр/настроение/язык/кому песня/ключевые слова. Если нужен формат — попроси: <code class="inline">[Verse]</code> / <code class="inline">[Chorus]</code> / <code class="inline">[Bridge]</code>.
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+
   <script>
     // -----------------------------
     // Telegram init (устойчивый)
@@ -587,6 +642,16 @@ function setAI(v){
       localStorage.setItem("music_ai", v);
 
       const isSuno = (v === "suno");
+  // GPT Songwriter: для Udio скрываем кнопку "Вставить" (у Udio нет режима "Текст")
+  const _btnInsert = document.getElementById("btnSongwriterInsert");
+  if (_btnInsert){
+    if (v === "udio"){
+      _btnInsert.style.display = "none";
+    } else {
+      _btnInsert.style.display = "";
+    }
+  }
+
       aiSuno.classList.toggle('active', isSuno);
       aiUdio.classList.toggle('active', !isSuno);
       aiSuno.setAttribute('aria-selected', isSuno ? 'true' : 'false');
@@ -612,6 +677,7 @@ function setAI(v){
         tabLyrics.classList.remove('hidden');
         aiNote.style.display = "none";
       }
+      refreshSongwriterOpenButtons();
       forceReflow();
       requestAnimationFrame(forceReflow);
     }
@@ -623,7 +689,16 @@ function setAI(v){
     // -----------------------------
     // Tabs
     // -----------------------------
-    let mode = "idea"; // idea | lyrics
+    let mode = "idea";
+
+// Показываем кнопку GPT-текстовика только когда выбран Suno И режим "Текст"
+function refreshSongwriterOpenButtons(){
+  const show = (ai === "suno" && mode === "lyrics");
+  document.querySelectorAll('[data-open-songwriter="1"]').forEach((b) => {
+    b.style.display = show ? "" : "none";
+  });
+}
+ // idea | lyrics
     const tabIdea = document.getElementById('tabIdea');
     const tabLyrics = document.getElementById('tabLyrics');
     const ideaBlock = document.getElementById('ideaBlock');
@@ -638,6 +713,7 @@ function setAI(v){
       tabLyrics.setAttribute('aria-selected', !isIdea ? 'true' : 'false');
       ideaBlock.style.display = isIdea ? 'block' : 'none';
       lyricsBlock.style.display = isIdea ? 'none' : 'block';
+      refreshSongwriterOpenButtons();
       try { document.body.offsetHeight; } catch(e) {}
       requestAnimationFrame(() => { try { document.body.offsetHeight; } catch(e) {} });
     }
@@ -781,6 +857,216 @@ function setAI(v){
       okCopied.style.display = "none";
       closeGuide();
     });
-  </script>
+  
+    // -----------------------------
+    // Songwriter (GPT) modal logic
+    // -----------------------------
+    const songwriterBackdrop = document.getElementById('songwriterBackdrop');
+    const btnCloseSongwriter = document.getElementById('btnCloseSongwriter');
+    const songwriterMsgs = document.getElementById('songwriterMsgs');
+    const songwriterInput = document.getElementById('songwriterInput');
+    const btnSongwriterSend = document.getElementById('btnSongwriterSend');
+    const btnSongwriterInsert = document.getElementById('btnSongwriterInsert');
+    const btnSongwriterReset = document.getElementById('btnSongwriterReset');
+
+    // history for API: [{role:"user|assistant", content:"..."}]
+    let songwriterHistory = [];
+
+    function _escapeHtml(s){
+      return (s || "")
+        .replaceAll("&","&amp;")
+        .replaceAll("<","&lt;")
+        .replaceAll(">","&gt;")
+        .replaceAll('"',"&quot;")
+        .replaceAll("'","&#039;");
+    }
+
+    function _appendMsg(role, text){
+      const wrap = document.createElement('div');
+      wrap.style.margin = '8px 0';
+      wrap.style.display = 'flex';
+      wrap.style.justifyContent = (role === 'user') ? 'flex-end' : 'flex-start';
+
+      const bubble = document.createElement('div');
+      bubble.style.maxWidth = '92%';
+      bubble.style.padding = '10px 10px';
+      bubble.style.borderRadius = '14px';
+      bubble.style.border = '1px solid rgba(255,255,255,.12)';
+      bubble.style.whiteSpace = 'pre-wrap';
+      bubble.style.lineHeight = '1.35';
+      bubble.style.background = (role === 'user')
+        ? 'linear-gradient(90deg, rgba(58,168,255,.25), rgba(110,231,255,.12))'
+        : 'rgba(255,255,255,.06)';
+
+      bubble.innerHTML = _escapeHtml(text);
+
+      wrap.appendChild(bubble);
+      songwriterMsgs.appendChild(wrap);
+      songwriterMsgs.scrollTop = songwriterMsgs.scrollHeight;
+    }
+
+    function _seedIfEmpty(){
+      if (songwriterHistory.length === 0 && songwriterMsgs.childElementCount === 0){
+        const seed =
+          "Привет! Давай быстро соберём вводные.\n" +
+          "1) Жанр/стиль? 2) Настроение? 3) Язык? 4) Кому/о чём песня?\n" +
+          "Можешь ответить одним сообщением.";
+        _appendMsg('assistant', seed);
+        songwriterHistory.push({role:'assistant', content: seed});
+      }
+    }
+
+    function openSongwriter(){
+      songwriterBackdrop.style.display = 'flex';
+      songwriterBackdrop.setAttribute('aria-hidden', 'false');
+      document.body.style.overflow = 'hidden';
+      _seedIfEmpty();
+      setTimeout(() => { try { songwriterInput.focus(); } catch(e){} }, 80);
+    }
+
+    function closeSongwriter(){
+      songwriterBackdrop.style.display = 'none';
+      songwriterBackdrop.setAttribute('aria-hidden', 'true');
+      document.body.style.overflow = '';
+    }
+
+    // bind open buttons (both idea + lyrics)
+    document.querySelectorAll('[data-open-songwriter="1"]').forEach(btn => {
+      btn.addEventListener('click', openSongwriter);
+    });
+
+    btnCloseSongwriter.addEventListener('click', closeSongwriter);
+    songwriterBackdrop.addEventListener('click', (e) => {
+      if (e.target === songwriterBackdrop) closeSongwriter();
+    });
+
+    // close on ESC (desktop)
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && songwriterBackdrop.style.display === 'flex') closeSongwriter();
+    });
+
+    function _currentContext(){
+      const title = document.getElementById('title').value.trim();
+      const tags = (tagsEl.value || "").trim();
+      const make_instrumental = document.getElementById('instr').checked;
+
+      return {
+        language: null,
+        genre: tags || null,
+        mood: null,
+        references: (title ? `Название/тема: ${title}` : null) + (make_instrumental ? " | Инструментал (без вокала)" : "")
+      };
+    }
+
+    async function _callSongwriterApi(text){
+      const ctx = _currentContext();
+      const payload = {
+        text: text,
+        history: songwriterHistory,
+        language: ctx.language,
+        genre: ctx.genre,
+        mood: ctx.mood,
+        references: ctx.references
+      };
+
+      const resp = await fetch("/api/songwriter_lyrics", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+
+      if (!resp.ok){
+        const t = await resp.text();
+        throw new Error(`HTTP ${resp.status}: ${t}`);
+      }
+      return await resp.json();
+    }
+
+    function _setSongwriterBusy(isBusy){
+      btnSongwriterSend.disabled = !!isBusy;
+      btnSongwriterInsert.disabled = !!isBusy;
+      btnSongwriterReset.disabled = !!isBusy;
+      btnSongwriterSend.textContent = isBusy ? "..." : "Отправить";
+    }
+
+    async function sendSongwriter(){
+      const text = (songwriterInput.value || "").trim();
+      if (!text) return;
+
+      songwriterInput.value = "";
+      _appendMsg('user', text);
+      songwriterHistory.push({role:'user', content:text});
+
+      _setSongwriterBusy(true);
+      try{
+        const data = await _callSongwriterApi(text);
+        const ans = (data && data.answer) ? String(data.answer) : "Пустой ответ";
+        _appendMsg('assistant', ans);
+        songwriterHistory.push({role:'assistant', content: ans});
+      }catch(err){
+        const msg = "Ошибка при запросе к GPT. Проверь соединение/сервер.\n" + String(err);
+        _appendMsg('assistant', msg);
+        songwriterHistory.push({role:'assistant', content: msg});
+      }finally{
+        _setSongwriterBusy(false);
+      }
+    }
+
+    btnSongwriterSend.addEventListener('click', sendSongwriter);
+    songwriterInput.addEventListener('keydown', (e) => {
+      // Ctrl+Enter to send (desktop)
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)){
+        e.preventDefault();
+        sendSongwriter();
+      }
+    });
+
+    function _getLastAssistantText(){
+      for (let i = songwriterHistory.length - 1; i >= 0; i--){
+        const m = songwriterHistory[i];
+        if (m && m.role === 'assistant' && m.content) return String(m.content);
+      }
+      return "";
+    }
+
+    // UX decision: GPT generates lyrics; insert switches to "Текст" mode and fills #lyrics
+    btnSongwriterInsert.addEventListener('click', () => {
+  if (ai === "udio"){
+    _appendMsg('assistant', "Для Udio режим 'Текст' недоступен — используй отправку результата в описании (Идея) или переключись на Suno.");
+    return;
+  }
+
+      const last = _getLastAssistantText().trim();
+      if (!last){
+        _appendMsg('assistant', "Пока нечего вставлять. Сначала получи текст от GPT 🙂");
+        return;
+      }
+      try { setMode("lyrics"); } catch(e) {}
+      const lyr = document.getElementById('lyrics');
+      if (lyr){
+        if (lyr.value && lyr.value.trim()){
+          lyr.value = (lyr.value.trim() + "\n\n" + last).trim();
+        } else {
+          lyr.value = last;
+        }
+        try { lyr.scrollTop = 0; } catch(e){}
+        try { lyr.focus(); } catch(e){}
+      }
+      closeSongwriter();
+    });
+
+    btnSongwriterReset.addEventListener('click', () => {
+      songwriterHistory = [];
+      songwriterMsgs.innerHTML = "";
+      const seed =
+        "Ок, начнём заново. Ответь:\n" +
+        "1) жанр/стиль 2) настроение 3) язык 4) тема/кому песня.\n" +
+        "Можно одним сообщением.";
+      _appendMsg('assistant', seed);
+      songwriterHistory.push({role:'assistant', content: seed});
+      try { songwriterInput.focus(); } catch(e){}
+    });
+
+</script>
 </body>
 </html>
