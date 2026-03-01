@@ -49,17 +49,14 @@ async def tg_get_file_path(file_id: str) -> Optional[str]:
         return (j.get("result") or {}).get("file_path")
 
 
-async def tg_download_file_bytes_by_id(file_id: str) -> bytes:
-    """Download file bytes by Telegram file_id"""
-    if not TG_API or not TG_FILE:
+async def tg_file_url_by_id(file_id: str) -> str:
+    """Build a downloadable Telegram file URL from file_id (for ModelArk JSON mode)."""
+    if not TG_FILE:
         raise RuntimeError("TELEGRAM_BOT_TOKEN not set")
     file_path = await tg_get_file_path(file_id)
     if not file_path:
         raise RuntimeError("Telegram getFile returned no file_path")
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        r = await client.get(f"{TG_FILE}/{file_path}")
-        r.raise_for_status()
-        return r.content
+    return f"{TG_FILE}/{file_path}"
 
 
 async def handle_job(job: Dict[str, Any]) -> None:
@@ -81,7 +78,7 @@ async def handle_job(job: Dict[str, Any]) -> None:
 
     print("JOB:", json.dumps(job, ensure_ascii=False))
 
-    # --- NEW: PHOTOSESSION ---
+    # --- PHOTOSESSION ---
     if job_type == "photosession":
         if not chat_id or not user_id:
             raise RuntimeError("photosession job missing chat_id/user_id")
@@ -98,20 +95,19 @@ async def handle_job(job: Dict[str, Any]) -> None:
         await tg_send_message(chat_id, "⏳ Нейро‑фотосессия: генерация началась…")
 
         try:
-            # 1) download source photo
-            photo_bytes = await tg_download_file_bytes_by_id(photo_file_id)
+            # ModelArk in your setup expects JSON body with image URLs.
+            source_url = await tg_file_url_by_id(photo_file_id)
 
-            # 2) run the SAME generator as in main.py
-            #    (ark_edit_image is defined in main.py in this project)
+            # ark_edit_image is defined in main.py
             from main import ark_edit_image  # local import to keep startup light
 
             out_bytes = await ark_edit_image(
-                source_image_bytes=photo_bytes,
+                source_image_bytes=b"",  # unused when source_image_url is provided
                 prompt=prompt,
                 size=size,
+                source_image_url=source_url,
             )
 
-            # 3) send result
             await tg_send_photo_bytes(chat_id, out_bytes, caption="✅ Готово")
             return
 
@@ -123,7 +119,6 @@ async def handle_job(job: Dict[str, Any]) -> None:
             if charge_ref_id:
                 try:
                     from billing_db import refund_photosession_generation
-
                     refund_photosession_generation(user_id, ref_id=charge_ref_id, error=err)
                 except Exception as re_err:
                     print("refund failed:", re_err)
