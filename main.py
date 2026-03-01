@@ -6395,7 +6395,7 @@ async def webhook(secret: str, request: Request):
 
             await tg_send_message(
                 chat_id,
-                "✅ Поставил нейро-фотосессию в очередь. Как будет готово — пришлю результат.",
+                "✅ Запрос принят. Начинаю обработку — пришлю результат, как будет готово.",
                 reply_markup=_main_menu_for(user_id),
             )
             st["photosession"] = {"step": "need_photo", "photo_bytes": None}
