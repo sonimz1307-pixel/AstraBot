@@ -6368,73 +6368,36 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(chat_id, f"Не удалось списать токен: {e}", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
-            # Placeholder + fake progress (только для генерации изображений)
-            placeholder = _make_blur_placeholder(photo_bytes)
-            token = _dl_init_slot(chat_id, user_id)
-            msg_id = await tg_send_photo_bytes_return_message_id(chat_id, placeholder, caption="Генерация фотосессии…", reply_markup=_dl_keyboard(token))
-            stop = asyncio.Event()
-            prog_task = None
-            if msg_id is not None:
-                prog_task = asyncio.create_task(_progress_caption_updater(chat_id, msg_id, "Генерация фотосессии…", stop))
-            else:
-                await tg_send_chat_action(chat_id, "upload_photo")
-
-            _sent_via_edit = False
+            # QUEUE: тяжёлую генерацию делаем в воркере
+            job_id = uuid4().hex
             try:
-                _busy_start(int(user_id), "Seedream фотосессия")
-                photo_file_id = ps.get("photo_file_id")
-                source_url = None
-                if photo_file_id:
-                    file_path = await tg_get_file_path(photo_file_id)
-                    source_url = f"{TELEGRAM_FILE_BASE}/{file_path}"
-
-                out_bytes = await ark_edit_image(
-                    source_image_bytes=photo_bytes,
-                    prompt=prompt,
-                    size=ARK_SIZE_DEFAULT,
-                    mask_png_bytes=None,
-                    source_image_url=source_url,
-                )
-
-                _dl_set_bytes(chat_id, user_id, token, out_bytes)
-
-                stop.set()
-                if prog_task:
-                    try:
-                        await prog_task
-                    except Exception:
-                        pass
-
-                if msg_id is not None:
-                    try:
-                        await tg_edit_message_media_photo(chat_id, msg_id, out_bytes, caption="Готово.", reply_markup=_dl_keyboard(token))
-                        _sent_via_edit = True
-                    except Exception:
-                        pass
-
+                await enqueue_job({
+                    "job_id": job_id,
+                    "type": "photosession",
+                    "chat_id": int(chat_id),
+                    "user_id": int(user_id),
+                    "photo_file_id": (ps.get("photo_file_id") or ""),
+                    "prompt": prompt,
+                    "size": ARK_SIZE_DEFAULT,
+                    "charge_ref_id": charge_ref_id,
+                })
             except Exception as e:
-                if charged:
-                    try:
-                        refund_photosession_generation(int(user_id), ref_id=charge_ref_id, error=str(e))
-                    except Exception:
-                        pass
+                # если не смогли поставить в очередь — вернём токен
+                try:
+                    refund_photosession_generation(int(user_id), ref_id=charge_ref_id, error=f"enqueue_failed: {e}")
+                except Exception:
+                    pass
 
-                stop.set()
-                if prog_task:
-                    try:
-                        await prog_task
-                    except Exception:
-                        pass
-                await tg_send_message(chat_id, f"Ошибка нейро-фотосессии: {e}", reply_markup=_main_menu_for(user_id))
-                # остаёмся в режиме, чтобы пользователь мог попробовать ещё раз
+                await tg_send_message(chat_id, f"❌ Не удалось поставить в очередь: {e}", reply_markup=_main_menu_for(user_id))
                 st["photosession"] = {"step": "need_photo", "photo_bytes": None}
                 st["ts"] = _now()
-                _busy_end(int(user_id))
                 return {"ok": True}
 
-            if not _sent_via_edit:
-                await tg_send_photo_bytes(chat_id, out_bytes, caption="Готово. Если нужно ещё — пришли новое фото.")
-            _busy_end(int(user_id))  # ← ДОБАВИТЬ ЭТУ СТРОКУ
+            await tg_send_message(
+                chat_id,
+                "✅ Поставил нейро-фотосессию в очередь. Как будет готово — пришлю результат.",
+                reply_markup=_main_menu_for(user_id),
+            )
             st["photosession"] = {"step": "need_photo", "photo_bytes": None}
             st["ts"] = _now()
             return {"ok": True}
