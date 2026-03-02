@@ -5166,9 +5166,12 @@ async def webhook(secret: str, request: Request):
         _set_mode(chat_id, user_id, "nano_banana_pro")
         await tg_send_message(
             chat_id,
-            "🍌 Nano Banana Pro — продвинутое редактирование (платно).\n\n"
+            "🍌 Nano Banana Pro — продвинутое редактирование 2 Токена.\n\n"
+            "Вариант A (фото→фото):\n"
             "1) Пришли фото.\n"
             "2) Затем напиши что изменить.\n\n"
+            "Вариант B (текст→картинка):\n"
+            "• Просто пришли текст без фото — сгенерирую картинку.\n\n"
             "Стоимость: 2 токена за результат.",
             reply_markup=_photo_future_menu_keyboard(),
         )
@@ -5968,33 +5971,126 @@ async def webhook(secret: str, request: Request):
                 st["ts"] = _now()
                 return {"ok": True}
 
-        # NANO BANANA PRO (PiAPI): после фото — пользователь пишет инструкцию
+        # NANO BANANA PRO (PiAPI): текст→картинка ИЛИ фото→фото
         if st.get("mode") == "nano_banana_pro":
             nbp = st.get("nano_banana_pro") or {}
             step = (nbp.get("step") or "need_photo")
+
+            nav_text = (incoming_text or "").strip()
+
+            # -----------------------------
+            # CASE 1: TEXT → IMAGE
+            # -----------------------------
             if step != "need_prompt":
+
+                # если это кнопка/навигация — не считаем промптом
+                if (not nav_text) or _is_nav_or_menu_text(nav_text):
+                    await tg_send_message(
+                        chat_id,
+                        "🍌 Nano Banana Pro:\n"
+                        "• Пришли фото (для редактирования)\n"
+                        "ИЛИ\n"
+                        "• Пришли текст (для генерации картинки без фото).",
+                        reply_markup=_photo_future_menu_keyboard(),
+                    )
+                    return {"ok": True}
+
+                user_prompt = nav_text
+                cost = 2
+
+                try:
+                    add_tokens(user_id, -cost, reason="nano_banana_pro")
+                except TypeError:
+                    add_tokens(user_id, -int(cost), reason="nano_banana_pro")
+
+                token = _dl_init_slot(chat_id, user_id)
+
                 await tg_send_message(
                     chat_id,
-                    "В режиме Nano Banana Pro сначала пришли фото.",
+                    "🍌 Nano Banana Pro (текст→картинка) — генерирую…",
+                    reply_markup=_photo_future_menu_keyboard(),
+                )
+
+                try:
+                    _busy_start(int(user_id), "Nano Banana Pro T2I")
+
+                    out_bytes, ext = await handle_nano_banana_pro(
+                        None,  # <-- ВАЖНО: нет исходного фото
+                        user_prompt,
+                        resolution=(nbp.get("resolution") or "2K"),
+                        output_format="png",
+                        aspect_ratio=(nbp.get("aspect_ratio") or "16:9"),
+                        safety_level=(nbp.get("safety_level") or "high"),
+                        telegram_file_id=None,
+                    )
+
+                    _dl_set_bytes(chat_id, user_id, token, out_bytes)
+
+                    await tg_send_photo_bytes(
+                        chat_id,
+                        out_bytes,
+                        caption="🍌 Nano Banana Pro — готово",
+                        reply_markup=_dl_keyboard(token),
+                    )
+
+                except Exception as e:
+                    try:
+                        try:
+                            add_tokens(user_id, cost, reason="nano_banana_pro_refund")
+                        except TypeError:
+                            add_tokens(user_id, int(cost), reason="nano_banana_pro_refund")
+                    except Exception:
+                        pass
+
+                    await tg_send_message(
+                        chat_id,
+                        f"Ошибка Nano Banana Pro: {e}",
+                        reply_markup=_photo_future_menu_keyboard(),
+                    )
+                    _busy_end(int(user_id))
+                    return {"ok": True}
+
+                _busy_end(int(user_id))
+
+                st["nano_banana_pro"] = {
+                    "step": "need_photo",
+                    "photo_bytes": None,
+                    "resolution": (nbp.get("resolution") or "2K"),
+                }
+                st["ts"] = _now()
+                return {"ok": True}
+
+            # -----------------------------
+            # CASE 2: IMAGE → IMAGE
+            # -----------------------------
+            src_bytes = nbp.get("photo_bytes")
+
+            if not src_bytes:
+                st["nano_banana_pro"] = {
+                    "step": "need_photo",
+                    "photo_bytes": None,
+                    "resolution": (nbp.get("resolution") or "2K"),
+                }
+                st["ts"] = _now()
+
+                await tg_send_message(
+                    chat_id,
+                    "Фото не найдено. Пришли фото ещё раз.",
                     reply_markup=_photo_future_menu_keyboard(),
                 )
                 return {"ok": True}
 
-            src_bytes = nbp.get("photo_bytes")
-            if not src_bytes:
-                st["nano_banana_pro"] = {"step": "need_photo", "photo_bytes": None, "resolution": nbp.get("resolution") or "2K"}
-                st["ts"] = _now()
-                await tg_send_message(chat_id, "Фото не найдено. Пришли фото ещё раз.", reply_markup=_photo_future_menu_keyboard())
-                return {"ok": True}
-
-            user_prompt = (incoming_text or "").strip()
+            user_prompt = nav_text
             if not user_prompt:
-                await tg_send_message(chat_id, "Напиши текстом, что изменить (фон/стиль/детали).", reply_markup=_photo_future_menu_keyboard())
+                await tg_send_message(
+                    chat_id,
+                    "Напиши текстом, что изменить (фон/стиль/детали).",
+                    reply_markup=_photo_future_menu_keyboard(),
+                )
                 return {"ok": True}
 
-            cost = 2  # Nano Banana Pro: 2 токена за генерацию
+            cost = 2
 
-            # списываем токены ДО запроса
             try:
                 add_tokens(user_id, -cost, reason="nano_banana_pro")
             except TypeError:
@@ -6002,6 +6098,7 @@ async def webhook(secret: str, request: Request):
 
             placeholder = _make_blur_placeholder(src_bytes)
             token = _dl_init_slot(chat_id, user_id)
+
             msg_id = await tg_send_photo_bytes_return_message_id(
                 chat_id,
                 placeholder,
@@ -6012,12 +6109,13 @@ async def webhook(secret: str, request: Request):
             try:
                 _busy_start(int(user_id), "Nano Banana Pro")
 
-                # ВАЖНО: функция будет в nano_banana_pro_piapi.py (следующий шаг добавим файл)
                 out_bytes, ext = await handle_nano_banana_pro(
                     src_bytes,
                     user_prompt,
                     resolution=(nbp.get("resolution") or "2K"),
                     output_format="jpg",
+                    aspect_ratio=(nbp.get("aspect_ratio") or "16:9"),
+                    safety_level=(nbp.get("safety_level") or "high"),
                     telegram_file_id=nbp.get("photo_file_id"),
                 )
 
@@ -6048,7 +6146,6 @@ async def webhook(secret: str, request: Request):
                     )
 
             except Exception as e:
-                # возврат токенов при ошибке
                 try:
                     try:
                         add_tokens(user_id, cost, reason="nano_banana_pro_refund")
@@ -6066,8 +6163,14 @@ async def webhook(secret: str, request: Request):
                 return {"ok": True}
 
             _busy_end(int(user_id))
-            st["nano_banana_pro"] = {"step": "need_photo", "photo_bytes": None, "resolution": (nbp.get("resolution") or "2K")}
+
+            st["nano_banana_pro"] = {
+                "step": "need_photo",
+                "photo_bytes": None,
+                "resolution": (nbp.get("resolution") or "2K"),
+            }
             st["ts"] = _now()
+
             return {"ok": True}
             
         # TWO PHOTOS: после 2 фото — пользователь пишет инструкцию
