@@ -5166,12 +5166,9 @@ async def webhook(secret: str, request: Request):
         _set_mode(chat_id, user_id, "nano_banana_pro")
         await tg_send_message(
             chat_id,
-            "🍌 Nano Banana Pro — PRO режим (платно).\n\n"
-            "Вариант 1 — Редактирование фото (Image→Image):\n"
+            "🍌 Nano Banana Pro — продвинутое редактирование (платно).\n\n"
             "1) Пришли фото.\n"
-            "2) Затем напиши, что изменить (фон/стиль/детали).\n\n"
-            "Вариант 2 — Создать картинку по тексту (Text→Image):\n"
-            "• Просто напиши, что сгенерировать (без фото).\n\n"
+            "2) Затем напиши что изменить.\n\n"
             "Стоимость: 2 токена за результат.",
             reply_markup=_photo_future_menu_keyboard(),
         )
@@ -5971,99 +5968,10 @@ async def webhook(secret: str, request: Request):
                 st["ts"] = _now()
                 return {"ok": True}
 
-        # NANO BANANA PRO (PiAPI/ModelArk): 
-# - Image→Image: пришли фото, затем текст-инструкцию
-# - Text→Image: если в этом режиме пришёл ТОЛЬКО текст (без фото) — генерируем картинку по тексту через ModelArk (Seedream)
+        # NANO BANANA PRO (PiAPI): после фото — пользователь пишет инструкцию
         if st.get("mode") == "nano_banana_pro":
             nbp = st.get("nano_banana_pro") or {}
             step = (nbp.get("step") or "need_photo")
-
-            # --- Text → Image (когда фото ещё не было) ---
-            if step == "need_photo":
-                user_prompt = (incoming_text or "").strip()
-                if not user_prompt:
-                    await tg_send_message(
-                        chat_id,
-                        "Напиши текстом, что сгенерировать (стиль/сцена/детали).",
-                        reply_markup=_photo_future_menu_keyboard(),
-                    )
-                    return {"ok": True}
-
-                cost = 2  # Nano Banana Pro: 2 токена за генерацию
-
-                # списываем токены ДО запроса
-                try:
-                    add_tokens(user_id, -cost, reason="nano_banana_pro_t2i")
-                except TypeError:
-                    add_tokens(user_id, -int(cost), reason="nano_banana_pro_t2i")
-
-                placeholder = _make_blur_placeholder(None)
-                token = _dl_init_slot(chat_id, user_id)
-                msg_id = await tg_send_photo_bytes_return_message_id(
-                    chat_id,
-                    placeholder,
-                    caption="🍌 Nano Banana Pro — генерирую…",
-                    reply_markup=_dl_keyboard(token),
-                )
-
-                try:
-                    _busy_start(int(user_id), "Nano Banana Pro")
-
-                    out_bytes = await ark_text_to_image(
-                        user_prompt,
-                        size=(nbp.get("resolution") or "2K"),
-                    )
-
-                    _dl_set_bytes(chat_id, user_id, token, out_bytes)
-
-                    if msg_id is not None:
-                        try:
-                            await tg_edit_message_media_photo(
-                                chat_id,
-                                msg_id,
-                                out_bytes,
-                                caption="🍌 Nano Banana Pro — готово",
-                                reply_markup=_dl_keyboard(token),
-                            )
-                        except Exception:
-                            await tg_send_photo_bytes(
-                                chat_id,
-                                out_bytes,
-                                caption="🍌 Nano Banana Pro — готово",
-                                reply_markup=_dl_keyboard(token),
-                            )
-                    else:
-                        await tg_send_photo_bytes(
-                            chat_id,
-                            out_bytes,
-                            caption="🍌 Nano Banana Pro — готово",
-                            reply_markup=_dl_keyboard(token),
-                        )
-
-                except Exception as e:
-                    # возврат токенов при ошибке
-                    try:
-                        try:
-                            add_tokens(user_id, cost, reason="nano_banana_pro_t2i_refund")
-                        except TypeError:
-                            add_tokens(user_id, int(cost), reason="nano_banana_pro_t2i_refund")
-                    except Exception:
-                        pass
-
-                    await tg_send_message(
-                        chat_id,
-                        f"Ошибка Nano Banana Pro (Text→Image): {e}",
-                        reply_markup=_photo_future_menu_keyboard(),
-                    )
-                    _busy_end(int(user_id))
-                    return {"ok": True}
-
-                _busy_end(int(user_id))
-                st["nano_banana_pro"] = {"step": "need_photo", "photo_bytes": None, "resolution": (nbp.get("resolution") or "2K")}
-                st["ts"] = _now()
-                return {"ok": True}
-
-            # --- Image → Image (после фото — пользователь пишет инструкцию) ---
             if step != "need_prompt":
                 await tg_send_message(
                     chat_id,
@@ -6161,8 +6069,6 @@ async def webhook(secret: str, request: Request):
             st["nano_banana_pro"] = {"step": "need_photo", "photo_bytes": None, "resolution": (nbp.get("resolution") or "2K")}
             st["ts"] = _now()
             return {"ok": True}
-
-
             
         # TWO PHOTOS: после 2 фото — пользователь пишет инструкцию
         if st.get("mode") == "two_photos":
