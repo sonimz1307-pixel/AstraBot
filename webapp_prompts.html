@@ -130,14 +130,23 @@ body:before{
   background: linear-gradient(135deg, rgba(255,176,0,.26), rgba(255,90,0,.12));
   box-shadow: 0 16px 30px rgba(255,120,0,.12);
 }
-.heroFooter{margin-top:14px;display:flex;gap:10px;flex-wrap:wrap}
+.heroFooter{
+  margin-top:14px;
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:10px;
+}
+@media (max-width:520px){
+  .heroFooter{grid-template-columns:1fr;}
+}
 .chip{
-  display:inline-flex;align-items:center;gap:8px;
-  padding:9px 10px;border-radius:16px;
+  display:flex;align-items:center;gap:8px;
+  padding:10px 12px;border-radius:16px;
   border:1px solid rgba(255,255,255,.10);
   background: rgba(255,255,255,.02);
   color:rgba(255,255,255,.86);
   font-weight:850;font-size:12px;
+  min-height:44px;
 }
 .chip span{color:var(--muted2);font-weight:800}
 .icon{
