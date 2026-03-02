@@ -6096,14 +6096,11 @@ async def webhook(secret: str, request: Request):
             except TypeError:
                 add_tokens(user_id, -int(cost), reason="nano_banana_pro")
 
-            placeholder = _make_blur_placeholder(src_bytes)
             token = _dl_init_slot(chat_id, user_id)
 
-            msg_id = await tg_send_photo_bytes_return_message_id(
+            await tg_send_message(
                 chat_id,
-                placeholder,
-                caption="🍌 Nano Banana Pro — генерирую…",
-                reply_markup=_dl_keyboard(token),
+                "🍌 Nano Banana Pro — генерирую…",
             )
 
             try:
@@ -6121,29 +6118,13 @@ async def webhook(secret: str, request: Request):
 
                 _dl_set_bytes(chat_id, user_id, token, out_bytes)
 
-                if msg_id is not None:
-                    try:
-                        await tg_edit_message_media_photo(
-                            chat_id,
-                            msg_id,
-                            out_bytes,
-                            caption="🍌 Nano Banana Pro — готово",
-                            reply_markup=_dl_keyboard(token),
-                        )
-                    except Exception:
-                        await tg_send_photo_bytes(
-                            chat_id,
-                            out_bytes,
-                            caption="🍌 Nano Banana Pro — готово",
-                            reply_markup=_dl_keyboard(token),
-                        )
-                else:
-                    await tg_send_photo_bytes(
-                        chat_id,
-                        out_bytes,
-                        caption="🍌 Nano Banana Pro — готово",
-                        reply_markup=_dl_keyboard(token),
-                    )
+                # Результат — НОВЫМ сообщением (исходник пользователя останется выше в чате)
+                await tg_send_photo_bytes(
+                    chat_id,
+                    out_bytes,
+                    caption="🍌 Nano Banana Pro — готово",
+                    reply_markup=_dl_keyboard(token),
+                )
 
             except Exception as e:
                 try:
