@@ -66,14 +66,21 @@ def _looks_like_capacity_error(msg: str) -> bool:
 
 
 async def handle_nano_banana_pro(
-    source_image_bytes: bytes,
+    source_image_bytes: Optional[bytes],
     prompt: str,
     *,
     resolution: str = "2K",
     output_format: str = "jpg",
+    aspect_ratio: str = "16:9",
+    safety_level: str = "high",
     telegram_file_id: Optional[str] = None,
 ) -> Tuple[bytes, str]:
-    """Main entrypoint used by main.py: returns (out_bytes, ext)."""
+    """Main entrypoint used by main.py: returns (out_bytes, ext).
+
+    Supports:
+    - Image→Image (when source_image_bytes provided)
+    - Text→Image  (when source_image_bytes is None)
+    """
 
     # If primary is replicate, just use it.
     if _PRIMARY == "replicate":
@@ -82,6 +89,8 @@ async def handle_nano_banana_pro(
             prompt,
             resolution=resolution,
             output_format=output_format,
+            aspect_ratio=aspect_ratio,
+            safety_level=safety_level,
             telegram_file_id=telegram_file_id,
         )
 
@@ -92,6 +101,8 @@ async def handle_nano_banana_pro(
             prompt,
             resolution=resolution,
             output_format=output_format,
+            aspect_ratio=aspect_ratio,
+            safety_level=safety_level,
             telegram_file_id=telegram_file_id,
         )
 
@@ -101,6 +112,8 @@ async def handle_nano_banana_pro(
             prompt,
             resolution=resolution,
             output_format=output_format,
+            aspect_ratio=aspect_ratio,
+            safety_level=safety_level,
             telegram_file_id=telegram_file_id,
         )
     except NanoBananaProError as e:
@@ -113,9 +126,11 @@ async def handle_nano_banana_pro(
                 prompt,
                 resolution=resolution,
                 output_format=output_format,
+                aspect_ratio=aspect_ratio,
+                safety_level=safety_level,
                 telegram_file_id=telegram_file_id,
             )
         raise
-    except Exception as e:
+    except Exception:
         # any unexpected piapi errors -> do NOT blindly failover (could be a bug)
         raise
