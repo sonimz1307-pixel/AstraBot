@@ -71,7 +71,7 @@ async def handle_nano_banana_pro(
     *,
     resolution: str = "2K",
     output_format: str = "jpg",
-    aspect_ratio: str = "16:9",
+    aspect_ratio: Optional[str] = None,
     safety_level: str = "high",
     telegram_file_id: Optional[str] = None,
 ) -> Tuple[bytes, str]:
@@ -81,6 +81,17 @@ async def handle_nano_banana_pro(
     - Image→Image (when source_image_bytes provided)
     - Text→Image  (when source_image_bytes is None)
     """
+
+    # Auto aspect ratio handling:
+    # - Image→Image: preserve the input image ratio (avoid forcing 16:9)
+    # - Text→Image: if not specified, default to 16:9
+    if source_image_bytes:
+        if not aspect_ratio:
+            aspect_ratio = "match_input_image"
+    else:
+        if not aspect_ratio:
+            aspect_ratio = "16:9"
+
 
     # If primary is replicate, just use it.
     if _PRIMARY == "replicate":
