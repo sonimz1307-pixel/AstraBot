@@ -6019,7 +6019,7 @@ async def webhook(secret: str, request: Request):
                         user_prompt,
                         resolution=(nbp.get("resolution") or "2K"),
                         output_format="png",
-                        aspect_ratio=(nbp.get("aspect_ratio") or "16:9"),
+                        aspect_ratio=None,
                         safety_level=(nbp.get("safety_level") or "high"),
                         telegram_file_id=None,
                     )
