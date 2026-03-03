@@ -308,3 +308,41 @@ def refund_photosession_generation(telegram_user_id: int, *, ref_id: str, error:
         ref_id=ref_id,
         meta={"error": (error or "")[:300]},
     )
+
+
+
+# === WELCOME BONUS ===
+
+WELCOME_BONUS_DEFAULT = int(os.getenv('WELCOME_BONUS_TOKENS', '3'))
+
+
+def grant_welcome_bonus_once(telegram_user_id: int, *, amount: int | None = None) -> bool:
+    """Начисляет приветственный бонус ТОЛЬКО 1 раз (использовать только в /start).
+
+    Реализация "как лучше": вся логика (проверка + ledger + баланс) выполняется атомарно в БД
+    через RPC-функцию public.grant_welcome_bonus.
+
+    Возвращает True если бонус начислен сейчас, иначе False.
+    """
+    _require_client()
+    uid = int(telegram_user_id)
+    ensure_user_row(uid)
+
+    amt = int(WELCOME_BONUS_DEFAULT if amount is None else amount)
+    if amt <= 0:
+        return False
+
+    r = supabase.rpc('grant_welcome_bonus', {'p_telegram_user_id': uid, 'p_amount': amt}).execute()
+    data = getattr(r, 'data', None)
+    # supabase-py может вернуть bool или список/словарь
+    if isinstance(data, bool):
+        return data
+    if isinstance(data, list) and data:
+        # иногда возвращает [{'grant_welcome_bonus': true}]
+        v = data[0]
+        if isinstance(v, dict):
+            return bool(next(iter(v.values())))
+        return bool(v)
+    if isinstance(data, dict):
+        return bool(next(iter(data.values())))
+    return False
