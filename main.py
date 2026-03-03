@@ -26,6 +26,7 @@ from billing_db import (
     add_tokens,
     charge_photosession_generation,
     refund_photosession_generation,
+    grant_welcome_bonus_once,
 )
 from nano_banana import run_nano_banana
 from nano_banana_pro import handle_nano_banana_pro
@@ -4514,6 +4515,12 @@ async def webhook(secret: str, request: Request):
     # /start
     if incoming_text.startswith("/start"):
         _set_mode(chat_id, user_id, "chat")
+        # 🎁 Welcome bonus: 3 tokens only once (after first /start)
+        try:
+            granted = grant_welcome_bonus_once(user_id)
+        except Exception:
+            granted = False
+
         await tg_send_message(
             chat_id,
             "Привет!\n"
