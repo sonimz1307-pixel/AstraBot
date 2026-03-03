@@ -91,13 +91,14 @@ def _normalize_resolution(resolution: str) -> str:
 
 
 async def handle_nano_banana_pro_replicate(
-    source_image_bytes: bytes,
+    source_image_bytes: Optional[bytes],
     prompt: str,
     *,
     resolution: str = DEFAULT_RESOLUTION,
     output_format: str = "jpg",
     telegram_file_id: Optional[str] = None,
     aspect_ratio: str = "1:1",
+    safety_level: str = "high",
 ) -> Tuple[bytes, str]:
     """Returns (out_bytes, ext) using Replicate."""
 
@@ -106,21 +107,34 @@ async def handle_nano_banana_pro_replicate(
         raise NanoBananaProReplicateError("Empty prompt")
 
     res = _normalize_resolution(resolution)
-
-    # Build a URL Replicate can fetch. Prefer Telegram file URL.
-    if telegram_file_id:
-        src_url = await _tg_file_url(telegram_file_id)
+    # Map our generic safety_level (high/medium/low) to Replicate input values.
+    # Keep a safe default if an unknown value is passed.
+    _s = (safety_level or "").strip().lower()
+    if _s in ("medium", "med", "normal"):
+        safety_filter_level = "block_medium_and_above"
     else:
-        src_url = _data_url_from_bytes(source_image_bytes)
+        # "high" and anything unknown -> strictest common option
+        safety_filter_level = "block_only_high"
+    # Allow env override if you want to force a specific Replicate setting.
+    safety_filter_level = os.getenv("REPLICATE_NANO_SAFETY", safety_filter_level)
+
+
+    # Build an input image list Replicate can fetch.
+    # For pure Text→Image we send an empty list.
+    image_input: list[str] = []
+    if telegram_file_id:
+        image_input = [await _tg_file_url(telegram_file_id)]
+    elif source_image_bytes:
+        image_input = [_data_url_from_bytes(source_image_bytes)]
 
     # Replicate input schema (per your snippet)
     inp: Dict[str, Any] = {
         "prompt": p,
         "resolution": res,
-        "image_input": [src_url],
+        "image_input": image_input,
         "aspect_ratio": aspect_ratio,
         "output_format": "png" if output_format.lower() == "png" else "jpg",
-        "safety_filter_level": os.getenv("REPLICATE_NANO_SAFETY", "block_only_high"),
+        "safety_filter_level": safety_filter_level,
         "allow_fallback_model": False,
     }
 
