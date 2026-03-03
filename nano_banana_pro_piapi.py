@@ -316,7 +316,7 @@ async def handle_nano_banana_pro(
     if not task_id:
         raise NanoBananaProError(f"PiAPI didn't return task_id: {json.dumps(created, ensure_ascii=False)[:800]}")
 
-    done = await _piapi_wait(task_id, timeout_s=240, poll_s=5)
+    done = await _piapi_wait(task_id, timeout_s=600, poll_s=5)
 
     if _status_lower(done) == "failed":
         err = (((done.get("data") or {}) if isinstance(done, dict) else {}) or {}).get("error") or {}
