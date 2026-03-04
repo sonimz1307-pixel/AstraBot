@@ -239,7 +239,17 @@ async def handle_job(job: Dict[str, Any]) -> None:
                 except Exception:
                     pass
 
-            await tg_send_photo_bytes(chat_id, out_bytes, caption="✅ Готово")
+            token = await register_dl2k_slot(chat_id, user_id, out_bytes)
+
+            reply_markup = None
+            if token:
+                reply_markup = {
+                    "inline_keyboard": [[
+                        {"text": "⬇️ Скачать оригинал 2К", "callback_data": f"dl2k:{token}"}
+                    ]]
+                }
+
+            await tg_send_photo_bytes(chat_id, out_bytes, caption="✅ Готово", reply_markup=reply_markup)
             return
 
         except Exception as e:
