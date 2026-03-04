@@ -7,6 +7,9 @@ import httpx
 
 from queue_redis import dequeue_job
 
+from nano_banana_pro import handle_nano_banana_pro
+from billing_db import add_tokens
+
 # --- Telegram ---
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # must be set in Render env
 TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else None
@@ -56,6 +59,19 @@ async def tg_send_photo_bytes(chat_id: int, photo_bytes: bytes, *, caption: Opti
     files = {"photo": ("result.jpg", photo_bytes, "image/jpeg")}
     async with httpx.AsyncClient(timeout=60.0) as client:
         await client.post(f"{TG_API}/sendPhoto", data=data, files=files)
+
+async def tg_send_document_bytes(chat_id: int, doc_bytes: bytes, *, filename: str = "file.jpg", caption: Optional[str] = None) -> None:
+    """Send a document (keeps original quality, unlike photo)."""
+    if not TG_API:
+        print("TELEGRAM_BOT_TOKEN not set; cannot send document")
+        return
+    data = {"chat_id": str(chat_id)}
+    if caption:
+        data["caption"] = caption
+    files = {"document": (filename, doc_bytes)}
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        await client.post(f"{TG_API}/sendDocument", data=data, files=files)
+
 
 
 async def tg_get_file_path(file_id: str) -> Optional[str]:
@@ -210,6 +226,108 @@ async def handle_job(job: Dict[str, Any]) -> None:
                     pass
             await tg_send_message(chat_id, f"❌ Ошибка нейро‑фотосессии.\n{err}")
             return
+    # --- NANO BANANA PRO (queue worker) ---
+    elif job_type == "nano_banana_pro":
+        prompt = str(job.get("prompt") or "").strip()
+        photo_file_id = str(job.get("photo_file_id") or "").strip()
+        resolution = str(job.get("resolution") or "2K").strip()
+        output_format = str(job.get("output_format") or "jpg").strip()
+        aspect_ratio = str(job.get("aspect_ratio") or "").strip() or None
+        safety_level = str(job.get("safety_level") or "high").strip()
+        cost = int(job.get("cost") or 2)
+
+        if not chat_id or not user_id:
+            raise RuntimeError("nano_banana_pro job missing chat_id/user_id")
+        if not prompt:
+            raise RuntimeError("nano_banana_pro job missing prompt")
+
+        # progress message (edits)
+        msg_id = await tg_send_message(chat_id, "⏳ Nano Banana Pro: начинаю обработку…")
+
+        stop = asyncio.Event()
+
+        async def _progress_loop_nano() -> None:
+            if not msg_id:
+                return
+            seq = _parse_progress_seq()
+            i = 0
+            while not stop.is_set():
+                pct = seq[min(i, len(seq) - 1)]
+                i += 1
+                try:
+                    await tg_edit_message_text(chat_id, msg_id, f"⏳ Nano Banana Pro: обработка… {pct}%")
+                except Exception:
+                    pass
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=PROGRESS_STEP_SEC)
+                except asyncio.TimeoutError:
+                    continue
+
+        prog_task = asyncio.create_task(_progress_loop_nano())
+
+        try:
+            # If photo_file_id is present -> Image→Image. Else -> Text→Image.
+            if photo_file_id:
+                out_bytes, ext = await handle_nano_banana_pro(
+                    b"x",  # non-empty -> i2i branch
+                    prompt,
+                    resolution=resolution,
+                    output_format=output_format,
+                    aspect_ratio=aspect_ratio,
+                    safety_level=safety_level,
+                    telegram_file_id=photo_file_id,
+                )
+            else:
+                out_bytes, ext = await handle_nano_banana_pro(
+                    None,
+                    prompt,
+                    resolution=resolution,
+                    output_format=output_format,
+                    aspect_ratio=aspect_ratio,
+                    safety_level=safety_level,
+                )
+
+            stop.set()
+            try:
+                await prog_task
+            except Exception:
+                pass
+
+            if msg_id:
+                try:
+                    await tg_edit_message_text(chat_id, msg_id, "✅ Nano Banana Pro: готово. Отправляю файл…")
+                except Exception:
+                    pass
+
+            filename = f"nano_banana_pro.{ext or 'jpg'}"
+            await tg_send_document_bytes(chat_id, out_bytes, filename=filename, caption="🍌 Nano Banana Pro — готово")
+            return
+
+        except Exception as e:
+            err = str(e)[:800]
+            print("nano_banana_pro failed:", err)
+
+            stop.set()
+            try:
+                await prog_task
+            except Exception:
+                pass
+
+            # refund: return tokens back (simple add_tokens)
+            try:
+                add_tokens(user_id, cost, reason="nano_banana_pro_refund")
+            except Exception:
+                pass
+
+            if msg_id:
+                try:
+                    await tg_edit_message_text(chat_id, msg_id, f"❌ Ошибка Nano Banana Pro.\n{err}")
+                except Exception:
+                    pass
+            await tg_send_message(chat_id, f"❌ Ошибка Nano Banana Pro.\n{err}")
+            return
+
+
 
     # --- Default (qtest etc.) ---
     if chat_id:
