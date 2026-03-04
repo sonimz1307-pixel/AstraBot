@@ -29,7 +29,6 @@ from billing_db import (
     grant_welcome_bonus_once,
 )
 from nano_banana import run_nano_banana
-from nano_banana_pro import handle_nano_banana_pro
 from yookassa_flow import create_yookassa_payment
 from kling3_pricing import calculate_kling3_price
 from kling3_telegram_handler import handle_kling3_wait_prompt
@@ -6010,37 +6009,29 @@ async def webhook(secret: str, request: Request):
                 except TypeError:
                     add_tokens(user_id, -int(cost), reason="nano_banana_pro")
 
-                token = _dl_init_slot(chat_id, user_id)
-
                 await tg_send_message(
                     chat_id,
-                    "🍌 Nano Banana Pro (текст→картинка) — генерирую…",
+                    "🍌 Nano Banana Pro (текст→картинка) — запускаю…",
                     reply_markup=_photo_future_menu_keyboard(),
                 )
 
+                job_id = uuid4().hex
                 try:
-                    _busy_start(int(user_id), "Nano Banana Pro T2I")
-
-                    out_bytes, ext = await handle_nano_banana_pro(
-                        None,  # <-- ВАЖНО: нет исходного фото
-                        user_prompt,
-                        resolution=(nbp.get("resolution") or "2K"),
-                        output_format="png",
-                        aspect_ratio=(nbp.get("aspect_ratio") or "match_input_image"),
-                        safety_level=(nbp.get("safety_level") or "high"),
-                        telegram_file_id=None,
-                    )
-
-                    _dl_set_bytes(chat_id, user_id, token, out_bytes)
-
-                    await tg_send_photo_bytes(
-                        chat_id,
-                        out_bytes,
-                        caption="🍌 Nano Banana Pro — готово",
-                        reply_markup=_dl_keyboard(token),
-                    )
-
+                    await enqueue_job({
+                        "job_id": job_id,
+                        "type": "nano_banana_pro",
+                        "chat_id": int(chat_id),
+                        "user_id": int(user_id),
+                        "prompt": user_prompt,
+                        "photo_file_id": "",
+                        "resolution": (nbp.get("resolution") or "2K"),
+                        "aspect_ratio": (nbp.get("aspect_ratio") or "match_input_image"),
+                        "safety_level": (nbp.get("safety_level") or "high"),
+                        "output_format": "png",
+                        "cost": cost,
+                    })
                 except Exception as e:
+                    # возврат токенов при ошибке постановки в очередь
                     try:
                         try:
                             add_tokens(user_id, cost, reason="nano_banana_pro_refund")
@@ -6048,16 +6039,19 @@ async def webhook(secret: str, request: Request):
                             add_tokens(user_id, int(cost), reason="nano_banana_pro_refund")
                     except Exception:
                         pass
-
                     await tg_send_message(
                         chat_id,
-                        f"Ошибка Nano Banana Pro: {e}",
+                        f"❌ Не удалось запустить Nano Banana Pro: {e}",
                         reply_markup=_photo_future_menu_keyboard(),
                     )
-                    _busy_end(int(user_id))
                     return {"ok": True}
 
-                _busy_end(int(user_id))
+                await tg_send_message(
+                    chat_id,
+                    "⏳ Nano Banana Pro запущен (в очереди). Как будет готово — пришлю результат.",
+                    reply_markup=_photo_future_menu_keyboard(),
+                )
+
 
                 st["nano_banana_pro"] = {
                     "step": "need_photo",
@@ -6103,37 +6097,28 @@ async def webhook(secret: str, request: Request):
             except TypeError:
                 add_tokens(user_id, -int(cost), reason="nano_banana_pro")
 
-            token = _dl_init_slot(chat_id, user_id)
-
             await tg_send_message(
                 chat_id,
-                "🍌 Nano Banana Pro — генерирую…",
+                "🍌 Nano Banana Pro — запускаю…",
             )
 
+            job_id = uuid4().hex
             try:
-                _busy_start(int(user_id), "Nano Banana Pro")
-
-                out_bytes, ext = await handle_nano_banana_pro(
-                    src_bytes,
-                    user_prompt,
-                    resolution=(nbp.get("resolution") or "2K"),
-                    output_format="jpg",
-                    aspect_ratio=(nbp.get("aspect_ratio") or "match_input_image"),
-                    safety_level=(nbp.get("safety_level") or "high"),
-                    telegram_file_id=nbp.get("photo_file_id"),
-                )
-
-                _dl_set_bytes(chat_id, user_id, token, out_bytes)
-
-                # Результат — НОВЫМ сообщением (исходник пользователя останется выше в чате)
-                await tg_send_photo_bytes(
-                    chat_id,
-                    out_bytes,
-                    caption="🍌 Nano Banana Pro — готово",
-                    reply_markup=_dl_keyboard(token),
-                )
-
+                await enqueue_job({
+                    "job_id": job_id,
+                    "type": "nano_banana_pro",
+                    "chat_id": int(chat_id),
+                    "user_id": int(user_id),
+                    "prompt": user_prompt,
+                    "photo_file_id": (nbp.get("photo_file_id") or ""),
+                    "resolution": (nbp.get("resolution") or "2K"),
+                    "aspect_ratio": (nbp.get("aspect_ratio") or "match_input_image"),
+                    "safety_level": (nbp.get("safety_level") or "high"),
+                    "output_format": "jpg",
+                    "cost": cost,
+                })
             except Exception as e:
+                # возврат токенов при ошибке постановки в очередь
                 try:
                     try:
                         add_tokens(user_id, cost, reason="nano_banana_pro_refund")
@@ -6141,16 +6126,19 @@ async def webhook(secret: str, request: Request):
                         add_tokens(user_id, int(cost), reason="nano_banana_pro_refund")
                 except Exception:
                     pass
-
                 await tg_send_message(
                     chat_id,
-                    f"Ошибка Nano Banana Pro: {e}",
+                    f"❌ Не удалось запустить Nano Banana Pro: {e}",
                     reply_markup=_photo_future_menu_keyboard(),
                 )
-                _busy_end(int(user_id))
                 return {"ok": True}
 
-            _busy_end(int(user_id))
+            await tg_send_message(
+                chat_id,
+                "⏳ Nano Banana Pro запущен (в очереди). Как будет готово — пришлю результат.",
+                reply_markup=_photo_future_menu_keyboard(),
+            )
+
 
             st["nano_banana_pro"] = {
                 "step": "need_photo",
