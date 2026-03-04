@@ -589,6 +589,7 @@ def _yookassa_enabled() -> bool:
 PIAPI_API_KEY = os.getenv("PIAPI_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change_me")
+INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "").strip()
 
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 SUNOAPI_ENABLED = os.getenv("SUNOAPI_ENABLED", "true").lower() in ("1","true","yes","y","on")
@@ -3121,6 +3122,35 @@ async def yookassa_webhook(request: Request):
                 pass
 
     return {"ok": True}
+
+@app.post("/internal/dl2k")
+async def internal_dl2k(request: Request):
+    """
+    Worker -> main: register bytes for inline callback "dl2k:<token>".
+    Stores bytes in in-memory per-user state (same mechanism as _dl_* helpers).
+    Security: set INTERNAL_API_KEY env and send it as header X-Internal-Key from the worker.
+    """
+    if INTERNAL_API_KEY:
+        key = (request.headers.get("x-internal-key") or "").strip()
+        if key != INTERNAL_API_KEY:
+            return Response(status_code=401)
+
+    payload = await request.json()
+    chat_id = int(payload.get("chat_id") or 0)
+    user_id = int(payload.get("user_id") or 0)
+    bytes_b64 = (payload.get("bytes_b64") or "").strip()
+
+    if not (chat_id and user_id and bytes_b64):
+        return Response(status_code=400)
+
+    try:
+        img_bytes = base64.b64decode(bytes_b64)
+    except Exception:
+        return Response(status_code=400)
+
+    token = _dl_init_slot(chat_id, user_id)
+    _dl_set_bytes(chat_id, user_id, token, img_bytes)
+    return {"ok": True, "token": token}
 
 @app.post("/webhook/{secret}")
 async def webhook(secret: str, request: Request):
