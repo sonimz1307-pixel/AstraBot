@@ -6076,13 +6076,6 @@ async def webhook(secret: str, request: Request):
                     )
                     return {"ok": True}
 
-                await tg_send_message(
-                    chat_id,
-                    "⏳ Nano Banana Pro запущен (в очереди). Как будет готово — пришлю результат.",
-                    reply_markup=_photo_future_menu_keyboard(),
-                )
-
-
                 st["nano_banana_pro"] = {
                     "step": "need_photo",
                     "photo_bytes": None,
@@ -6162,13 +6155,6 @@ async def webhook(secret: str, request: Request):
                     reply_markup=_photo_future_menu_keyboard(),
                 )
                 return {"ok": True}
-
-            await tg_send_message(
-                chat_id,
-                "⏳ Nano Banana Pro запущен (в очереди). Как будет готово — пришлю результат.",
-                reply_markup=_photo_future_menu_keyboard(),
-            )
-
 
             st["nano_banana_pro"] = {
                 "step": "need_photo",
