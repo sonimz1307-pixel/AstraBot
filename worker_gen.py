@@ -1,6 +1,7 @@
 import os
 import asyncio
 import json
+import base64
 from typing import Any, Dict, Optional
 
 import httpx
@@ -14,6 +15,10 @@ from billing_db import add_tokens
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # must be set in Render env
 TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else None
 TG_FILE = f"https://api.telegram.org/file/bot{BOT_TOKEN}" if BOT_TOKEN else None
+
+# --- Main service (for download button "Скачать оригинал 2К") ---
+MAIN_INTERNAL_URL = os.getenv("MAIN_INTERNAL_URL", "").strip().rstrip("/")
+INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "").strip()
 
 # --- Concurrency inside ONE worker instance (scale instances on Render too) ---
 MAX_CONCURRENCY = int(os.getenv("GEN_WORKER_CONCURRENCY", "5"))
@@ -49,13 +54,48 @@ async def tg_edit_message_text(chat_id: int, message_id: int, text: str) -> None
         )
 
 
-async def tg_send_photo_bytes(chat_id: int, photo_bytes: bytes, *, caption: Optional[str] = None) -> None:
+
+async def register_dl2k_slot(chat_id: int, user_id: int, image_bytes: bytes) -> Optional[str]:
+    """
+    Ask main service to register a temporary download slot for inline callback button.
+    Returns token for callback_data "dl2k:<token>".
+    """
+    if not MAIN_INTERNAL_URL:
+        return None
+    if not image_bytes:
+        return None
+
+    headers = {}
+    if INTERNAL_API_KEY:
+        headers["x-internal-key"] = INTERNAL_API_KEY
+
+    payload = {
+        "chat_id": int(chat_id),
+        "user_id": int(user_id),
+        "bytes_b64": base64.b64encode(image_bytes).decode("ascii"),
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.post(f"{MAIN_INTERNAL_URL}/internal/dl2k", json=payload, headers=headers)
+            if r.status_code != 200:
+                return None
+            j = r.json()
+            if j.get("ok") and j.get("token"):
+                return str(j["token"])
+    except Exception:
+        return None
+    return None
+
+async def tg_send_photo_bytes(chat_id: int, photo_bytes: bytes, *, caption: Optional[str] = None, reply_markup: Optional[dict] = None) -> None:
     if not TG_API:
         print("TELEGRAM_BOT_TOKEN not set; cannot send photo")
         return
     data = {"chat_id": str(chat_id)}
     if caption:
         data["caption"] = caption
+    if reply_markup is not None:
+        data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
     files = {"photo": ("result.jpg", photo_bytes, "image/jpeg")}
     async with httpx.AsyncClient(timeout=60.0) as client:
         await client.post(f"{TG_API}/sendPhoto", data=data, files=files)
@@ -68,6 +108,8 @@ async def tg_send_document_bytes(chat_id: int, doc_bytes: bytes, *, filename: st
     data = {"chat_id": str(chat_id)}
     if caption:
         data["caption"] = caption
+    if reply_markup is not None:
+        data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
     files = {"document": (filename, doc_bytes)}
     async with httpx.AsyncClient(timeout=60.0) as client:
         await client.post(f"{TG_API}/sendDocument", data=data, files=files)
@@ -299,8 +341,19 @@ async def handle_job(job: Dict[str, Any]) -> None:
                 except Exception:
                     pass
 
-            filename = f"nano_banana_pro.{ext or 'jpg'}"
-            await tg_send_document_bytes(chat_id, out_bytes, filename=filename, caption="🍌 Nano Banana Pro — готово")
+            # Register download slot in main to keep old UX: photo + inline button "Скачать оригинал 2К"
+            token = await register_dl2k_slot(chat_id, user_id, out_bytes)
+            reply_markup = None
+            if token:
+                reply_markup = {"inline_keyboard": [[{"text": "⬇️ Скачать оригинал 2К", "callback_data": f"dl2k:{token}"}]]}
+
+            if msg_id:
+                try:
+                    await tg_edit_message_text(chat_id, msg_id, "✅ Nano Banana Pro: готово")
+                except Exception:
+                    pass
+
+            await tg_send_photo_bytes(chat_id, out_bytes, caption="🍌 Nano Banana Pro — готово", reply_markup=reply_markup)
             return
 
         except Exception as e:
