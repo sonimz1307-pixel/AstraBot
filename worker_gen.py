@@ -100,7 +100,7 @@ async def tg_send_photo_bytes(chat_id: int, photo_bytes: bytes, *, caption: Opti
     async with httpx.AsyncClient(timeout=60.0) as client:
         await client.post(f"{TG_API}/sendPhoto", data=data, files=files)
 
-async def tg_send_document_bytes(chat_id: int, doc_bytes: bytes, *, filename: str = "file.jpg", caption: Optional[str] = None) -> None:
+async def tg_send_document_bytes(chat_id: int, doc_bytes: bytes, *, filename: str = "file.jpg", caption: Optional[str] = None, reply_markup: Optional[dict] = None) -> None:
     """Send a document (keeps original quality, unlike photo)."""
     if not TG_API:
         print("TELEGRAM_BOT_TOKEN not set; cannot send document")
@@ -137,6 +137,126 @@ async def tg_file_url_by_id(file_id: str) -> str:
     if not file_path:
         raise RuntimeError("Telegram getFile returned no file_path")
     return f"{TG_FILE}/{file_path}"
+
+
+# --- PiAPI Seedance 2.0 (Text/Image -> Video) ---
+PIAPI_BASE_URL = os.getenv("PIAPI_BASE_URL", "https://api.piapi.ai").strip().rstrip("/")
+PIAPI_API_KEY = os.getenv("PIAPI_API_KEY", "").strip()
+
+SEEDANCE_TIMEOUT_SEC = int(os.getenv("SEEDANCE_TIMEOUT_SEC", "7200"))  # up to 2h (queue may be long)
+SEEDANCE_POLL_SEC = float(os.getenv("SEEDANCE_POLL_SEC", "6"))
+
+
+async def _piapi_seedance_create_task(*, task_type: str, prompt: Optional[str] = None,
+                                     duration: Optional[int] = None,
+                                     aspect_ratio: Optional[str] = None,
+                                     image_urls: Optional[list[str]] = None,
+                                     parent_task_id: Optional[str] = None,
+                                     service_mode: str = "public") -> dict:
+    if not PIAPI_API_KEY:
+        raise RuntimeError("PIAPI_API_KEY not set")
+    if not PIAPI_BASE_URL:
+        raise RuntimeError("PIAPI_BASE_URL not set")
+    body: dict = {"model": "seedance", "task_type": task_type, "input": {}}
+    if prompt is not None:
+        body["input"]["prompt"] = prompt
+    if duration is not None:
+        body["input"]["duration"] = int(duration)
+    if aspect_ratio is not None:
+        body["input"]["aspect_ratio"] = aspect_ratio
+    if image_urls:
+        body["input"]["image_urls"] = image_urls
+    if parent_task_id:
+        body["input"]["parent_task_id"] = parent_task_id
+    body["config"] = {"service_mode": service_mode}
+    headers = {"X-API-Key": PIAPI_API_KEY}
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        r = await client.post(f"{PIAPI_BASE_URL}/api/v1/task", headers=headers, json=body)
+        try:
+            j = r.json()
+        except Exception:
+            j = {}
+        if r.status_code >= 300:
+            raise RuntimeError(f"PiAPI seedance create failed: {r.status_code} {r.text[:600]}")
+        if not isinstance(j, dict):
+            raise RuntimeError("PiAPI seedance create: bad JSON")
+        return j
+
+
+async def _piapi_seedance_get_task(task_id: str) -> dict:
+    if not PIAPI_API_KEY:
+        raise RuntimeError("PIAPI_API_KEY not set")
+    headers = {"X-API-Key": PIAPI_API_KEY}
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        r = await client.get(f"{PIAPI_BASE_URL}/api/v1/task/{task_id}", headers=headers)
+        try:
+            j = r.json()
+        except Exception:
+            j = {}
+        if r.status_code >= 300:
+            raise RuntimeError(f"PiAPI seedance get failed: {r.status_code} {r.text[:600]}")
+        if not isinstance(j, dict):
+            raise RuntimeError("PiAPI seedance get: bad JSON")
+        return j
+
+
+def _seedance_status_lower(resp: dict) -> str:
+    d = (resp.get("data") or {}) if isinstance(resp, dict) else {}
+    return str(d.get("status") or "").lower().strip()
+
+
+def _first_http_url(*vals: Any) -> Optional[str]:
+    for v in vals:
+        if isinstance(v, str) and v.startswith("http"):
+            return v
+    return None
+
+
+def _seedance_extract_output_url(resp: dict) -> Optional[str]:
+    d = (resp.get("data") or {}) if isinstance(resp, dict) else {}
+    out = (d.get("output") or {}) if isinstance(d, dict) else {}
+    if isinstance(out, dict):
+        u = _first_http_url(
+            out.get("video_url"), out.get("videoUrl"),
+            out.get("url"), out.get("mp4_url"), out.get("mp4Url"),
+            out.get("file_url"), out.get("fileUrl"),
+            out.get("image_url"),  # fallback (some gateways misuse this field)
+        )
+        if u:
+            return u
+        urls = out.get("video_urls") or out.get("videoUrls") or out.get("image_urls") or out.get("imageUrls")
+        if isinstance(urls, list):
+            for x in urls:
+                u2 = _first_http_url(x)
+                if u2:
+                    return u2
+    return None
+
+
+async def _piapi_seedance_wait(task_id: str, *, timeout_s: int, poll_s: float) -> dict:
+    t0 = asyncio.get_event_loop().time()
+    last = None
+    while True:
+        last = await _piapi_seedance_get_task(task_id)
+        st = _seedance_status_lower(last)
+        if st in ("completed", "failed"):
+            return last
+        if (asyncio.get_event_loop().time() - t0) > float(timeout_s):
+            raise TimeoutError("Seedance: timeout while waiting")
+        await asyncio.sleep(poll_s)
+
+
+async def tg_send_video_from_url(chat_id: int, video_url: str, caption: str = "") -> None:
+    if not TG_API:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN not set")
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        r = await client.post(f"{TG_API}/sendVideo", json={"chat_id": chat_id, "video": video_url, "caption": caption})
+        # If Telegram rejects URL, fallback to message with link
+        if r.status_code >= 300:
+            try:
+                await tg_send_message(chat_id, f"{caption}\n🎬 {video_url}")
+            except Exception:
+                pass
 
 
 def _parse_progress_seq() -> list[int]:
@@ -391,10 +511,137 @@ async def handle_job(job: Dict[str, Any]) -> None:
             return
 
 
+# --- SEEDANCE 2 (PiAPI) --- 
+    elif job_type == "seedance_video":
+        prompt = str(job.get("prompt") or "").strip()
+        task_type = str(job.get("task_type") or "seedance-2-preview").strip()
+        duration = int(job.get("duration") or 5)
+        aspect_ratio = str(job.get("aspect_ratio") or "16:9").strip()
+        image_file_ids = job.get("image_file_ids") or []
+        parent_task_id = str(job.get("parent_task_id") or "").strip() or None
+        service_mode = str(job.get("service_mode") or "public").strip() or "public"
+
+        charge_tokens = int(job.get("charge_tokens") or 0)
+
+        if not chat_id or not user_id:
+            raise RuntimeError("seedance_video job missing chat_id/user_id")
+        if not parent_task_id and not prompt:
+            raise RuntimeError("seedance_video job missing prompt")
+
+        msg_id = await tg_send_message(chat_id, "⏳ Seedance: отправляю задачу…")
+
+        stop = asyncio.Event()
+
+        async def _progress_loop_seedance() -> None:
+            if not msg_id:
+                return
+            seq = _parse_progress_seq()
+            i = 0
+            while not stop.is_set():
+                pct = seq[min(i, len(seq) - 1)]
+                i += 1
+                try:
+                    await tg_edit_message_text(chat_id, msg_id, f"⏳ Seedance: в очереди/генерация… {pct}%")
+                except Exception:
+                    pass
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=max(2.0, SEEDANCE_POLL_SEC))
+                except asyncio.TimeoutError:
+                    continue
+
+        prog_task = asyncio.create_task(_progress_loop_seedance())
+
+        try:
+            # Convert reference images to public URLs (Telegram getFile -> file URL)
+            image_urls: Optional[list[str]] = None
+            if isinstance(image_file_ids, list) and image_file_ids:
+                image_urls = []
+                for fid in image_file_ids[:9]:
+                    if not isinstance(fid, str) or not fid.strip():
+                        continue
+                    try:
+                        u = await tg_file_url_by_id(fid.strip())
+                        image_urls.append(u)
+                    except Exception as e:
+                        print("Seedance: failed to build image_url:", e)
+
+            created = await _piapi_seedance_create_task(
+                task_type=task_type,
+                prompt=prompt if not parent_task_id else (job.get("prompt") if job.get("prompt") is not None else None),
+                duration=duration if not parent_task_id else (job.get("duration") if job.get("duration") is not None else None),
+                aspect_ratio=aspect_ratio if not parent_task_id else (job.get("aspect_ratio") if job.get("aspect_ratio") is not None else None),
+                image_urls=image_urls,
+                parent_task_id=parent_task_id,
+                service_mode=service_mode,
+            )
+
+            task_id = ((created.get("data") or {}) if isinstance(created, dict) else {}).get("task_id")
+            if not task_id:
+                raise RuntimeError(f"Seedance: PiAPI didn't return task_id: {json.dumps(created, ensure_ascii=False)[:800]}")
+
+            done = await _piapi_seedance_wait(task_id, timeout_s=SEEDANCE_TIMEOUT_SEC, poll_s=SEEDANCE_POLL_SEC)
+
+            stop.set()
+            try:
+                await prog_task
+            except Exception:
+                pass
+
+            st = _seedance_status_lower(done)
+            if st == "failed":
+                err = ((done.get("data") or {}).get("error") or {}) if isinstance(done, dict) else {}
+                msg = ""
+                if isinstance(err, dict):
+                    msg = str(err.get("message") or "")
+                raise RuntimeError(msg or "Seedance task failed")
+
+            url = _seedance_extract_output_url(done)
+            if not url:
+                raise RuntimeError("Seedance completed but no output url")
+
+            if msg_id:
+                try:
+                    await tg_edit_message_text(chat_id, msg_id, "✅ Seedance: готово. Отправляю видео…")
+                except Exception:
+                    pass
+
+            try:
+                await tg_send_video_from_url(chat_id, url, caption="🎬 Seedance видео")
+            except Exception:
+                await tg_send_message(chat_id, f"✅ Seedance готово!\n🎬 {url}")
+
+            return
+
+        except Exception as e:
+            stop.set()
+            try:
+                await prog_task
+            except Exception:
+                pass
+
+            # refund on failure if charged
+            if charge_tokens > 0:
+                try:
+                    add_tokens(user_id, int(charge_tokens), reason="seedance_video_refund", meta={"error": str(e)[:300]})
+                except TypeError:
+                    try:
+                        add_tokens(user_id, int(charge_tokens), reason="seedance_video_refund")
+                    except Exception:
+                        pass
+
+            try:
+                await tg_send_message(chat_id, f"❌ Seedance: ошибка генерации.\n{e}")
+            except Exception:
+                pass
+            return
 
     # --- Default (qtest etc.) ---
-    if chat_id:
-        await tg_send_message(chat_id, f"✅ Воркер получил задачу: {job_type}\njob_id={job.get('job_id')}")
+    else:
+        if chat_id:
+            await tg_send_message(chat_id, f"✅ Воркер получил задачу: {job_type}\njob_id={job.get('job_id')}")
+        return
+
+
 
 
 async def worker_loop() -> None:
