@@ -143,8 +143,8 @@ async def tg_file_url_by_id(file_id: str) -> str:
 PIAPI_BASE_URL = os.getenv("PIAPI_BASE_URL", "https://api.piapi.ai").strip().rstrip("/")
 PIAPI_API_KEY = os.getenv("PIAPI_API_KEY", "").strip()
 
-SEEDANCE_TIMEOUT_SEC = int(os.getenv("SEEDANCE_TIMEOUT_SEC", "7200"))  # up to 2h (queue may be long)
-SEEDANCE_POLL_SEC = float(os.getenv("SEEDANCE_POLL_SEC", "6"))
+SEEDANCE_TIMEOUT_SEC = int(os.getenv("SEEDANCE_TIMEOUT_SEC", "3600"))  # up to 1h (queue may be long)
+SEEDANCE_POLL_SEC = float(os.getenv("SEEDANCE_POLL_SEC", "12"))
 
 
 async def _piapi_seedance_create_task(*, task_type: str, prompt: Optional[str] = None,
