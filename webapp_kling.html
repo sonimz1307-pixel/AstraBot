@@ -378,6 +378,16 @@
           </div>
         </label>
 
+
+        <input id="provider_seedance" type="radio" name="provider" value="seedance">
+        <label for="provider_seedance" aria-label="Seedance 2.0">
+          <img class="pimg" src="/static/img/providers/seedance.png" alt="Seedance">
+          <div class="poverlay"></div>
+          <div class="ptxt">
+            <div class="pname">Seedance</div>
+          </div>
+        </label>
+
         <input id="provider_veo" type="radio" name="provider" value="veo">
         <label for="provider_veo" aria-label="Veo 3">
           <img class="pimg" src="/static/img/providers/veo3.png" alt="Veo 3">
@@ -645,6 +655,53 @@
       </div>
     </div>
 
+
+    <!-- ===================== SEEDANCE BLOCK ===================== -->
+    <div id="seedanceBlock" style="display:none;">
+      <div class="card">
+        <h3>Модель Seedance</h3>
+        <div class="seg" role="radiogroup" aria-label="Модель Seedance">
+          <input id="seed_preview" type="radio" name="seedance_model" value="preview" checked>
+          <label for="seed_preview"><span class="segtitle">Preview</span><span class="segsub">Качество</span></label>
+
+          <input id="seed_fast" type="radio" name="seedance_model" value="fast">
+          <label for="seed_fast"><span class="segtitle">Fast</span><span class="segsub">Быстрее/дешевле</span></label>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Режим</h3>
+        <div class="seg" role="radiogroup" aria-label="Режим Seedance">
+          <input id="seed_flow_text" type="radio" name="seedance_flow" value="text" checked>
+          <label for="seed_flow_text"><span class="segtitle">Text → Video</span><span class="segsub">по промпту</span></label>
+
+          <input id="seed_flow_image" type="radio" name="seedance_flow" value="image">
+          <label for="seed_flow_image"><span class="segtitle">Image → Video</span><span class="segsub">по референсам</span></label>
+        </div>
+        <div class="hint">Для Image → Video: после сохранения пришли 1–9 фото в чат, затем промпт.</div>
+      </div>
+
+      <div class="card">
+        <h3>Длительность</h3>
+        <select id="seedance_duration" aria-label="Длительность Seedance">
+          <option value="5">5 секунд</option>
+          <option value="10">10 секунд</option>
+          <option value="15">15 секунд</option>
+        </select>
+      </div>
+
+      <div class="card">
+        <h3>Формат (соотношение сторон)</h3>
+        <select id="seedance_aspect" aria-label="Формат Seedance">
+          <option value="16:9">16:9</option>
+          <option value="9:16">9:16</option>
+          <option value="4:3">4:3</option>
+          <option value="3:4">3:4</option>
+        </select>
+        <div class="hint">Если используешь референсы, формат референс‑картинки может переопределить этот параметр.</div>
+      </div>
+    </div>
+
     <div class="debug" id="debug"></div>
   </div>
 
@@ -757,13 +814,15 @@
       const provider = getProvider();
       const klingBlock = qs('#klingBlock');
       const veoBlock = qs('#veoBlock');
+      const seedanceBlock = qs('#seedanceBlock');
 
       if (klingBlock) klingBlock.style.display = (provider === 'kling') ? 'block' : 'none';
       if (veoBlock) veoBlock.style.display   = (provider === 'veo')   ? 'block' : 'none';
+      if (seedanceBlock) seedanceBlock.style.display = (provider === 'seedance') ? 'block' : 'none';
 
       // ⚠️ В “красивом” макете бейджей нет — поэтому ничего не трогаем, чтобы не падало.
       const pb = qs('#providerBadge');
-      if (pb) pb.textContent = (provider === 'kling') ? 'Kling' : 'Veo';
+      if (pb) pb.textContent = (provider === 'kling') ? 'Kling' : (provider === 'veo') ? 'Veo' : 'Seedance';
 
       if (provider === 'kling'){
         updateKlingUI();
@@ -781,7 +840,6 @@
 qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () => {
       updateVeoPriceHint();
       setVeoAdvancedEnabled(getVeoModel() === 'pro');
-    updateCostUI();
       updateCostUI();
     }));
 
@@ -833,6 +891,14 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
 
     function calcTokenCost(){
       const provider = getProvider();
+
+      if (provider === 'seedance'){
+        const model = (qs('input[name="seedance_model"]:checked')?.value || 'preview');
+        const seconds = parseInt((qs('#seedance_duration')?.value || "5"), 10);
+        let rate = (model === 'fast') ? 1 : 2;
+        const tokens = rate * seconds;
+        return { known:true, tokens, note:'' };
+      }
 
       // KLING
       if (provider === 'kling'){
@@ -944,6 +1010,21 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
               prefer_multi_shots: getKling3PreferMultiShots()
             };
           }
+
+        } else if (provider === 'seedance'){
+          const seedance_model = (qs('input[name="seedance_model"]:checked')?.value || 'preview');
+          const flow = (qs('input[name="seedance_flow"]:checked')?.value || 'text');
+          const duration = parseInt((qs('#seedance_duration')?.value || "5"), 10);
+          const aspect_ratio = (qs('#seedance_aspect')?.value || "16:9");
+
+          payload = {
+            type: "seedance_settings",
+            provider: "seedance",
+            seedance_model,
+            flow,
+            duration,
+            aspect_ratio
+          };
         } else {
           const veo_model = getVeoModel(); // fast|pro
           const flow = getVeoFlow();       // text|image
