@@ -3885,7 +3885,80 @@ async def webhook(secret: str, request: Request):
 
         
 
-        # ----- WebApp data (Veo settings) -----
+                # ----- WebApp data (Seedance 2 preview settings) -----
+        # Expected: {type:"seedance_settings", provider:"seedance", seedance_model:"preview|fast",
+        # flow:"text|image", duration:5|10|15, aspect_ratio:"16:9|9:16|4:3|3:4"}
+        is_seedance = (
+            (str(payload.get("type") or "").lower().strip() in ("seedance_settings", "seedance2_settings", "seedance_2_settings"))
+            or (str(payload.get("provider") or provider_raw or "").lower().strip() == "seedance")
+            or (str(payload.get("task_type") or payload.get("taskType") or "").lower().strip().startswith("seedance-2-"))
+        ) and (str(payload.get("provider") or provider_raw or "seedance").lower().strip() in ("seedance", "seedance2", "seedance_2"))
+
+        if is_seedance:
+            seedance_model = str(payload.get("seedance_model") or payload.get("model") or payload.get("preset") or "preview").lower().strip()
+            if seedance_model not in ("preview", "fast", "seedance-2-preview", "seedance-2-fast-preview"):
+                seedance_model = "preview"
+            # normalize to task_type
+            if seedance_model in ("seedance-2-fast-preview",):
+                task_type = "seedance-2-fast-preview"
+                seedance_model = "fast"
+            elif seedance_model in ("seedance-2-preview",):
+                task_type = "seedance-2-preview"
+                seedance_model = "preview"
+            else:
+                task_type = "seedance-2-fast-preview" if seedance_model == "fast" else "seedance-2-preview"
+
+            flow = str(payload.get("flow") or payload.get("gen_mode") or payload.get("mode") or "text").lower().strip()
+            if flow not in ("text", "image"):
+                flow = "text"
+
+            try:
+                duration = int(payload.get("duration") or 5)
+            except Exception:
+                duration = 5
+            if duration not in (5, 10, 15):
+                duration = 5
+
+            aspect_ratio = str(payload.get("aspect_ratio") or "16:9").strip()
+            if aspect_ratio not in ("16:9", "9:16", "4:3", "3:4"):
+                aspect_ratio = "16:9"
+
+            st["seedance_settings"] = {
+                "seedance_model": seedance_model,
+                "task_type": task_type,
+                "flow": flow,
+                "duration": duration,
+                "aspect_ratio": aspect_ratio,
+            }
+            st["ts"] = _now()
+
+            if flow == "text":
+                _set_mode(chat_id, user_id, "seedance_t2v")
+                st["seedance_t2v"] = {"step": "need_prompt"}
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    "✅ Настройки Seedance 2.0 сохранены.\n\nТеперь пришли ТЕКСТ (промпт), что должно быть в видео.",
+                    reply_markup=_help_menu_for(user_id),
+                )
+                return {"ok": True}
+            else:
+                _set_mode(chat_id, user_id, "seedance_i2v")
+                st["seedance_i2v"] = {
+                    "step": "need_images",
+                    "image_file_ids": [],
+                    "prompt": None,
+                }
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    "✅ Настройки Seedance 2.0 сохранены.\n\nТеперь пришли 1–9 ФОТО (референсы).\n"
+                    "Когда все фото отправишь — напиши «Готово», и я попрошу промпт.",
+                    reply_markup=_help_menu_for(user_id),
+                )
+                return {"ok": True}
+
+# ----- WebApp data (Veo settings) -----
         # Expected (from our WebApp): {type:"veo_settings", provider:"veo", veo_model:"fast|pro", flow:"text|image",
         # duration, aspect_ratio, generate_audio, resolution, use_last_frame, use_reference_images}
         is_veo = (
@@ -4944,6 +5017,164 @@ async def webhook(secret: str, request: Request):
     if handled:
         return {"ok": True}
 
+    # ---- SEEDANCE 2 (PiAPI) Text/Image → Video: ждём промпт ----
+    if st.get("mode") in ("seedance_t2v", "seedance_i2v") and incoming_text:
+        # Навигация/кнопки меню не считаем промптом
+        if _is_nav_or_menu_text(incoming_text):
+            _set_mode(chat_id, user_id, "chat")
+            st.pop("seedance_t2v", None)
+            st.pop("seedance_i2v", None)
+            st.pop("seedance_settings", None)
+            st["ts"] = _now()
+            sb_clear_user_state(user_id)
+            await tg_send_message(chat_id, "Ок. Вышел из Seedance. Главное меню.", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+
+        # Защита от двойного запуска
+        if _busy_is_active(int(user_id)):
+            kind = _busy_kind(int(user_id)) or "генерация"
+            await tg_send_message(
+                chat_id,
+                f"⏳ Сейчас выполняется: {kind}. Дождись завершения (или /reset).",
+                reply_markup=_help_menu_for(user_id),
+            )
+            return {"ok": True}
+
+        settings = st.get("seedance_settings") or {}
+        task_type = str(settings.get("task_type") or "seedance-2-preview").strip()
+        duration = int(settings.get("duration") or 5)
+        aspect_ratio = str(settings.get("aspect_ratio") or "16:9").strip()
+
+        # Если это i2v, но мы ещё собираем фото — обрабатываем «Готово»
+        if st.get("mode") == "seedance_i2v":
+            si = st.get("seedance_i2v") or {}
+            step = (si.get("step") or "need_images")
+            if step == "need_images":
+                if incoming_text.lower() in ("готово", "готов", "done", "ok", "ок"):
+                    imgs = si.get("image_file_ids") or []
+                    if not imgs:
+                        await tg_send_message(chat_id, "Сначала пришли хотя бы 1 фото (референс).", reply_markup=_help_menu_for(user_id))
+                        return {"ok": True}
+                    si["step"] = "need_prompt"
+                    st["seedance_i2v"] = si
+                    st["ts"] = _now()
+                    await tg_send_message(
+                        chat_id,
+                        "Фото принял ✅ Теперь пришли ТЕКСТ (промпт), что должно происходить в видео.",
+                        reply_markup=_help_menu_for(user_id),
+                    )
+                    return {"ok": True}
+
+                # если пользователь написал что-то другое, пока мы ждём фото — подсказка
+                await tg_send_message(
+                    chat_id,
+                    "Я сейчас жду фото-референсы (1–9).\nОтправь фото или напиши «Готово», когда закончил.",
+                    reply_markup=_help_menu_for(user_id),
+                )
+                return {"ok": True}
+
+        prompt = incoming_text.strip()
+        if not prompt:
+            await tg_send_message(chat_id, "Промпт пустой. Пришли текстом, что должно быть в видео.", reply_markup=_help_menu_for(user_id))
+            return {"ok": True}
+
+        # ---- SEEDANCE BILLING ----
+        # По умолчанию: preview=2 ток/сек, fast=1 ток/сек (можно переопределить env)
+        rate_preview = int(os.getenv("SEEDANCE_TOKENS_PER_SEC_PREVIEW", "2") or 2)
+        rate_fast = int(os.getenv("SEEDANCE_TOKENS_PER_SEC_FAST", "1") or 1)
+        is_fast = ("fast" in task_type)
+        rate = rate_fast if is_fast else rate_preview
+        cost_tokens = int(max(0, rate * int(duration)))
+
+        _busy_start(int(user_id), "Seedance видео")
+        seedance_charged = False
+        try:
+            try:
+                ensure_user_row(user_id)
+                bal = int(get_balance(user_id) or 0)
+            except Exception:
+                bal = 0
+
+            if bal < cost_tokens:
+                await tg_send_message(
+                    chat_id,
+                    f"❌ Недостаточно токенов.\nНужно: {cost_tokens}\nБаланс: {bal}",
+                    reply_markup=_topup_balance_inline_kb(),
+                )
+                return {"ok": True}
+
+            try:
+                add_tokens(
+                    user_id,
+                    -cost_tokens,
+                    reason="seedance_video",
+                    meta={
+                        "task_type": task_type,
+                        "duration": int(duration),
+                        "aspect_ratio": aspect_ratio,
+                        "cost_tokens": int(cost_tokens),
+                    },
+                )
+            except TypeError:
+                add_tokens(
+                    user_id,
+                    -int(cost_tokens),
+                    reason="seedance_video",
+                    meta={
+                        "task_type": task_type,
+                        "duration": int(duration),
+                        "aspect_ratio": aspect_ratio,
+                        "cost_tokens": int(cost_tokens),
+                    },
+                )
+            seedance_charged = True
+
+            # build job for worker
+            job_id = uuid4().hex
+            job: Dict[str, Any] = {
+                "job_id": job_id,
+                "type": "seedance_video",
+                "chat_id": int(chat_id),
+                "user_id": int(user_id),
+                "task_type": task_type,
+                "prompt": prompt,
+                "duration": int(duration),
+                "aspect_ratio": aspect_ratio,
+                "charge_tokens": int(cost_tokens),
+            }
+
+            if st.get("mode") == "seedance_i2v":
+                si = st.get("seedance_i2v") or {}
+                job["image_file_ids"] = list(si.get("image_file_ids") or [])[:9]
+
+            # очистим контекст, чтобы любой следующий текст не перезапускал генерацию
+            st.pop("seedance_t2v", None)
+            st.pop("seedance_i2v", None)
+            st.pop("seedance_settings", None)
+            st["ts"] = _now()
+            sb_clear_user_state(user_id)
+            _set_mode(chat_id, user_id, "chat")
+
+            await tg_send_message(chat_id, "⏳ Seedance: поставил в очередь. Как будет готово — пришлю видео.", reply_markup=_help_menu_for(user_id))
+
+            await enqueue_job(job)
+            return {"ok": True}
+
+        except Exception as e:
+            # refund if we charged but enqueue/logic failed
+            try:
+                if seedance_charged:
+                    try:
+                        add_tokens(user_id, int(cost_tokens), reason="seedance_video_refund", meta={"stage": "main_exception"})
+                    except TypeError:
+                        add_tokens(user_id, int(cost_tokens), reason="seedance_video_refund")
+            except Exception:
+                pass
+            await tg_send_message(chat_id, f"❌ Ошибка Seedance: {e}", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+        finally:
+            _busy_end(int(user_id))
+
     # ---- VEO Text→Video: ждём промпт ----
     if st.get("mode") == "veo_t2v" and incoming_text:
         # Если пользователь нажал кнопку меню/навигации — НЕ считаем это промптом
@@ -5389,6 +5620,47 @@ async def webhook(secret: str, request: Request):
             )
             return {"ok": True}
 
+
+        # ---- SEEDANCE 2 Image → Video: сбор референс-фото ----
+        if st.get("mode") == "seedance_i2v":
+            si = st.get("seedance_i2v") or {}
+            step = (si.get("step") or "need_images")
+            if step == "need_images":
+                # собираем до 9 фото (file_id), байты не храним
+                imgs = list(si.get("image_file_ids") or [])
+                if file_id and (file_id not in imgs):
+                    imgs.append(file_id)
+                imgs = imgs[:9]
+                si["image_file_ids"] = imgs
+                st["seedance_i2v"] = si
+                st["ts"] = _now()
+
+                if len(imgs) >= 9:
+                    si["step"] = "need_prompt"
+                    st["seedance_i2v"] = si
+                    st["ts"] = _now()
+                    await tg_send_message(
+                        chat_id,
+                        "Получил 9/9 фото ✅ Теперь пришли ТЕКСТ (промпт), что должно происходить в видео.",
+                        reply_markup=_help_menu_for(user_id),
+                    )
+                    return {"ok": True}
+
+                await tg_send_message(
+                    chat_id,
+                    f"Фото #{len(imgs)} получил ✅\n"
+                    "Пришли ещё фото (до 9) или напиши «Готово», чтобы перейти к промпту.",
+                    reply_markup=_help_menu_for(user_id),
+                )
+                return {"ok": True}
+
+            # если мы уже на шаге need_prompt — фото больше не нужно
+            await tg_send_message(
+                chat_id,
+                "Фото уже собраны ✅ Теперь жду промпт текстом (или /reset).",
+                reply_markup=_help_menu_for(user_id),
+            )
+            return {"ok": True}
 
         # ---- VEO Image → Video: шаги need_image / need_last_frame / need_refs ----
         if st.get("mode") == "veo_i2v":
