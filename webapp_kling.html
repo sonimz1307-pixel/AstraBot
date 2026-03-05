@@ -86,6 +86,10 @@
     .seg .name{ font-weight:800; font-size:15px; }
     .seg .desc{ font-size:12px; color: var(--muted); line-height:1.25; }
 
+    /* Seedance legacy segtitle/segsub (kept for backward compatibility) */
+    .seg .segtitle{ font-weight:800; font-size:15px; }
+    .seg .segsub{ font-size:12px; color: var(--muted); line-height:1.25; }
+
     .seg input:checked + label{
       border-color: rgba(46,166,255,.55);
       background: linear-gradient(180deg, rgba(46,166,255,.18), rgba(31,111,235,.10));
@@ -662,21 +666,33 @@
         <h3>Модель Seedance</h3>
         <div class="seg" role="radiogroup" aria-label="Модель Seedance">
           <input id="seed_preview" type="radio" name="seedance_model" value="preview" checked>
-          <label for="seed_preview"><span class="segtitle">Preview</span><span class="segsub">Качество</span></label>
+          <label for="seed_preview">
+            <span class="name">Preview</span>
+            <span class="desc">Максимальное качество</span>
+          </label>
 
           <input id="seed_fast" type="radio" name="seedance_model" value="fast">
-          <label for="seed_fast"><span class="segtitle">Fast</span><span class="segsub">Быстрее/дешевле</span></label>
-        </div>
+          <label for="seed_fast">
+            <span class="name">Fast</span>
+            <span class="desc">Быстрее / дешевле</span>
+          </label>
+                <div class="hint">Preview — лучшее качество (дороже). Fast — быстрее и дешевле.</div>
       </div>
 
       <div class="card">
         <h3>Режим</h3>
         <div class="seg" role="radiogroup" aria-label="Режим Seedance">
           <input id="seed_flow_text" type="radio" name="seedance_flow" value="text" checked>
-          <label for="seed_flow_text"><span class="segtitle">Text → Video</span><span class="segsub">по промпту</span></label>
+          <label for="seed_flow_text">
+            <span class="name">Text → Video</span>
+            <span class="desc">Только промпт</span>
+          </label>
 
           <input id="seed_flow_image" type="radio" name="seedance_flow" value="image">
-          <label for="seed_flow_image"><span class="segtitle">Image → Video</span><span class="segsub">по референсам</span></label>
+          <label for="seed_flow_image">
+            <span class="name">Image → Video</span>
+            <span class="desc">По референсам</span>
+          </label>
         </div>
         <div class="hint">Для Image → Video: после сохранения пришли 1–9 фото в чат, затем промпт.</div>
       </div>
