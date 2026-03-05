@@ -1393,12 +1393,12 @@ def _help_menu_for(user_id: int) -> dict:
 
 
 def _photo_future_menu_keyboard() -> dict:
-    """Подменю «Фото будущего» (объединяет фото-режимы в одну кнопку на главном экране)."""
     return {
         "keyboard": [
-            [{"text": "Фото/Афиши"}, {"text": "Нейро фотосессии"}, {"text": "Текст→Картинка"}],
-            [{"text": "2 фото"}, {"text": "🍌 Nano Banana"}, {"text": "🍌 Nano Banana Pro"}],
-            [{"text": "⬅ Назад"}],
+            [{"text": "Фото/Афиши"}, {"text": "Нейро фотосессии"}],
+            [{"text": "Текст→Картинка"}, {"text": "2 фото"}],
+            [{"text": "🍌 Nano Banana"}, {"text": "🍌 Nano Banana Pro"}],
+            [{"text": "⬅️ Назад"}],
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False,
