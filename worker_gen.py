@@ -2,9 +2,6 @@ import os
 import asyncio
 import json
 import base64
-import uuid
-import time
-import mimetypes
 from typing import Any, Dict, Optional
 
 import httpx
@@ -141,60 +138,6 @@ async def tg_file_url_by_id(file_id: str) -> str:
         raise RuntimeError("Telegram getFile returned no file_path")
     return f"{TG_FILE}/{file_path}"
 
-# --- Supabase Storage (for PUBLIC reference URLs, so PiAPI can fetch reliably) ---
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "").strip()
-SEEDANCE_REF_BUCKET = os.getenv("SEEDANCE_REF_BUCKET", "seedance-refs").strip() or "seedance-refs"
-
-def _sb_public_url(bucket: str, object_path: str) -> str:
-    return f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{object_path}"
-
-async def sb_upload_public_bytes(bucket: str, object_path: str, data: bytes, *, content_type: str = "application/octet-stream") -> str:
-    """Upload bytes to Supabase Storage and return PUBLIC URL.
-    Bucket must be PUBLIC or have a public policy for object reads.
-    Uses service key (recommended on server-side only).
-    """
-    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-        raise RuntimeError("Supabase Storage not configured (SUPABASE_URL/SUPABASE_SERVICE_KEY)")
-    url = f"{SUPABASE_URL}/storage/v1/object/{bucket}/{object_path}"
-    headers = {
-        "authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-        "apikey": SUPABASE_SERVICE_KEY,
-        "content-type": content_type,
-        "x-upsert": "true",
-    }
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        r = await client.post(url, headers=headers, content=data)
-        if r.status_code >= 300:
-            raise RuntimeError(f"Supabase upload failed: {r.status_code} {r.text[:300]}")
-    return _sb_public_url(bucket, object_path)
-
-async def tg_download_file_bytes(file_id: str) -> tuple[bytes, str]:
-    """Download Telegram file by file_id and return (bytes, content_type)."""
-    file_url = await tg_file_url_by_id(file_id)
-    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-        r = await client.get(file_url)
-        r.raise_for_status()
-        ct = r.headers.get("content-type") or "application/octet-stream"
-        return (r.content, ct)
-
-async def seedance_ref_public_url_from_tg_file_id(file_id: str) -> str:
-    """Make a PUBLIC URL for Seedance reference image from a Telegram file_id.
-
-    Preferred: upload to Supabase public storage (stable, no bot token in URL).
-    Fallback: Telegram direct URL (can be ignored by PiAPI in some networks).
-    """
-    # Try Supabase
-    try:
-        b, ct = await tg_download_file_bytes(file_id)
-        ext = mimetypes.guess_extension(ct.split(";")[0].strip()) or ".jpg"
-        obj = f"tg_refs/{int(time.time())}_{uuid.uuid4().hex}{ext}"
-        return await sb_upload_public_bytes(SEEDANCE_REF_BUCKET, obj, b, content_type=ct)
-    except Exception as e:
-        print("Seedance: Supabase ref upload failed, fallback to Telegram URL:", e)
-        return await tg_file_url_by_id(file_id)
-
-
 
 # --- PiAPI Seedance 2.0 (Text/Image -> Video) ---
 PIAPI_BASE_URL = os.getenv("PIAPI_BASE_URL", "https://api.piapi.ai").strip().rstrip("/")
@@ -257,12 +200,17 @@ async def _piapi_seedance_get_task(task_id: str) -> dict:
         return j
 
 
+def _seedance_payload(resp: dict) -> dict:
+    """PiAPI may return either {data:{...}} or a flat object. Normalize."""
+    if isinstance(resp, dict) and isinstance(resp.get("data"), dict):
+        return resp["data"]
+    return resp if isinstance(resp, dict) else {}
+
+
 def _seedance_status_lower(resp: dict) -> str:
-    """Seedance task status, supports both {data:{...}} and flat payload."""
-    if not isinstance(resp, dict):
-        return ""
-    d = resp.get("data") if isinstance(resp.get("data"), dict) else resp
-    return str((d or {}).get("status") or "").lower().strip()
+    d = _seedance_payload(resp)
+    return str(d.get("status") or "").lower().strip()
+
 
 
 def _first_http_url(*vals: Any) -> Optional[str]:
@@ -273,21 +221,18 @@ def _first_http_url(*vals: Any) -> Optional[str]:
 
 
 def _seedance_extract_output_url(resp: dict) -> Optional[str]:
-    """Extract resulting video URL from PiAPI Seedance task response.
+    d = _seedance_payload(resp)
+    out = d.get("output") or {}
+    # Some gateways may return output as a string URL directly
+    if isinstance(out, str):
+        return out if out.startswith("http") else None
 
-    Supports both formats:
-    1) {"data": {"output": {"video": "https://..."}}}
-    2) {"output": {"video": "https://..."}}   (flat)
-    """
-    if not isinstance(resp, dict):
-        return None
-    d = resp.get("data") if isinstance(resp.get("data"), dict) else resp
-    out = (d.get("output") or {}) if isinstance(d, dict) else {}
     if isinstance(out, dict):
         u = _first_http_url(
-            out.get("video"),  # IMPORTANT: PiAPI returns output.video
             out.get("video_url"), out.get("videoUrl"),
-            out.get("url"), out.get("mp4_url"), out.get("mp4Url"),
+            out.get("video"),  # <-- PiAPI often uses this key
+            out.get("url"),
+            out.get("mp4_url"), out.get("mp4Url"),
             out.get("file_url"), out.get("fileUrl"),
             out.get("image_url"),  # fallback (some gateways misuse this field)
         )
@@ -300,6 +245,7 @@ def _seedance_extract_output_url(resp: dict) -> Optional[str]:
                 if u2:
                     return u2
     return None
+
 
 
 async def _piapi_seedance_wait(task_id: str, *, timeout_s: int, poll_s: float) -> dict:
@@ -316,45 +262,53 @@ async def _piapi_seedance_wait(task_id: str, *, timeout_s: int, poll_s: float) -
 
 
 async def tg_send_video_bytes(chat_id: int, video_bytes: bytes, *, filename: str = "video.mp4", caption: str = "") -> None:
-    """Send video as multipart bytes (most reliable)."""
+    """Upload video bytes to Telegram (most reliable)."""
     if not TG_API:
         raise RuntimeError("TELEGRAM_BOT_TOKEN not set")
     data = {"chat_id": str(chat_id)}
     if caption:
         data["caption"] = caption
     files = {"video": (filename, video_bytes, "video/mp4")}
-    async with httpx.AsyncClient(timeout=180.0) as client:
+    async with httpx.AsyncClient(timeout=120.0) as client:
         r = await client.post(f"{TG_API}/sendVideo", data=data, files=files)
         j = {}
         try:
             j = r.json()
         except Exception:
             pass
-        if (r.status_code >= 300) or (isinstance(j, dict) and not j.get("ok", True)):
-            raise RuntimeError(f"Telegram sendVideo(bytes) failed: {r.status_code} {str(j)[:300]}")
+        if r.status_code >= 300 or (isinstance(j, dict) and not j.get("ok")):
+            raise RuntimeError(f"Telegram sendVideo(upload) failed: {r.status_code} {str(j)[:400]}")
 
-async def http_download_bytes(url: str, *, timeout: float = 180.0) -> bytes:
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        r = await client.get(url)
-        r.raise_for_status()
-        return r.content
 
 async def tg_send_video_from_url(chat_id: int, video_url: str, caption: str = "") -> None:
-    """Try to send video by URL; if Telegram rejects, fallback to bytes upload."""
     if not TG_API:
         raise RuntimeError("TELEGRAM_BOT_TOKEN not set")
+
+    # 1) Try URL send (fast, no download)
     async with httpx.AsyncClient(timeout=60.0) as client:
         r = await client.post(f"{TG_API}/sendVideo", json={"chat_id": chat_id, "video": video_url, "caption": caption})
         j = {}
         try:
             j = r.json()
         except Exception:
+            j = {}
+        if r.status_code < 300 and isinstance(j, dict) and j.get("ok"):
+            return
+
+    # 2) Fallback: download mp4 and upload bytes (reliable)
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            vr = await client.get(video_url)
+            vr.raise_for_status()
+            await tg_send_video_bytes(chat_id, vr.content, filename="seedance.mp4", caption=caption)
+            return
+    except Exception as e:
+        # 3) Last resort: send link
+        try:
+            await tg_send_message(chat_id, f"{caption}\n🎬 {video_url}")
+        except Exception:
             pass
-        # Telegram can return HTTP 200 but ok=false
-        if (r.status_code >= 300) or (isinstance(j, dict) and not j.get("ok", True)):
-            # fallback: download and upload bytes
-            vb = await http_download_bytes(video_url, timeout=240.0)
-            await tg_send_video_bytes(chat_id, vb, filename="seedance.mp4", caption=caption)
+        raise e
 
 
 
@@ -651,7 +605,7 @@ async def handle_job(job: Dict[str, Any]) -> None:
         prog_task = asyncio.create_task(_progress_loop_seedance())
 
         try:
-            # Convert reference images to PUBLIC URLs (preferred: Supabase public; fallback: Telegram file URL)
+            # Convert reference images to public URLs (Telegram getFile -> file URL)
             image_urls: Optional[list[str]] = None
             if isinstance(image_file_ids, list) and image_file_ids:
                 image_urls = []
@@ -659,10 +613,10 @@ async def handle_job(job: Dict[str, Any]) -> None:
                     if not isinstance(fid, str) or not fid.strip():
                         continue
                     try:
-                        u = await seedance_ref_public_url_from_tg_file_id(fid.strip())
+                        u = await tg_file_url_by_id(fid.strip())
                         image_urls.append(u)
                     except Exception as e:
-                        print("Seedance: failed to build public ref url:", e)
+                        print("Seedance: failed to build image_url:", e)
 
             created = await _piapi_seedance_create_task(
                 task_type=task_type,
@@ -674,7 +628,7 @@ async def handle_job(job: Dict[str, Any]) -> None:
                 service_mode=service_mode,
             )
 
-            task_id = (((created.get("data") or {}) if isinstance(created.get("data"), dict) else created) or {}).get("task_id") if isinstance(created, dict) else None
+            task_id = (_seedance_payload(created).get("task_id") or (created.get("task_id") if isinstance(created, dict) else None))
             if not task_id:
                 raise RuntimeError(f"Seedance: PiAPI didn't return task_id: {json.dumps(created, ensure_ascii=False)[:800]}")
 
@@ -688,8 +642,7 @@ async def handle_job(job: Dict[str, Any]) -> None:
 
             st = _seedance_status_lower(done)
             if st == "failed":
-                d_done = (done.get("data") if isinstance(done.get("data"), dict) else done) if isinstance(done, dict) else {}
-                err = ((d_done or {}).get("error") or {}) if isinstance(d_done, dict) else {}
+                err = (_seedance_payload(done).get("error") or {})
                 msg = ""
                 if isinstance(err, dict):
                     msg = str(err.get("message") or "")
