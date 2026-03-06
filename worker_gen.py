@@ -146,8 +146,12 @@ async def tg_send_video_bytes(
                 raise RuntimeError(f"Telegram sendVideo failed: {r.status_code} {r.text[:400]}")
             raise
 
-
-
+def _seedance_continue_kb(task_id: str) -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "🎬 Продолжить видео", "callback_data": f"seedance_extend:{task_id}"}]
+        ]
+    }
 
 async def tg_get_file_path(file_id: str) -> Optional[str]:
     """Telegram getFile -> file_path"""
@@ -832,6 +836,12 @@ async def handle_job(job: Dict[str, Any]) -> None:
                 await tg_send_video_from_url(chat_id, url, caption="🎬 Seedance видео")
             except Exception:
                 await tg_send_message(chat_id, f"✅ Seedance готово!\n🎬 {url}")
+
+            await tg_send_message(
+                chat_id,
+                "Продолжить сцену?",
+                reply_markup=_seedance_continue_kb(task_id),
+            )
 
             return
 
