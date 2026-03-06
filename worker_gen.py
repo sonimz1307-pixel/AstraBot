@@ -731,7 +731,35 @@ async def handle_job(job: Dict[str, Any]) -> None:
             await tg_send_message(chat_id, f"❌ Ошибка Nano Banana Pro.\n{err}")
             return
 
+    elif job_type == "seedance_extend":
+        prompt = str(job.get("prompt") or "").strip()
+        duration = int(job.get("duration") or 5)
+        parent_task_id = str(job.get("extend_from_task_id") or "").strip() or None
+        charge_tokens = int(job.get("charge_tokens") or 0)
 
+        if not chat_id or not user_id:
+            raise RuntimeError("seedance_extend job missing chat_id/user_id")
+        if not parent_task_id:
+            raise RuntimeError("seedance_extend job missing extend_from_task_id")
+        if not prompt:
+            raise RuntimeError("seedance_extend job missing prompt")
+
+        # переиспользуем существующую ветку seedance_video:
+        # просто превращаем extend job в обычный seedance_video с parent_task_id
+        job = {
+            "job_id": job.get("job_id"),
+            "type": "seedance_video",
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "prompt": prompt,
+            "duration": duration,
+            "parent_task_id": parent_task_id,
+            "charge_tokens": charge_tokens,
+            "service_mode": str(job.get("service_mode") or "public").strip() or "public",
+        }
+
+        return await handle_job(job)
+        
 # --- SEEDANCE 2 (PiAPI) --- 
     elif job_type == "seedance_video":
         prompt = str(job.get("prompt") or "").strip()
