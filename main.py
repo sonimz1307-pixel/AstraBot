@@ -165,7 +165,7 @@ def _is_nav_or_menu_text(t: str) -> bool:
         "баланс", "профиль", "тарифы", "оплата", "пополнить",
         "статистика",
         # submenus you use in keyboards
-        "фото/афиши", "нейро фотосессии", "2 фото", "nano banana",
+        "фото/афиши", "нейро фотосессии", "картинка+картинка", "2 фото", "nano banana",
         "афиша: ярко", "афиша: кино",
         "текст→картинка",
         "🔄 сбросить генерацию".lower(),
@@ -1396,7 +1396,7 @@ def _photo_future_menu_keyboard() -> dict:
     return {
         "keyboard": [
             [{"text": "Фото/Афиши"}, {"text": "Нейро фотосессии"}],
-            [{"text": "Текст→Картинка"}, {"text": "2 фото"}],
+            [{"text": "Текст→Картинка"}, {"text": "Картинка+Картинка"}],
             [{"text": "🍌 Nano Banana"}, {"text": "🍌 Nano Banana Pro"}],
             [{"text": "⬅️ Назад"}],
         ],
@@ -5443,14 +5443,15 @@ async def webhook(secret: str, request: Request):
         )
         return {"ok": True}
 
-    if incoming_text == "2 фото":
+    if incoming_text in ("2 фото", "Картинка+Картинка"):
         _set_mode(chat_id, user_id, "two_photos")
         await tg_send_message(
             chat_id,
-            "Режим «2 фото».\n"
+            "Режим «Картинка+Картинка».\n"
             "1) Пришли Фото 1 — это ОСНОВА (поза/тело/фон).\n"
             "2) Потом Пришли Фото 2 — это ИСТОЧНИК (лицо/стиль/одежда — что скажешь).\n"
             "3) Потом одним сообщением напиши, что сделать из этих двух фото.\n\n"
+            "Стоимость: 1 токен.\n"
             "Команда для сброса: /reset",
             reply_markup=_help_menu_for(user_id),
         )
@@ -6155,7 +6156,7 @@ async def webhook(secret: str, request: Request):
             if nav_text in ("⬅ Назад", "Назад") or nav_text.startswith("/"):
                 # обработается выше в общих обработчиках (/reset, /start, Назад)
                 pass
-            elif nav_text in ("Фото будущего", "📸 Фото будущего", "Фото/Афиши", "Нейро фотосессии", "2 фото", "🍌 Nano Banana", "Текст→Картинка", "🧠 ИИ (чат)", "ИИ (чат)", "🧠 ИИ чат"):
+            elif nav_text in ("Фото будущего", "📸 Фото будущего", "Фото/Афиши", "Нейро фотосессии", "2 фото", "Картинка+Картинка", "🍌 Nano Banana", "Текст→Картинка", "🧠 ИИ (чат)", "ИИ (чат)", "🧠 ИИ чат"):
                 # навигация по меню — тоже не промпт
                 pass
             else:
@@ -6441,7 +6442,7 @@ async def webhook(secret: str, request: Request):
             tp = st.get("two_photos") or {}
             step = (tp.get("step") or "need_photo_1")
             if step != "need_prompt":
-                await tg_send_message(chat_id, "В режиме «2 фото» сначала пришли 2 фото подряд.", reply_markup=_main_menu_for(user_id))
+                await tg_send_message(chat_id, "В режиме «Картинка+Картинка» сначала пришли 2 фото подряд.", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
             photo1_file_id = tp.get("photo1_file_id")
@@ -6455,79 +6456,82 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(chat_id, "Напиши текстом, что сделать из этих 2 фото.", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
-            await tg_send_message(chat_id, "Делаю генерацию по 2 фото…", reply_markup=_main_menu_for(user_id))
+            ensure_user_row(int(user_id))
             try:
-                file_path1 = await tg_get_file_path(photo1_file_id)
-                file_path2 = await tg_get_file_path(photo2_file_id)
-                url1 = f"{TELEGRAM_FILE_BASE}/{file_path1}"
-                url2 = f"{TELEGRAM_FILE_BASE}/{file_path2}"
+                bal = int(get_balance(int(user_id)) or 0)
+            except Exception:
+                bal = 0
 
-                prompt = _two_photos_prompt(user_task)
-
-                # Placeholder + fake progress
-                placeholder = _make_blur_placeholder(tp.get("photo1_bytes") or b"")
-                token = _dl_init_slot(chat_id, user_id)
-                msg_id = await tg_send_photo_bytes_return_message_id(chat_id, placeholder, caption="Генерация по 2 фото…", reply_markup=_dl_keyboard(token))
-                stop = asyncio.Event()
-                prog_task = None
-                if msg_id is not None:
-                    prog_task = asyncio.create_task(_progress_caption_updater(chat_id, msg_id, "Генерация по 2 фото…", stop))
-                else:
-                    await tg_send_chat_action(chat_id, "upload_photo")
-
-                _sent_via_edit = False
-
-                _busy_start(int(user_id), "2 фото")
-
-                out_bytes = await ark_edit_image(
-                    source_image_bytes=tp.get("photo1_bytes") or b"",
-                    prompt=prompt,
-                    size=ARK_SIZE_DEFAULT,
-                    mask_png_bytes=None,
-                    source_image_urls=[url1, url2],
-                )
-
-                _dl_set_bytes(chat_id, user_id, token, out_bytes)
-
-                _dl_set_bytes(chat_id, user_id, token, out_bytes)
-
-                stop.set()
-                if prog_task:
-                    try:
-                        await prog_task
-                    except Exception:
-                        pass
-
-                if msg_id is not None:
-                    try:
-                        await tg_edit_message_media_photo(chat_id, msg_id, out_bytes, caption="Готово (2 фото).", reply_markup=_dl_keyboard(token))
-                        _sent_via_edit = True
-                    except Exception:
-                        pass
-
-                if not _sent_via_edit:
-                    await tg_send_photo_bytes(chat_id, out_bytes, caption="Готово (2 фото).")
-            except Exception as e:
-                stop.set()
-                if prog_task:
-                    try:
-                        await prog_task
-                    except Exception:
-                        pass
+            cost_tokens = 1
+            if bal < cost_tokens:
                 await tg_send_message(
                     chat_id,
-                    f"Ошибка 2 фото: {e}\n"
-                    "Если ошибка про 'image' / 'invalid' — возможно твой endpoint не поддерживает 2 изображения.\n"
-                    "Тогда нужен endpoint с multi-image или другой провайдер.",
-                    reply_markup=_help_menu_for(user_id),
+                    f"Недостаточно токенов 😕\nНужно: {cost_tokens} токен для режима «Картинка+Картинка».",
+                    reply_markup=_topup_packs_kb(),
                 )
-            finally:
-                _busy_end(int(user_id))
-                # Сбрасываем режим, чтобы можно было сразу начать заново
-                _set_mode(chat_id, user_id, "two_photos")
-                st["ts"] = _now()
+                return {"ok": True}
 
+            charge_ref_id = f"two_photos:{int(user_id)}:{uuid4().hex}"
+            prompt = _two_photos_prompt(user_task)
+            try:
+                add_tokens(
+                    int(user_id),
+                    -int(cost_tokens),
+                    reason="two_photos",
+                    ref_id=charge_ref_id,
+                    meta={
+                        "cost": int(cost_tokens),
+                        "photo1_file_id": str(photo1_file_id),
+                        "photo2_file_id": str(photo2_file_id),
+                    },
+                )
+            except Exception as e:
+                await tg_send_message(chat_id, f"❌ Не удалось списать токен: {e}", reply_markup=_topup_packs_kb())
+                return {"ok": True}
+
+            try:
+                await enqueue_job({
+                    "job_id": uuid4().hex,
+                    "type": "two_photos",
+                    "chat_id": int(chat_id),
+                    "user_id": int(user_id),
+                    "photo1_file_id": str(photo1_file_id),
+                    "photo2_file_id": str(photo2_file_id),
+                    "prompt": prompt,
+                    "charge_tokens": int(cost_tokens),
+                    "charge_ref_id": charge_ref_id,
+                })
+            except Exception as e:
+                try:
+                    add_tokens(
+                        int(user_id),
+                        int(cost_tokens),
+                        reason="two_photos_refund",
+                        ref_id=charge_ref_id,
+                        meta={"error": f"enqueue_failed: {str(e)[:300]}"},
+                    )
+                except Exception:
+                    pass
+                await tg_send_message(
+                    chat_id,
+                    f"❌ Не удалось поставить задачу «Картинка+Картинка» в очередь: {e}",
+                    reply_markup=_photo_future_menu_keyboard(),
+                )
+                return {"ok": True}
+
+            await tg_send_message(chat_id, "⏳ Картинка+Картинка: поставил задачу в очередь. Как будет готово — пришлю результат.", reply_markup=_main_menu_for(user_id))
+
+            st["two_photos"] = {
+                "step": "need_photo_1",
+                "photo1_bytes": None,
+                "photo1_file_id": None,
+                "photo2_bytes": None,
+                "photo2_file_id": None,
+            }
+            st["ts"] = _now()
             return {"ok": True}
+
+        # ---- KLING Motion Control: step=need_prompt ----            return {"ok": True}
 
         
         # ---- KLING Motion Control: step=need_prompt ----
