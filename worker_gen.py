@@ -511,6 +511,110 @@ async def handle_job(job: Dict[str, Any]) -> None:
                     pass
             await tg_send_message(chat_id, f"❌ Ошибка нейро‑фотосессии.\n{err}")
             return
+
+    # --- TWO PHOTOS / КАРТИНКА+КАРТИНКА (queue worker) ---
+    elif job_type == "two_photos":
+        prompt = str(job.get("prompt") or "").strip()
+        photo1_file_id = str(job.get("photo1_file_id") or "").strip()
+        photo2_file_id = str(job.get("photo2_file_id") or "").strip()
+        charge_tokens = int(job.get("charge_tokens") or 1)
+        charge_ref_id = str(job.get("charge_ref_id") or "").strip() or None
+
+        if not chat_id or not user_id:
+            raise RuntimeError("two_photos job missing chat_id/user_id")
+        if not prompt:
+            raise RuntimeError("two_photos job missing prompt")
+        if not photo1_file_id or not photo2_file_id:
+            raise RuntimeError("two_photos job missing photo1_file_id/photo2_file_id")
+
+        msg_id = await tg_send_message(chat_id, "⏳ Картинка+Картинка: начинаю обработку…")
+
+        stop = asyncio.Event()
+        prog_task: Optional[asyncio.Task] = None
+
+        async def _progress_loop_two_photos() -> None:
+            if not msg_id:
+                return
+            seq = _parse_progress_seq()
+            i = 0
+            while not stop.is_set():
+                pct = seq[min(i, len(seq) - 1)]
+                i += 1
+                try:
+                    await tg_edit_message_text(chat_id, msg_id, f"⏳ Картинка+Картинка: обработка… {pct}%")
+                except Exception:
+                    pass
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=PROGRESS_STEP_SEC)
+                except asyncio.TimeoutError:
+                    continue
+
+        prog_task = asyncio.create_task(_progress_loop_two_photos())
+
+        try:
+            url1 = await tg_file_url_by_id(photo1_file_id)
+            url2 = await tg_file_url_by_id(photo2_file_id)
+
+            from main import ark_edit_image
+
+            out_bytes = await ark_edit_image(
+                source_image_bytes=b"",
+                prompt=prompt,
+                size=os.getenv("ARK_SIZE_DEFAULT", "2048x2048"),
+                mask_png_bytes=None,
+                source_image_urls=[url1, url2],
+            )
+
+            stop.set()
+            if prog_task:
+                try:
+                    await prog_task
+                except Exception:
+                    pass
+
+            if msg_id:
+                try:
+                    await tg_edit_message_text(chat_id, msg_id, "✅ Картинка+Картинка: готово.")
+                except Exception:
+                    pass
+
+            token = await register_dl2k_slot(chat_id, user_id, out_bytes)
+            reply_markup = None
+            if token:
+                reply_markup = {
+                    "inline_keyboard": [[
+                        {"text": "⬇️ Скачать оригинал 2К", "callback_data": f"dl2k:{token}"}
+                    ]]
+                }
+
+            await tg_send_photo_bytes(chat_id, out_bytes, caption="✅ Готово (Картинка+Картинка)", reply_markup=reply_markup)
+            return
+
+        except Exception as e:
+            err = str(e)[:800]
+            print("two_photos failed:", err)
+
+            stop.set()
+            if prog_task:
+                try:
+                    await prog_task
+                except Exception:
+                    pass
+
+            try:
+                add_tokens(user_id, int(charge_tokens), reason="two_photos_refund", ref_id=charge_ref_id, meta={"error": err[:300]})
+            except Exception as refund_err:
+                print("two_photos refund failed:", refund_err)
+
+            if msg_id:
+                try:
+                    await tg_edit_message_text(chat_id, msg_id, f"❌ Ошибка Картинка+Картинка.\n{err}")
+                    return
+                except Exception:
+                    pass
+            await tg_send_message(chat_id, f"❌ Ошибка Картинка+Картинка.\n{err}")
+            return
+
     # --- NANO BANANA PRO (queue worker) ---
     elif job_type == "nano_banana_pro":
         prompt = str(job.get("prompt") or "").strip()
