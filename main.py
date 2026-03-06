@@ -1431,7 +1431,13 @@ def _poster_menu_keyboard(light: str = "bright") -> dict:
 
 def _dl_keyboard(token: str) -> dict:
     return {"inline_keyboard": [[{"text": "⬇️ Скачать оригинал 2К", "callback_data": f"dl2k:{token}"}]]}
-
+    
+def _seedance_continue_kb(task_id: str) -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "🎬 Продолжить видео", "callback_data": f"seedance_extend:{task_id}"}]
+        ]
+    }
 
 def _dl_init_slot(chat_id: int, user_id: int) -> str:
     """Create a download slot and return token. Bytes will be filled later."""
@@ -3195,7 +3201,83 @@ async def webhook(secret: str, request: Request):
                 await tg_send_document_bytes(chat_id, b, filename=f"original_2k.{meta.get('ext','png')}", caption="⬇️ Оригинал 2К (без сжатия)")
             except Exception:
                 await tg_send_message(chat_id, "Не смог отправить оригинал файлом. Попробуй ещё раз.")
+            return {"ok": True}
+            
+        if chat_id and user_id and data.startswith("seedance_extend:"):
+            prev_task_id = data.split(":", 1)[1].strip()
+            if not prev_task_id:
+                await tg_answer_callback_query(str(cq_id), text="Не найден task_id для продолжения.", show_alert=True)
+                return {"ok": True}
 
+            st = _ensure_state(chat_id, user_id)
+            se = st.get("seedance_extend") or {}
+            se["extend_from_task_id"] = prev_task_id
+            st["seedance_extend"] = se
+            st["ts"] = _now()
+
+            se = st.get("seedance_extend") or {}
+            task_type = str(se.get("task_type") or "seedance-2-preview")
+
+            rate_preview = int(os.getenv("SEEDANCE_TOKENS_PER_SEC_PREVIEW", "2") or 2)
+            rate_fast = int(os.getenv("SEEDANCE_TOKENS_PER_SEC_FAST", "1") or 1)
+            is_fast = ("fast" in task_type)
+            rate = rate_fast if is_fast else rate_preview
+
+            cost_5 = int(rate * 5)
+            cost_10 = int(rate * 10)
+            cost_15 = int(rate * 15)
+
+            await tg_send_message(
+                chat_id,
+                "Выберите длительность продолжения:",
+                reply_markup={
+                    "inline_keyboard": [
+                        [{"text": f"5 сек • {cost_5} токенов", "callback_data": "seedance_extend_dur:5"}],
+                        [{"text": f"10 сек • {cost_10} токенов", "callback_data": "seedance_extend_dur:10"}],
+                        [{"text": f"15 сек • {cost_15} токенов", "callback_data": "seedance_extend_dur:15"}],
+                    ]
+                },
+            )
+            return {"ok": True}
+            
+        if chat_id and user_id and data.startswith("seedance_extend_dur:"):
+            try:
+                duration = int(data.split(":", 1)[1].strip())
+            except Exception:
+                await tg_answer_callback_query(str(cq_id), text="Некорректная длительность.", show_alert=True)
+                return {"ok": True}
+
+            if duration not in (5, 10, 15):
+                await tg_answer_callback_query(str(cq_id), text="Некорректная длительность.", show_alert=True)
+                return {"ok": True}
+
+            st = _ensure_state(chat_id, user_id)
+            se = st.get("seedance_extend") or {}
+            se["duration"] = duration
+
+            seedance_settings = st.get("seedance_settings") or {}
+            task_type = str(seedance_settings.get("task_type") or "seedance-2-preview")
+
+            rate_preview = int(os.getenv("SEEDANCE_TOKENS_PER_SEC_PREVIEW", "2") or 2)
+            rate_fast = int(os.getenv("SEEDANCE_TOKENS_PER_SEC_FAST", "1") or 1)
+            is_fast = ("fast" in task_type)
+            rate = rate_fast if is_fast else rate_preview
+            cost_tokens = int(rate * duration)
+
+            se["cost_tokens"] = cost_tokens
+            st["seedance_extend"] = se
+            st["ts"] = _now()
+
+            _set_mode(chat_id, user_id, "seedance_extend_prompt")
+
+            await tg_send_message(
+                chat_id,
+                f"Введите промпт для продолжения сцены.\n"
+                f"Будет списано: {cost_tokens} токенов.",
+                reply_markup=_help_menu_for(user_id),
+            )
+            return {"ok": True}
+            
         # --- Balance topup (Stars) ---
         if chat_id and user_id and data.startswith("topup:"):
             # topup:menu
@@ -5017,6 +5099,119 @@ async def webhook(secret: str, request: Request):
     if handled:
         return {"ok": True}
 
+    if st.get("mode") == "seedance_extend_prompt" and incoming_text:
+        if _is_nav_or_menu_text(incoming_text):
+            st.pop("seedance_extend", None)
+            st["ts"] = _now()
+            _set_mode(chat_id, user_id, "chat")
+            await tg_send_message(chat_id, "Ок. Вышел из продолжения Seedance. Главное меню.", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+
+        se = st.get("seedance_extend") or {}
+        extend_from_task_id = str(se.get("extend_from_task_id") or "").strip()
+        duration = int(se.get("duration") or 0)
+        cost_tokens = int(se.get("cost_tokens") or 0)
+        prompt = incoming_text.strip()
+
+        if not extend_from_task_id:
+            await tg_send_message(chat_id, "Не найден task_id для продолжения. Запусти продолжение заново.", reply_markup=_main_menu_for(user_id))
+            st.pop("seedance_extend", None)
+            st["ts"] = _now()
+            _set_mode(chat_id, user_id, "chat")
+            return {"ok": True}
+
+        if duration not in (5, 10, 15):
+            await tg_send_message(chat_id, "Не найдена длительность продолжения. Запусти продолжение заново.", reply_markup=_main_menu_for(user_id))
+            st.pop("seedance_extend", None)
+            st["ts"] = _now()
+            _set_mode(chat_id, user_id, "chat")
+            return {"ok": True}
+
+        if not prompt:
+            await tg_send_message(chat_id, "Промпт пустой. Пришли текстом, что должно происходить дальше.", reply_markup=_help_menu_for(user_id))
+            return {"ok": True}
+
+        _busy_start(int(user_id), "Seedance Extend")
+        seedance_charged = False
+        try:
+            try:
+                ensure_user_row(user_id)
+                bal = int(get_balance(user_id) or 0)
+            except Exception:
+                bal = 0
+
+            if bal < cost_tokens:
+                await tg_send_message(
+                    chat_id,
+                    f"❌ Недостаточно токенов.\nНужно: {cost_tokens}\nБаланс: {bal}",
+                    reply_markup=_topup_balance_inline_kb(),
+                )
+                return {"ok": True}
+
+            try:
+                add_tokens(
+                    user_id,
+                    -cost_tokens,
+                    reason="seedance_extend",
+                    meta={
+                        "extend_from_task_id": extend_from_task_id,
+                        "duration": int(duration),
+                        "cost_tokens": int(cost_tokens),
+                    },
+                )
+            except TypeError:
+                add_tokens(
+                    user_id,
+                    -int(cost_tokens),
+                    reason="seedance_extend",
+                    meta={
+                        "extend_from_task_id": extend_from_task_id,
+                        "duration": int(duration),
+                        "cost_tokens": int(cost_tokens),
+                    },
+                )
+            seedance_charged = True
+
+            job_id = uuid4().hex
+            job = {
+                "job_id": job_id,
+                "type": "seedance_extend",
+                "chat_id": int(chat_id),
+                "user_id": int(user_id),
+                "extend_from_task_id": extend_from_task_id,
+                "prompt": prompt,
+                "duration": int(duration),
+                "charge_tokens": int(cost_tokens),
+            }
+
+            st.pop("seedance_extend", None)
+            st["ts"] = _now()
+            _set_mode(chat_id, user_id, "chat")
+
+            await tg_send_message(
+                chat_id,
+                "⏳ Seedance: продолжение поставил в очередь. Как будет готово — пришлю видео.",
+                reply_markup=_help_menu_for(user_id),
+            )
+
+            await enqueue_job(job)
+            return {"ok": True}
+
+        except Exception as e:
+            try:
+                if seedance_charged:
+                    try:
+                        add_tokens(user_id, int(cost_tokens), reason="seedance_extend_refund", meta={"stage": "main_exception"})
+                    except TypeError:
+                        add_tokens(user_id, int(cost_tokens), reason="seedance_extend_refund")
+            except Exception:
+                pass
+
+            await tg_send_message(chat_id, f"❌ Ошибка продолжения Seedance: {e}", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+        finally:
+            _busy_end(int(user_id))
+
     # ---- SEEDANCE 2 (PiAPI) Text/Image → Video: ждём промпт ----
     if st.get("mode") in ("seedance_t2v", "seedance_i2v") and incoming_text:
         # Навигация/кнопки меню не считаем промптом
@@ -5146,7 +5341,11 @@ async def webhook(secret: str, request: Request):
             if st.get("mode") == "seedance_i2v":
                 si = st.get("seedance_i2v") or {}
                 job["image_file_ids"] = list(si.get("image_file_ids") or [])[:9]
-
+                
+            se = st.get("seedance_extend") or {}
+            se["task_type"] = task_type
+            st["seedance_extend"] = se
+            
             # очистим контекст, чтобы любой следующий текст не перезапускал генерацию
             st.pop("seedance_t2v", None)
             st.pop("seedance_i2v", None)
