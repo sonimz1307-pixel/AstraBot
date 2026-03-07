@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import os
 import time
@@ -38,6 +40,9 @@ SUNOAPI_API_KEY = os.getenv("SUNOAPI_API_KEY", "").strip()
 SUNOAPI_BASE_URL = os.getenv("SUNOAPI_BASE_URL", "https://api.sunoapi.org/api/v1").rstrip("/")
 if SUNOAPI_BASE_URL.rstrip("/") == "https://api.sunoapi.org":
     SUNOAPI_BASE_URL = "https://api.sunoapi.org/api/v1"
+SUNOAPI_CALLBACK_URL = os.getenv("SUNOAPI_CALLBACK_URL", "").strip()
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip()
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
 
 
 async def tg_send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None) -> Optional[int]:
@@ -246,6 +251,20 @@ async def piapi_poll_task(task_id: str, *, timeout_sec: int = 240, sleep_sec: fl
         await asyncio.sleep(sleep_sec)
 
 
+def _suno_sig(uid: int, chat_id: int) -> str:
+    secret = (WEBHOOK_SECRET or "change_me").encode("utf-8")
+    msg = f"{int(uid)}:{int(chat_id)}".encode("utf-8")
+    return hmac.new(secret, msg, hashlib.sha256).hexdigest()
+
+
+def _build_suno_callback_url(user_id: int, chat_id: int) -> str:
+    base = (PUBLIC_BASE_URL or "").strip().rstrip("/")
+    if not base:
+        raise RuntimeError("PUBLIC_BASE_URL is not set (needed for SunoAPI callBackUrl)")
+    sig = _suno_sig(int(user_id), int(chat_id))
+    return f"{base}/api/suno/callback?uid={int(user_id)}&chat={int(chat_id)}&sig={sig}"
+
+
 # ---------------- SunoAPI.org helpers ----------------
 async def sunoapi_generate_task(
     *,
@@ -253,6 +272,8 @@ async def sunoapi_generate_task(
     custom_mode: bool,
     instrumental: bool,
     model: str,
+    user_id: int,
+    chat_id: int,
     title: str = "",
     style: str = "",
 ) -> str:
@@ -269,6 +290,7 @@ async def sunoapi_generate_task(
         payload["title"] = title
     if style:
         payload["style"] = style
+    payload["callBackUrl"] = SUNOAPI_CALLBACK_URL or _build_suno_callback_url(int(user_id), int(chat_id))
     headers = {"Authorization": f"Bearer {SUNOAPI_API_KEY}", "Content-Type": "application/json"}
     async with httpx.AsyncClient(timeout=60.0) as client:
         r = await client.post(url, headers=headers, json=payload)
@@ -638,6 +660,8 @@ async def handle_music_job(job: Dict[str, Any]) -> None:
             custom_mode=custom_mode,
             instrumental=instrumental,
             model=model_enum,
+            user_id=user_id,
+            chat_id=chat_id,
             title=title_local,
             style=style_local,
         )
