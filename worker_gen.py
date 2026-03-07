@@ -29,19 +29,30 @@ PROGRESS_STEP_SEC = float(os.getenv("PHOTOSESSION_PROGRESS_STEP_SEC", "3"))
 PROGRESS_SEQUENCE = os.getenv("PHOTOSESSION_PROGRESS_SEQ", "10,25,45,65,85,95").strip()
 
 
-async def tg_send_message(chat_id: int, text: str) -> Optional[int]:
+async def tg_send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None) -> Optional[int]:
     """Send a message and return Telegram message_id (or None)."""
     if not TG_API:
         print("TELEGRAM_BOT_TOKEN not set; cannot send message")
         return None
+
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+    }
+
+    if reply_markup is not None:
+        payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+
     async with httpx.AsyncClient(timeout=20.0) as client:
-        r = await client.post(f"{TG_API}/sendMessage", json={"chat_id": chat_id, "text": text})
+        r = await client.post(f"{TG_API}/sendMessage", json=payload)
+
         try:
             j = r.json()
             if j.get("ok"):
                 return int((j.get("result") or {}).get("message_id") or 0) or None
         except Exception:
             pass
+
     return None
 
 
