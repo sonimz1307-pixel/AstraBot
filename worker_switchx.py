@@ -16,9 +16,17 @@ from switchx_types import JOB_TYPE_SWITCHX, RESOLUTION_720, RESOLUTION_1080
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else None
 TG_FILE = f"https://api.telegram.org/file/bot{BOT_TOKEN}" if BOT_TOKEN else None
-MAX_CONCURRENCY = int(os.getenv("SWITCHX_WORKER_CONCURRENCY", "2"))
+
+SWITCHX_CONCURRENCY = int(os.getenv("SWITCHX_CONCURRENCY", os.getenv("SWITCHX_WORKER_CONCURRENCY", "2")))
+MUSIC_CONCURRENCY = int(os.getenv("MUSIC_CONCURRENCY", "3"))
 SWITCHX_TIMEOUT_SEC = int(os.getenv("SWITCHX_TIMEOUT_SEC", "3600"))
 SWITCHX_POLL_SEC = float(os.getenv("SWITCHX_POLL_SEC", "8"))
+
+switchx_sem = asyncio.Semaphore(SWITCHX_CONCURRENCY)
+music_sem = asyncio.Semaphore(MUSIC_CONCURRENCY)
+
+MUSIC_JOB_TYPES = {"music_piapi", "music_suno"}
+SUPPORTED_JOB_TYPES = {JOB_TYPE_SWITCHX, *MUSIC_JOB_TYPES}
 
 
 async def tg_send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None) -> Optional[int]:
@@ -233,34 +241,61 @@ async def handle_switchx_job(job: Dict[str, Any]) -> None:
         await tg_send_message(chat_id, f"❌ SwitchX: ошибка генерации.\n{e}")
 
 
+async def handle_music_job(job: Dict[str, Any]) -> None:
+    job_type = str(job.get("type") or job.get("job_type") or "").strip()
+    chat_id = int(job.get("chat_id") or 0)
+
+    print(f"Music job received: {job_type}")
+
+    if chat_id:
+        await tg_send_message(
+            chat_id,
+            f"🎵 Музыкальная задача принята воркером ({job_type}).\n"
+            f"Дальше сюда нужно перенести polling/generate логику из main.",
+        )
+
+
 async def handle_job(job: Dict[str, Any]) -> None:
     job_type = str(job.get("type") or job.get("job_type") or "").strip()
-    if job_type != JOB_TYPE_SWITCHX:
+
+    if job_type == JOB_TYPE_SWITCHX:
+        async with switchx_sem:
+            await handle_switchx_job(job)
         return
-    await handle_switchx_job(job)
+
+    if job_type in MUSIC_JOB_TYPES:
+        async with music_sem:
+            await handle_music_job(job)
+        return
+
+    print("Unknown job type:", job_type)
 
 
 async def worker_loop() -> None:
-    sem = asyncio.Semaphore(MAX_CONCURRENCY)
-
     async def _run_one(job: Dict[str, Any]) -> None:
-        async with sem:
-            try:
-                await handle_job(job)
-            except Exception as e:
-                print("SwitchX job failed:", e)
+        try:
+            await handle_job(job)
+        except Exception as e:
+            print("Generation job failed:", e)
 
     while True:
         job = await dequeue_job(timeout_sec=10)
         if not job:
             continue
-        if str(job.get("type") or job.get("job_type") or "").strip() != JOB_TYPE_SWITCHX:
+
+        job_type = str(job.get("type") or job.get("job_type") or "").strip()
+        if job_type not in SUPPORTED_JOB_TYPES:
             continue
+
         asyncio.create_task(_run_one(job))
 
 
 def main() -> None:
-    print("SwitchX worker started. concurrency =", MAX_CONCURRENCY)
+    print(
+        "Generation worker started. "
+        f"switchx_concurrency={SWITCHX_CONCURRENCY} "
+        f"music_concurrency={MUSIC_CONCURRENCY}"
+    )
     asyncio.run(worker_loop())
 
 
