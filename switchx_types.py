@@ -1,0 +1,26 @@
+from __future__ import annotations
+
+JOB_TYPE_SWITCHX = "switchx"
+
+SWITCHX_MODE = "switchx"
+
+ALPHA_AUTO = "auto"
+ALPHA_FILL = "fill"
+ALPHA_SELECT = "select"
+ALPHA_CUSTOM = "custom"
+
+RESOLUTION_720 = 720
+RESOLUTION_1080 = 1080
+ALLOWED_MAX_RESOLUTIONS = {RESOLUTION_720, RESOLUTION_1080}
+ALLOWED_VIDEO_EXTS = {"mp4", "mov"}
+ALLOWED_IMAGE_EXTS = {"jpg", "jpeg", "png", "webp"}
+
+DEFAULT_ALPHA_MODE = ALPHA_AUTO
+DEFAULT_MAX_RESOLUTION = RESOLUTION_1080
+
+STATE_NEED_VIDEO = "need_video"
+STATE_NEED_RESOLUTION = "need_resolution"
+STATE_NEED_REFERENCE = "need_reference"
+STATE_NEED_PROMPT = "need_prompt"
+
+SWITCHX_BUSY_KIND = "SwitchX"
