@@ -23,6 +23,7 @@ INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "").strip()
 
 # --- Concurrency inside ONE worker instance (scale instances on Render too) ---
 MAX_CONCURRENCY = int(os.getenv("GEN_WORKER_CONCURRENCY", "5"))
+GEN_QUEUE_NAME = (os.getenv("GEN_QUEUE_NAME", "gen") or "gen").strip() or "gen"
 
 # progress behavior (Telegram edits)
 PROGRESS_STEP_SEC = float(os.getenv("PHOTOSESSION_PROGRESS_STEP_SEC", "3"))
@@ -534,6 +535,7 @@ async def handle_job(job: Dict[str, Any]) -> None:
         photo2_file_id = str(job.get("photo2_file_id") or "").strip()
         charge_tokens = int(job.get("charge_tokens") or 1)
         charge_ref_id = str(job.get("charge_ref_id") or "").strip() or None
+        size = (job.get("size") or "").strip() or None
 
         if not chat_id or not user_id:
             raise RuntimeError("two_photos job missing chat_id/user_id")
@@ -575,7 +577,7 @@ async def handle_job(job: Dict[str, Any]) -> None:
             out_bytes = await ark_edit_image(
                 source_image_bytes=b"",
                 prompt=prompt,
-                size=os.getenv("ARK_SIZE_DEFAULT", "2048x2048"),
+                size=size,
                 mask_png_bytes=None,
                 source_image_urls=[url1, url2],
             )
@@ -907,10 +909,9 @@ async def handle_job(job: Dict[str, Any]) -> None:
                 pass
             return
 
-    # --- Default (qtest etc.) ---
+    # --- Default / unknown type ---
     else:
-        if chat_id:
-            await tg_send_message(chat_id, f"✅ Воркер получил задачу: {job_type}\njob_id={job.get('job_id')}")
+        print(f"Gen worker: unsupported job type={job_type} job_id={job.get('job_id')}")
         return
 
 
@@ -927,14 +928,14 @@ async def worker_loop() -> None:
                 print("Job failed:", e)
 
     while True:
-        job = await dequeue_job(timeout_sec=10)
+        job = await dequeue_job(queue_name=GEN_QUEUE_NAME, timeout_sec=10)
         if not job:
             continue
         asyncio.create_task(_run_one(job))
 
 
 def main() -> None:
-    print("Gen worker started. concurrency =", MAX_CONCURRENCY)
+    print(f"Gen worker started. queue={GEN_QUEUE_NAME} concurrency={MAX_CONCURRENCY}")
     asyncio.run(worker_loop())
 
 
