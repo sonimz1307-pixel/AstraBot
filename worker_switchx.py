@@ -27,6 +27,9 @@ SWITCHX_POLL_SEC = float(os.getenv("SWITCHX_POLL_SEC", "8"))
 SUNOAPI_POLL_TIMEOUT_SEC = int(os.getenv("SUNOAPI_POLL_TIMEOUT_SEC", "600"))
 PIAPI_POLL_TIMEOUT_SEC = int(os.getenv("PIAPI_POLL_TIMEOUT_SEC", "300"))
 
+MUSIC_QUEUE_NAME = os.getenv("MUSIC_QUEUE_NAME", "music").strip() or "music"
+SWITCHX_QUEUE_NAME = os.getenv("SWITCHX_QUEUE_NAME", "switchx").strip() or "switchx"
+
 switchx_sem = asyncio.Semaphore(SWITCHX_CONCURRENCY)
 music_sem = asyncio.Semaphore(MUSIC_CONCURRENCY)
 
@@ -783,13 +786,16 @@ async def worker_loop() -> None:
         except Exception as e:
             print("Generation job failed:", e)
 
+    queue_names = [MUSIC_QUEUE_NAME, SWITCHX_QUEUE_NAME]
+
     while True:
-        job = await dequeue_job(timeout_sec=10)
+        job = await dequeue_job(timeout_sec=10, queue_names=queue_names)
         if not job:
             continue
 
         job_type = str(job.get("type") or job.get("job_type") or "").strip()
         if job_type not in SUPPORTED_JOB_TYPES:
+            print("Skipped unsupported job type from combined worker:", job_type)
             continue
 
         asyncio.create_task(_run_one(job))
@@ -801,7 +807,8 @@ def main() -> None:
     print(
         "Generation worker started. "
         f"switchx_concurrency={SWITCHX_CONCURRENCY} "
-        f"music_concurrency={MUSIC_CONCURRENCY}"
+        f"music_concurrency={MUSIC_CONCURRENCY} "
+        f"queues={[MUSIC_QUEUE_NAME, SWITCHX_QUEUE_NAME]}"
     )
     asyncio.run(worker_loop())
 
