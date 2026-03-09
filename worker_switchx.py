@@ -22,19 +22,25 @@ TG_FILE = f"https://api.telegram.org/file/bot{BOT_TOKEN}" if BOT_TOKEN else None
 
 SWITCHX_CONCURRENCY = int(os.getenv("SWITCHX_CONCURRENCY", os.getenv("SWITCHX_WORKER_CONCURRENCY", "2")))
 MUSIC_CONCURRENCY = int(os.getenv("MUSIC_CONCURRENCY", "3"))
+SORA_CONCURRENCY = int(os.getenv("SORA_CONCURRENCY", "2"))
 SWITCHX_TIMEOUT_SEC = int(os.getenv("SWITCHX_TIMEOUT_SEC", "3600"))
+SORA_TIMEOUT_SEC = int(os.getenv("SORA_TIMEOUT_SEC", "1800"))
+SORA_POLL_SEC = float(os.getenv("SORA_POLL_SEC", "10"))
 SWITCHX_POLL_SEC = float(os.getenv("SWITCHX_POLL_SEC", "8"))
 SUNOAPI_POLL_TIMEOUT_SEC = int(os.getenv("SUNOAPI_POLL_TIMEOUT_SEC", "600"))
 PIAPI_POLL_TIMEOUT_SEC = int(os.getenv("PIAPI_POLL_TIMEOUT_SEC", "300"))
 
 MUSIC_QUEUE_NAME = os.getenv("MUSIC_QUEUE_NAME", "music").strip() or "music"
 SWITCHX_QUEUE_NAME = os.getenv("SWITCHX_QUEUE_NAME", "switchx").strip() or "switchx"
+SORA_QUEUE_NAME = os.getenv("SORA_QUEUE_NAME", "sora").strip() or "sora"
 
 switchx_sem = asyncio.Semaphore(SWITCHX_CONCURRENCY)
 music_sem = asyncio.Semaphore(MUSIC_CONCURRENCY)
+sora_sem = asyncio.Semaphore(SORA_CONCURRENCY)
 
 MUSIC_JOB_TYPES = {"music", "music_piapi", "music_suno"}
-SUPPORTED_JOB_TYPES = {JOB_TYPE_SWITCHX, *MUSIC_JOB_TYPES}
+SORA_JOB_TYPES = {"sora_video"}
+SUPPORTED_JOB_TYPES = {JOB_TYPE_SWITCHX, *MUSIC_JOB_TYPES, *SORA_JOB_TYPES}
 
 PIAPI_API_KEY = os.getenv("PIAPI_API_KEY", "").strip()
 PIAPI_BASE_URL = os.getenv("PIAPI_BASE_URL", "https://api.piapi.ai").rstrip("/")
@@ -46,6 +52,9 @@ if SUNOAPI_BASE_URL.rstrip("/") == "https://api.sunoapi.org":
 SUNOAPI_CALLBACK_URL = os.getenv("SUNOAPI_CALLBACK_URL", "").strip()
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip()
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
 
 
 async def tg_send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None) -> Optional[int]:
@@ -216,6 +225,82 @@ async def tg_send_audio_from_url(
             await tg_send_document_bytes(chat_id, content, filename="track.mp3", mime="audio/mpeg", caption=caption, reply_markup=reply_markup)
     except Exception:
         await tg_send_message(chat_id, f"🎧 MP3: {url}", reply_markup=reply_markup)
+
+
+def _sora_headers() -> dict[str, str]:
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not set")
+    return {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+    }
+
+
+def _sora_size_from_aspect(aspect_ratio: str) -> str:
+    ar = str(aspect_ratio or "16:9").strip()
+    if ar == "9:16":
+        return "720x1280"
+    return "1280x720"
+
+
+async def sora_create_video(*, prompt: str, duration: int, aspect_ratio: str, model: str = "sora-2") -> dict:
+    url = f"{OPENAI_API_BASE}/videos"
+    files = [
+        ("model", (None, str(model or "sora-2"))),
+        ("prompt", (None, str(prompt or "").strip())),
+        ("seconds", (None, str(int(duration)))),
+        ("size", (None, _sora_size_from_aspect(aspect_ratio))),
+    ]
+    headers = _sora_headers()
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        r = await client.post(url, headers=headers, files=files)
+    if r.status_code >= 300:
+        try:
+            j = r.json()
+            raise RuntimeError(((j.get("error") or {}).get("message")) or r.text[:800])
+        except Exception:
+            raise RuntimeError(f"OpenAI create video failed: {r.status_code} {r.text[:800]}")
+    return r.json()
+
+
+async def sora_retrieve_video(video_id: str) -> dict:
+    url = f"{OPENAI_API_BASE}/videos/{video_id}"
+    headers = _sora_headers()
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        r = await client.get(url, headers=headers)
+    if r.status_code >= 300:
+        try:
+            j = r.json()
+            raise RuntimeError(((j.get("error") or {}).get("message")) or r.text[:800])
+        except Exception:
+            raise RuntimeError(f"OpenAI retrieve video failed: {r.status_code} {r.text[:800]}")
+    return r.json()
+
+
+async def sora_download_video(video_id: str) -> bytes:
+    url = f"{OPENAI_API_BASE}/videos/{video_id}/content"
+    headers = _sora_headers()
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        r = await client.get(url, headers=headers, params={"variant": "video"})
+    if r.status_code >= 300:
+        try:
+            j = r.json()
+            raise RuntimeError(((j.get("error") or {}).get("message")) or r.text[:800])
+        except Exception:
+            raise RuntimeError(f"OpenAI download video failed: {r.status_code} {r.text[:800]}")
+    return r.content
+
+
+async def sora_poll_video(video_id: str, *, timeout_sec: int = SORA_TIMEOUT_SEC, sleep_sec: float = SORA_POLL_SEC) -> dict:
+    t0 = time.time()
+    last: dict[str, Any] = {}
+    while True:
+        last = await sora_retrieve_video(video_id)
+        status = str(last.get("status") or "").strip().lower()
+        if status in ("completed", "failed"):
+            return last
+        if time.time() - t0 > timeout_sec:
+            raise TimeoutError(f"Sora timeout after {timeout_sec}s (video_id={video_id}, status={status})")
+        await asyncio.sleep(max(2.0, float(sleep_sec)))
 
 
 # ---------------- PiAPI music helpers ----------------
@@ -585,6 +670,103 @@ async def handle_switchx_job(job: Dict[str, Any]) -> None:
         await tg_send_message(chat_id, f"❌ SwitchX: ошибка генерации.\n{e}")
 
 
+async def handle_sora_job(job: Dict[str, Any]) -> None:
+    chat_id = int(job.get("chat_id") or 0)
+    user_id = int(job.get("user_id") or 0)
+    prompt = str(job.get("prompt") or "").strip()
+    model = str(job.get("model") or "sora-2").strip() or "sora-2"
+    duration = int(job.get("duration") or 4)
+    aspect_ratio = str(job.get("aspect_ratio") or "16:9").strip()
+    charge_tokens = int(job.get("charge_tokens") or 0)
+
+    if not chat_id or not user_id:
+        raise RuntimeError("sora job missing chat_id/user_id")
+    if not prompt:
+        raise RuntimeError("sora job missing prompt")
+    if duration not in (4, 8, 12):
+        raise RuntimeError(f"sora invalid duration: {duration}")
+    if aspect_ratio not in ("16:9", "9:16"):
+        raise RuntimeError(f"sora invalid aspect_ratio: {aspect_ratio}")
+
+    msg_id = await tg_send_message(chat_id, f"⏳ Sora 2: отправляю задачу…\n{duration} сек • {aspect_ratio}")
+    stop = asyncio.Event()
+
+    async def _progress_loop() -> None:
+        if not msg_id:
+            return
+        seq = [8, 16, 24, 32, 45, 58, 71, 84, 92, 97]
+        i = 0
+        while not stop.is_set():
+            pct = seq[min(i, len(seq) - 1)]
+            i += 1
+            try:
+                await tg_edit_message_text(chat_id, msg_id, f"⏳ Sora 2: генерация… {pct}%")
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=max(4.0, SORA_POLL_SEC))
+            except asyncio.TimeoutError:
+                continue
+
+    prog_task = asyncio.create_task(_progress_loop())
+
+    try:
+        created = await sora_create_video(
+            prompt=prompt,
+            duration=duration,
+            aspect_ratio=aspect_ratio,
+            model=model,
+        )
+        video_id = str(created.get("id") or "").strip()
+        if not video_id:
+            raise RuntimeError(f"OpenAI did not return video id: {created}")
+
+        done = await sora_poll_video(video_id)
+
+        stop.set()
+        try:
+            await prog_task
+        except Exception:
+            pass
+
+        status = str(done.get("status") or "").strip().lower()
+        if status == "failed":
+            err = ((done.get("error") or {}).get("message")) or "Sora generation failed"
+            raise RuntimeError(err)
+        if status != "completed":
+            raise RuntimeError(f"Unexpected Sora status: {status}")
+
+        if msg_id:
+            try:
+                await tg_edit_message_text(chat_id, msg_id, "✅ Sora 2: готово. Отправляю видео…")
+            except Exception:
+                pass
+
+        video_bytes = await sora_download_video(video_id)
+        await tg_send_video_bytes(
+            chat_id,
+            video_bytes,
+            filename="sora2.mp4",
+            caption=f"🎬 Sora 2 готово • {duration} сек • {aspect_ratio}",
+        )
+
+    except Exception as e:
+        stop.set()
+        try:
+            await prog_task
+        except Exception:
+            pass
+        if charge_tokens > 0:
+            try:
+                add_tokens(user_id, int(charge_tokens), reason="sora_video_refund", meta={"error": str(e)[:300]})
+            except TypeError:
+                try:
+                    add_tokens(user_id, int(charge_tokens), reason="sora_video_refund")
+                except Exception:
+                    pass
+        await tg_send_message(chat_id, f"❌ Sora 2: ошибка генерации.\n{e}")
+
+
 async def handle_music_job(job: Dict[str, Any]) -> None:
     job_type = str(job.get("type") or job.get("job_type") or "").strip().lower()
     chat_id = int(job.get("chat_id") or 0)
@@ -776,6 +958,11 @@ async def handle_job(job: Dict[str, Any]) -> None:
             await handle_music_job(job)
         return
 
+    if job_type in SORA_JOB_TYPES:
+        async with sora_sem:
+            await handle_sora_job(job)
+        return
+
     print("Unknown job type:", job_type)
 
 
@@ -786,7 +973,7 @@ async def worker_loop() -> None:
         except Exception as e:
             print("Generation job failed:", e)
 
-    queue_names = [MUSIC_QUEUE_NAME, SWITCHX_QUEUE_NAME]
+    queue_names = [MUSIC_QUEUE_NAME, SWITCHX_QUEUE_NAME, SORA_QUEUE_NAME]
 
     while True:
         job = await dequeue_job(timeout_sec=10, queue_names=queue_names)
@@ -808,7 +995,8 @@ def main() -> None:
         "Generation worker started. "
         f"switchx_concurrency={SWITCHX_CONCURRENCY} "
         f"music_concurrency={MUSIC_CONCURRENCY} "
-        f"queues={[MUSIC_QUEUE_NAME, SWITCHX_QUEUE_NAME]}"
+        f"sora_concurrency={SORA_CONCURRENCY} "
+        f"queues={[MUSIC_QUEUE_NAME, SWITCHX_QUEUE_NAME, SORA_QUEUE_NAME]}"
     )
     asyncio.run(worker_loop())
 
