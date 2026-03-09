@@ -162,8 +162,9 @@ def _is_nav_or_menu_text(t: str) -> bool:
         # main menu buttons (texts)
         "ии (чат)", "ии", "ии чат", "чат", "ai chat", "chatgpt", "gpt",
         "фото будущего", "видео будущего", "музыка будущего",
+        "озвучить текст", "для pro", "промпты",
         "баланс", "профиль", "тарифы", "оплата", "пополнить",
-        "статистика",
+        "статистика", "рассылка",
         # submenus you use in keyboards
         "фото/афиши", "нейро фотосессии", "картинка+картинка", "2 фото", "nano banana",
         "афиша: ярко", "афиша: кино",
@@ -574,6 +575,7 @@ WEBAPP_MUSIC_URL = os.getenv("WEBAPP_MUSIC_URL", "https://astrabot-tchj.onrender
 WEBAPP_TOP_ANALIZATOR_URL = os.getenv("WEBAPP_TOP_ANALIZATOR_URL", "https://astrabot-tchj.onrender.com/webapp/top_analizator")
 WEBAPP_PROMPTS_URL = os.getenv("WEBAPP_PROMPTS_URL", "https://astrabot-tchj.onrender.com/webapp/prompts")
 WEBAPP_PROMPTS_ADMIN_URL = os.getenv("WEBAPP_PROMPTS_ADMIN_URL", "https://astrabot-tchj.onrender.com/webapp/prompts_admin")
+SORA_QUEUE_NAME = os.getenv("SORA_QUEUE_NAME", "sora").strip() or "sora"
 # --- YooKassa (cards/SBP) ---
 YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "").strip()
 YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "").strip()
@@ -1081,7 +1083,7 @@ async def _ai_maybe_summarize(st: Dict[str, Any]):
     st["ai_ts"] = _now()
 
 
-def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photosession", "t2i", "two_photos", "nano_banana", "kling_mc", "kling_i2v", "suno_music", "veo_t2v", "veo_i2v"]):
+def _set_mode(chat_id: int, user_id: int, mode: str):
     st = _ensure_state(chat_id, user_id)
     st["mode"] = mode
     st["ts"] = _now()
@@ -1116,6 +1118,9 @@ def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photo
     elif mode == "nano_banana_pro":
         st["nano_banana_pro"] = {"step": "need_photo", "photo_bytes": None, "resolution": "2K"}
 
+    elif mode == "sora_t2v":
+        st["sora_t2v"] = {"step": "need_prompt"}
+
     elif mode == "veo_t2v":
         st["veo_t2v"] = {"step": "need_prompt"}
 
@@ -1136,6 +1141,8 @@ def _set_mode(chat_id: int, user_id: int, mode: Literal["chat", "poster", "photo
         st.pop("t2i", None)
         st.pop("two_photos", None)
         st.pop("nano_banana", None)
+        st.pop("sora_t2v", None)
+        st.pop("sora_settings", None)
         st.pop("veo_t2v", None)
         st.pop("veo_i2v", None)
 
@@ -1385,11 +1392,15 @@ def _main_menu_keyboard(is_admin: bool = False) -> dict:
             {"text": "🎬 Видео будущего", "web_app": {"url": WEBAPP_KLING_URL}},
             {"text": "🎵 Музыка будущего", "web_app": {"url": WEBAPP_MUSIC_URL}},
         ],
-        [{"text": "🔊 Озвучить текст"}, {"text": "Для Pro"}],
+        [
+            {"text": "🔊 Озвучить текст"},
+            {"text": "📚 Промпты", "web_app": {"url": WEBAPP_PROMPTS_URL}},
+        ],
         [{"text": "💰 Баланс"}, {"text": "Помощь"}],
     ]
     if is_admin:
         rows.append([{"text": "📊 Статистика"}, {"text": "📣 Рассылка"}])
+        rows.append([{"text": "Для Pro"}])
 
     return {
         "keyboard": rows,
@@ -3912,6 +3923,43 @@ async def webhook(secret: str, request: Request):
                 )
                 return {"ok": True}
 
+# ----- WebApp data (Sora 2 settings) -----
+        # Expected: {type:"sora_settings", provider:"sora", duration:4|8|12, aspect_ratio:"16:9|9:16"}
+        is_sora = (
+            (str(payload.get("type") or "").lower().strip() == "sora_settings")
+            or (provider_raw == "sora")
+        ) and (str(payload.get("provider") or provider_raw or "").lower().strip() == "sora")
+
+        if is_sora:
+            try:
+                duration = int(payload.get("duration") or 4)
+            except Exception:
+                duration = 4
+            if duration not in (4, 8, 12):
+                duration = 4
+
+            aspect_ratio = str(payload.get("aspect_ratio") or "16:9").strip()
+            if aspect_ratio not in ("16:9", "9:16"):
+                aspect_ratio = "16:9"
+
+            st["sora_settings"] = {
+                "model": "sora-2",
+                "flow": "text",
+                "duration": duration,
+                "aspect_ratio": aspect_ratio,
+            }
+            st["ts"] = _now()
+
+            _set_mode(chat_id, user_id, "sora_t2v")
+            st["sora_t2v"] = {"step": "need_prompt"}
+            st["ts"] = _now()
+            await tg_send_message(
+                chat_id,
+                "✅ Настройки Sora 2 сохранены.\n\nТеперь пришли ТЕКСТ (промпт), что должно быть в видео.",
+                reply_markup=_help_menu_for(user_id),
+            )
+            return {"ok": True}
+
 # ----- WebApp data (Veo settings) -----
         # Expected (from our WebApp): {type:"veo_settings", provider:"veo", veo_model:"fast|pro", flow:"text|image",
         # duration, aspect_ratio, generate_audio, resolution, use_last_frame, use_reference_images}
@@ -4291,6 +4339,14 @@ async def webhook(secret: str, request: Request):
 
     # ----- Pro menu -----
     if incoming_text == "Для Pro":
+        if not _is_admin(user_id):
+            await tg_send_message(
+                chat_id,
+                "Нет доступа.",
+                reply_markup=_main_menu_for(user_id),
+            )
+            return {"ok": True}
+
         await tg_send_message(
             chat_id,
             "Раздел Pro. Открывай Top Analizator: В РАЗРАБОТКЕ",
@@ -4907,6 +4963,124 @@ async def webhook(secret: str, request: Request):
             except Exception:
                 pass
             await tg_send_message(chat_id, f"❌ Ошибка Seedance: {e}", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+        finally:
+            _busy_end(int(user_id))
+
+    # ---- Sora 2 (OpenAI) Text→Video: ждём промпт ----
+    if st.get("mode") == "sora_t2v" and incoming_text:
+        if _is_nav_or_menu_text(incoming_text):
+            _set_mode(chat_id, user_id, "chat")
+            st.pop("sora_t2v", None)
+            st.pop("sora_settings", None)
+            st["ts"] = _now()
+            sb_clear_user_state(user_id)
+            await tg_send_message(chat_id, "Ок. Вышел из Sora 2. Главное меню.", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+
+        if _busy_is_active(int(user_id)):
+            kind = _busy_kind(int(user_id)) or "генерация"
+            await tg_send_message(
+                chat_id,
+                f"⏳ Сейчас выполняется: {kind}. Дождись завершения (или /reset).",
+                reply_markup=_help_menu_for(user_id),
+            )
+            return {"ok": True}
+
+        prompt = incoming_text.strip()
+        if not prompt:
+            await tg_send_message(chat_id, "Промпт пустой. Пришли текстом, что должно быть в видео.", reply_markup=_help_menu_for(user_id))
+            return {"ok": True}
+
+        settings = st.get("sora_settings") or {}
+        duration = int(settings.get("duration") or 4)
+        aspect_ratio = str(settings.get("aspect_ratio") or "16:9").strip()
+        model_slug = str(settings.get("model") or "sora-2").strip() or "sora-2"
+
+        cost_map = {4: 5, 8: 10, 12: 15}
+        cost_tokens = int(cost_map.get(duration, 5))
+
+        _busy_start(int(user_id), "Sora 2 видео")
+        sora_charged = False
+        try:
+            try:
+                ensure_user_row(user_id)
+                bal = int(get_balance(user_id) or 0)
+            except Exception:
+                bal = 0
+
+            if bal < cost_tokens:
+                await tg_send_message(
+                    chat_id,
+                    f"❌ Недостаточно токенов.\nНужно: {cost_tokens}\nБаланс: {bal}",
+                    reply_markup=_topup_balance_inline_kb(),
+                )
+                return {"ok": True}
+
+            try:
+                add_tokens(
+                    user_id,
+                    -cost_tokens,
+                    reason="sora_video",
+                    meta={
+                        "model": model_slug,
+                        "duration": int(duration),
+                        "aspect_ratio": aspect_ratio,
+                        "cost_tokens": int(cost_tokens),
+                    },
+                )
+            except TypeError:
+                add_tokens(
+                    user_id,
+                    -int(cost_tokens),
+                    reason="sora_video",
+                    meta={
+                        "model": model_slug,
+                        "duration": int(duration),
+                        "aspect_ratio": aspect_ratio,
+                        "cost_tokens": int(cost_tokens),
+                    },
+                )
+            sora_charged = True
+
+            job_id = uuid4().hex
+            job: Dict[str, Any] = {
+                "job_id": job_id,
+                "type": "sora_video",
+                "chat_id": int(chat_id),
+                "user_id": int(user_id),
+                "model": model_slug,
+                "prompt": prompt,
+                "duration": int(duration),
+                "aspect_ratio": aspect_ratio,
+                "charge_tokens": int(cost_tokens),
+            }
+
+            st.pop("sora_t2v", None)
+            st.pop("sora_settings", None)
+            st["ts"] = _now()
+            sb_clear_user_state(user_id)
+            _set_mode(chat_id, user_id, "chat")
+
+            await tg_send_message(
+                chat_id,
+                f"⏳ Sora 2: поставил в очередь ({duration} сек • {aspect_ratio}). Как будет готово — пришлю видео.",
+                reply_markup=_help_menu_for(user_id),
+            )
+
+            await enqueue_job(job, queue_name=SORA_QUEUE_NAME)
+            return {"ok": True}
+
+        except Exception as e:
+            try:
+                if sora_charged:
+                    try:
+                        add_tokens(user_id, int(cost_tokens), reason="sora_video_refund", meta={"stage": "main_exception"})
+                    except TypeError:
+                        add_tokens(user_id, int(cost_tokens), reason="sora_video_refund")
+            except Exception:
+                pass
+            await tg_send_message(chat_id, f"❌ Ошибка Sora 2: {e}", reply_markup=_main_menu_for(user_id))
             return {"ok": True}
         finally:
             _busy_end(int(user_id))
