@@ -6234,7 +6234,7 @@ async def webhook(secret: str, request: Request):
                     "photo1_file_id": str(photo1_file_id),
                     "photo2_file_id": str(photo2_file_id),
                     "prompt": prompt,
-                    "size": ARK_SIZE_DEFAULT,
+                    "size": "1792x1024",
                     "charge_tokens": int(cost_tokens),
                     "charge_ref_id": charge_ref_id,
                 }, queue_name="gen")
