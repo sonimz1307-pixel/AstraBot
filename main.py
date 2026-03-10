@@ -3870,7 +3870,7 @@ async def webhook(secret: str, request: Request):
             _clear_music_ctx(st, chat_id, user_id)
             await tg_send_message(
                 chat_id,
-                "⏳ Музыка: поставил в очередь. Как будет готово — пришлю трек.",
+                "⏳ Музыка: Начинаю генерацию. Как будет готово — пришлю трек.",
                 reply_markup=_help_menu_for(user_id),
             )
             return {"ok": True}
@@ -4992,7 +4992,7 @@ async def webhook(secret: str, request: Request):
             sb_clear_user_state(user_id)
             _set_mode(chat_id, user_id, "chat")
 
-            await tg_send_message(chat_id, "⏳ Seedance: поставил в очередь. Как будет готово — пришлю видео.", reply_markup=_help_menu_for(user_id))
+            await tg_send_message(chat_id, "⏳ Генерация может занять от 5 до 30 минут. Как будет готово — пришлю видео.", reply_markup=_help_menu_for(user_id))
 
             await enqueue_job(job, queue_name="gen")
             return {"ok": True}
@@ -5109,7 +5109,7 @@ async def webhook(secret: str, request: Request):
 
             await tg_send_message(
                 chat_id,
-                f"⏳ Sora 2: поставил в очередь ({duration} сек • {aspect_ratio}). Как будет готово — пришлю видео.",
+                f"⏳ Sora 2: Начинаю генерацию ({duration} сек • {aspect_ratio}). Как будет готово — пришлю видео.",
                 reply_markup=_help_menu_for(user_id),
             )
 
@@ -6475,7 +6475,7 @@ async def webhook(secret: str, request: Request):
                 )
                 return {"ok": True}
 
-            await tg_send_message(chat_id, "⏳ Картинка+Картинка: поставил задачу в очередь. Как будет готово — пришлю результат.", reply_markup=_main_menu_for(user_id))
+            await tg_send_message(chat_id, "⏳ Картинка+Картинка: Начинаю генерацию. Как будет готово — пришлю результат.", reply_markup=_main_menu_for(user_id))
 
             st["two_photos"] = {
                 "step": "need_photo_1",
