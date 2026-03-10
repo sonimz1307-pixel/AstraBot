@@ -67,6 +67,31 @@ if UVICORN_LOGGER.level > logging.INFO:
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+BALANCE_BANNER_PATH = os.getenv("BALANCE_BANNER_PATH", "").strip()
+
+def _read_balance_banner_bytes() -> Optional[bytes]:
+    candidates = []
+    if BALANCE_BANNER_PATH:
+        candidates.append(BALANCE_BANNER_PATH)
+    candidates.extend([
+        os.path.join(BASE_DIR, "static", "img", "balance_banner.png"),
+        os.path.join(BASE_DIR, "static", "img", "balance_banner.jpg"),
+        os.path.join(BASE_DIR, "balance_banner.png"),
+        os.path.join(BASE_DIR, "balance_banner.jpg"),
+    ])
+    seen = set()
+    for p in candidates:
+        if not p or p in seen:
+            continue
+        seen.add(p)
+        try:
+            if os.path.exists(p) and os.path.isfile(p):
+                with open(p, "rb") as f:
+                    return f.read()
+        except Exception:
+            continue
+    return None
+
 # предотвращаем дубли callback'ов от SunoAPI (иногда приходит несколько POST подряд)
 _SUNOAPI_CB_DEDUP: dict[str, float] = {}
 _SUNOAPI_CB_DEDUP_TTL_SEC = 600.0
@@ -785,12 +810,10 @@ def sb_set_user_email(user_id: int, email: str) -> bool:
 # ₽ — расчётная стоимость в рублях
 # Токены — внутренняя единица сервиса
 TOPUP_PACKS = [
-    {"tokens": 5,   "stars": 33},
-    {"tokens": 18,  "stars": 99},
-    {"tokens": 36,  "stars": 198},
-    {"tokens": 72,  "stars": 399},
-    {"tokens": 160, "stars": 799},
-    {"tokens": 303, "stars": 1499},
+    {"tokens": 5, "rub": 60, "stars": 33, "badge": "💰", "title": "Для знакомства"},
+    {"tokens": 20, "rub": 180, "stars": 99, "badge": "⭐", "title": "Самый популярный"},
+    {"tokens": 50, "rub": 450, "stars": 247, "badge": "🚀", "title": "Для регулярного использования"},
+    {"tokens": 100, "rub": 850, "stars": 467, "badge": "👑", "title": "Максимальная выгода"},
 ]
 
 def _find_pack_by_tokens(tokens: int) -> Optional[Dict[str, int]]:
@@ -811,9 +834,13 @@ def _topup_packs_kb() -> dict:
     btns = []
     for p in TOPUP_PACKS:
         tokens = int(p["tokens"])
-        stars = int(p["stars"])
+        rub = int(p["rub"])
+        badge = str(p.get("badge") or "").strip()
+        title = str(p.get("title") or "").strip()
+        prefix = f"{badge} " if badge else ""
+        suffix = f" • {title}" if title else ""
         btns.append({
-            "text": f"≈{int(round(stars * 1.82))}₽ • {tokens} токенов",
+            "text": f"{prefix}{rub}₽ • {tokens} токенов{suffix}",
             "callback_data": f"topup:pack:{tokens}"
         })
 
@@ -3427,7 +3454,7 @@ async def webhook(secret: str, request: Request):
                     return {"ok": True}
 
                 stars = int(pack["stars"])
-                amount_rub = int(round(stars * 1.82))
+                amount_rub = int(pack.get("rub") or 0)
                 title = f"Пополнение баланса: {tokens} токенов"
                 description = f"{tokens} токенов • {amount_rub}₽ (оплата картой/СБП)"
 
@@ -4580,11 +4607,29 @@ async def webhook(secret: str, request: Request):
             await tg_send_message(chat_id, f"Не смог получить баланс: {e}", reply_markup=_main_menu_for(user_id))
             return {"ok": True}
 
-        await tg_send_message(
-            chat_id,
-            f"💰 Баланс: {bal} токенов\n\nРасход токенов зависит от режима генерации (выбирается в WebApp).",
-            reply_markup=_topup_balance_inline_kb(),
-        )
+        caption = f"💰 Баланс: {bal} токенов\n\nРасход токенов зависит от режима генерации (выбирается в WebApp)."
+        banner_bytes = _read_balance_banner_bytes()
+
+        if banner_bytes:
+            try:
+                await tg_send_photo_bytes(
+                    chat_id,
+                    banner_bytes,
+                    caption=caption,
+                    reply_markup=_topup_balance_inline_kb(),
+                )
+            except Exception:
+                await tg_send_message(
+                    chat_id,
+                    caption,
+                    reply_markup=_topup_balance_inline_kb(),
+                )
+        else:
+            await tg_send_message(
+                chat_id,
+                caption,
+                reply_markup=_topup_balance_inline_kb(),
+            )
         return {"ok": True}
 
     if incoming_text in ("🔊 Озвучить текст", "Озвучить текст"):
