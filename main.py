@@ -810,10 +810,10 @@ def sb_set_user_email(user_id: int, email: str) -> bool:
 # ₽ — расчётная стоимость в рублях
 # Токены — внутренняя единица сервиса
 TOPUP_PACKS = [
-    {"tokens": 5, "rub": 60, "stars": 33, "badge": "💰", "title": "Для знакомства"},
-    {"tokens": 20, "rub": 180, "stars": 99, "badge": "⭐", "title": "Самый популярный"},
-    {"tokens": 50, "rub": 450, "stars": 247, "badge": "🚀", "title": "Для регулярного использования"},
-    {"tokens": 100, "rub": 850, "stars": 467, "badge": "👑", "title": "Максимальная выгода"},
+    {"tokens": 5, "rub": 60, "stars": 33, "badge": "💰"},
+    {"tokens": 20, "rub": 180, "stars": 99, "badge": "⭐"},
+    {"tokens": 50, "rub": 450, "stars": 247, "badge": "🚀"},
+    {"tokens": 100, "rub": 850, "stars": 467, "badge": "👑"},
 ]
 
 def _find_pack_by_tokens(tokens: int) -> Optional[Dict[str, int]]:
