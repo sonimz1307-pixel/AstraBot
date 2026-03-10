@@ -6557,7 +6557,7 @@ async def webhook(secret: str, request: Request):
             if user_prompt.lower() in ("старт", "start", "go"):
                 user_prompt = "A person performs the same motion as in the reference video."
 
-            await tg_send_message(chat_id, "🎬 Генерирую видео (обычно 3–7 минут)…", reply_markup=_main_menu_for(user_id))
+            await tg_send_message(chat_id, "🎬 Генерирую видео (обычно 5–20 минут)…", reply_markup=_main_menu_for(user_id))
 
             _busy_start(int(user_id), "Kling Motion")
 
