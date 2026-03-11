@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Nightly janitor for temporary Supabase Storage files.
 
-What it cleans by default for this AstraBot project:
+This version uses the Supabase Storage SDK to list files/folders instead of
+querying PostgREST on the `storage` schema.
+
+Default cleanup targets for this AstraBot project:
 - bucket SB_MEDIA_BUCKET / SUPABASE_MEDIA_BUCKET / SUPABASE_BUCKET / Kling -> kling3/
 - bucket SUPABASE_BUCKET / Kling -> kling_inputs/
 - bucket SUPABASE_BUCKET / Kling -> veo_inputs/ (or VEO_BUCKET_PREFIX)
@@ -13,9 +16,9 @@ Safe behavior:
 - supports dry-run mode
 
 Usage:
-  python cleanup_storage.py
-  python cleanup_storage.py --dry-run
-  python cleanup_storage.py --hours 48
+  python cleanup_storage_fixed.py
+  python cleanup_storage_fixed.py --dry-run
+  python cleanup_storage_fixed.py --hours 48
 """
 
 from __future__ import annotations
@@ -27,9 +30,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, List, Optional, Tuple
-from urllib.parse import urlencode
 
-import httpx
 from supabase import create_client
 
 LOG = logging.getLogger("cleanup_storage")
@@ -77,17 +78,13 @@ def _unique_rules(rules: Iterable[CleanupRule]) -> List[CleanupRule]:
 
 
 def _default_rules() -> List[CleanupRule]:
-    # Kling 3 temp frames may use dedicated media bucket or the same Kling bucket.
     kling3_bucket = (
         _env("SB_MEDIA_BUCKET")
         or _env("SUPABASE_MEDIA_BUCKET")
         or _env("SUPABASE_BUCKET")
         or "Kling"
     )
-
-    # Kling / Veo temp inputs use SUPABASE_BUCKET in this project.
     main_bucket = _env("SUPABASE_BUCKET") or kling3_bucket or "Kling"
-
     veo_prefix = _env("VEO_BUCKET_PREFIX") or "veo_inputs"
     seedance_bucket = _env("SEEDANCE_REF_BUCKET") or "seedance-refs"
     seedance_prefix = _env("SEEDANCE_REF_PREFIX") or "refs"
@@ -101,7 +98,6 @@ def _default_rules() -> List[CleanupRule]:
 
     extra = _env("CLEANUP_EXTRA_RULES")
     if extra:
-        # Format: bucket1:prefix1;bucket2:prefix2
         for chunk in extra.split(";"):
             chunk = chunk.strip()
             if not chunk or ":" not in chunk:
@@ -129,69 +125,86 @@ def _parse_ts(value: Optional[str]) -> Optional[datetime]:
     return dt.astimezone(timezone.utc)
 
 
-def _build_rest_headers(service_key: str) -> dict:
-    return {
-        "apikey": service_key,
-        "Authorization": f"Bearer {service_key}",
-        "Accept-Profile": "storage",
-    }
+def _normalize_list_response(rows):
+    if rows is None:
+        return []
+    if isinstance(rows, list):
+        return rows
+    if isinstance(rows, dict):
+        if isinstance(rows.get("data"), list):
+            return rows["data"]
+        if isinstance(rows.get("items"), list):
+            return rows["items"]
+    raise RuntimeError(f"Unexpected list() response type: {type(rows).__name__}")
+
+
+def _is_folder_entry(entry: dict) -> bool:
+    # Supabase docs note that folder entries have id/created_at/updated_at/metadata == null.
+    return (
+        entry.get("id") is None
+        and entry.get("created_at") is None
+        and entry.get("updated_at") is None
+        and entry.get("metadata") is None
+    )
+
+
+def _join_path(parent: str, name: str) -> str:
+    parent = parent.strip().strip("/")
+    name = name.strip().strip("/")
+    if not parent:
+        return name
+    if not name:
+        return parent
+    return f"{parent}/{name}"
 
 
 def _list_old_paths(
     *,
-    url: str,
-    service_key: str,
+    sb_client,
     bucket: str,
     prefix: str,
     cutoff: datetime,
     page_size: int,
-    timeout_sec: float,
 ) -> List[str]:
-    """Read only metadata from storage.objects, then delete through Storage API.
-
-    We query the storage schema for object metadata because it gives us full object names
-    and timestamps reliably for age-based cleanup, while actual deletion still goes through
-    the Storage API via `storage.remove(...)`.
-    """
-    endpoint = f"{url}/rest/v1/objects"
-    headers = _build_rest_headers(service_key)
-    cutoff_iso = cutoff.isoformat()
     results: List[str] = []
-    offset = 0
+    folders_to_scan: List[str] = [prefix.strip().strip("/")]
 
-    with httpx.Client(timeout=timeout_sec, headers=headers) as client:
+    while folders_to_scan:
+        current_folder = folders_to_scan.pop(0)
+        offset = 0
         while True:
-            params = {
-                "select": "name,created_at,updated_at",
-                "bucket_id": f"eq.{bucket}",
-                "name": f"like.{prefix}/%",
-                "or": f"(created_at.lt.{cutoff_iso},and(created_at.is.null,updated_at.lt.{cutoff_iso}))",
-                "order": "created_at.asc.nullsfirst,name.asc",
-                "limit": str(page_size),
-                "offset": str(offset),
-            }
-            resp = client.get(endpoint, params=params)
-            if resp.status_code >= 300:
-                raise RuntimeError(
-                    f"Failed to read storage.objects for bucket={bucket} prefix={prefix}: "
-                    f"{resp.status_code} {resp.text[:500]}"
-                )
-            rows = resp.json()
-            if not isinstance(rows, list):
-                raise RuntimeError(
-                    f"Unexpected response for bucket={bucket} prefix={prefix}: {type(rows).__name__}"
-                )
+            rows = sb_client.storage.from_(bucket).list(
+                current_folder,
+                {
+                    "limit": page_size,
+                    "offset": offset,
+                    "sortBy": {"column": "name", "order": "asc"},
+                },
+            )
+            rows = _normalize_list_response(rows)
             if not rows:
                 break
 
-            for row in rows:
-                name = (row.get("name") or "").strip().lstrip("/")
+            for entry in rows:
+                if not isinstance(entry, dict):
+                    continue
+                name = (entry.get("name") or "").strip().strip("/")
                 if not name:
                     continue
-                # Extra guard in case filters change or API returns surprises.
-                if not name.startswith(prefix.rstrip("/") + "/"):
+                full_path = _join_path(current_folder, name)
+
+                if _is_folder_entry(entry):
+                    folders_to_scan.append(full_path)
                     continue
-                results.append(name)
+
+                created_at = _parse_ts(entry.get("created_at"))
+                updated_at = _parse_ts(entry.get("updated_at"))
+                ts = created_at or updated_at
+                if ts is None:
+                    # Unknown timestamp -> skip for safety.
+                    continue
+                if ts < cutoff:
+                    results.append(full_path)
 
             if len(rows) < page_size:
                 break
@@ -205,13 +218,7 @@ def _chunked(items: List[str], size: int) -> Iterable[List[str]]:
         yield items[idx : idx + size]
 
 
-def _delete_paths(
-    *,
-    sb_client,
-    bucket: str,
-    paths: List[str],
-    chunk_size: int,
-) -> int:
+def _delete_paths(*, sb_client, bucket: str, paths: List[str], chunk_size: int) -> int:
     deleted = 0
     for chunk in _chunked(paths, chunk_size):
         sb_client.storage.from_(bucket).remove(chunk)
@@ -240,7 +247,6 @@ def main() -> int:
     max_age_hours = args.hours or int(_env("CLEANUP_MAX_AGE_HOURS", "72"))
     page_size = int(_env("CLEANUP_PAGE_SIZE", "1000"))
     delete_chunk_size = int(_env("CLEANUP_DELETE_CHUNK_SIZE", "100"))
-    timeout_sec = float(_env("CLEANUP_HTTP_TIMEOUT_SEC", "60"))
     dry_run = args.dry_run or _env_bool("CLEANUP_DRY_RUN", False)
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
@@ -249,7 +255,12 @@ def main() -> int:
         LOG.warning("No cleanup rules configured. Nothing to do.")
         return 0
 
-    LOG.info("Cleanup started | dry_run=%s | older_than_hours=%s | cutoff_utc=%s", dry_run, max_age_hours, cutoff.isoformat())
+    LOG.info(
+        "Cleanup started | dry_run=%s | older_than_hours=%s | cutoff_utc=%s",
+        dry_run,
+        max_age_hours,
+        cutoff.isoformat(),
+    )
     for rule in rules:
         LOG.info("Rule: bucket=%s prefix=%s/", rule.bucket, rule.prefix)
 
@@ -266,13 +277,11 @@ def main() -> int:
     for rule in rules:
         try:
             old_paths = _list_old_paths(
-                url=supabase_url,
-                service_key=service_key,
+                sb_client=sb,
                 bucket=rule.bucket,
                 prefix=rule.prefix,
                 cutoff=cutoff,
                 page_size=page_size,
-                timeout_sec=timeout_sec,
             )
             total_found += len(old_paths)
             if not old_paths:
