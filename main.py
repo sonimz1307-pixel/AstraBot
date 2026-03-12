@@ -1753,7 +1753,7 @@ async def _ai_prompt_generate(pb: Dict[str, Any], user_text: str) -> str:
         image_bytes=None,
         image_bytes_list=images if images else None,
         temperature=0.5,
-        max_tokens=1200,
+        max_completion_tokens=1200,
         model=PROMPT_BUILDER_MODEL,
     )
     return (out or "").strip()
