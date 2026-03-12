@@ -4341,8 +4341,15 @@ async def webhook(secret: str, request: Request):
             else:
                 resolution = "720p"
 
-            use_last_frame = bool(payload.get("use_last_frame")) if veo_model == "pro" else False
-            use_reference_images = bool(payload.get("use_reference_images")) if veo_model == "pro" else False
+            use_last_frame = bool(payload.get("use_last_frame")) if (veo_model == "pro" and flow == "image") else False
+            use_reference_images = bool(payload.get("use_reference_images")) if (
+                veo_model == "pro" and flow == "image" and aspect_ratio == "16:9" and duration == 8
+            ) else False
+
+            # PiAPI / Veo 3.1 refs: только Image→Video, 16:9, 8s, 1-3 refs.
+            # Если refs включены, tail/last frame игнорируется — делаем это явным и на нашей стороне.
+            if use_reference_images:
+                use_last_frame = False
 
             st["veo_settings"] = {
                 "model": ("veo-3.1" if veo_model == "pro" else "veo-3-fast"),
@@ -4384,11 +4391,16 @@ async def webhook(secret: str, request: Request):
                 if use_last_frame:
                     extra.append("• last frame (финальный кадр)")
                 if use_reference_images:
-                    extra.append("• референсы (до 4)")
+                    extra.append("• референсы (до 3)")
                 extra_txt = ("\nДополнительно понадобится: " + ", ".join(extra)) if extra else ""
+                refs_note = ""
+                if use_reference_images:
+                    refs_note = "\n\nℹ️ Refs работают только в Veo 3.1 Pro + Image → Video + 16:9 + 8 сек. Максимум: 3 фото. При refs last frame не используется."
+                elif use_last_frame:
+                    refs_note = "\n\nℹ️ Last frame работает как финальный кадр перехода."
                 await tg_send_message(
                     chat_id,
-                    "✅ Настройки Veo сохранены (Image → Video).\n\nШаг 1) Пришли СТАРТОВОЕ фото (кадр 1)." + extra_txt,
+                    "✅ Настройки Veo сохранены (Image → Video).\n\nШаг 1) Пришли СТАРТОВОЕ фото (кадр 1)." + extra_txt + refs_note,
                     reply_markup=_help_menu_for(user_id),
                 )
                 return {"ok": True}
@@ -4500,6 +4512,12 @@ async def webhook(secret: str, request: Request):
 
             multi_shots = payload.get("multi_shots") or None
             prefer_multi_shots = bool(payload.get("prefer_multi_shots"))
+            base_gen_mode = (
+                str(payload.get("base_gen_mode") or "")
+                .lower()
+                .strip()
+            )
+            effective_gen_mode = "multishot" if prefer_multi_shots else gen_mode
 
             # 1-й/последний кадр: пока приходят фото в чат (см. Правка B)
             # Здесь просто сохраняем текущие значения, если они уже есть в state
@@ -4511,7 +4529,8 @@ async def webhook(secret: str, request: Request):
                 "duration": duration,
                 "aspect_ratio": aspect_ratio,
 
-                "gen_mode": gen_mode,
+                "gen_mode": effective_gen_mode,
+                "base_gen_mode": base_gen_mode or (gen_mode if gen_mode != "multishot" else "t2v"),
                 "multi_shots": multi_shots,
                 "prefer_multi_shots": prefer_multi_shots,
 
@@ -4523,7 +4542,7 @@ async def webhook(secret: str, request: Request):
 
             _set_mode(chat_id, user_id, "kling3_wait_prompt")
 
-            mode = gen_mode
+            mode = effective_gen_mode
 
             if mode == "i2v":
                 next_block = (
@@ -4537,7 +4556,7 @@ async def webhook(secret: str, request: Request):
                     "Дальше:\n"
                     "• Пришли текстовый промпт"
                 )
-            elif mode == "multi":
+            elif mode == "multishot":
                 next_block = (
                     "Дальше:\n"
                     "• Пришли multi-shot промпт\n"
@@ -4549,7 +4568,7 @@ async def webhook(secret: str, request: Request):
             await tg_send_message(
                 chat_id,
                 "✅ Kling PRO 3.0 настройки сохранены.\n"
-                f"Режим: {gen_mode}\n"
+                f"Режим: {effective_gen_mode}\n"
                 f"{resolution}p • {duration} сек • {'Audio ON' if enable_audio else 'Audio OFF'}\n"
                 f"Формат: {aspect_ratio}\n"
                 f"1-й кадр: {'да' if st['kling3_settings'].get('start_image_bytes') else 'нет'} • "
@@ -6087,7 +6106,7 @@ async def webhook(secret: str, request: Request):
                     st["ts"] = _now()
                     await tg_send_message(
                         chat_id,
-                        "Стартовое фото получил ✅\nТеперь пришли референсы (до 4 фото).\n"
+                        "Стартовое фото получил ✅\nТеперь пришли референсы (до 3 фото).\n"
                         "Когда закончишь — напиши «Готово».",
                         reply_markup=_help_menu_for(user_id),
                     )
@@ -6114,7 +6133,7 @@ async def webhook(secret: str, request: Request):
                     st["ts"] = _now()
                     await tg_send_message(
                         chat_id,
-                        "Last frame получил ✅\nТеперь пришли референсы (до 4 фото).\n"
+                        "Last frame получил ✅\nТеперь пришли референсы (до 3 фото).\n"
                         "Когда закончишь — напиши «Готово».",
                         reply_markup=_help_menu_for(user_id),
                     )
@@ -6130,16 +6149,16 @@ async def webhook(secret: str, request: Request):
                 )
                 return {"ok": True}
 
-            # 3) Reference images (до 4)
+            # 3) Reference images (до 3)
             if step == "need_refs":
                 refs = vi.get("reference_images_bytes") or []
                 if not isinstance(refs, list):
                     refs = []
 
-                if len(refs) >= 4:
+                if len(refs) >= 3:
                     await tg_send_message(
                         chat_id,
-                        "Референсов уже 4/4 ✅\nНапиши «Готово», чтобы перейти к промпту.",
+                        "Референсов уже 3/3 ✅\nНапиши «Готово», чтобы перейти к промпту.",
                         reply_markup=_help_menu_for(user_id),
                     )
                     return {"ok": True}
@@ -6151,7 +6170,7 @@ async def webhook(secret: str, request: Request):
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
-                    f"Референс принят ✅ ({len(refs)}/4)\n"
+                    f"Референс принят ✅ ({len(refs)}/3)\n"
                     "Пришли ещё референс или напиши «Готово».",
                     reply_markup=_help_menu_for(user_id),
                 )
@@ -6597,24 +6616,28 @@ async def webhook(secret: str, request: Request):
                     )
                     return {"ok": True}
 
-                # списываем токен ДО запроса
-                try:
-                    add_tokens(user_id, -cost, reason="nano_banana")
-                except TypeError:
-                    # если billing_db принимает только int
-                    add_tokens(user_id, -int(cost), reason="nano_banana")
-
-                # Placeholder + кнопка "Скачать оригинал"
+                nano_banana_charged = False
                 placeholder = _make_blur_placeholder(src_bytes)
                 token = _dl_init_slot(chat_id, user_id)
-                msg_id = await tg_send_photo_bytes_return_message_id(
-                    chat_id,
-                    placeholder,
-                    caption="🍌 Nano Banana — генерирую…",
-                    reply_markup=_dl_keyboard(token),
-                )
+                msg_id = None
 
                 try:
+                    # списываем токен ДО запроса
+                    try:
+                        add_tokens(user_id, -cost, reason="nano_banana")
+                    except TypeError:
+                        # если billing_db принимает только int
+                        add_tokens(user_id, -int(cost), reason="nano_banana")
+                    nano_banana_charged = True
+
+                    # Placeholder + кнопка "Скачать оригинал"
+                    msg_id = await tg_send_photo_bytes_return_message_id(
+                        chat_id,
+                        placeholder,
+                        caption="🍌 Nano Banana — генерирую…",
+                        reply_markup=_dl_keyboard(token),
+                    )
+
                     _busy_start(int(user_id), "Nano Banana")
                     out_bytes, ext = await run_nano_banana(src_bytes, user_prompt, output_format="jpg")
 
@@ -6648,20 +6671,24 @@ async def webhook(secret: str, request: Request):
                         )
 
                 except Exception as e:
-                    # возврат токена при ошибке
-                    try:
+                    # возврат токена при ошибке после списания
+                    if nano_banana_charged:
                         try:
-                            add_tokens(user_id, cost, reason="nano_banana_refund")
-                        except TypeError:
-                            add_tokens(user_id, int(cost), reason="nano_banana_refund")
+                            try:
+                                add_tokens(user_id, cost, reason="nano_banana_refund")
+                            except TypeError:
+                                add_tokens(user_id, int(cost), reason="nano_banana_refund")
+                        except Exception:
+                            pass
+                    # НЕ сбрасываем фото: пользователь может просто поменять текст и повторить
+                    try:
+                        await tg_send_message(
+                            chat_id,
+                            f"Ошибка Nano Banana: {e}\nТокены возвращены.",
+                            reply_markup=_photo_future_menu_keyboard(),
+                        )
                     except Exception:
                         pass
-                    # НЕ сбрасываем фото: пользователь может просто поменять текст и повторить
-                    await tg_send_message(
-                        chat_id,
-                        f"Ошибка Nano Banana: {e}",
-                        reply_markup=_photo_future_menu_keyboard(),
-                    )
                     _busy_end(int(user_id))
                     return {"ok": True}
 
@@ -6697,20 +6724,35 @@ async def webhook(secret: str, request: Request):
 
                 user_prompt = nav_text
                 cost = 2
-
+                ensure_user_row(user_id)
                 try:
-                    add_tokens(user_id, -cost, reason="nano_banana_pro")
-                except TypeError:
-                    add_tokens(user_id, -int(cost), reason="nano_banana_pro")
+                    bal = float(get_balance(user_id) or 0)
+                except Exception:
+                    bal = 0
 
-                await tg_send_message(
-                    chat_id,
-                    "🍌 Nano Banana Pro (текст→картинка) — запускаю…",
-                    reply_markup=_photo_future_menu_keyboard(),
-                )
+                if bal < cost:
+                    await tg_send_message(
+                        chat_id,
+                        f"Недостаточно токенов 😕\nНужно: {cost} токен(а) для Nano Banana Pro.",
+                        reply_markup=_topup_packs_kb(),
+                    )
+                    return {"ok": True}
 
+                nano_banana_pro_charged = False
                 job_id = uuid4().hex
                 try:
+                    try:
+                        add_tokens(user_id, -cost, reason="nano_banana_pro")
+                    except TypeError:
+                        add_tokens(user_id, -int(cost), reason="nano_banana_pro")
+                    nano_banana_pro_charged = True
+
+                    await tg_send_message(
+                        chat_id,
+                        "🍌 Nano Banana Pro (текст→картинка) — запускаю…",
+                        reply_markup=_photo_future_menu_keyboard(),
+                    )
+
                     await enqueue_job({
                         "job_id": job_id,
                         "type": "nano_banana_pro",
@@ -6725,19 +6767,23 @@ async def webhook(secret: str, request: Request):
                         "cost": cost,
                     }, queue_name="gen")
                 except Exception as e:
-                    # возврат токенов при ошибке постановки в очередь
-                    try:
+                    # возврат токенов при ошибке после списания
+                    if nano_banana_pro_charged:
                         try:
-                            add_tokens(user_id, cost, reason="nano_banana_pro_refund")
-                        except TypeError:
-                            add_tokens(user_id, int(cost), reason="nano_banana_pro_refund")
+                            try:
+                                add_tokens(user_id, cost, reason="nano_banana_pro_refund")
+                            except TypeError:
+                                add_tokens(user_id, int(cost), reason="nano_banana_pro_refund")
+                        except Exception:
+                            pass
+                    try:
+                        await tg_send_message(
+                            chat_id,
+                            f"❌ Не удалось запустить Nano Banana Pro: {e}\nТокены возвращены.",
+                            reply_markup=_photo_future_menu_keyboard(),
+                        )
                     except Exception:
                         pass
-                    await tg_send_message(
-                        chat_id,
-                        f"❌ Не удалось запустить Nano Banana Pro: {e}",
-                        reply_markup=_photo_future_menu_keyboard(),
-                    )
                     return {"ok": True}
 
                 st["nano_banana_pro"] = {
@@ -6778,19 +6824,34 @@ async def webhook(secret: str, request: Request):
                 return {"ok": True}
 
             cost = 2
-
+            ensure_user_row(user_id)
             try:
-                add_tokens(user_id, -cost, reason="nano_banana_pro")
-            except TypeError:
-                add_tokens(user_id, -int(cost), reason="nano_banana_pro")
+                bal = float(get_balance(user_id) or 0)
+            except Exception:
+                bal = 0
 
-            await tg_send_message(
-                chat_id,
-                "🍌 Nano Banana Pro — запускаю…",
-            )
+            if bal < cost:
+                await tg_send_message(
+                    chat_id,
+                    f"Недостаточно токенов 😕\nНужно: {cost} токен(а) для Nano Banana Pro.",
+                    reply_markup=_topup_packs_kb(),
+                )
+                return {"ok": True}
 
+            nano_banana_pro_charged = False
             job_id = uuid4().hex
             try:
+                try:
+                    add_tokens(user_id, -cost, reason="nano_banana_pro")
+                except TypeError:
+                    add_tokens(user_id, -int(cost), reason="nano_banana_pro")
+                nano_banana_pro_charged = True
+
+                await tg_send_message(
+                    chat_id,
+                    "🍌 Nano Banana Pro — запускаю…",
+                )
+
                 await enqueue_job({
                     "job_id": job_id,
                     "type": "nano_banana_pro",
@@ -6805,19 +6866,23 @@ async def webhook(secret: str, request: Request):
                     "cost": cost,
                 }, queue_name="gen")
             except Exception as e:
-                # возврат токенов при ошибке постановки в очередь
-                try:
+                # возврат токенов при ошибке после списания
+                if nano_banana_pro_charged:
                     try:
-                        add_tokens(user_id, cost, reason="nano_banana_pro_refund")
-                    except TypeError:
-                        add_tokens(user_id, int(cost), reason="nano_banana_pro_refund")
+                        try:
+                            add_tokens(user_id, cost, reason="nano_banana_pro_refund")
+                        except TypeError:
+                            add_tokens(user_id, int(cost), reason="nano_banana_pro_refund")
+                    except Exception:
+                        pass
+                try:
+                    await tg_send_message(
+                        chat_id,
+                        f"❌ Не удалось запустить Nano Banana Pro: {e}\nТокены возвращены.",
+                        reply_markup=_photo_future_menu_keyboard(),
+                    )
                 except Exception:
                     pass
-                await tg_send_message(
-                    chat_id,
-                    f"❌ Не удалось запустить Nano Banana Pro: {e}",
-                    reply_markup=_photo_future_menu_keyboard(),
-                )
                 return {"ok": True}
 
             st["nano_banana_pro"] = {
