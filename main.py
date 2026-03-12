@@ -615,6 +615,8 @@ def _yookassa_enabled() -> bool:
     return bool(YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY)
 PIAPI_API_KEY = os.getenv("PIAPI_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+PROMPT_BUILDER_MODEL = os.getenv("PROMPT_BUILDER_MODEL", "gpt-5.4").strip() or "gpt-5.4"
+PROMPT_BUILDER_MAX_IMAGES = int(os.getenv("PROMPT_BUILDER_MAX_IMAGES", "9") or 9)
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change_me")
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "").strip()
 
@@ -1162,7 +1164,7 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
 
 
     else:
-        # chat
+        # chat / default
         st.pop("poster", None)
         st.pop("photosession", None)
         st.pop("t2i", None)
@@ -1172,6 +1174,8 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
         st.pop("sora_settings", None)
         st.pop("veo_t2v", None)
         st.pop("veo_i2v", None)
+        st.pop("ai_chat_mode", None)
+        st.pop("ai_prompt", None)
 
 
 
@@ -1586,6 +1590,174 @@ def _seedance_continue_kb(task_id: str) -> dict:
         ]
     }
 
+def _ai_chat_mode_inline_kb() -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "💬 Чат", "callback_data": "aichat:mode:chat"},
+                {"text": "🪄 Промт", "callback_data": "aichat:mode:prompt"},
+            ]
+        ]
+    }
+
+
+def _ai_prompt_root_inline_kb() -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "🖼 Фото", "callback_data": "aichat:prompt_root:photo"},
+                {"text": "🎬 Видео", "callback_data": "aichat:prompt_root:video"},
+            ],
+            [
+                {"text": "🎵 Музыка", "callback_data": "aichat:prompt_root:music"},
+                {"text": "✨ Универсальный", "callback_data": "aichat:prompt_root:universal"},
+            ],
+            [
+                {"text": "💬 Чат", "callback_data": "aichat:mode:chat"},
+            ],
+        ]
+    }
+
+
+def _ai_prompt_video_inline_kb() -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "Veo", "callback_data": "aichat:prompt_video:veo"},
+                {"text": "Kling", "callback_data": "aichat:prompt_video:kling"},
+            ],
+            [
+                {"text": "Seedance", "callback_data": "aichat:prompt_video:seedance"},
+                {"text": "Sora", "callback_data": "aichat:prompt_video:sora"},
+            ],
+            [
+                {"text": "✨ Универсальный", "callback_data": "aichat:prompt_video:universal"},
+            ],
+            [
+                {"text": "↩️ Разделы", "callback_data": "aichat:prompt_reset"},
+                {"text": "💬 Чат", "callback_data": "aichat:mode:chat"},
+            ],
+        ]
+    }
+
+
+def _new_ai_prompt_state() -> Dict[str, Any]:
+    return {
+        "step": "choose_root",
+        "root": None,
+        "provider": None,
+        "images": [],
+        "last_prompt": None,
+    }
+
+
+def _ai_prompt_title(pb: Dict[str, Any]) -> str:
+    root = str(pb.get("root") or "").strip()
+    provider = str(pb.get("provider") or "").strip()
+    if root == "video" and provider:
+        return f"Видео → {provider}"
+    return {
+        "photo": "Фото",
+        "video": "Видео",
+        "music": "Музыка",
+        "universal": "Универсальный",
+    }.get(root, "Промт")
+
+
+def _ai_prompt_tools_inline_kb(pb: Optional[Dict[str, Any]] = None) -> dict:
+    img_count = len((pb or {}).get("images") or [])
+    clear_label = f"🗑 Очистить фото ({img_count})" if img_count else "🗑 Очистить фото"
+    return {
+        "inline_keyboard": [
+            [
+                {"text": clear_label, "callback_data": "aichat:prompt_clear"},
+                {"text": "🔁 Выбрать заново", "callback_data": "aichat:prompt_reset"},
+            ],
+            [
+                {"text": "💬 Чат", "callback_data": "aichat:mode:chat"},
+            ],
+        ]
+    }
+
+
+def _ai_prompt_waiting_text(pb: Dict[str, Any]) -> str:
+    title = _ai_prompt_title(pb)
+    img_count = len(pb.get("images") or [])
+    extra = ""
+    if str(pb.get("root") or "") == "video" and str(pb.get("provider") or "") == "seedance":
+        extra = (
+            "\n\nДля Seedance можешь прислать несколько фото-референсов. "
+            "Я соберу промт со структурой @image1, @image2 и т.д. по порядку загруженных фото."
+        )
+    elif img_count:
+        extra = "\n\nФото уже сохранены в контексте — можешь просто прислать идею текстом."
+
+    return (
+        f"🪄 Режим «{title}».\n\n"
+        "Теперь пришли идею текстом. Можно дополнительно отправить фото-референсы, и я учту их в промте."
+        f"\nСейчас фото в контексте: {img_count}/{PROMPT_BUILDER_MAX_IMAGES}."
+        f"{extra}"
+    )
+
+
+def _ai_prompt_system_prompt(root: str, provider: str, image_count: int) -> str:
+    provider_line = f"Целевой движок: {provider}." if provider else ""
+    seedance_rules = (
+        "Для Seedance: если приложены изображения, сначала выдай строки вида '@image1 = роль референса', "
+        "'@image2 = роль референса' и т.д. строго по порядку приложенных фото, затем пустую строку и финальный промт. "
+        "Используй только те @imageN, которые реально есть. Если фото одно — используй только @image1. "
+        "Роли должны быть короткими и практичными: character reference, outfit reference, style reference, environment reference, product reference и т.п. "
+        "Финальный Seedance-промт должен естественно ссылаться на эти плейсхолдеры. "
+        "Не добавляй markdown, заголовки, комментарии или пояснения."
+    )
+    return (
+        "Ты senior prompt engineer для генеративных моделей. "
+        "Твоя задача — вернуть один готовый, сильный, практический промт, который можно сразу вставлять в генератор. "
+        "Пиши на языке пользователя. Не веди диалог, не задавай вопросов, не добавляй вводные фразы вроде 'вот промт'. "
+        f"Тип запроса: {root}. {provider_line} "
+        "Если приложены изображения, проанализируй их и используй как референсы: внешность, одежду, композицию, свет, стиль, предметы, фактуру и настроение. "
+        "Не выдумывай деталей, которых нет. Если пользователь просит изменить сцену, сохрани важные элементы референса и адаптируй их под задачу. "
+        "Для фото-промтов делай акцент на композиции, свете, стиле, деталях и визуальном результате. "
+        "Для видео-промтов описывай сцену, действие, движение камеры, ритм, физику движения, свет и атмосферу. "
+        "Для музыки формируй prompt как задание для AI-генерации трека: жанр, настроение, темп, инструменты, вокал, структура, энергия. "
+        "Для универсального режима делай нейтральный, мощный промт без жёсткой привязки к одной модели. "
+        "Для Veo — cinematic natural language, для Kling — акцент на motion, realism и continuity, для Sora — cinematic scene prompt с богатой визуальной детализацией. "
+        f"Изображений приложено: {image_count}. "
+        + (seedance_rules if provider == "seedance" else "Верни только финальный промт без пояснений и без markdown.")
+    )
+
+
+async def _ai_prompt_generate(pb: Dict[str, Any], user_text: str) -> str:
+    root = str(pb.get("root") or "universal").strip().lower() or "universal"
+    provider = str(pb.get("provider") or "").strip().lower()
+    images = list(pb.get("images") or [])[:PROMPT_BUILDER_MAX_IMAGES]
+
+    if provider == "universal":
+        provider = ""
+
+    system_prompt = _ai_prompt_system_prompt(root=root, provider=provider, image_count=len(images))
+    user_payload = (
+        f"Запрос пользователя:\n{(user_text or '').strip() or 'Собери лучший готовый промт по задаче и референсам.'}\n\n"
+        f"Тип: {root}.\n"
+        + (f"Движок: {provider}.\n" if provider else "")
+        + (
+            "Если приложены изображения, используй их как реальные референсы и встрои важные детали в итоговый промт.\n"
+            if images else
+            "Изображений нет — работай только по тексту.\n"
+        )
+    )
+
+    out = await openai_chat_answer(
+        user_text=user_payload,
+        system_prompt=system_prompt,
+        image_bytes=None,
+        image_bytes_list=images if images else None,
+        temperature=0.5,
+        max_tokens=1200,
+        model=PROMPT_BUILDER_MODEL,
+    )
+    return (out or "").strip()
+
 def _dl_init_slot(chat_id: int, user_id: int) -> str:
     """Create a download slot and return token. Bytes will be filled later."""
     st = _ensure_state(chat_id, user_id)
@@ -1700,6 +1872,7 @@ async def tg_send_message(chat_id: int, text: str, reply_markup: Optional[dict] 
     async with httpx.AsyncClient(timeout=30) as client:
         await client.post(f"{TELEGRAM_API_BASE}/sendMessage", json=payload)
         
+
 async def _admin_broadcast_send(admin_chat_id: int, text: str) -> Tuple[int, int]:
     """
     Рассылка текста по всем пользователям из Supabase таблицы bot_users (telegram_user_id).
@@ -1709,17 +1882,39 @@ async def _admin_broadcast_send(admin_chat_id: int, text: str) -> Tuple[int, int
         await tg_send_message(admin_chat_id, "❌ Supabase не настроен (sb=None).")
         return (0, 0)
 
-    # Получаем список telegram_user_id
+    page_size = 1000
+    start = 0
+    user_ids: List[int] = []
+    seen_ids = set()
+
     try:
-        resp = sb.table("bot_users").select("telegram_user_id").execute()
-        rows = getattr(resp, "data", None) or []
-        user_ids = []
-        for r in rows:
-            try:
-                uid = int(r.get("telegram_user_id"))
-                user_ids.append(uid)
-            except Exception:
-                continue
+        while True:
+            resp = (
+                sb.table("bot_users")
+                .select("telegram_user_id")
+                .range(start, start + page_size - 1)
+                .execute()
+            )
+            rows = getattr(resp, "data", None) or []
+            if not rows:
+                break
+
+            for r in rows:
+                try:
+                    raw_uid = r.get("telegram_user_id")
+                    if raw_uid is None:
+                        continue
+                    uid = int(raw_uid)
+                    if uid in seen_ids:
+                        continue
+                    seen_ids.add(uid)
+                    user_ids.append(uid)
+                except Exception:
+                    continue
+
+            if len(rows) < page_size:
+                break
+            start += page_size
     except Exception as e:
         await tg_send_message(admin_chat_id, f"❌ Не смог получить список пользователей: {e}")
         return (0, 0)
@@ -2098,22 +2293,31 @@ async def openai_chat_answer(
     temperature: float = 0.5,
     max_tokens: int = 800,
     history: Optional[List[Dict[str, str]]] = None,
+    model: str = "gpt-4o-mini",
+    image_bytes_list: Optional[List[bytes]] = None,
 ) -> str:
     if not OPENAI_API_KEY:
         return "OPENAI_API_KEY не задан в переменных окружения."
 
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
 
-    # IMAGE + TEXT (Vision)
-    if image_bytes is not None:
-        b64 = base64.b64encode(image_bytes).decode("utf-8")
+    images_to_send: List[bytes] = []
+    if image_bytes_list:
+        images_to_send.extend([bytes(b) for b in image_bytes_list if isinstance(b, (bytes, bytearray))])
+    elif image_bytes is not None:
+        images_to_send.append(image_bytes)
+
+    if images_to_send:
         user_content: List[Dict[str, Any]] = []
         if user_text:
             user_content.append({"type": "text", "text": user_text})
-        user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+        for img in images_to_send[:PROMPT_BUILDER_MAX_IMAGES]:
+            _ext, mime = _detect_image_type(img)
+            b64 = base64.b64encode(img).decode("utf-8")
+            user_content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
 
         payload = {
-            "model": "gpt-4o-mini",
+            "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
@@ -2122,7 +2326,6 @@ async def openai_chat_answer(
             "max_tokens": max_tokens,
         }
     else:
-        # TEXT ONLY (Chat) + optional history
         msgs: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
         if history:
             for m in history:
@@ -2137,7 +2340,7 @@ async def openai_chat_answer(
         msgs.append({"role": "user", "content": user_text})
 
         payload = {
-            "model": "gpt-4o-mini",
+            "model": model,
             "messages": msgs,
             "temperature": temperature,
             "max_tokens": max_tokens,
@@ -3335,6 +3538,102 @@ async def webhook(secret: str, request: Request):
                 await tg_answer_callback_query(str(cq_id))
             except Exception:
                 pass
+
+        if chat_id and user_id and data.startswith("aichat:"):
+            st = _ensure_state(chat_id, user_id)
+            parts = data.split(":")
+
+            if data == "aichat:mode:chat":
+                _set_mode(chat_id, user_id, "chat")
+                st["ai_chat_mode"] = "chat"
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    "💬 Режим чата включён. Можешь писать вопрос или прислать фото для анализа.",
+                    reply_markup=_ai_chat_mode_inline_kb(),
+                )
+                return {"ok": True}
+
+            if data == "aichat:mode:prompt":
+                _set_mode(chat_id, user_id, "chat")
+                st["ai_chat_mode"] = "prompt"
+                st["ai_prompt"] = _new_ai_prompt_state()
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    "🪄 Режим промтов включён. Выбери, для чего нужен промт:",
+                    reply_markup=_ai_prompt_root_inline_kb(),
+                )
+                return {"ok": True}
+
+            if data == "aichat:prompt_reset":
+                st["ai_chat_mode"] = "prompt"
+                st["ai_prompt"] = _new_ai_prompt_state()
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    "Выбери раздел для промта:",
+                    reply_markup=_ai_prompt_root_inline_kb(),
+                )
+                return {"ok": True}
+
+            if data == "aichat:prompt_clear":
+                pb = st.get("ai_prompt") or _new_ai_prompt_state()
+                pb["images"] = []
+                st["ai_chat_mode"] = "prompt"
+                st["ai_prompt"] = pb
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    f"Фото очищены.\n\n{_ai_prompt_waiting_text(pb)}",
+                    reply_markup=_ai_prompt_tools_inline_kb(pb),
+                )
+                return {"ok": True}
+
+            if len(parts) == 3 and parts[1] == "prompt_root":
+                root = parts[2].strip().lower()
+                if root in ("photo", "video", "music", "universal"):
+                    pb = st.get("ai_prompt") or _new_ai_prompt_state()
+                    pb["root"] = root
+                    pb["provider"] = None
+                    pb["images"] = list(pb.get("images") or [])[:PROMPT_BUILDER_MAX_IMAGES]
+                    st["ai_chat_mode"] = "prompt"
+                    if root == "video":
+                        pb["step"] = "choose_video_target"
+                        st["ai_prompt"] = pb
+                        st["ts"] = _now()
+                        await tg_send_message(
+                            chat_id,
+                            "Выбери видеомодель, под которую собрать промт:",
+                            reply_markup=_ai_prompt_video_inline_kb(),
+                        )
+                        return {"ok": True}
+                    pb["step"] = "await_input"
+                    st["ai_prompt"] = pb
+                    st["ts"] = _now()
+                    await tg_send_message(
+                        chat_id,
+                        _ai_prompt_waiting_text(pb),
+                        reply_markup=_ai_prompt_tools_inline_kb(pb),
+                    )
+                    return {"ok": True}
+
+            if len(parts) == 3 and parts[1] == "prompt_video":
+                provider = parts[2].strip().lower()
+                if provider in ("veo", "kling", "seedance", "sora", "universal"):
+                    pb = st.get("ai_prompt") or _new_ai_prompt_state()
+                    pb["root"] = "video"
+                    pb["provider"] = provider
+                    pb["step"] = "await_input"
+                    st["ai_chat_mode"] = "prompt"
+                    st["ai_prompt"] = pb
+                    st["ts"] = _now()
+                    await tg_send_message(
+                        chat_id,
+                        _ai_prompt_waiting_text(pb),
+                        reply_markup=_ai_prompt_tools_inline_kb(pb),
+                    )
+                    return {"ok": True}
 
         if chat_id and user_id and data.startswith("dl2k:"):
             token = data.split(":", 1)[1].strip()
@@ -4686,9 +4985,41 @@ async def webhook(secret: str, request: Request):
 
     if incoming_text in ("ИИ (чат)", "🧠 ИИ (чат)", "🧠 ИИ чат"):
         _set_mode(chat_id, user_id, "chat")
-        await tg_send_message(chat_id, "Ок. Режим «ИИ (чат) Задай любой вопрос и я отвечу на него, так же я могу помочь с написанием промтов для ваших идей».", reply_markup=_main_menu_for(user_id))
+        st["ai_chat_mode"] = "chat"
+        st["ai_prompt"] = _new_ai_prompt_state()
+        st["ts"] = _now()
+        await tg_send_message(
+            chat_id,
+            "🤖 ИИ помощник включён.\n\nВыбери режим ниже: обычный чат или генератор промтов.",
+            reply_markup=_ai_chat_mode_inline_kb(),
+        )
         return {"ok": True}
 
+
+    if st.get("mode") == "chat" and st.get("ai_chat_mode") == "prompt" and incoming_text and not _is_nav_or_menu_text(incoming_text):
+        pb = st.get("ai_prompt") or _new_ai_prompt_state()
+        step = str(pb.get("step") or "choose_root")
+        if step == "choose_root":
+            await tg_send_message(
+                chat_id,
+                "Сначала выбери раздел для промта ниже.",
+                reply_markup=_ai_prompt_root_inline_kb(),
+            )
+            return {"ok": True}
+        if step == "choose_video_target":
+            await tg_send_message(
+                chat_id,
+                "Сначала выбери видеомодель ниже, а потом присылай идею или фото.",
+                reply_markup=_ai_prompt_video_inline_kb(),
+            )
+            return {"ok": True}
+
+        result = await _ai_prompt_generate(pb, incoming_text)
+        pb["last_prompt"] = result
+        st["ai_prompt"] = pb
+        st["ts"] = _now()
+        await tg_send_message(chat_id, result, reply_markup=_ai_prompt_tools_inline_kb(pb))
+        return {"ok": True}
 
     if incoming_text == "Нейро фотосессии":
         _set_mode(chat_id, user_id, "photosession")
@@ -5465,6 +5796,54 @@ async def webhook(secret: str, request: Request):
         
         
         
+        if st.get("mode") == "chat" and st.get("ai_chat_mode") == "prompt":
+            pb = st.get("ai_prompt") or _new_ai_prompt_state()
+            step = str(pb.get("step") or "choose_root")
+            if step == "choose_root":
+                await tg_send_message(
+                    chat_id,
+                    "Сначала выбери раздел для промта ниже, а потом присылай фото.",
+                    reply_markup=_ai_prompt_root_inline_kb(),
+                )
+                return {"ok": True}
+            if step == "choose_video_target":
+                await tg_send_message(
+                    chat_id,
+                    "Сначала выбери видеомодель ниже, а потом присылай фото.",
+                    reply_markup=_ai_prompt_video_inline_kb(),
+                )
+                return {"ok": True}
+
+            imgs = list(pb.get("images") or [])
+            if len(imgs) >= PROMPT_BUILDER_MAX_IMAGES:
+                await tg_send_message(
+                    chat_id,
+                    f"Уже загружено максимум фото: {PROMPT_BUILDER_MAX_IMAGES}. Нажми «Очистить фото» или пришли идею текстом.",
+                    reply_markup=_ai_prompt_tools_inline_kb(pb),
+                )
+                return {"ok": True}
+
+            imgs.append(img_bytes)
+            pb["images"] = imgs
+            st["ai_prompt"] = pb
+            st["ts"] = _now()
+
+            caption_prompt = (incoming_text or "").strip()
+            if caption_prompt and not _is_nav_or_menu_text(caption_prompt):
+                result = await _ai_prompt_generate(pb, caption_prompt)
+                pb["last_prompt"] = result
+                st["ai_prompt"] = pb
+                st["ts"] = _now()
+                await tg_send_message(chat_id, result, reply_markup=_ai_prompt_tools_inline_kb(pb))
+                return {"ok": True}
+
+            await tg_send_message(
+                chat_id,
+                f"Фото добавил ✅\n\n{_ai_prompt_waiting_text(pb)}",
+                reply_markup=_ai_prompt_tools_inline_kb(pb),
+            )
+            return {"ok": True}
+
         # ---- NANO BANANA: ждём фото ----
         if st.get("mode") == "nano_banana":
             nb = st.get("nano_banana") or {}
