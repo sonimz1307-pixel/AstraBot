@@ -5508,6 +5508,7 @@ async def webhook(secret: str, request: Request):
 
         # ---- VEO BILLING (Text→Video) ----
         _busy_start(int(user_id), "Veo видео")
+        veo_charged = False
         try:
             # Баланс + списание
             try:
@@ -5544,6 +5545,7 @@ async def webhook(secret: str, request: Request):
                     "flow": "t2v",
                 },
             )
+            veo_charged = True
 
             info = (
                 f"⏳ Генерирую видео (Veo {'3.1' if veo_model == 'pro' else 'Fast'} | "
@@ -5563,8 +5565,28 @@ async def webhook(secret: str, request: Request):
                     negative_prompt=None,
                     reference_images_bytes=None,
                 )
+                if not video_url:
+                    raise RuntimeError("empty_video_url")
             except Exception as e:
-                await tg_send_message(chat_id, f"⚠️ Veo временно недоступен. Попробуй через минуту", reply_markup=_help_menu_for(user_id))
+                try:
+                    if veo_charged:
+                        try:
+                            add_tokens(
+                                user_id,
+                                int(ch.total_tokens),
+                                reason="veo_video_refund",
+                                meta={
+                                    "stage": "generation_failed",
+                                    "flow": "t2v",
+                                    "total_tokens": int(ch.total_tokens),
+                                    "error": str(e)[:300],
+                                },
+                            )
+                        except TypeError:
+                            add_tokens(user_id, int(ch.total_tokens), reason="veo_video_refund")
+                except Exception:
+                    pass
+                await tg_send_message(chat_id, "⚠️ Veo временно недоступен. Токены возвращены. Попробуй через минуту", reply_markup=_help_menu_for(user_id))
                 return {"ok": True}
 
             try:
@@ -5637,6 +5659,7 @@ async def webhook(secret: str, request: Request):
 
             # ---- VEO BILLING (Image→Video) ----
             _busy_start(int(user_id), "Veo видео")
+            veo_charged = False
             try:
                 # Баланс + списание
                 try:
@@ -5673,6 +5696,7 @@ async def webhook(secret: str, request: Request):
                         "flow": "i2v",
                     },
                 )
+                veo_charged = True
 
                 info = (
                     f"⏳ Генерирую видео (Veo {'3.1' if veo_model == 'pro' else 'Fast'} | "
@@ -5694,8 +5718,28 @@ async def webhook(secret: str, request: Request):
                         reference_images_bytes=ref_bytes if ref_bytes else None,
                         last_frame_bytes=last_frame_bytes if last_frame_bytes else None,
                     )
+                    if not video_url:
+                        raise RuntimeError("empty_video_url")
                 except Exception as e:
-                    await tg_send_message(chat_id, f"⚠️ Veo временно недоступен. Попробуй через минуту", reply_markup=_help_menu_for(user_id))
+                    try:
+                        if veo_charged:
+                            try:
+                                add_tokens(
+                                    user_id,
+                                    int(ch.total_tokens),
+                                    reason="veo_video_refund",
+                                    meta={
+                                        "stage": "generation_failed",
+                                        "flow": "i2v",
+                                        "total_tokens": int(ch.total_tokens),
+                                        "error": str(e)[:300],
+                                    },
+                                )
+                            except TypeError:
+                                add_tokens(user_id, int(ch.total_tokens), reason="veo_video_refund")
+                    except Exception:
+                        pass
+                    await tg_send_message(chat_id, "⚠️ Veo временно недоступен. Токены возвращены. Попробуй через минуту", reply_markup=_help_menu_for(user_id))
                     return {"ok": True}
 
                 try:
