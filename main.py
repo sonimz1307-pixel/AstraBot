@@ -2285,13 +2285,13 @@ VISUAL_ROUTER_SYSTEM_PROMPT = (
 
 
 # ---------------- OpenAI calls ----------------
-
 async def openai_chat_answer(
     user_text: str,
     system_prompt: str,
     image_bytes: Optional[bytes] = None,
     temperature: float = 0.5,
-    max_tokens: int = 800,
+    max_tokens: Optional[int] = 800,
+    max_completion_tokens: Optional[int] = None,
     history: Optional[List[Dict[str, str]]] = None,
     model: str = "gpt-4o-mini",
     image_bytes_list: Optional[List[bytes]] = None,
@@ -2299,7 +2299,12 @@ async def openai_chat_answer(
     if not OPENAI_API_KEY:
         return "OPENAI_API_KEY не задан в переменных окружения."
 
-    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    token_limit = max_completion_tokens if max_completion_tokens is not None else max_tokens
 
     images_to_send: List[bytes] = []
     if image_bytes_list:
@@ -2314,7 +2319,10 @@ async def openai_chat_answer(
         for img in images_to_send[:PROMPT_BUILDER_MAX_IMAGES]:
             _ext, mime = _detect_image_type(img)
             b64 = base64.b64encode(img).decode("utf-8")
-            user_content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+            user_content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{b64}"}
+            })
 
         payload = {
             "model": model,
@@ -2323,8 +2331,9 @@ async def openai_chat_answer(
                 {"role": "user", "content": user_content},
             ],
             "temperature": temperature,
-            "max_tokens": max_tokens,
         }
+        if token_limit is not None:
+            payload["max_completion_tokens"] = token_limit
     else:
         msgs: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
         if history:
@@ -2343,11 +2352,16 @@ async def openai_chat_answer(
             "model": model,
             "messages": msgs,
             "temperature": temperature,
-            "max_tokens": max_tokens,
         }
+        if token_limit is not None:
+            payload["max_completion_tokens"] = token_limit
 
     async with httpx.AsyncClient(timeout=120) as client:
-        r = await client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
+        r = await client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers=headers,
+            json=payload,
+        )
 
     if r.status_code != 200:
         return f"Ошибка OpenAI ({r.status_code}): {r.text[:1600]}"
