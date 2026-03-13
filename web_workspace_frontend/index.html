@@ -32,24 +32,44 @@
 
       <div class="account-card soft-panel">
         <div class="card-head">
-          <strong>Подключение</strong>
+          <strong>Аккаунт</strong>
           <span id="apiStatus" class="badge muted">offline</span>
         </div>
-        <label class="label">Telegram User ID</label>
+
+        <div class="auth-block" id="authBlock">
+          <div id="authGuestView">
+            <div class="auth-copy">Вход для существующих пользователей AstraBot — через Telegram. ID руками вводить не нужно.</div>
+            <div id="telegramLoginMount" class="telegram-login-mount"></div>
+            <div class="auth-help muted">Если кнопка не появилась, сначала проверь API Base URL и домен в Telegram Web Login.</div>
+          </div>
+
+          <div id="authUserView" class="auth-user-view hidden">
+            <div class="auth-user-row">
+              <div class="auth-avatar" id="authAvatar">TG</div>
+              <div>
+                <strong id="authUserName">—</strong>
+                <div class="muted" id="authUserMeta">—</div>
+              </div>
+            </div>
+            <div class="actions two-up compact-gap" style="margin-top:10px;">
+              <button id="loadBalanceBtn" class="btn primary">Баланс</button>
+              <button id="logoutBtn" class="btn ghost">Выйти</button>
+            </div>
+          </div>
+        </div>
+
+        <label class="label">API Base URL</label>
         <div class="inline-row">
-          <input id="telegramUserId" type="number" placeholder="например 123456789">
+          <input id="apiBaseUrl" type="text" placeholder="https://astrabot-tchj.onrender.com">
           <button id="saveSettingsBtn" class="btn ghost">Сохранить</button>
         </div>
-        <label class="label">API Base URL</label>
-        <input id="apiBaseUrl" type="text" placeholder="https://astrabot-tchj.onrender.com">
-        <div class="actions two-up compact-gap">
-          <button id="checkApiBtn" class="btn secondary">Проверить API</button>
-          <button id="loadBalanceBtn" class="btn primary">Баланс</button>
+        <div class="actions compact-gap" style="margin-top:12px;">
+          <button id="checkApiBtn" class="btn secondary full">Проверить API</button>
         </div>
         <div class="balance-block">
           <small>Баланс</small>
           <strong id="balanceValue">—</strong>
-          <span id="balanceHint">подключи backend-роут workspace</span>
+          <span id="balanceHint">выполни вход через Telegram</span>
         </div>
       </div>
     </aside>
