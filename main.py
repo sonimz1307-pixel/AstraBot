@@ -6002,6 +6002,82 @@ async def webhook(secret: str, request: Request):
             await tg_send_message(chat_id, f"Ошибка при загрузке фото: {e}", reply_markup=_main_menu_for(user_id))
             return {"ok": True}
 
+        if st.get("mode") == "topaz_photo":
+            tpz = st.get("topaz_photo") or {}
+            preset_slug = str(tpz.get("preset_slug") or "").strip().lower()
+            if not preset_slug:
+                await tg_send_message(
+                    chat_id,
+                    "Сначала выбери пресет для Topaz Фото.",
+                    reply_markup=_topaz_photo_presets_keyboard(),
+                )
+                return {"ok": True}
+
+            cost = int(get_photo_preset_tokens(preset_slug))
+            ensure_user_row(user_id)
+            try:
+                bal = float(get_balance(user_id) or 0)
+            except Exception:
+                bal = 0
+
+            if bal < cost:
+                await tg_send_message(
+                    chat_id,
+                    f"Недостаточно токенов 😕\nНужно: {cost} токен(а) для Topaz Фото.",
+                    reply_markup=_topup_packs_kb(),
+                )
+                return {"ok": True}
+
+            job_id = uuid4().hex
+            charged = False
+            try:
+                try:
+                    add_tokens(user_id, -cost, reason="topaz_image_upscale")
+                except TypeError:
+                    add_tokens(user_id, -int(cost), reason="topaz_image_upscale")
+                charged = True
+
+                await tg_send_message(
+                    chat_id,
+                    f"🖼 Topaz Фото ({preset_slug}) — запускаю…",
+                    reply_markup=_photo_future_menu_keyboard(),
+                )
+
+                await enqueue_job(
+                    {
+                        "job_id": job_id,
+                        "type": "topaz_image_upscale",
+                        "chat_id": int(chat_id),
+                        "user_id": int(user_id),
+                        "photo_file_id": str(file_id or ""),
+                        "preset_slug": preset_slug,
+                        "charge_tokens": int(cost),
+                        "refund_reason": "topaz_image_upscale_refund",
+                        "reply_markup": _photo_future_menu_keyboard(),
+                    },
+                    queue_name=TOPAZ_PHOTO_QUEUE_NAME,
+                )
+            except Exception as e:
+                if charged:
+                    try:
+                        try:
+                            add_tokens(user_id, int(cost), reason="topaz_image_upscale_refund")
+                        except TypeError:
+                            add_tokens(user_id, int(cost), reason="topaz_image_upscale_refund")
+                    except Exception:
+                        pass
+                await tg_send_message(
+                    chat_id,
+                    f"❌ Не удалось запустить Topaz Фото: {e}\nТокены возвращены.",
+                    reply_markup=_photo_future_menu_keyboard(),
+                )
+                return {"ok": True}
+
+            st["topaz_photo"] = {"step": "choose_preset", "preset_slug": None}
+            st["ts"] = _now()
+            return {"ok": True}
+
+
 
 
         
@@ -6754,80 +6830,6 @@ async def webhook(secret: str, request: Request):
             st["ts"] = _now()
             return {"ok": True}
 
-        if st.get("mode") == "topaz_photo":
-            tpz = st.get("topaz_photo") or {}
-            preset_slug = str(tpz.get("preset_slug") or "").strip().lower()
-            if not preset_slug:
-                await tg_send_message(
-                    chat_id,
-                    "Сначала выбери пресет для Topaz Фото.",
-                    reply_markup=_topaz_photo_presets_keyboard(),
-                )
-                return {"ok": True}
-
-            cost = int(get_photo_preset_tokens(preset_slug))
-            ensure_user_row(user_id)
-            try:
-                bal = float(get_balance(user_id) or 0)
-            except Exception:
-                bal = 0
-
-            if bal < cost:
-                await tg_send_message(
-                    chat_id,
-                    f"Недостаточно токенов 😕\nНужно: {cost} токен(а) для Topaz Фото.",
-                    reply_markup=_topup_packs_kb(),
-                )
-                return {"ok": True}
-
-            job_id = uuid4().hex
-            charged = False
-            try:
-                try:
-                    add_tokens(user_id, -cost, reason="topaz_image_upscale")
-                except TypeError:
-                    add_tokens(user_id, -int(cost), reason="topaz_image_upscale")
-                charged = True
-
-                await tg_send_message(
-                    chat_id,
-                    f"🖼 Topaz Фото ({preset_slug}) — запускаю…",
-                    reply_markup=_photo_future_menu_keyboard(),
-                )
-
-                await enqueue_job(
-                    {
-                        "job_id": job_id,
-                        "type": "topaz_image_upscale",
-                        "chat_id": int(chat_id),
-                        "user_id": int(user_id),
-                        "photo_file_id": str(file_id or ""),
-                        "preset_slug": preset_slug,
-                        "charge_tokens": int(cost),
-                        "refund_reason": "topaz_image_upscale_refund",
-                        "reply_markup": _photo_future_menu_keyboard(),
-                    },
-                    queue_name=TOPAZ_PHOTO_QUEUE_NAME,
-                )
-            except Exception as e:
-                if charged:
-                    try:
-                        try:
-                            add_tokens(user_id, int(cost), reason="topaz_image_upscale_refund")
-                        except TypeError:
-                            add_tokens(user_id, int(cost), reason="topaz_image_upscale_refund")
-                    except Exception:
-                        pass
-                await tg_send_message(
-                    chat_id,
-                    f"❌ Не удалось запустить Topaz Фото: {e}\nТокены возвращены.",
-                    reply_markup=_photo_future_menu_keyboard(),
-                )
-                return {"ok": True}
-
-            st["topaz_photo"] = {"step": "choose_preset", "preset_slug": None}
-            st["ts"] = _now()
-            return {"ok": True}
 
 # ---- KLING Image → Video: accept start image as document ----
             if st.get("mode") == "kling_i2v":
