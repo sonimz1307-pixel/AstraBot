@@ -16,6 +16,7 @@ import httpx
 from queue_redis import enqueue_job
 from fastapi import FastAPI, Request, Response
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 from db_supabase import track_user_activity, get_basic_stats, supabase as sb
 from kling_flow import run_motion_control_from_bytes, run_image_to_video_from_bytes
 from veo_flow import run_veo_text_to_video, run_veo_image_to_video
@@ -41,6 +42,22 @@ from kling3_telegram_handler import handle_kling3_wait_prompt
 from app.routers.tts import router as tts_router
 
 app = FastAPI()
+
+WORKSPACE_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("WORKSPACE_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+    if origin.strip()
+]
+WORKSPACE_ALLOWED_ORIGIN_REGEX = os.getenv("WORKSPACE_ALLOWED_ORIGIN_REGEX", r"https://.*\.onrender\.com")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=WORKSPACE_ALLOWED_ORIGINS,
+    allow_origin_regex=WORKSPACE_ALLOWED_ORIGIN_REGEX,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 # --- static files (/static/...) ---
 app.mount("/static", StaticFiles(directory="static"), name="static")
 from app.routers.leads import router as leads_router
@@ -49,6 +66,7 @@ from app.routers.admin_top import router as admin_top_router
 from app.routers.prompts import router as prompts_router
 from app.routers.prompts_admin import router as prompts_admin_router
 from app.routers.songwriter import router as songwriter_router
+from app.routers.web_workspace_api import router as workspace_router
 app.include_router(leads_router, prefix="/api/leads", tags=["leads"])
 app.include_router(kling3_router, prefix="/api/kling3", tags=["kling3"])
 app.include_router(admin_top_router, prefix="/api/admin", tags=["admin"])
@@ -56,6 +74,7 @@ app.include_router(prompts_router, prefix="/api/prompts", tags=["prompts"])
 app.include_router(prompts_admin_router, prefix="/api/prompts_admin", tags=["prompts_admin"])
 app.include_router(tts_router)
 app.include_router(songwriter_router)
+app.include_router(workspace_router)
 
 APP_VERSION = "v7-suno-callback-dedup-fix"
 try:
