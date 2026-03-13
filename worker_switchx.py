@@ -15,6 +15,10 @@ from billing_db import add_tokens
 from queue_redis import dequeue_job
 from switchx_service import SwitchXClient, SwitchXError, guess_content_type
 from switchx_types import JOB_TYPE_SWITCHX, RESOLUTION_720, RESOLUTION_1080
+from replicate_common import ReplicateError, download_bytes
+from topaz_image_replicate import TopazImageParams, run_topaz_image_upscale
+from topaz_video_replicate import TopazVideoParams, run_topaz_video_upscale
+from topaz_pricing import get_photo_preset_settings, get_video_preset_settings
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else None
@@ -23,6 +27,8 @@ TG_FILE = f"https://api.telegram.org/file/bot{BOT_TOKEN}" if BOT_TOKEN else None
 SWITCHX_CONCURRENCY = int(os.getenv("SWITCHX_CONCURRENCY", os.getenv("SWITCHX_WORKER_CONCURRENCY", "2")))
 MUSIC_CONCURRENCY = int(os.getenv("MUSIC_CONCURRENCY", "3"))
 SORA_CONCURRENCY = int(os.getenv("SORA_CONCURRENCY", "2"))
+TOPAZ_PHOTO_CONCURRENCY = int(os.getenv("TOPAZ_PHOTO_CONCURRENCY", "1"))
+TOPAZ_VIDEO_CONCURRENCY = int(os.getenv("TOPAZ_VIDEO_CONCURRENCY", "1"))
 SWITCHX_TIMEOUT_SEC = int(os.getenv("SWITCHX_TIMEOUT_SEC", "3600"))
 SORA_TIMEOUT_SEC = int(os.getenv("SORA_TIMEOUT_SEC", "1800"))
 SORA_POLL_SEC = float(os.getenv("SORA_POLL_SEC", "10"))
@@ -33,14 +39,20 @@ PIAPI_POLL_TIMEOUT_SEC = int(os.getenv("PIAPI_POLL_TIMEOUT_SEC", "300"))
 MUSIC_QUEUE_NAME = os.getenv("MUSIC_QUEUE_NAME", "music").strip() or "music"
 SWITCHX_QUEUE_NAME = os.getenv("SWITCHX_QUEUE_NAME", "switchx").strip() or "switchx"
 SORA_QUEUE_NAME = os.getenv("SORA_QUEUE_NAME", "sora").strip() or "sora"
+TOPAZ_PHOTO_QUEUE_NAME = os.getenv("TOPAZ_PHOTO_QUEUE_NAME", "topaz_photo").strip() or "topaz_photo"
+TOPAZ_VIDEO_QUEUE_NAME = os.getenv("TOPAZ_VIDEO_QUEUE_NAME", "topaz_video").strip() or "topaz_video"
 
 switchx_sem = asyncio.Semaphore(SWITCHX_CONCURRENCY)
 music_sem = asyncio.Semaphore(MUSIC_CONCURRENCY)
 sora_sem = asyncio.Semaphore(SORA_CONCURRENCY)
+topaz_photo_sem = asyncio.Semaphore(TOPAZ_PHOTO_CONCURRENCY)
+topaz_video_sem = asyncio.Semaphore(TOPAZ_VIDEO_CONCURRENCY)
 
 MUSIC_JOB_TYPES = {"music", "music_piapi", "music_suno"}
 SORA_JOB_TYPES = {"sora_video"}
-SUPPORTED_JOB_TYPES = {JOB_TYPE_SWITCHX, *MUSIC_JOB_TYPES, *SORA_JOB_TYPES}
+TOPAZ_PHOTO_JOB_TYPES = {"topaz_image_upscale"}
+TOPAZ_VIDEO_JOB_TYPES = {"topaz_video_upscale"}
+SUPPORTED_JOB_TYPES = {JOB_TYPE_SWITCHX, *MUSIC_JOB_TYPES, *SORA_JOB_TYPES, *TOPAZ_PHOTO_JOB_TYPES, *TOPAZ_VIDEO_JOB_TYPES}
 
 PIAPI_API_KEY = os.getenv("PIAPI_API_KEY", "").strip()
 PIAPI_BASE_URL = os.getenv("PIAPI_BASE_URL", "https://api.piapi.ai").rstrip("/")
@@ -55,6 +67,14 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
+
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "").strip()
+TOPAZ_PUBLIC_BUCKET = os.getenv("TOPAZ_PUBLIC_BUCKET", "topaz-io").strip()
+TOPAZ_INPUT_PREFIX = os.getenv("TOPAZ_INPUT_PREFIX", "inputs").strip().strip("/")
+TOPAZ_OUTPUT_PREFIX = os.getenv("TOPAZ_OUTPUT_PREFIX", "outputs").strip().strip("/")
+TOPAZ_IMAGE_TIMEOUT_SEC = int(os.getenv("TOPAZ_IMAGE_TIMEOUT_SEC", "1800"))
+TOPAZ_VIDEO_TIMEOUT_SEC = int(os.getenv("TOPAZ_VIDEO_TIMEOUT_SEC", "1800"))
 
 
 async def tg_send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None) -> Optional[int]:
@@ -205,6 +225,105 @@ async def tg_send_document_bytes(
     except Exception:
         if r.status_code >= 300:
             raise RuntimeError(f"Telegram sendDocument failed: {r.status_code} {r.text[:500]}")
+
+
+
+def _ext_from_url(url: str, default: str = "bin") -> str:
+    s = str(url or "").split("?", 1)[0].split("#", 1)[0].strip().lower()
+    for ext in ("jpg", "jpeg", "png", "webp", "mp4", "mov", "mkv"):
+        if s.endswith("." + ext):
+            return "jpg" if ext == "jpeg" else ext
+    return default
+
+
+def _mime_from_ext(ext: str) -> str:
+    e = str(ext or "").strip().lower()
+    if e in ("jpg", "jpeg"):
+        return "image/jpeg"
+    if e == "png":
+        return "image/png"
+    if e == "webp":
+        return "image/webp"
+    if e == "mp4":
+        return "video/mp4"
+    if e == "mov":
+        return "video/quicktime"
+    if e == "mkv":
+        return "video/x-matroska"
+    return "application/octet-stream"
+
+
+def _supabase_public_object_url(bucket: str, path: str) -> str:
+    return f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{path.lstrip('/')}"
+
+
+async def supabase_upload_public_bytes(
+    data: bytes,
+    *,
+    ext: str,
+    prefix: str,
+    bucket: Optional[str] = None,
+    content_type: Optional[str] = None,
+) -> str:
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        raise RuntimeError("SUPABASE_URL / SUPABASE_SERVICE_KEY not set in worker env")
+    bucket_name = str(bucket or TOPAZ_PUBLIC_BUCKET or "topaz-io").strip()
+    object_key = f"{prefix.strip().strip('/')}/{uuid.uuid4().hex}.{ext}"
+    put_url = f"{SUPABASE_URL}/storage/v1/object/{bucket_name}/{object_key}"
+    headers = {
+        "authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "apikey": SUPABASE_SERVICE_KEY,
+        "x-upsert": "true",
+        "content-type": content_type or _mime_from_ext(ext),
+    }
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        r = await client.put(put_url, headers=headers, content=data)
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase upload failed: {r.status_code} {r.text[:400]}")
+    return _supabase_public_object_url(bucket_name, object_key)
+
+
+async def tg_send_photo_or_document_bytes(
+    chat_id: int,
+    image_bytes: bytes,
+    *,
+    filename: str,
+    caption: Optional[str] = None,
+    reply_markup: Optional[dict] = None,
+) -> None:
+    ext = _ext_from_url(filename, default="jpg")
+    mime = _mime_from_ext(ext)
+    await tg_send_document_bytes(
+        chat_id,
+        image_bytes,
+        filename=filename,
+        mime=mime,
+        caption=caption,
+        reply_markup=reply_markup,
+    )
+
+
+async def tg_send_video_or_document_bytes(
+    chat_id: int,
+    video_bytes: bytes,
+    *,
+    filename: str,
+    caption: Optional[str] = None,
+    reply_markup: Optional[dict] = None,
+) -> None:
+    try:
+        await tg_send_video_bytes(chat_id, video_bytes, filename=filename, caption=caption)
+        if reply_markup:
+            await tg_send_message(chat_id, "⬅️ В меню", reply_markup=reply_markup)
+    except Exception:
+        await tg_send_document_bytes(
+            chat_id,
+            video_bytes,
+            filename=filename,
+            mime=_mime_from_ext(_ext_from_url(filename, default="mp4")),
+            caption=caption,
+            reply_markup=reply_markup,
+        )
 
 
 async def tg_send_audio_from_url(
@@ -945,6 +1064,167 @@ async def handle_music_job(job: Dict[str, Any]) -> None:
         await tg_send_message(chat_id, f"❌ Ошибка music worker: {e}", reply_markup=menu_markup)
 
 
+async def handle_topaz_image_job(job: Dict[str, Any]) -> None:
+    chat_id = int(job.get("chat_id") or 0)
+    user_id = int(job.get("user_id") or 0)
+    if not chat_id or not user_id:
+        raise RuntimeError("topaz image job missing chat_id/user_id")
+
+    preset_slug = str(job.get("preset_slug") or "standard").strip().lower()
+    photo_file_id = str(job.get("photo_file_id") or "").strip()
+    if not photo_file_id:
+        raise RuntimeError("topaz image job missing photo_file_id")
+
+    charge_tokens = int(job.get("charge_tokens") or 0)
+    refund_reason = str(job.get("refund_reason") or "topaz_image_upscale_refund").strip() or "topaz_image_upscale_refund"
+    menu_markup = job.get("reply_markup") if isinstance(job.get("reply_markup"), dict) else None
+
+    src_bytes, src_ext = await tg_download_file_bytes(photo_file_id)
+    real_ext = src_ext if src_ext != "bin" else "jpg"
+    public_input_url = await supabase_upload_public_bytes(
+        src_bytes,
+        ext=real_ext,
+        prefix=TOPAZ_INPUT_PREFIX,
+        content_type=_mime_from_ext(real_ext),
+    )
+
+    preset = get_photo_preset_settings(preset_slug)
+    await tg_send_message(chat_id, f"⏳ Topaz Фото: запускаю апскейл ({preset_slug})…")
+
+    try:
+        result = await run_topaz_image_upscale(
+            TopazImageParams(
+                image_url=public_input_url,
+                enhance_model=str(preset.get("enhance_model") or "Standard V2"),
+                upscale_factor=str(preset.get("upscale_factor") or "2x"),
+                output_format=str(preset.get("output_format") or "jpg"),
+                subject_detection=str(preset.get("subject_detection") or "None"),
+                face_enhancement=bool(preset.get("face_enhancement") or False),
+                face_enhancement_creativity=float(preset.get("face_enhancement_creativity") or 0.0),
+                face_enhancement_strength=float(preset.get("face_enhancement_strength") or 0.8),
+            ),
+            timeout_sec=TOPAZ_IMAGE_TIMEOUT_SEC,
+        )
+        out_url = str(result.output_url or "").strip()
+        if not out_url:
+            raise ReplicateError("Topaz Image returned empty output_url")
+        out_ext = _ext_from_url(out_url, default="jpg")
+        out_bytes = await download_bytes(out_url, timeout_sec=300.0)
+
+        public_output_url = ""
+        try:
+            public_output_url = await supabase_upload_public_bytes(
+                out_bytes,
+                ext=out_ext,
+                prefix=TOPAZ_OUTPUT_PREFIX,
+                content_type=_mime_from_ext(out_ext),
+            )
+        except Exception:
+            public_output_url = ""
+
+        caption = f"✅ Topaz Фото готово ({preset_slug})."
+        if public_output_url:
+            caption += f"\n🔗 {public_output_url}"
+
+        await tg_send_photo_or_document_bytes(
+            chat_id,
+            out_bytes,
+            filename=f"topaz_photo_{preset_slug}.{out_ext}",
+            caption=caption,
+            reply_markup=menu_markup,
+        )
+    except Exception as e:
+        if charge_tokens > 0:
+            try:
+                add_tokens(user_id, int(charge_tokens), reason=refund_reason, meta={"error": str(e)[:300], "job_type": "topaz_image_upscale"})
+            except TypeError:
+                try:
+                    add_tokens(user_id, int(charge_tokens), reason=refund_reason)
+                except Exception:
+                    pass
+        await tg_send_message(chat_id, f"❌ Ошибка Topaz Фото: {e}\nТокены возвращены.", reply_markup=menu_markup)
+
+
+async def handle_topaz_video_job(job: Dict[str, Any]) -> None:
+    chat_id = int(job.get("chat_id") or 0)
+    user_id = int(job.get("user_id") or 0)
+    if not chat_id or not user_id:
+        raise RuntimeError("topaz video job missing chat_id/user_id")
+
+    preset_slug = str(job.get("preset_slug") or "full_hd").strip().lower()
+    video_file_id = str(job.get("video_file_id") or "").strip()
+    if not video_file_id:
+        raise RuntimeError("topaz video job missing video_file_id")
+
+    charge_tokens = int(job.get("charge_tokens") or 0)
+    refund_reason = str(job.get("refund_reason") or "topaz_video_upscale_refund").strip() or "topaz_video_upscale_refund"
+    menu_markup = job.get("reply_markup") if isinstance(job.get("reply_markup"), dict) else None
+    duration_sec = int(job.get("duration_sec") or 0)
+
+    src_bytes, src_ext = await tg_download_file_bytes(video_file_id)
+    real_ext = src_ext if src_ext != "bin" else "mp4"
+    public_input_url = await supabase_upload_public_bytes(
+        src_bytes,
+        ext=real_ext,
+        prefix=TOPAZ_INPUT_PREFIX,
+        content_type=_mime_from_ext(real_ext),
+    )
+
+    preset = get_video_preset_settings(preset_slug)
+    target_resolution = str(preset.get("target_resolution") or "1080p")
+    target_fps = int(preset.get("target_fps") or 30)
+    await tg_send_message(chat_id, f"⏳ Topaz Видео: запускаю апскейл ({preset_slug}, {duration_sec or '?'} сек)…")
+
+    try:
+        result = await run_topaz_video_upscale(
+            TopazVideoParams(
+                video_url=public_input_url,
+                target_resolution=target_resolution,
+                target_fps=target_fps,
+            ),
+            timeout_sec=TOPAZ_VIDEO_TIMEOUT_SEC,
+        )
+        out_url = str(result.output_url or "").strip()
+        if not out_url:
+            raise ReplicateError("Topaz Video returned empty output_url")
+        out_ext = _ext_from_url(out_url, default="mp4")
+        out_bytes = await download_bytes(out_url, timeout_sec=900.0)
+
+        public_output_url = ""
+        try:
+            public_output_url = await supabase_upload_public_bytes(
+                out_bytes,
+                ext=out_ext,
+                prefix=TOPAZ_OUTPUT_PREFIX,
+                content_type=_mime_from_ext(out_ext),
+            )
+        except Exception:
+            public_output_url = ""
+
+        caption = f"✅ Topaz Видео готово ({preset_slug})."
+        if public_output_url:
+            caption += f"\n🔗 {public_output_url}"
+
+        await tg_send_video_or_document_bytes(
+            chat_id,
+            out_bytes,
+            filename=f"topaz_video_{preset_slug}.{out_ext}",
+            caption=caption,
+            reply_markup=menu_markup,
+        )
+    except Exception as e:
+        if charge_tokens > 0:
+            try:
+                add_tokens(user_id, int(charge_tokens), reason=refund_reason, meta={"error": str(e)[:300], "job_type": "topaz_video_upscale"})
+            except TypeError:
+                try:
+                    add_tokens(user_id, int(charge_tokens), reason=refund_reason)
+                except Exception:
+                    pass
+        await tg_send_message(chat_id, f"❌ Ошибка Topaz Видео: {e}\nТокены возвращены.", reply_markup=menu_markup)
+
+
+
 async def handle_job(job: Dict[str, Any]) -> None:
     job_type = str(job.get("type") or job.get("job_type") or "").strip()
 
@@ -963,6 +1243,16 @@ async def handle_job(job: Dict[str, Any]) -> None:
             await handle_sora_job(job)
         return
 
+    if job_type in TOPAZ_PHOTO_JOB_TYPES:
+        async with topaz_photo_sem:
+            await handle_topaz_image_job(job)
+        return
+
+    if job_type in TOPAZ_VIDEO_JOB_TYPES:
+        async with topaz_video_sem:
+            await handle_topaz_video_job(job)
+        return
+
     print("Unknown job type:", job_type)
 
 
@@ -973,7 +1263,7 @@ async def worker_loop() -> None:
         except Exception as e:
             print("Generation job failed:", e)
 
-    queue_names = [MUSIC_QUEUE_NAME, SWITCHX_QUEUE_NAME, SORA_QUEUE_NAME]
+    queue_names = [MUSIC_QUEUE_NAME, SWITCHX_QUEUE_NAME, SORA_QUEUE_NAME, TOPAZ_PHOTO_QUEUE_NAME, TOPAZ_VIDEO_QUEUE_NAME]
 
     while True:
         job = await dequeue_job(timeout_sec=10, queue_names=queue_names)
@@ -996,7 +1286,9 @@ def main() -> None:
         f"switchx_concurrency={SWITCHX_CONCURRENCY} "
         f"music_concurrency={MUSIC_CONCURRENCY} "
         f"sora_concurrency={SORA_CONCURRENCY} "
-        f"queues={[MUSIC_QUEUE_NAME, SWITCHX_QUEUE_NAME, SORA_QUEUE_NAME]}"
+        f"topaz_photo_concurrency={TOPAZ_PHOTO_CONCURRENCY} "
+        f"topaz_video_concurrency={TOPAZ_VIDEO_CONCURRENCY} "
+        f"queues={[MUSIC_QUEUE_NAME, SWITCHX_QUEUE_NAME, SORA_QUEUE_NAME, TOPAZ_PHOTO_QUEUE_NAME, TOPAZ_VIDEO_QUEUE_NAME]}"
     )
     asyncio.run(worker_loop())
 
