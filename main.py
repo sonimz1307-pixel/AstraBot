@@ -29,6 +29,12 @@ from billing_db import (
     grant_welcome_bonus_once,
 )
 from nano_banana import run_nano_banana
+from topaz_pricing import (
+    get_photo_preset_tokens,
+    get_photo_preset_settings,
+    calc_video_retail_tokens,
+    get_video_preset_settings,
+)
 from yookassa_flow import create_yookassa_payment
 from kling3_pricing import calculate_kling3_price
 from kling3_telegram_handler import handle_kling3_wait_prompt
@@ -160,7 +166,7 @@ def _normalize_btn_text(t: str) -> str:
     t = t.replace("✅", "").replace("☑️", "").replace("✔️", "").strip()
 
     # strip common leading menu emojis so exact-match works
-    for em in ("🎬", "🎵", "💰", "📊", "⬅", "🔄", "➕", "🍌"):
+    for em in ("🎬", "🎵", "💰", "📊", "⬅", "🔄", "➕", "🍌", "🖼", "🔎", "🎞", "📹"):
         if t.startswith(em):
             t = t[len(em):].strip()
 
@@ -192,6 +198,11 @@ def _is_nav_or_menu_text(t: str) -> bool:
         "статистика", "рассылка",
         # submenus you use in keyboards
         "фото/афиши", "нейро фотосессии", "картинка+картинка", "2 фото", "nano banana",
+        "апскейл фото", "апскейл видео",
+        "topaz фото • standard • 2 токена", "topaz фото • detail • 3 токена", "topaz фото • max • 4 токена",
+        "topaz видео • hd smooth • 1 токен / 5 сек",
+        "topaz видео • full hd • 2 токена / 5 сек",
+        "topaz видео • full hd smooth • 3 токена / 5 сек",
         "афиша: ярко", "афиша: кино",
         "текст→картинка",
         "🔄 сбросить генерацию".lower(),
@@ -601,6 +612,8 @@ WEBAPP_TOP_ANALIZATOR_URL = os.getenv("WEBAPP_TOP_ANALIZATOR_URL", "https://astr
 WEBAPP_PROMPTS_URL = os.getenv("WEBAPP_PROMPTS_URL", "https://astrabot-tchj.onrender.com/webapp/prompts")
 WEBAPP_PROMPTS_ADMIN_URL = os.getenv("WEBAPP_PROMPTS_ADMIN_URL", "https://astrabot-tchj.onrender.com/webapp/prompts_admin")
 SORA_QUEUE_NAME = os.getenv("SORA_QUEUE_NAME", "sora").strip() or "sora"
+TOPAZ_PHOTO_QUEUE_NAME = os.getenv("TOPAZ_PHOTO_QUEUE_NAME", "topaz_photo").strip() or "topaz_photo"
+TOPAZ_VIDEO_QUEUE_NAME = os.getenv("TOPAZ_VIDEO_QUEUE_NAME", "topaz_video").strip() or "topaz_video"
 # --- YooKassa (cards/SBP) ---
 YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "").strip()
 YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "").strip()
@@ -1147,6 +1160,12 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
     elif mode == "nano_banana_pro":
         st["nano_banana_pro"] = {"step": "need_photo", "photo_bytes": None, "resolution": "2K"}
 
+    elif mode == "topaz_photo":
+        st["topaz_photo"] = {"step": "choose_preset", "preset_slug": None}
+
+    elif mode == "topaz_video":
+        st["topaz_video"] = {"step": "choose_preset", "preset_slug": None}
+
     elif mode == "sora_t2v":
         st["sora_t2v"] = {"step": "need_prompt"}
 
@@ -1170,6 +1189,9 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
         st.pop("t2i", None)
         st.pop("two_photos", None)
         st.pop("nano_banana", None)
+        st.pop("nano_banana_pro", None)
+        st.pop("topaz_photo", None)
+        st.pop("topaz_video", None)
         st.pop("sora_t2v", None)
         st.pop("sora_settings", None)
         st.pop("veo_t2v", None)
@@ -1549,6 +1571,35 @@ def _photo_future_menu_keyboard() -> dict:
             [{"text": "Фото/Афиши"}, {"text": "Нейро фотосессии"}],
             [{"text": "Текст→Картинка"}, {"text": "Картинка+Картинка"}],
             [{"text": "🍌 Nano Banana"}, {"text": "🍌 Nano Banana Pro"}],
+            [{"text": "🖼 Апскейл фото"}, {"text": "🎬 Апскейл видео"}],
+            [{"text": "⬅️ Назад"}],
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+        "selective": False,
+    }
+
+
+def _topaz_photo_presets_keyboard() -> dict:
+    return {
+        "keyboard": [
+            [{"text": "Topaz Фото • Standard • 2 токена"}],
+            [{"text": "Topaz Фото • Detail • 3 токена"}],
+            [{"text": "Topaz Фото • Max • 4 токена"}],
+            [{"text": "⬅️ Назад"}],
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+        "selective": False,
+    }
+
+
+def _topaz_video_presets_keyboard() -> dict:
+    return {
+        "keyboard": [
+            [{"text": "Topaz Видео • HD Smooth • 1 токен / 5 сек"}],
+            [{"text": "Topaz Видео • Full HD • 2 токена / 5 сек"}],
+            [{"text": "Topaz Видео • Full HD Smooth • 3 токена / 5 сек"}],
             [{"text": "⬅️ Назад"}],
         ],
         "resize_keyboard": True,
@@ -5806,6 +5857,90 @@ async def webhook(secret: str, request: Request):
         )
         return {"ok": True}
 
+    if incoming_text in ("🖼 Апскейл фото", "Апскейл фото"):
+        _set_mode(chat_id, user_id, "topaz_photo")
+        await tg_send_message(
+            chat_id,
+            "🖼 Topaz Upscale Фото.\n\n"
+            "Выбери пресет ниже, затем пришли фото.\n"
+            "• Standard — 2 токена\n"
+            "• Detail — 3 токена\n"
+            "• Max — 4 токена",
+            reply_markup=_topaz_photo_presets_keyboard(),
+        )
+        return {"ok": True}
+
+    if incoming_text == "Topaz Фото • Standard • 2 токена":
+        _set_mode(chat_id, user_id, "topaz_photo")
+        st["topaz_photo"] = {"step": "need_photo", "preset_slug": "standard"}
+        await tg_send_message(
+            chat_id,
+            "🖼 Topaz Фото • Standard выбран.\nТеперь пришли фото. Стоимость: 2 токена.",
+            reply_markup=_topaz_photo_presets_keyboard(),
+        )
+        return {"ok": True}
+
+    if incoming_text == "Topaz Фото • Detail • 3 токена":
+        _set_mode(chat_id, user_id, "topaz_photo")
+        st["topaz_photo"] = {"step": "need_photo", "preset_slug": "detail"}
+        await tg_send_message(
+            chat_id,
+            "🖼 Topaz Фото • Detail выбран.\nТеперь пришли фото. Стоимость: 3 токена.",
+            reply_markup=_topaz_photo_presets_keyboard(),
+        )
+        return {"ok": True}
+
+    if incoming_text == "Topaz Фото • Max • 4 токена":
+        _set_mode(chat_id, user_id, "topaz_photo")
+        st["topaz_photo"] = {"step": "need_photo", "preset_slug": "max"}
+        await tg_send_message(
+            chat_id,
+            "🖼 Topaz Фото • Max выбран.\nТеперь пришли фото. Стоимость: 4 токена.",
+            reply_markup=_topaz_photo_presets_keyboard(),
+        )
+        return {"ok": True}
+
+    if incoming_text in ("🎬 Апскейл видео", "Апскейл видео"):
+        _set_mode(chat_id, user_id, "topaz_video")
+        await tg_send_message(
+            chat_id,
+            "🎬 Topaz Upscale Видео.\n\n"
+            "Выбери пресет ниже, затем пришли видео как обычное видео Telegram (не документ).\n"
+            "Цена считается по длительности ролика.",
+            reply_markup=_topaz_video_presets_keyboard(),
+        )
+        return {"ok": True}
+
+    if incoming_text == "Topaz Видео • HD Smooth • 1 токен / 5 сек":
+        _set_mode(chat_id, user_id, "topaz_video")
+        st["topaz_video"] = {"step": "need_video", "preset_slug": "hd_smooth"}
+        await tg_send_message(
+            chat_id,
+            "🎬 Topaz Видео • HD Smooth выбран.\nПришли видео как обычное видео Telegram.\nСтоимость: 1 токен за каждые 5 секунд.",
+            reply_markup=_topaz_video_presets_keyboard(),
+        )
+        return {"ok": True}
+
+    if incoming_text == "Topaz Видео • Full HD • 2 токена / 5 сек":
+        _set_mode(chat_id, user_id, "topaz_video")
+        st["topaz_video"] = {"step": "need_video", "preset_slug": "full_hd"}
+        await tg_send_message(
+            chat_id,
+            "🎬 Topaz Видео • Full HD выбран.\nПришли видео как обычное видео Telegram.\nСтоимость: 2 токена за каждые 5 секунд.",
+            reply_markup=_topaz_video_presets_keyboard(),
+        )
+        return {"ok": True}
+
+    if incoming_text == "Topaz Видео • Full HD Smooth • 3 токена / 5 сек":
+        _set_mode(chat_id, user_id, "topaz_video")
+        st["topaz_video"] = {"step": "need_video", "preset_slug": "full_hd_smooth"}
+        await tg_send_message(
+            chat_id,
+            "🎬 Topaz Видео • Full HD Smooth выбран.\nПришли видео как обычное видео Telegram.\nСтоимость: 3 токена за каждые 5 секунд.",
+            reply_markup=_topaz_video_presets_keyboard(),
+        )
+        return {"ok": True}
+
     if incoming_text in ("2 фото", "Картинка+Картинка"):
         _set_mode(chat_id, user_id, "two_photos")
         await tg_send_message(
@@ -6338,6 +6473,95 @@ async def webhook(secret: str, request: Request):
     # ---------------- Video (message.video) ----------------
     vid = message.get("video") or {}
     if vid:
+        if st.get("mode") == "topaz_video":
+            tv = st.get("topaz_video") or {}
+            preset_slug = str(tv.get("preset_slug") or "").strip().lower()
+            if not preset_slug:
+                await tg_send_message(
+                    chat_id,
+                    "Сначала выбери пресет для Topaz Видео.",
+                    reply_markup=_topaz_video_presets_keyboard(),
+                )
+                return {"ok": True}
+
+            file_id = vid.get("file_id")
+            duration_sec = int(vid.get("duration") or 0)
+            if not file_id:
+                await tg_send_message(chat_id, "Не смог прочитать video file_id. Пришли видео ещё раз.", reply_markup=_topaz_video_presets_keyboard())
+                return {"ok": True}
+            if duration_sec <= 0:
+                await tg_send_message(
+                    chat_id,
+                    "Не смог определить длительность видео. Пришли ролик как обычное Telegram-видео, не документом.",
+                    reply_markup=_topaz_video_presets_keyboard(),
+                )
+                return {"ok": True}
+
+            cost = int(calc_video_retail_tokens(preset_slug, duration_sec))
+            ensure_user_row(user_id)
+            try:
+                bal = float(get_balance(user_id) or 0)
+            except Exception:
+                bal = 0
+
+            if bal < cost:
+                await tg_send_message(
+                    chat_id,
+                    f"Недостаточно токенов 😕\nНужно: {cost} токен(а) для Topaz Видео.",
+                    reply_markup=_topup_packs_kb(),
+                )
+                return {"ok": True}
+
+            job_id = uuid4().hex
+            charged = False
+            try:
+                try:
+                    add_tokens(user_id, -cost, reason="topaz_video_upscale")
+                except TypeError:
+                    add_tokens(user_id, -int(cost), reason="topaz_video_upscale")
+                charged = True
+
+                await tg_send_message(
+                    chat_id,
+                    f"🎬 Topaz Видео ({preset_slug}, {duration_sec} сек) — запускаю…",
+                    reply_markup=_photo_future_menu_keyboard(),
+                )
+
+                await enqueue_job(
+                    {
+                        "job_id": job_id,
+                        "type": "topaz_video_upscale",
+                        "chat_id": int(chat_id),
+                        "user_id": int(user_id),
+                        "video_file_id": str(file_id or ""),
+                        "preset_slug": preset_slug,
+                        "duration_sec": int(duration_sec),
+                        "charge_tokens": int(cost),
+                        "refund_reason": "topaz_video_upscale_refund",
+                        "reply_markup": _photo_future_menu_keyboard(),
+                    },
+                    queue_name=TOPAZ_VIDEO_QUEUE_NAME,
+                )
+            except Exception as e:
+                if charged:
+                    try:
+                        try:
+                            add_tokens(user_id, int(cost), reason="topaz_video_upscale_refund")
+                        except TypeError:
+                            add_tokens(user_id, int(cost), reason="topaz_video_upscale_refund")
+                    except Exception:
+                        pass
+                await tg_send_message(
+                    chat_id,
+                    f"❌ Не удалось запустить Topaz Видео: {e}\nТокены возвращены.",
+                    reply_markup=_photo_future_menu_keyboard(),
+                )
+                return {"ok": True}
+
+            st["topaz_video"] = {"step": "choose_preset", "preset_slug": None}
+            st["ts"] = _now()
+            return {"ok": True}
+
         if st.get("mode") == "kling_mc":
             km = st.get("kling_mc") or {}
             step = (km.get("step") or "need_avatar")
@@ -6376,6 +6600,14 @@ async def webhook(secret: str, request: Request):
     if doc:
         mime = (doc.get("mime_type") or "").lower()
         file_id = doc.get("file_id")
+
+        if file_id and mime.startswith("video/") and st.get("mode") == "topaz_video":
+            await tg_send_message(
+                chat_id,
+                "Для Topaz Видео пришли ролик как обычное Telegram-видео, не документом. Так я вижу длительность и правильно считаю цену.",
+                reply_markup=_topaz_video_presets_keyboard(),
+            )
+            return {"ok": True}
 
         # ---- KLING Motion Control: accept video as document ----
         if file_id and mime.startswith("video/") and st.get("mode") == "kling_mc":
@@ -6446,6 +6678,156 @@ async def webhook(secret: str, request: Request):
                     reply_markup=_photo_future_menu_keyboard(),
                 )
                 return {"ok": True}
+
+        if st.get("mode") == "topaz_photo":
+            tpz = st.get("topaz_photo") or {}
+            preset_slug = str(tpz.get("preset_slug") or "").strip().lower()
+            if not preset_slug:
+                await tg_send_message(
+                    chat_id,
+                    "Сначала выбери пресет для Topaz Фото.",
+                    reply_markup=_topaz_photo_presets_keyboard(),
+                )
+                return {"ok": True}
+
+            cost = int(get_photo_preset_tokens(preset_slug))
+            ensure_user_row(user_id)
+            try:
+                bal = float(get_balance(user_id) or 0)
+            except Exception:
+                bal = 0
+
+            if bal < cost:
+                await tg_send_message(
+                    chat_id,
+                    f"Недостаточно токенов 😕\nНужно: {cost} токен(а) для Topaz Фото.",
+                    reply_markup=_topup_packs_kb(),
+                )
+                return {"ok": True}
+
+            job_id = uuid4().hex
+            charged = False
+            try:
+                try:
+                    add_tokens(user_id, -cost, reason="topaz_image_upscale")
+                except TypeError:
+                    add_tokens(user_id, -int(cost), reason="topaz_image_upscale")
+                charged = True
+
+                await tg_send_message(
+                    chat_id,
+                    f"🖼 Topaz Фото ({preset_slug}) — запускаю…",
+                    reply_markup=_photo_future_menu_keyboard(),
+                )
+
+                await enqueue_job(
+                    {
+                        "job_id": job_id,
+                        "type": "topaz_image_upscale",
+                        "chat_id": int(chat_id),
+                        "user_id": int(user_id),
+                        "photo_file_id": str(file_id or ""),
+                        "preset_slug": preset_slug,
+                        "charge_tokens": int(cost),
+                        "refund_reason": "topaz_image_upscale_refund",
+                        "reply_markup": _photo_future_menu_keyboard(),
+                    },
+                    queue_name=TOPAZ_PHOTO_QUEUE_NAME,
+                )
+            except Exception as e:
+                if charged:
+                    try:
+                        try:
+                            add_tokens(user_id, int(cost), reason="topaz_image_upscale_refund")
+                        except TypeError:
+                            add_tokens(user_id, int(cost), reason="topaz_image_upscale_refund")
+                    except Exception:
+                        pass
+                await tg_send_message(
+                    chat_id,
+                    f"❌ Не удалось запустить Topaz Фото: {e}\nТокены возвращены.",
+                    reply_markup=_photo_future_menu_keyboard(),
+                )
+                return {"ok": True}
+
+            st["topaz_photo"] = {"step": "choose_preset", "preset_slug": None}
+            st["ts"] = _now()
+            return {"ok": True}
+
+        if st.get("mode") == "topaz_photo":
+            tpz = st.get("topaz_photo") or {}
+            preset_slug = str(tpz.get("preset_slug") or "").strip().lower()
+            if not preset_slug:
+                await tg_send_message(
+                    chat_id,
+                    "Сначала выбери пресет для Topaz Фото.",
+                    reply_markup=_topaz_photo_presets_keyboard(),
+                )
+                return {"ok": True}
+
+            cost = int(get_photo_preset_tokens(preset_slug))
+            ensure_user_row(user_id)
+            try:
+                bal = float(get_balance(user_id) or 0)
+            except Exception:
+                bal = 0
+
+            if bal < cost:
+                await tg_send_message(
+                    chat_id,
+                    f"Недостаточно токенов 😕\nНужно: {cost} токен(а) для Topaz Фото.",
+                    reply_markup=_topup_packs_kb(),
+                )
+                return {"ok": True}
+
+            job_id = uuid4().hex
+            charged = False
+            try:
+                try:
+                    add_tokens(user_id, -cost, reason="topaz_image_upscale")
+                except TypeError:
+                    add_tokens(user_id, -int(cost), reason="topaz_image_upscale")
+                charged = True
+
+                await tg_send_message(
+                    chat_id,
+                    f"🖼 Topaz Фото ({preset_slug}) — запускаю…",
+                    reply_markup=_photo_future_menu_keyboard(),
+                )
+
+                await enqueue_job(
+                    {
+                        "job_id": job_id,
+                        "type": "topaz_image_upscale",
+                        "chat_id": int(chat_id),
+                        "user_id": int(user_id),
+                        "photo_file_id": str(file_id or ""),
+                        "preset_slug": preset_slug,
+                        "charge_tokens": int(cost),
+                        "refund_reason": "topaz_image_upscale_refund",
+                        "reply_markup": _photo_future_menu_keyboard(),
+                    },
+                    queue_name=TOPAZ_PHOTO_QUEUE_NAME,
+                )
+            except Exception as e:
+                if charged:
+                    try:
+                        try:
+                            add_tokens(user_id, int(cost), reason="topaz_image_upscale_refund")
+                        except TypeError:
+                            add_tokens(user_id, int(cost), reason="topaz_image_upscale_refund")
+                    except Exception:
+                        pass
+                await tg_send_message(
+                    chat_id,
+                    f"❌ Не удалось запустить Topaz Фото: {e}\nТокены возвращены.",
+                    reply_markup=_photo_future_menu_keyboard(),
+                )
+                return {"ok": True}
+
+            st["topaz_photo"] = {"step": "choose_preset", "preset_slug": None}
+            st["ts"] = _now()
+            return {"ok": True}
 
 # ---- KLING Image → Video: accept start image as document ----
             if st.get("mode") == "kling_i2v":
