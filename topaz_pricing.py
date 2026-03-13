@@ -20,33 +20,37 @@ PHOTO_PRESET_TOKENS = {
     "max": 4,
 }
 
+# Universal photo presets:
+# - keep one simple UX for all images
+# - enable face enhancement on every preset so people shots do not get ignored
+# - stay conservative enough to avoid obvious over-processing on non-portrait images
 PHOTO_PRESET_SETTINGS = {
     "standard": {
         "enhance_model": "Standard V2",
         "upscale_factor": "2x",
         "output_format": "jpg",
-        "subject_detection": "None",
-        "face_enhancement": False,
-        "face_enhancement_creativity": 0.0,
-        "face_enhancement_strength": 0.8,
+        "subject_detection": "Foreground",
+        "face_enhancement": True,
+        "face_enhancement_creativity": 0.15,
+        "face_enhancement_strength": 0.65,
     },
     "detail": {
-        "enhance_model": "High Fidelity V2",
+        "enhance_model": "Standard V2",
         "upscale_factor": "4x",
         "output_format": "jpg",
         "subject_detection": "Foreground",
-        "face_enhancement": False,
-        "face_enhancement_creativity": 0.0,
-        "face_enhancement_strength": 0.8,
+        "face_enhancement": True,
+        "face_enhancement_creativity": 0.20,
+        "face_enhancement_strength": 0.75,
     },
     "max": {
-        "enhance_model": "High Fidelity V2",
+        "enhance_model": "Low Resolution V2",
         "upscale_factor": "6x",
         "output_format": "jpg",
         "subject_detection": "Foreground",
         "face_enhancement": True,
-        "face_enhancement_creativity": 0.0,
-        "face_enhancement_strength": 0.8,
+        "face_enhancement_creativity": 0.25,
+        "face_enhancement_strength": 0.80,
     },
 }
 
