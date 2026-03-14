@@ -817,24 +817,29 @@ function extractVideoTaskError(task) {
   return '';
 }
 
-function getVideoLoadingHeadline(percent, status) {
+function getVideoLoadingHeadline(_percent, status) {
   if (isVideoTaskFailed(status)) return 'Генерация завершилась с ошибкой';
-  if (percent !== null && percent >= 95) return 'Получаем итоговый файл';
-  if (percent !== null && percent >= 65) return 'Собираем видео';
-  if (percent !== null && percent >= 25) return 'Генерируем кадры';
   if (['completed', 'success', 'succeeded', 'finished', 'done'].includes(String(status || '').toLowerCase())) {
-    return 'Провайдер завершил задачу';
+    return 'Финализируем результат';
   }
-  return 'Генерация в работе';
+  return 'Генерация началась';
 }
 
-function getVideoLoadingSubline(percent, status) {
+function getVideoLoadingSubline(_percent, status) {
   if (isVideoTaskFailed(status)) return state.video.errorText || state.video.statusText || 'Не удалось завершить генерацию.';
   if (['completed', 'success', 'succeeded', 'finished', 'done'].includes(String(status || '').toLowerCase()) && !state.video.outputUrl) {
-    return 'PiAPI уже собрал задачу. Забираем видео и подготавливаем его для рабочей зоны.';
+    return 'Провайдер уже завершил рендер. Подтягиваем итоговый файл в рабочую зону.';
   }
-  if (percent !== null) return `Прогресс провайдера: ${percent}%. Как только ссылка будет готова, ролик появится по центру.`;
-  return state.video.statusText || 'Ждём ответ провайдера и готовый ролик.';
+  return 'Ожидайте, видео появится в рабочей зоне автоматически.';
+}
+
+function getVideoLoadingPhase(status) {
+  if (isVideoTaskFailed(status)) return 'Ошибка рендера';
+  const normalized = String(status || '').toLowerCase();
+  if (['completed', 'success', 'succeeded', 'finished', 'done'].includes(normalized)) return 'Финализация файла';
+  if (['submitted', 'queued', 'pending', 'created'].includes(normalized)) return 'Постановка в очередь';
+  if (['processing', 'running', 'in_progress'].includes(normalized)) return 'Сборка кадров';
+  return 'AI scan / render engine';
 }
 
 function stopVideoPolling() {
@@ -893,6 +898,7 @@ function renderVideoWorkspace() {
   const progressValue = Number.isFinite(Number(state.video.percent)) ? Math.max(0, Math.min(100, Number(state.video.percent))) : null;
   const loadingHeadline = getVideoLoadingHeadline(progressValue, state.video.lastStatus);
   const loadingSubline = getVideoLoadingSubline(progressValue, state.video.lastStatus);
+  const loadingPhase = getVideoLoadingPhase(state.video.lastStatus);
   const downloadHref = state.video.downloadUrl || state.video.outputUrl;
   const outputBlock = state.video.outputUrl ? `
     <div style="display:grid; gap:16px; width:min(980px, 100%);">
@@ -908,22 +914,30 @@ function renderVideoWorkspace() {
       </div>
     </div>
   ` : state.video.providerTaskId ? `
-    <div class="video-loader-shell">
-      <div class="video-loader">
-        <div class="video-loader-ring"></div>
-        <div class="video-loader-ring ring-2"></div>
-        <div class="video-loader-core">▶</div>
+    <div class="video-loader-shell video-loader-shell-scan">
+      <div class="video-scan-stage">
+        <div class="video-scan-grid"></div>
+        <div class="video-scan-sweep"></div>
+        <div class="video-scan-glow"></div>
+        <div class="video-loader">
+          <div class="video-loader-ring"></div>
+          <div class="video-loader-ring ring-2"></div>
+          <div class="video-loader-ring ring-3"></div>
+          <div class="video-loader-core">▶</div>
+        </div>
       </div>
       <div class="video-loader-copy">
         <strong>${escapeHtml(loadingHeadline)}</strong>
         <div>${escapeHtml(loadingSubline)}</div>
       </div>
-      <div class="video-progress-track ${progressValue !== null ? 'determinate' : 'indeterminate'}">
-        <div class="video-progress-fill" style="${progressValue !== null ? `width:${progressValue}%;` : ''}"></div>
+      <div class="video-scan-meta">
+        <span class="meta-pill subtle">AI scan / render engine</span>
+        <span class="meta-pill subtle">${escapeHtml(loadingPhase)}</span>
       </div>
-      <div class="video-progress-meta">
-        <span>${escapeHtml(videoStatusLabel(state.video.lastStatus))}</span>
-        <span>${progressValue !== null ? `${Math.round(progressValue)}%` : 'Ожидание ответа провайдера'}</span>
+      <div class="video-scan-steps">
+        <div class="scan-step active"><span class="scan-dot"></span><b>Задача отправлена</b></div>
+        <div class="scan-step active"><span class="scan-dot"></span><b>Нейросеть собирает видео</b></div>
+        <div class="scan-step ${['completed', 'success', 'succeeded', 'finished', 'done'].includes(String(state.video.lastStatus || '').toLowerCase()) ? 'active' : ''}"><span class="scan-dot"></span><b>Подтягиваем итоговый файл</b></div>
       </div>
       <div class="actions compact-gap" style="margin-top:16px; justify-content:center; flex-wrap:wrap;">
         <button class="btn primary" data-action="poll-video-task">Проверить статус</button>
@@ -951,7 +965,7 @@ function renderVideoWorkspace() {
               <div class="table-row"><span class="muted">Task ID</span><span>${escapeHtml(state.video.providerTaskId || '—')}</span></div>
               <div class="table-row"><span class="muted">Режим</span><span>${escapeHtml(state.video.mode || '—')}</span></div>
               <div class="table-row"><span class="muted">Prompt</span><span>${escapeHtml(state.video.prompt || '—')}</span></div>
-              <div class="table-row"><span class="muted">Прогресс</span><span>${state.video.percent !== null && state.video.percent !== undefined ? escapeHtml(String(state.video.percent) + '%') : '—'}</span></div>
+              <div class="table-row"><span class="muted">Индикация</span><span>${state.video.outputUrl ? 'Видео готово' : state.video.providerTaskId ? 'Авто · без процентов' : '—'}</span></div>
             </div>
             <div class="actions compact-gap" style="margin-top:12px; flex-wrap:wrap;">
               ${state.video.providerTaskId ? `<button class="btn ghost" data-action="poll-video-task">Проверить статус</button>` : ''}
@@ -1954,7 +1968,7 @@ async function runVideo() {
       state.video.percent = null;
       state.video.errorText = '';
       state.video.lastStatus = 'submitted';
-      state.video.statusText = `Генерация запущена. Task ID: ${state.video.providerTaskId || '—'}. Видео появится в рабочей зоне после готовности.`;
+      state.video.statusText = `Генерация началась. Task ID: ${state.video.providerTaskId || '—'}. Ожидайте, видео появится в рабочей зоне автоматически.`;
       pushRun({ studio: 'Video', title: 'Kling 3 Text → Video', summary: state.video.prompt.slice(0, 100) });
       saveState();
       startVideoPolling({ immediate: true });
@@ -2024,11 +2038,9 @@ async function pollVideoTask(options = {}) {
     }
 
     if (['completed', 'success', 'succeeded', 'finished', 'done'].includes(status)) {
-      state.video.statusText = 'Провайдер уже завершил задачу. Получаем ссылку на итоговое видео…';
-    } else if (percent !== null) {
-      state.video.statusText = `Статус: ${videoStatusLabel(status)} · ${percent}%. Видео появится в рабочей зоне автоматически.`;
+      state.video.statusText = 'Провайдер завершил рендер. Подтягиваем итоговый файл в рабочую зону…';
     } else {
-      state.video.statusText = `Статус: ${videoStatusLabel(status)}. Как только провайдер отдаст видео, результат появится в рабочей зоне.`;
+      state.video.statusText = `Генерация началась. Статус: ${videoStatusLabel(status)}. Ожидайте, видео появится в рабочей зоне автоматически.`;
     }
 
     saveState();
