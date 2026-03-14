@@ -85,6 +85,92 @@ def _songwriter_prompt_with_context(p: "SongwriterPayload") -> str:
     return SONGWRITER_SYSTEM_PROMPT + "\n\nКонтекст:\n- " + "\n- ".join(ctx_parts)
 
 
+
+def _first_nonempty(*values: Any) -> Optional[str]:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def _normalize_kling3_task(task: Dict[str, Any]) -> Dict[str, Any]:
+    payload = task.get("data") if isinstance(task.get("data"), dict) else task
+    output = payload.get("output") if isinstance(payload, dict) and isinstance(payload.get("output"), dict) else {}
+    error = payload.get("error") if isinstance(payload, dict) and isinstance(payload.get("error"), dict) else {}
+
+    provider_status = str(
+        (payload.get("status") if isinstance(payload, dict) else None)
+        or task.get("status")
+        or task.get("state")
+        or ""
+    ).strip().lower()
+
+    video_url = _first_nonempty(
+        output.get("video_url"),
+        output.get("url"),
+        payload.get("video_url") if isinstance(payload, dict) else None,
+        task.get("video_url"),
+    )
+    download_url = _first_nonempty(
+        output.get("download_url"),
+        payload.get("download_url") if isinstance(payload, dict) else None,
+        task.get("download_url"),
+    )
+    cover_url = _first_nonempty(
+        output.get("cover_url"),
+        payload.get("cover_url") if isinstance(payload, dict) else None,
+        task.get("cover_url"),
+    )
+    output_url = video_url or download_url
+
+    percent_raw = output.get("percent")
+    percent: Optional[int] = None
+    if percent_raw not in (None, ""):
+        try:
+            percent = max(0, min(100, int(round(float(percent_raw)))))
+        except Exception:
+            percent = None
+
+    error_message = _first_nonempty(
+        error.get("message"),
+        error.get("raw_message"),
+        payload.get("error_message") if isinstance(payload, dict) else None,
+        output.get("message"),
+        task.get("message"),
+        task.get("detail"),
+    )
+
+    if provider_status in {"failed", "error", "cancelled", "canceled"}:
+        status = "failed"
+    elif output_url:
+        status = "succeeded"
+    elif provider_status in {"queued", "pending"}:
+        status = "queued"
+    else:
+        status = "processing"
+
+    return {
+        "task_id": _first_nonempty(
+            payload.get("task_id") if isinstance(payload, dict) else None,
+            task.get("task_id"),
+        ),
+        "model": payload.get("model") if isinstance(payload, dict) else task.get("model"),
+        "task_type": payload.get("task_type") if isinstance(payload, dict) else task.get("task_type"),
+        "status": status,
+        "provider_status": provider_status or "unknown",
+        "percent": percent,
+        "video_url": video_url,
+        "download_url": download_url,
+        "output_url": output_url,
+        "cover_url": cover_url,
+        "error_message": error_message,
+        "finished": bool(output_url or provider_status in {"failed", "error", "cancelled", "canceled"}),
+    }
+
+
 class TelegramAuthPayload(BaseModel):
     auth_data: Dict[str, Any]
 
@@ -256,7 +342,8 @@ async def workspace_kling3_create(payload: WorkspaceKlingCreateIn, user: Dict[st
 async def workspace_kling3_task(task_id: str, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
     try:
         task = await get_kling3_task(task_id)
-        return {"ok": True, "task": task}
+        normalized = _normalize_kling3_task(task if isinstance(task, dict) else {"raw": task})
+        return {"ok": True, "task": task, "normalized": normalized}
     except (ValueError, Kling3Error) as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
