@@ -255,3 +255,99 @@ textarea { resize: vertical; min-height: 110px; }
 .auth-avatar img { width:100%; height:100%; object-fit:cover; }
 .auth-help { font-size:12px; line-height:1.45; }
 .btn.full { width:100%; }
+
+
+.video-loader-shell {
+  width: min(760px, 100%);
+  display: grid;
+  gap: 18px;
+  justify-items: center;
+}
+.video-loader {
+  position: relative;
+  width: 138px;
+  height: 138px;
+  display: grid;
+  place-items: center;
+}
+.video-loader-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(124,92,255,0.22);
+  box-shadow: 0 0 0 1px rgba(124,92,255,0.05) inset, 0 0 42px rgba(124,92,255,0.14);
+  animation: astrabotPulse 2.2s ease-in-out infinite;
+}
+.video-loader-ring.ring-2 {
+  inset: 12px;
+  animation-delay: .45s;
+  border-color: rgba(34,211,238,0.18);
+}
+.video-loader-core {
+  position: relative;
+  z-index: 2;
+  width: 78px;
+  height: 78px;
+  border-radius: 24px;
+  display: grid;
+  place-items: center;
+  font-size: 24px;
+  color: #f5f3ff;
+  background: radial-gradient(circle at 30% 30%, rgba(124,92,255,0.95), rgba(124,92,255,0.45));
+  box-shadow: 0 18px 42px rgba(124,92,255,0.28);
+}
+.video-loader-copy {
+  max-width: 560px;
+  display: grid;
+  gap: 8px;
+}
+.video-loader-copy strong {
+  font-size: 22px;
+  color: var(--text);
+}
+.video-loader-copy div {
+  line-height: 1.65;
+  color: var(--muted);
+}
+.video-progress-track {
+  width: min(520px, 100%);
+  height: 12px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.08);
+  position: relative;
+}
+.video-progress-track.indeterminate::after {
+  content: "";
+  position: absolute;
+  inset: 1px auto 1px -32%;
+  width: 32%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(124,92,255,0), rgba(124,92,255,0.95), rgba(34,211,238,0.85), rgba(124,92,255,0));
+  animation: astrabotProgress 1.7s linear infinite;
+}
+.video-progress-fill {
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(124,92,255,0.95), rgba(34,211,238,0.85));
+  box-shadow: 0 0 20px rgba(124,92,255,0.24);
+  transition: width .35s ease;
+}
+.video-progress-meta {
+  width: min(520px, 100%);
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+@keyframes astrabotPulse {
+  0%, 100% { transform: scale(.96); opacity: .72; }
+  50% { transform: scale(1.04); opacity: 1; }
+}
+@keyframes astrabotProgress {
+  from { left: -32%; }
+  to { left: 100%; }
+}
