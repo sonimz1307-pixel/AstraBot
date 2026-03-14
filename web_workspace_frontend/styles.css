@@ -430,3 +430,90 @@ textarea { resize: vertical; min-height: 110px; }
   from { left: -32%; }
   to { left: 100%; }
 }
+
+
+.history-browser {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) 380px;
+  gap: 16px;
+}
+.history-preview-panel,
+.history-library-panel {
+  background: rgba(255,255,255,0.035);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 22px;
+  padding: 16px;
+}
+.history-preview-panel {
+  display: grid;
+  gap: 14px;
+}
+.history-preview-media {
+  border-radius: 20px;
+  overflow: hidden;
+  background: rgba(5,8,16,0.82);
+  border: 1px solid rgba(255,255,255,0.06);
+}
+.history-preview-empty {
+  min-height: 320px;
+  border-radius: 20px;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  padding: 24px;
+  border: 1px dashed rgba(255,255,255,0.10);
+  background: linear-gradient(145deg, rgba(124,92,255,0.07), rgba(34,211,238,0.04));
+}
+.history-preview-empty strong {
+  display: block;
+  font-size: 20px;
+  margin-bottom: 8px;
+}
+.history-preview-empty div {
+  color: var(--muted);
+  max-width: 520px;
+  line-height: 1.6;
+}
+.history-library-panel {
+  display: grid;
+  gap: 12px;
+  max-height: 100%;
+}
+.history-library-list {
+  max-height: 760px;
+  overflow: auto;
+  padding-right: 2px;
+}
+.history-library-item,
+.history-item.compact {
+  padding: 14px;
+  border-radius: 18px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.05);
+}
+.history-library-item.active {
+  border-color: rgba(124,92,255,0.34);
+  background: linear-gradient(180deg, rgba(124,92,255,0.10), rgba(34,211,238,0.04));
+  box-shadow: 0 0 0 1px rgba(124,92,255,0.08) inset;
+}
+.history-item-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.history-item-row strong {
+  flex: 1 1 auto;
+  margin: 0;
+}
+.history-preview-details .table-row {
+  grid-template-columns: 120px 1fr auto;
+}
+@media (max-width: 1180px) {
+  .history-browser {
+    grid-template-columns: 1fr;
+  }
+  .history-library-list {
+    max-height: none;
+  }
+}
