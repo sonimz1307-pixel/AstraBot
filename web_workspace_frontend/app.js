@@ -342,6 +342,95 @@ function formatDate(ts) {
   }
 }
 
+
+function trimText(value, max = 120) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  if (!Number.isFinite(Number(max)) || max <= 0) return text;
+  return text.length > max ? `${text.slice(0, max).trim()}…` : text;
+}
+
+function formatFileSize(bytes) {
+  const value = Number(bytes || 0);
+  if (!Number.isFinite(value) || value <= 0) return '—';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = value;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  const digits = size >= 100 || unitIndex === 0 ? 0 : size >= 10 ? 1 : 2;
+  return `${size.toFixed(digits)} ${units[unitIndex]}`;
+}
+
+function historySelectedItem() {
+  const items = Array.isArray(state.history?.items) ? state.history.items : [];
+  const selectedId = String(state.history?.selectedId || '').trim();
+  if (state.history?.selectedItem && state.history.selectedItem.id) {
+    return state.history.selectedItem;
+  }
+  if (selectedId) {
+    const found = items.find((item) => String(item?.id || '') === selectedId);
+    if (found) return found;
+  }
+  return items[0] || null;
+}
+
+function historyVideoUrl(item) {
+  if (!item) return '';
+  const candidates = [
+    item.video_url,
+    item.download_url,
+    item.signed_url,
+    item.public_url,
+    item.provider_video_url,
+  ].filter(Boolean);
+  return candidates[0] || '';
+}
+
+function historyVideoDownloadUrl(item) {
+  if (!item) return '';
+  const candidates = [
+    item.download_url,
+    item.video_url,
+    item.signed_url,
+    item.public_url,
+    item.provider_video_url,
+  ].filter(Boolean);
+  return candidates[0] || '';
+}
+
+function historyStatusTone(status) {
+  const value = String(status || '').toLowerCase();
+  if (!value || value === 'idle') return 'muted';
+  if (['completed', 'success', 'succeeded', 'finished', 'done'].includes(value)) return 'ok';
+  if (['failed', 'error', 'cancelled', 'canceled'].includes(value)) return 'error';
+  return 'muted';
+}
+
+function historyStatusLabel(status) {
+  const value = String(status || '').toLowerCase();
+  const map = {
+    idle: 'Ожидание',
+    queued: 'В очереди',
+    pending: 'В очереди',
+    processing: 'Обрабатывается',
+    running: 'Обрабатывается',
+    in_progress: 'Обрабатывается',
+    completed: 'Готово',
+    success: 'Готово',
+    succeeded: 'Готово',
+    finished: 'Готово',
+    done: 'Готово',
+    failed: 'Ошибка',
+    error: 'Ошибка',
+    cancelled: 'Остановлено',
+    canceled: 'Остановлено',
+  };
+  return map[value] || (status || 'Ожидание');
+}
+
 function toast(type, title, text) {
   const stack = document.getElementById('toastStack');
   const el = document.createElement('div');
