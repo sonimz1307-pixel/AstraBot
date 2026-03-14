@@ -47,6 +47,7 @@ const state = {
     downloadUrl: DEFAULT_VIDEO_STATE.downloadUrl || '',
     coverUrl: DEFAULT_VIDEO_STATE.coverUrl || '',
     percent: Number.isFinite(Number(DEFAULT_VIDEO_STATE.percent)) ? Number(DEFAULT_VIDEO_STATE.percent) : null,
+    generationId: DEFAULT_VIDEO_STATE.generationId || '',
     providerTaskId: DEFAULT_VIDEO_STATE.providerTaskId || '',
     statusText: DEFAULT_VIDEO_STATE.statusText || 'Здесь будут превью, статусы и готовые видео.',
     errorText: DEFAULT_VIDEO_STATE.errorText || '',
@@ -91,6 +92,16 @@ const state = {
     selectedGroupId: '',
     items: [],
     loading: false,
+  },
+  history: {
+    items: [],
+    loading: false,
+    loaded: false,
+    selectedId: '',
+    selectedItem: null,
+    lastError: '',
+    limit: 24,
+    offset: 0,
   },
 };
 
@@ -306,6 +317,7 @@ function saveState() {
     downloadUrl: state.video.downloadUrl,
     coverUrl: state.video.coverUrl,
     percent: state.video.percent,
+    generationId: state.video.generationId,
     providerTaskId: state.video.providerTaskId,
     statusText: state.video.statusText,
     errorText: state.video.errorText,
@@ -866,6 +878,7 @@ function clearVideoRunState({ keepPrompt = true } = {}) {
   state.video.downloadUrl = '';
   state.video.coverUrl = '';
   state.video.percent = null;
+  state.video.generationId = '';
   state.video.providerTaskId = '';
   state.video.errorText = '';
   state.video.lastStatus = 'idle';
@@ -900,6 +913,8 @@ function renderVideoWorkspace() {
   const loadingSubline = getVideoLoadingSubline(progressValue, state.video.lastStatus);
   const loadingPhase = getVideoLoadingPhase(state.video.lastStatus);
   const downloadHref = state.video.downloadUrl || state.video.outputUrl;
+  const historyShelf = renderVideoHistoryShelf();
+
   const outputBlock = state.video.outputUrl ? `
     <div style="display:grid; gap:16px; width:min(980px, 100%);">
       <video class="preview-media" src="${escapeHtml(state.video.outputUrl)}" controls playsinline poster="${escapeHtml(state.video.coverUrl || '')}"></video>
@@ -908,7 +923,8 @@ function renderVideoWorkspace() {
         <small>${escapeHtml(state.video.statusText || 'Результат получен и сохранён в рабочей зоне.')}</small>
         <div class="actions compact-gap" style="margin-top:12px; flex-wrap:wrap;">
           <a class="btn primary" href="${escapeHtml(downloadHref)}" download>Скачать видео</a>
-          ${state.video.providerTaskId ? `<button class="btn ghost" data-action="clear-video-run">Очистить запуск</button>` : ''}
+          <button class="btn ghost" data-action="switch-studio" data-studio="history">История видео</button>
+          ${state.video.providerTaskId ? `<button class="btn outline" data-action="clear-video-run">Очистить запуск</button>` : ''}
         </div>
       </div>
     </div>
@@ -946,7 +962,7 @@ function renderVideoWorkspace() {
   ` : `
     <div class="empty-copy">
       <strong>Video workspace</strong>
-      <div>Выбери модель, режим и нужные входы справа. После запуска статус, ошибки и готовое видео будут появляться прямо здесь, в рабочей зоне.</div>
+      <div>Выбери модель, режим и нужные входы справа. После запуска статус, ошибки, история и готовые видео будут появляться прямо здесь, в рабочей зоне.</div>
     </div>
   `;
 
@@ -961,6 +977,7 @@ function renderVideoWorkspace() {
           <small>${escapeHtml(state.video.errorText || state.video.statusText || 'Состояние запуска будет показано здесь.')}</small>
           ${showRunInfo ? `
             <div class="tableish" style="margin-top:12px;">
+              <div class="table-row"><span class="muted">Generation ID</span><span>${escapeHtml(state.video.generationId || '—')}</span></div>
               <div class="table-row"><span class="muted">Task ID</span><span>${escapeHtml(state.video.providerTaskId || '—')}</span></div>
               <div class="table-row"><span class="muted">Режим</span><span>${escapeHtml(state.video.mode || '—')}</span></div>
               <div class="table-row"><span class="muted">Prompt</span><span>${escapeHtml(state.video.prompt || '—')}</span></div>
@@ -968,9 +985,11 @@ function renderVideoWorkspace() {
             </div>
             <div class="actions compact-gap" style="margin-top:12px; flex-wrap:wrap;">
               ${state.video.providerTaskId ? `<button class="btn outline" data-action="clear-video-run">Очистить запуск</button>` : ''}
+              <button class="btn ghost" data-action="switch-studio" data-studio="history">Открыть историю</button>
             </div>
           ` : ''}
         </div>
+        ${historyShelf}
         <div class="upload-grid two" style="margin-top:16px;">
           ${uploadedCards || `<div class="asset-card"><h4>Нет загруженных ассетов</h4><small>Когда справа появятся поля start frame / last frame / refs / motion video — выбранные файлы будут видны здесь.</small></div>`}
         </div>
@@ -1144,19 +1163,116 @@ function renderPlanningWorkspace() {
 }
 
 function renderHistoryWorkspace() {
+  const items = state.history.items || [];
+  const selected = historySelectedItem();
+  const previewUrl = historyVideoUrl(selected);
+  const selectedPrompt = trimText(selected?.prompt || '', 320);
+  const selectedStatus = historyStatusLabel(selected?.status || 'idle');
+  const selectedTone = historyStatusTone(selected?.status || 'idle');
+  const selectedMeta = selected ? [
+    selected.provider || 'video',
+    selected.model || 'model',
+    selected.mode || 'mode',
+  ].filter(Boolean).join(' · ') : '';
+
   return `
-    <div class="workspace-grid single">
+    <div class="workspace-grid">
       <div class="workspace-main scroll">
-        <div class="history-card">
-          <div class="field-head"><h4>История запусков</h4><button class="btn ghost small" data-action="clear-runs">Очистить</button></div>
-          <div class="mini-list">
-            ${state.recentRuns.length ? state.recentRuns.map((run) => `
-              <div class="history-item">
-                <strong>${escapeHtml(run.title || run.studio || 'Run')}</strong>
-                <small>${escapeHtml(run.summary || '')}</small>
-                <small>${formatDate(run.ts)}</small>
+        <div class="history-browser">
+          <div class="history-preview-panel">
+            <div class="field-head">
+              <h4>Предпросмотр</h4>
+              <div class="actions compact-gap" style="margin-top:0; flex-wrap:wrap;">
+                <button class="btn ghost small" data-action="refresh-history">Обновить</button>
+                ${selected?.id ? `<button class="btn outline small" data-action="use-history-item" data-generation-id="${escapeHtml(selected.id)}">В рабочую зону</button>` : ''}
               </div>
-            `).join('') : '<div class="empty-state">Пока нет локальной истории. Она появляется после запусков из студий.</div>'}
+            </div>
+
+            ${state.history.loading && !selected ? `
+              <div class="history-preview-empty">
+                <strong>Подтягиваем библиотеку</strong>
+                <div>Собираем сохранённые видео пользователя из Supabase Storage и базы генераций.</div>
+              </div>
+            ` : selected && previewUrl ? `
+              <div class="history-preview-media">
+                <video class="preview-media" src="${escapeHtml(previewUrl)}" controls playsinline></video>
+              </div>
+            ` : `
+              <div class="history-preview-empty">
+                <strong>${state.authToken ? 'Выбери видео из списка' : 'Нужна авторизация'}</strong>
+                <div>${state.authToken ? 'Слева появятся все сохранённые генерации. Кликни по любой карточке, чтобы открыть предпросмотр.' : 'Сначала войди через Telegram, чтобы увидеть свои прошлые генерации.'}</div>
+              </div>
+            `}
+
+            <div class="result-card history-preview-details">
+              <div class="field-head">
+                <h4>${escapeHtml(selected ? 'Детали ролика' : 'Как это работает')}</h4>
+                ${selected ? `<span class="badge ${selectedTone}">${escapeHtml(selectedStatus)}</span>` : `<span class="badge muted">History</span>`}
+              </div>
+              ${selected ? `
+                <small>${escapeHtml(selectedPrompt || 'Промт не сохранён')}</small>
+                <div class="tableish" style="margin-top:12px;">
+                  <div class="table-row"><span class="muted">Provider</span><span>${escapeHtml(selected.provider || '—')}</span><span class="badge muted">${escapeHtml(selected.model || '—')}</span></div>
+                  <div class="table-row"><span class="muted">Режим</span><span>${escapeHtml(selected.mode || '—')}</span><span class="badge muted">${escapeHtml(selected.aspect_ratio || '—')}</span></div>
+                  <div class="table-row"><span class="muted">Размер файла</span><span>${escapeHtml(formatFileSize(selected.file_size_bytes))}</span><span class="badge muted">${escapeHtml(selected.mime_type || 'video/mp4')}</span></div>
+                  <div class="table-row"><span class="muted">Создано</span><span>${escapeHtml(formatDate(selected.created_at))}</span><span class="badge muted">${escapeHtml(selected.has_storage_file ? 'AstraBot Cloud' : 'Provider URL')}</span></div>
+                </div>
+                <div class="actions compact-gap" style="margin-top:12px; flex-wrap:wrap;">
+                  ${previewUrl ? `<a class="btn primary" href="${escapeHtml(historyVideoDownloadUrl(selected) || previewUrl)}" download>Скачать видео</a>` : ''}
+                  <button class="btn ghost" data-action="use-history-item" data-generation-id="${escapeHtml(selected.id || '')}">Открыть в Video Studio</button>
+                </div>
+              ` : `
+                <small>Здесь будут все сохранённые ролики пользователя. После выбора карточки в списке ты сможешь открыть её в предпросмотре, скачать или вернуть в Video Studio.</small>
+              `}
+            </div>
+          </div>
+
+          <div class="history-library-panel">
+            <div class="field-head">
+              <h4>Библиотека видео</h4>
+              <span class="badge muted">${items.length}</span>
+            </div>
+            <div class="help-text">Показываются новые сохранённые ролики из workspace_video_generations. Старые записи без Storage тоже видны через fallback на provider URL.</div>
+            <div class="mini-list history-library-list">
+              ${state.history.lastError ? `<div class="empty-state">${escapeHtml(state.history.lastError)}</div>` : ''}
+              ${items.length ? items.map((item) => {
+                const isActive = selected?.id === item.id;
+                const href = historyVideoUrl(item);
+                return `
+                  <div class="history-library-item ${isActive ? 'active' : ''}">
+                    <div class="history-item-row">
+                      <strong>${escapeHtml(trimText(item.prompt || `${item.provider || 'video'} · ${item.model || ''}`, 96) || 'Видео')}</strong>
+                      <span class="badge ${historyStatusTone(item.status)}">${escapeHtml(historyStatusLabel(item.status))}</span>
+                    </div>
+                    <small>${escapeHtml(formatDate(item.completed_at || item.created_at))}</small>
+                    <small>${escapeHtml(trimText([item.provider, item.model, item.mode].filter(Boolean).join(' · '), 120) || '—')}</small>
+                    <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;">
+                      <button class="btn ghost small" data-action="preview-history-item" data-generation-id="${escapeHtml(item.id || '')}">Просмотр</button>
+                      <button class="btn outline small" data-action="use-history-item" data-generation-id="${escapeHtml(item.id || '')}">В рабочую зону</button>
+                      ${href ? `<a class="btn outline small" href="${escapeHtml(historyVideoDownloadUrl(item) || href)}" download>Скачать</a>` : ''}
+                    </div>
+                  </div>
+                `;
+              }).join('') : `<div class="empty-state">Пока нет сохранённых видео. Запусти Kling 3.0 и дождись completed — ролик появится здесь автоматически.</div>`}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="workspace-side scroll">
+        <div class="result-card">
+          <h4>Сводка</h4>
+          <small>${state.authToken ? `Сохранённых роликов: ${items.length}. Выбранный элемент можно открыть в предпросмотре или вернуть в центральную рабочую зону.` : 'После входа через Telegram здесь появится облачная история всех твоих генераций.'}</small>
+        </div>
+        <div class="result-card">
+          <h4>Выбранный ролик</h4>
+          <small>${escapeHtml(selected ? selectedMeta || 'Видео из истории' : 'Ничего не выбрано')}</small>
+        </div>
+        <div class="result-card">
+          <h4>Управление</h4>
+          <div class="actions compact-gap" style="flex-direction:column;">
+            <button class="btn secondary full" data-action="refresh-history">Обновить историю</button>
+            <button class="btn ghost full" data-action="switch-studio" data-studio="video">Перейти в Video Studio</button>
           </div>
         </div>
       </div>
@@ -1475,10 +1591,15 @@ function renderPlanningInspector() {
 }
 
 function renderHistoryInspector() {
+  const selected = historySelectedItem();
   return `
     <div class="inspector-card">
       <div class="section-title">History controls</div>
-      <div class="help-text">Сейчас история локальная, из браузера. Когда будут серверные jobs/history endpoints, эта же панель примет фильтры, статусы, сортировки и поиск.</div>
+      <div class="help-text">История уже подтягивается с backend через /api/workspace/history и умеет работать с private bucket через signed URL.</div>
+      <div class="actions compact-gap" style="margin-top:12px; flex-direction:column;">
+        <button class="btn secondary full" data-action="refresh-history">Обновить историю</button>
+        ${selected?.id ? `<button class="btn ghost full" data-action="use-history-item" data-generation-id="${escapeHtml(selected.id)}">Открыть выбранное видео в Video Studio</button>` : ''}
+      </div>
     </div>
   `;
 }
@@ -1935,6 +2056,179 @@ async function sendChat() {
   }
 }
 
+
+async function loadVideoHistory(options = {}) {
+  const { silent = false, selectId = '', keepSelection = true } = options;
+  if (!state.authToken) {
+    state.history.items = [];
+    state.history.selectedId = '';
+    state.history.selectedItem = null;
+    state.history.loaded = false;
+    state.history.loading = false;
+    state.history.lastError = '';
+    if (!silent) render();
+    return [];
+  }
+
+  state.history.loading = true;
+  state.history.lastError = '';
+  if (!silent) render();
+
+  try {
+    const qs = new URLSearchParams({
+      limit: String(state.history.limit || 24),
+      offset: String(state.history.offset || 0),
+    });
+    const res = await apiFetch(`/api/workspace/history?${qs.toString()}`);
+    const data = await res.json();
+    const items = Array.isArray(data.items) ? data.items : [];
+
+    state.history.items = items;
+    state.history.loaded = true;
+
+    const preferredId =
+      String(selectId || '').trim() ||
+      (keepSelection ? String(state.history.selectedId || '').trim() : '') ||
+      String(state.history.selectedItem?.id || '').trim() ||
+      String(items[0]?.id || '').trim();
+
+    state.history.selectedId = items.some((item) => item.id === preferredId)
+      ? preferredId
+      : String(items[0]?.id || '').trim();
+
+    const selectedFromList = items.find((item) => item.id === state.history.selectedId) || null;
+    state.history.selectedItem = selectedFromList;
+
+    if (!silent) render();
+    return items;
+  } catch (e) {
+    state.history.lastError = String(e.message || e);
+    if (!silent) {
+      render();
+      toast('error', 'Не удалось загрузить историю', state.history.lastError);
+    }
+    return [];
+  } finally {
+    state.history.loading = false;
+    if (!silent) render();
+  }
+}
+
+async function loadHistoryItem(generationId, options = {}) {
+  const { silent = false, switchStudio = false } = options;
+  const generationIdText = String(generationId || '').trim();
+  if (!generationIdText) return null;
+  if (!state.authToken) {
+    if (!silent) toast('error', 'Нужна авторизация', 'Сначала войди через Telegram, чтобы открыть историю.');
+    return null;
+  }
+
+  try {
+    const res = await apiFetch(`/api/workspace/history/${encodeURIComponent(generationIdText)}`);
+    const data = await res.json();
+    const item = data.item || null;
+    if (!item) throw new Error('Пустой ответ истории');
+
+    state.history.selectedId = item.id || generationIdText;
+    state.history.selectedItem = item;
+
+    const idx = state.history.items.findIndex((entry) => entry.id === item.id);
+    if (idx >= 0) {
+      state.history.items[idx] = { ...state.history.items[idx], ...item };
+    } else {
+      state.history.items.unshift(item);
+    }
+
+    if (switchStudio) state.studio = 'history';
+    saveState();
+    render();
+    return item;
+  } catch (e) {
+    if (!silent) toast('error', 'Не удалось открыть видео', String(e.message || e));
+    return null;
+  }
+}
+
+function applyHistoryItemToVideoWorkspace(item) {
+  const selected = item || historySelectedItem();
+  if (!selected) {
+    toast('info', 'История пуста', 'Сначала дождись хотя бы одного сохранённого видео.');
+    return;
+  }
+
+  const videoUrl = historyVideoUrl(selected);
+  if (!videoUrl) {
+    toast('error', 'Нет ссылки на видео', 'Для этого ролика ещё не найден доступный файл.');
+    return;
+  }
+
+  stopVideoPolling();
+  state.video.generationId = selected.id || '';
+  state.video.providerTaskId = selected.task_id || '';
+  state.video.prompt = selected.prompt || state.video.prompt;
+  state.video.outputUrl = videoUrl;
+  state.video.downloadUrl = historyVideoDownloadUrl(selected) || videoUrl;
+  state.video.coverUrl = selected.thumbnail_url || '';
+  state.video.percent = selected.status === 'completed' ? 100 : null;
+  state.video.lastStatus = String(selected.status || 'completed').toLowerCase();
+  state.video.errorText = selected.error_message || '';
+  state.video.statusText = selected.has_storage_file
+    ? 'Открыт сохранённый ролик из библиотеки AstraBot.'
+    : 'Открыт ролик из истории провайдера.';
+  state.studio = 'video';
+  saveState();
+  render();
+  toast('success', 'Видео открыто', 'Ролик возвращён в центральную рабочую зону.');
+}
+
+function renderVideoHistoryShelf() {
+  if (!state.authToken) {
+    return `
+      <div class="result-card" style="margin-top:16px;">
+        <div class="field-head"><h4>Сохранённые видео</h4><span class="badge muted">Private cloud</span></div>
+        <small>После входа через Telegram здесь появятся сохранённые ролики, к которым можно вернуться позже.</small>
+      </div>
+    `;
+  }
+
+  const items = state.history.items.slice(0, 6);
+  if (state.history.loading && !items.length) {
+    return `
+      <div class="result-card" style="margin-top:16px;">
+        <div class="field-head"><h4>Сохранённые видео</h4><span class="badge muted">Загрузка…</span></div>
+        <div class="empty-state">Подтягиваем библиотеку видео…</div>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="result-card" style="margin-top:16px;">
+      <div class="field-head">
+        <h4>Сохранённые видео</h4>
+        <div class="actions compact-gap" style="margin-top:0; flex-wrap:wrap;">
+          <button class="btn ghost small" data-action="refresh-history">Обновить</button>
+          <button class="btn outline small" data-action="switch-studio" data-studio="history">Открыть историю</button>
+        </div>
+      </div>
+      <div class="mini-list">
+        ${items.length ? items.map((item) => `
+          <div class="history-item compact">
+            <div class="history-item-row">
+              <strong>${escapeHtml(trimText(item.prompt || `${item.provider || 'video'} · ${item.model || ''}`, 92) || 'Видео')}</strong>
+              <span class="badge ${historyStatusTone(item.status)}">${escapeHtml(historyStatusLabel(item.status))}</span>
+            </div>
+            <small>${escapeHtml(formatDate(item.completed_at || item.created_at))}</small>
+            <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;">
+              <button class="btn ghost small" data-action="preview-history-item" data-generation-id="${escapeHtml(item.id || '')}">Просмотр</button>
+              <button class="btn outline small" data-action="use-history-item" data-generation-id="${escapeHtml(item.id || '')}">В рабочую зону</button>
+            </div>
+          </div>
+        `).join('') : `<div class="empty-state">Пока нет сохранённых видео. Как только первая генерация дойдёт до completed и сохранится в Storage, она появится здесь.</div>`}
+      </div>
+    </div>
+  `;
+}
+
 async function runVideo() {
   const provider = state.video.provider;
   const model = state.video.model;
@@ -1959,6 +2253,7 @@ async function runVideo() {
         }),
       });
       const data = await res.json();
+      state.video.generationId = data.generation_id || '';
       state.video.providerTaskId = data.provider_task_id || '';
       state.video.outputUrl = '';
       state.video.downloadUrl = '';
@@ -2020,6 +2315,9 @@ async function pollVideoTask(options = {}) {
       stopVideoPolling();
       saveState();
       render();
+      if (state.authToken) {
+        loadVideoHistory({ silent: true, selectId: state.video.generationId || '' }).catch(() => {});
+      }
       if (!silent) toast('success', 'Видео готово', 'Результат появился в центре рабочей зоны.');
       pushRun({ studio: 'Video', title: 'Kling result ready', summary: state.video.prompt.slice(0, 100) || state.video.providerTaskId });
       return;
@@ -2282,6 +2580,7 @@ function handleAction(action, dataset = {}) {
       state.studio = dataset.studio;
       if (state.studio === 'library' && !state.prompts.categories.length) loadPromptCategories();
       if (state.studio === 'voice' && !state.voice.voices.length) loadVoices();
+      if (state.studio === 'history' && state.authToken) loadVideoHistory({ silent: true });
       render();
       saveState();
       break;
@@ -2293,6 +2592,15 @@ function handleAction(action, dataset = {}) {
     case 'run-video': runVideo(); break;
     case 'poll-video-task': pollVideoTask(); break;
     case 'clear-video-run': clearVideoRunState({ keepPrompt: true }); render(); break;
+    case 'refresh-history': loadVideoHistory(); break;
+    case 'preview-history-item':
+      loadHistoryItem(dataset.generationId, { switchStudio: true });
+      break;
+    case 'use-history-item':
+      loadHistoryItem(dataset.generationId, { silent: false }).then((item) => {
+        if (item) applyHistoryItemToVideoWorkspace(item);
+      });
+      break;
     case 'run-image': toast('info', 'Image Studio готова архитектурно', 'Для запуска осталось вынести web-friendly image endpoints из backend.'); break;
     case 'load-voices': loadVoices(); break;
     case 'run-voice': runVoice(); break;
@@ -2398,7 +2706,10 @@ async function init() {
   render();
   await loadBootstrap();
   await checkApi();
-  if (state.authToken) await loadMe();
+  if (state.authToken) {
+    await loadMe();
+    loadVideoHistory({ silent: true }).catch(() => {});
+  }
   if (state.voice.voices.length === 0) loadVoices();
   if (state.studio === 'library' || state.prompts.categories.length === 0) loadPromptCategories();
   if (state.video.providerTaskId && !state.video.outputUrl && !isVideoTaskFailed(state.video.lastStatus)) {
