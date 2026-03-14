@@ -907,9 +907,8 @@ function renderVideoWorkspace() {
         <div class="field-head"><h4>Видео готово</h4><span class="badge ok">${escapeHtml(statusLabel)}</span></div>
         <small>${escapeHtml(state.video.statusText || 'Результат получен и сохранён в рабочей зоне.')}</small>
         <div class="actions compact-gap" style="margin-top:12px; flex-wrap:wrap;">
-          <a class="btn primary" href="${escapeHtml(state.video.outputUrl)}" target="_blank" rel="noopener">Открыть видео</a>
-          <a class="btn ghost" href="${escapeHtml(downloadHref)}" download>Скачать</a>
-          ${state.video.providerTaskId ? `<button class="btn outline" data-action="poll-video-task">Проверить статус</button>` : ''}
+          <a class="btn primary" href="${escapeHtml(downloadHref)}" download>Скачать видео</a>
+          ${state.video.providerTaskId ? `<button class="btn ghost" data-action="clear-video-run">Очистить запуск</button>` : ''}
         </div>
       </div>
     </div>
@@ -968,7 +967,6 @@ function renderVideoWorkspace() {
               <div class="table-row"><span class="muted">Индикация</span><span>${state.video.outputUrl ? 'Видео готово' : state.video.providerTaskId ? 'Авто · без процентов' : '—'}</span></div>
             </div>
             <div class="actions compact-gap" style="margin-top:12px; flex-wrap:wrap;">
-              ${state.video.providerTaskId ? `<button class="btn ghost" data-action="poll-video-task">Проверить статус</button>` : ''}
               ${state.video.providerTaskId ? `<button class="btn outline" data-action="clear-video-run">Очистить запуск</button>` : ''}
             </div>
           ` : ''}
