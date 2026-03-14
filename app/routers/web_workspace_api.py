@@ -109,9 +109,12 @@ def _normalize_kling3_task(task: Dict[str, Any]) -> Dict[str, Any]:
     ).strip().lower()
 
     video_url = _first_nonempty(
+        output.get("video"),
         output.get("video_url"),
         output.get("url"),
+        payload.get("video") if isinstance(payload, dict) else None,
         payload.get("video_url") if isinstance(payload, dict) else None,
+        task.get("video"),
         task.get("video_url"),
     )
     download_url = _first_nonempty(
