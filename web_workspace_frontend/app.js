@@ -736,15 +736,19 @@ function extractVideoTaskStatus(task) {
 function extractVideoTaskUrl(task) {
   const candidates = [
     task?.output_url,
+    task?.video,
     task?.video_url,
     task?.url,
     task?.download_url,
+    task?.output?.video,
     task?.output?.video_url,
     task?.output?.url,
     task?.output?.download_url,
+    task?.data?.video,
     task?.data?.video_url,
     task?.data?.url,
     task?.data?.download_url,
+    task?.data?.output?.video,
     task?.data?.output?.video_url,
     task?.data?.output?.url,
     task?.data?.output?.download_url,
@@ -755,9 +759,13 @@ function extractVideoTaskUrl(task) {
 function extractVideoTaskDownloadUrl(task) {
   const candidates = [
     task?.download_url,
+    task?.video,
     task?.output?.download_url,
+    task?.output?.video,
     task?.data?.download_url,
+    task?.data?.video,
     task?.data?.output?.download_url,
+    task?.data?.output?.video,
   ].filter(Boolean);
   return candidates[0] || '';
 }
@@ -1943,7 +1951,7 @@ async function runVideo() {
       state.video.outputUrl = '';
       state.video.downloadUrl = '';
       state.video.coverUrl = '';
-      state.video.percent = 0;
+      state.video.percent = null;
       state.video.errorText = '';
       state.video.lastStatus = 'submitted';
       state.video.statusText = `Генерация запущена. Task ID: ${state.video.providerTaskId || '—'}. Видео появится в рабочей зоне после готовности.`;
@@ -1995,6 +2003,7 @@ async function pollVideoTask(options = {}) {
 
     if (maybeUrl || downloadUrl) {
       state.video.outputUrl = maybeUrl || downloadUrl;
+      state.video.percent = 100;
       state.video.statusText = 'Видео готово и загружено в рабочую зону.';
       stopVideoPolling();
       saveState();
