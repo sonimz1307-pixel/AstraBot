@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
@@ -177,6 +178,19 @@ def _normalize_kling3_task(task: Dict[str, Any]) -> Dict[str, Any]:
 _WORKSPACE_VIDEO_GENERATIONS_TABLE = "workspace_video_generations"
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _db_generation_status(normalized_status: Optional[str]) -> str:
+    status = str(normalized_status or "").strip().lower()
+    if status == "succeeded":
+        return "completed"
+    if status in {"failed", "queued", "processing"}:
+        return status
+    return "processing"
+
+
 def _insert_workspace_generation(row: Dict[str, Any]) -> str:
     generation_id = str(row.get("id") or uuid4())
     payload = dict(row)
@@ -211,6 +225,37 @@ def _mark_workspace_generation_failed(generation_id: Optional[str], error_messag
         _update_workspace_generation(generation_id, patch)
     except Exception:
         pass
+
+
+def _sync_workspace_generation_by_task(user_id: int, task_id: Optional[str], normalized: Dict[str, Any]) -> None:
+    task_id_text = str(task_id or normalized.get("task_id") or "").strip()
+    if supabase is None or not task_id_text:
+        return
+
+    db_status = _db_generation_status(normalized.get("status"))
+    patch: Dict[str, Any] = {
+        "status": db_status,
+    }
+
+    provider_video_url = _first_nonempty(
+        normalized.get("video_url"),
+        normalized.get("download_url"),
+        normalized.get("output_url"),
+    )
+    if provider_video_url:
+        patch["provider_video_url"] = provider_video_url
+
+    error_message = _first_nonempty(normalized.get("error_message"))
+    if db_status == "completed":
+        patch["completed_at"] = _utc_now_iso()
+        patch["error_code"] = None
+        patch["error_message"] = None
+    elif db_status == "failed":
+        patch["completed_at"] = _utc_now_iso()
+        patch["error_code"] = "provider_error"
+        patch["error_message"] = (error_message or "Provider task failed")[:4000]
+
+    supabase.table(_WORKSPACE_VIDEO_GENERATIONS_TABLE).update(patch).eq("user_id", str(user_id)).eq("task_id", task_id_text).execute()
 
 
 class TelegramAuthPayload(BaseModel):
@@ -439,9 +484,14 @@ async def workspace_kling3_create(payload: WorkspaceKlingCreateIn, user: Dict[st
 
 @router.get("/kling3/task/{task_id}")
 async def workspace_kling3_task(task_id: str, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
+    uid = int(user["telegram_user_id"])
     try:
         task = await get_kling3_task(task_id)
         normalized = _normalize_kling3_task(task if isinstance(task, dict) else {"raw": task})
+        try:
+            _sync_workspace_generation_by_task(uid, task_id, normalized)
+        except Exception:
+            pass
         return {"ok": True, "task": task, "normalized": normalized}
     except (ValueError, Kling3Error) as e:
         raise HTTPException(status_code=400, detail=str(e))
