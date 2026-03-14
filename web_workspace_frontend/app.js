@@ -1267,83 +1267,85 @@ function renderHistoryWorkspace() {
   return `
     <div class="workspace-grid">
       <div class="workspace-main scroll">
-        <div class="history-browser">
-          <div class="history-preview-panel">
-            <div class="field-head">
-              <h4>Предпросмотр</h4>
-              <div class="actions compact-gap" style="margin-top:0; flex-wrap:wrap;">
-                <button class="btn ghost small" data-action="refresh-history">Обновить</button>
-                ${selected?.id ? `<button class="btn outline small" data-action="use-history-item" data-generation-id="${escapeHtml(selected.id)}">В рабочую зону</button>` : ''}
-              </div>
+        <div class="result-card">
+          <div class="field-head" style="align-items:flex-start; flex-wrap:wrap; gap:12px;">
+            <div>
+              <h4 style="margin:0 0 6px;">Предпросмотр</h4>
+              <small style="margin:0;">Выбери ролик из библиотеки ниже. После выбора его можно скачать или вернуть в Video Studio.</small>
             </div>
-
-            ${state.history.loading && !selected ? `
-              <div class="history-preview-empty">
-                <strong>Подтягиваем библиотеку</strong>
-                <div>Собираем сохранённые видео пользователя из Supabase Storage и базы генераций.</div>
-              </div>
-            ` : selected && previewUrl ? `
-              <div class="history-preview-media">
-                <video class="preview-media" src="${escapeHtml(previewUrl)}" controls playsinline></video>
-              </div>
-            ` : `
-              <div class="history-preview-empty">
-                <strong>${state.authToken ? 'Выбери видео из списка' : 'Нужна авторизация'}</strong>
-                <div>${state.authToken ? 'Слева появятся все сохранённые генерации. Кликни по любой карточке, чтобы открыть предпросмотр.' : 'Сначала войди через Telegram, чтобы увидеть свои прошлые генерации.'}</div>
-              </div>
-            `}
-
-            <div class="result-card history-preview-details">
-              <div class="field-head">
-                <h4>${escapeHtml(selected ? 'Детали ролика' : 'Как это работает')}</h4>
-                ${selected ? `<span class="badge ${selectedTone}">${escapeHtml(selectedStatus)}</span>` : `<span class="badge muted">History</span>`}
-              </div>
-              ${selected ? `
-                <small>${escapeHtml(selectedPrompt || 'Промт не сохранён')}</small>
-                <div class="tableish" style="margin-top:12px;">
-                  <div class="table-row"><span class="muted">Provider</span><span>${escapeHtml(selected.provider || '—')}</span><span class="badge muted">${escapeHtml(selected.model || '—')}</span></div>
-                  <div class="table-row"><span class="muted">Режим</span><span>${escapeHtml(selected.mode || '—')}</span><span class="badge muted">${escapeHtml(selected.aspect_ratio || '—')}</span></div>
-                  <div class="table-row"><span class="muted">Размер файла</span><span>${escapeHtml(formatFileSize(selected.file_size_bytes))}</span><span class="badge muted">${escapeHtml(selected.mime_type || 'video/mp4')}</span></div>
-                  <div class="table-row"><span class="muted">Создано</span><span>${escapeHtml(formatDate(selected.created_at))}</span><span class="badge muted">${escapeHtml(selected.has_storage_file ? 'AstraBot Cloud' : 'Provider URL')}</span></div>
-                </div>
-                <div class="actions compact-gap" style="margin-top:12px; flex-wrap:wrap;">
-                  ${previewUrl ? `<a class="btn primary" href="${escapeHtml(historyVideoDownloadUrl(selected) || previewUrl)}" download>Скачать видео</a>` : ''}
-                  <button class="btn ghost" data-action="use-history-item" data-generation-id="${escapeHtml(selected.id || '')}">Открыть в Video Studio</button>
-                </div>
-              ` : `
-                <small>Здесь будут все сохранённые ролики пользователя. После выбора карточки в списке ты сможешь открыть её в предпросмотре, скачать или вернуть в Video Studio.</small>
-              `}
+            <div class="actions compact-gap" style="margin-top:0; flex-wrap:wrap;">
+              <button class="btn ghost small" data-action="refresh-history">Обновить</button>
+              ${selected?.id ? `<button class="btn outline small" data-action="use-history-item" data-generation-id="${escapeHtml(selected.id)}">В рабочую зону</button>` : ''}
             </div>
           </div>
 
-          <div class="history-library-panel">
-            <div class="field-head">
-              <h4>Библиотека видео</h4>
-              <span class="badge muted">${items.length}</span>
+          ${state.history.loading && !selected ? `
+            <div class="history-preview-empty" style="margin-top:14px;">
+              <div>
+                <strong>Подтягиваем библиотеку</strong>
+                <div>Собираем сохранённые видео пользователя из Supabase Storage и базы генераций.</div>
+              </div>
             </div>
-            <div class="help-text">Показываются новые сохранённые ролики из workspace_video_generations. Старые записи без Storage тоже видны через fallback на provider URL.</div>
-            <div class="mini-list history-library-list">
-              ${state.history.lastError ? `<div class="empty-state">${escapeHtml(state.history.lastError)}</div>` : ''}
-              ${items.length ? items.map((item) => {
-                const isActive = selected?.id === item.id;
-                const href = historyVideoUrl(item);
-                return `
-                  <div class="history-library-item ${isActive ? 'active' : ''}">
-                    <div class="history-item-row">
-                      <strong>${escapeHtml(trimText(item.prompt || `${item.provider || 'video'} · ${item.model || ''}`, 96) || 'Видео')}</strong>
-                      <span class="badge ${historyStatusTone(item.status)}">${escapeHtml(historyStatusLabel(item.status))}</span>
-                    </div>
-                    <small>${escapeHtml(formatDate(item.completed_at || item.created_at))}</small>
-                    <small>${escapeHtml(trimText([item.provider, item.model, item.mode].filter(Boolean).join(' · '), 120) || '—')}</small>
-                    <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;">
-                      <button class="btn ghost small" data-action="preview-history-item" data-generation-id="${escapeHtml(item.id || '')}">Просмотр</button>
-                      <button class="btn outline small" data-action="use-history-item" data-generation-id="${escapeHtml(item.id || '')}">В рабочую зону</button>
-                      ${href ? `<a class="btn outline small" href="${escapeHtml(historyVideoDownloadUrl(item) || href)}" download>Скачать</a>` : ''}
-                    </div>
+          ` : selected && previewUrl ? `
+            <div class="history-preview-media" style="margin-top:14px;">
+              <video class="preview-media" src="${escapeHtml(previewUrl)}" controls playsinline></video>
+            </div>
+          ` : `
+            <div class="history-preview-empty" style="margin-top:14px;">
+              <div>
+                <strong>${state.authToken ? 'Выбери видео из списка' : 'Нужна авторизация'}</strong>
+                <div>${state.authToken ? 'Ниже показаны все сохранённые генерации. Нажми «Просмотр», чтобы открыть ролик здесь.' : 'Сначала войди через Telegram, чтобы увидеть свои прошлые генерации.'}</div>
+              </div>
+            </div>
+          `}
+
+          <div class="tableish" style="margin-top:14px;">
+            <div class="table-row"><span class="muted">Статус</span><span>${escapeHtml(selectedStatus)}</span><span class="badge ${selectedTone}">${escapeHtml(selected ? selectedStatus : 'History')}</span></div>
+            <div class="table-row"><span class="muted">Источник</span><span>${escapeHtml(selectedMeta || '—')}</span><span class="badge muted">${escapeHtml(selected?.has_storage_file ? 'AstraBot Cloud' : (selected ? 'Provider URL' : 'Library'))}</span></div>
+            <div class="table-row"><span class="muted">Создано</span><span>${escapeHtml(selected ? formatDate(selected.completed_at || selected.created_at) : '—')}</span><span class="badge muted">${escapeHtml(selected?.aspect_ratio || '—')}</span></div>
+            <div class="table-row"><span class="muted">Размер файла</span><span>${escapeHtml(selected ? formatFileSize(selected.file_size_bytes) : '—')}</span><span class="badge muted">${escapeHtml(selected?.mime_type || 'video/mp4')}</span></div>
+          </div>
+
+          <small style="margin-top:12px;">${escapeHtml(selectedPrompt || 'После выбора ролика здесь появятся его prompt и детали.')}</small>
+
+          ${selected ? `
+            <div class="actions compact-gap" style="margin-top:12px; flex-wrap:wrap;">
+              ${previewUrl ? `<a class="btn primary" href="${escapeHtml(historyVideoDownloadUrl(selected) || previewUrl)}" download>Скачать видео</a>` : ''}
+              <button class="btn ghost" data-action="use-history-item" data-generation-id="${escapeHtml(selected.id || '')}">Открыть в Video Studio</button>
+            </div>
+          ` : ''}
+        </div>
+
+        <div class="result-card" style="margin-top:16px;">
+          <div class="field-head" style="align-items:flex-start; flex-wrap:wrap; gap:12px;">
+            <div>
+              <h4 style="margin:0 0 6px;">Библиотека видео</h4>
+              <small style="margin:0;">Новые ролики приходят из workspace_video_generations. Старые записи без Storage остаются доступны через fallback на provider URL.</small>
+            </div>
+            <span class="badge muted">${items.length}</span>
+          </div>
+
+          <div class="mini-list" style="margin-top:14px;">
+            ${state.history.lastError ? `<div class="empty-state">${escapeHtml(state.history.lastError)}</div>` : ''}
+            ${items.length ? items.map((item) => {
+              const isActive = selected?.id === item.id;
+              const href = historyVideoUrl(item);
+              return `
+                <div class="history-library-item ${isActive ? 'active' : ''}">
+                  <div class="history-item-row">
+                    <strong>${escapeHtml(trimText(item.prompt || `${item.provider || 'video'} · ${item.model || ''}`, 120) || 'Видео')}</strong>
+                    <span class="badge ${historyStatusTone(item.status)}">${escapeHtml(historyStatusLabel(item.status))}</span>
                   </div>
-                `;
-              }).join('') : `<div class="empty-state">Пока нет сохранённых видео. Запусти Kling 3.0 и дождись completed — ролик появится здесь автоматически.</div>`}
-            </div>
+                  <small>${escapeHtml(formatDate(item.completed_at || item.created_at))}</small>
+                  <small>${escapeHtml(trimText([item.provider, item.model, item.mode].filter(Boolean).join(' · '), 140) || '—')}</small>
+                  <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;">
+                    <button class="btn ghost small" data-action="preview-history-item" data-generation-id="${escapeHtml(item.id || '')}">Просмотр</button>
+                    <button class="btn outline small" data-action="use-history-item" data-generation-id="${escapeHtml(item.id || '')}">В рабочую зону</button>
+                    ${href ? `<a class="btn outline small" href="${escapeHtml(historyVideoDownloadUrl(item) || href)}" download>Скачать</a>` : ''}
+                  </div>
+                </div>
+              `;
+            }).join('') : `<div class="empty-state">Пока нет сохранённых видео. Запусти Kling 3.0 и дождись completed — ролик появится здесь автоматически.</div>`}
           </div>
         </div>
       </div>
@@ -1351,7 +1353,7 @@ function renderHistoryWorkspace() {
       <div class="workspace-side scroll">
         <div class="result-card">
           <h4>Сводка</h4>
-          <small>${state.authToken ? `Сохранённых роликов: ${items.length}. Выбранный элемент можно открыть в предпросмотре или вернуть в центральную рабочую зону.` : 'После входа через Telegram здесь появится облачная история всех твоих генераций.'}</small>
+          <small>${state.authToken ? `Сохранённых роликов: ${items.length}. Выбранный ролик можно просмотреть, скачать или вернуть в центральную рабочую зону.` : 'После входа через Telegram здесь появится облачная история всех твоих генераций.'}</small>
         </div>
         <div class="result-card">
           <h4>Выбранный ролик</h4>
