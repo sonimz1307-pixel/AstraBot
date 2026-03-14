@@ -174,6 +174,45 @@ def _normalize_kling3_task(task: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+_WORKSPACE_VIDEO_GENERATIONS_TABLE = "workspace_video_generations"
+
+
+def _insert_workspace_generation(row: Dict[str, Any]) -> str:
+    generation_id = str(row.get("id") or uuid4())
+    payload = dict(row)
+    payload["id"] = generation_id
+    if supabase is None:
+        return generation_id
+    resp = supabase.table(_WORKSPACE_VIDEO_GENERATIONS_TABLE).insert(payload).execute()
+    data = getattr(resp, "data", None) or []
+    if data and isinstance(data[0], dict):
+        saved_id = data[0].get("id")
+        if saved_id:
+            return str(saved_id)
+    return generation_id
+
+
+def _update_workspace_generation(generation_id: Optional[str], patch: Dict[str, Any]) -> None:
+    if not generation_id or not patch or supabase is None:
+        return
+    supabase.table(_WORKSPACE_VIDEO_GENERATIONS_TABLE).update(patch).eq("id", str(generation_id)).execute()
+
+
+def _mark_workspace_generation_failed(generation_id: Optional[str], error_message: str, error_code: Optional[str] = None) -> None:
+    if not generation_id:
+        return
+    patch: Dict[str, Any] = {
+        "status": "failed",
+        "error_message": (error_message or "").strip()[:4000] or "Unknown error",
+    }
+    if error_code:
+        patch["error_code"] = str(error_code)[:255]
+    try:
+        _update_workspace_generation(generation_id, patch)
+    except Exception:
+        pass
+
+
 class TelegramAuthPayload(BaseModel):
     auth_data: Dict[str, Any]
 
@@ -316,16 +355,72 @@ async def workspace_chat(payload: WorkspaceChatIn, user: Dict[str, Any] = Depend
 async def workspace_kling3_create(payload: WorkspaceKlingCreateIn, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
     uid = int(user["telegram_user_id"])
     request_id = str(uuid4())
+    generation_id: Optional[str] = None
     tokens_required = 0
     try:
-        tokens_required = calculate_kling3_price(resolution=payload.resolution, enable_audio=payload.enable_audio, duration=payload.duration)
-        add_tokens(uid, -tokens_required, reason="kling3_create", ref_id=request_id, meta={"duration": payload.duration, "resolution": payload.resolution, "enable_audio": payload.enable_audio, "aspect_ratio": payload.aspect_ratio})
-        task = await create_kling3_task(prompt=payload.prompt, duration=payload.duration, resolution=payload.resolution, enable_audio=payload.enable_audio, aspect_ratio=payload.aspect_ratio)
+        tokens_required = calculate_kling3_price(
+            resolution=payload.resolution,
+            enable_audio=payload.enable_audio,
+            duration=payload.duration,
+        )
+        add_tokens(
+            uid,
+            -tokens_required,
+            reason="kling3_create",
+            ref_id=request_id,
+            meta={
+                "duration": payload.duration,
+                "resolution": payload.resolution,
+                "enable_audio": payload.enable_audio,
+                "aspect_ratio": payload.aspect_ratio,
+            },
+        )
+
+        generation_id = _insert_workspace_generation(
+            {
+                "user_id": str(uid),
+                "provider": "kling",
+                "model": "3.0",
+                "mode": "text_to_video",
+                "prompt": payload.prompt.strip(),
+                "status": "processing",
+                "aspect_ratio": payload.aspect_ratio,
+                "duration_sec": int(payload.duration),
+                "resolution": payload.resolution,
+                "enable_audio": bool(payload.enable_audio),
+                "origin": "workspace",
+            }
+        )
+
+        task = await create_kling3_task(
+            prompt=payload.prompt,
+            duration=payload.duration,
+            resolution=payload.resolution,
+            enable_audio=payload.enable_audio,
+            aspect_ratio=payload.aspect_ratio,
+        )
         provider_task_id = None
         if isinstance(task, dict):
             provider_task_id = (task.get("data") or {}).get("task_id") or task.get("task_id")
-        return {"ok": True, "request_id": request_id, "tokens_required": tokens_required, "provider_task_id": provider_task_id, "task": task}
+
+        if generation_id and provider_task_id:
+            _update_workspace_generation(
+                generation_id,
+                {
+                    "task_id": str(provider_task_id),
+                },
+            )
+
+        return {
+            "ok": True,
+            "generation_id": generation_id,
+            "request_id": request_id,
+            "tokens_required": tokens_required,
+            "provider_task_id": provider_task_id,
+            "task": task,
+        }
     except (ValueError, Kling3Error) as e:
+        _mark_workspace_generation_failed(generation_id, str(e), error_code="provider_error")
         if tokens_required > 0:
             try:
                 add_tokens(uid, tokens_required, reason="kling3_refund", ref_id=request_id, meta={"error": str(e)})
@@ -333,6 +428,7 @@ async def workspace_kling3_create(payload: WorkspaceKlingCreateIn, user: Dict[st
                 pass
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        _mark_workspace_generation_failed(generation_id, str(e), error_code="internal_error")
         if tokens_required > 0:
             try:
                 add_tokens(uid, tokens_required, reason="kling3_refund", ref_id=request_id, meta={"error": str(e)})
