@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import mimetypes
 import os
+import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 from uuid import uuid4
+
+import httpx
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
@@ -177,6 +183,196 @@ def _normalize_kling3_task(task: Dict[str, Any]) -> Dict[str, Any]:
 
 _WORKSPACE_VIDEO_GENERATIONS_TABLE = "workspace_video_generations"
 
+_WORKSPACE_VIDEOS_BUCKET = (os.getenv("WORKSPACE_VIDEOS_BUCKET", "workspace-videos") or "workspace-videos").strip() or "workspace-videos"
+
+
+def _storage_content_type_to_ext(content_type: Optional[str], url: Optional[str] = None) -> str:
+    ctype = (content_type or "").split(";", 1)[0].strip().lower()
+    mapping = {
+        "video/mp4": "mp4",
+        "video/quicktime": "mov",
+        "video/webm": "webm",
+        "video/x-matroska": "mkv",
+    }
+    if ctype in mapping:
+        return mapping[ctype]
+    guessed = mimetypes.guess_extension(ctype) or ""
+    guessed = guessed.lstrip(".").lower()
+    if guessed:
+        return guessed
+    parsed_path = urlparse(url or "").path
+    suffix = Path(parsed_path).suffix.lstrip(".").lower()
+    if suffix:
+        return suffix
+    return "mp4"
+
+
+def _workspace_video_storage_path(*, user_id: int, generation_id: str, ext: str) -> str:
+    now = datetime.now(timezone.utc)
+    safe_ext = (ext or "mp4").lstrip(".").lower() or "mp4"
+    return f"{user_id}/{now:%Y/%m/%d}/{generation_id}.{safe_ext}"
+
+
+def _extract_storage_public_url(public_result: Any) -> Optional[str]:
+    if isinstance(public_result, str):
+        return public_result
+    if isinstance(public_result, dict):
+        return public_result.get("publicUrl") or public_result.get("public_url")
+    return None
+
+
+def _get_workspace_generation_by_task(user_id: int, task_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    task_id_text = str(task_id or "").strip()
+    if supabase is None or not task_id_text:
+        return None
+    try:
+        resp = (
+            supabase.table(_WORKSPACE_VIDEO_GENERATIONS_TABLE)
+            .select("id,user_id,task_id,status,provider_video_url,storage_path,file_size_bytes,mime_type")
+            .eq("user_id", str(user_id))
+            .eq("task_id", task_id_text)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(resp, "data", None) or []
+        if rows and isinstance(rows[0], dict):
+            return rows[0]
+    except Exception:
+        return None
+    return None
+
+
+async def _download_video_to_tempfile(url: str) -> tuple[str, int, str]:
+    target_url = str(url or "").strip()
+    if not target_url:
+        raise RuntimeError("Missing provider video url")
+
+    timeout = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=60.0)
+    total_bytes = 0
+    content_type = "video/mp4"
+    ext = "mp4"
+    tmp_path = ""
+
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        async with client.stream("GET", target_url) as resp:
+            resp.raise_for_status()
+            content_type = (resp.headers.get("content-type") or "video/mp4").split(";", 1)[0].strip() or "video/mp4"
+            ext = _storage_content_type_to_ext(content_type, target_url)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
+                tmp_path = tmp.name
+                async for chunk in resp.aiter_bytes(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    tmp.write(chunk)
+                    total_bytes += len(chunk)
+
+    if not tmp_path or total_bytes <= 0:
+        raise RuntimeError("Downloaded provider video is empty")
+    return tmp_path, total_bytes, content_type
+
+
+def _upload_workspace_video_file(*, local_path: str, user_id: int, generation_id: str, content_type: str) -> Dict[str, Any]:
+    if supabase is None:
+        raise RuntimeError("Supabase client is not configured")
+    source_path = str(local_path or "").strip()
+    if not source_path:
+        raise RuntimeError("local_path is empty")
+
+    ext = Path(source_path).suffix.lstrip(".").lower() or _storage_content_type_to_ext(content_type)
+    storage_path = _workspace_video_storage_path(user_id=user_id, generation_id=generation_id, ext=ext)
+
+    with open(source_path, "rb") as fh:
+        file_bytes = fh.read()
+
+    if not file_bytes:
+        raise RuntimeError("Local video file is empty")
+
+    supabase.storage.from_(_WORKSPACE_VIDEOS_BUCKET).upload(
+        path=storage_path,
+        file=file_bytes,
+        file_options={
+            "content-type": content_type or "video/mp4",
+            "upsert": "true",
+        },
+    )
+
+    public_url = None
+    try:
+        public_url = _extract_storage_public_url(
+            supabase.storage.from_(_WORKSPACE_VIDEOS_BUCKET).get_public_url(storage_path)
+        )
+    except Exception:
+        public_url = None
+
+    return {
+        "storage_path": storage_path,
+        "public_url": public_url,
+        "file_size_bytes": len(file_bytes),
+        "mime_type": content_type or "video/mp4",
+    }
+
+
+async def _archive_workspace_video_if_needed(user_id: int, task_id: Optional[str], normalized: Dict[str, Any]) -> None:
+    if supabase is None:
+        return
+
+    row = _get_workspace_generation_by_task(user_id, task_id)
+    if not row:
+        return
+
+    existing_storage_path = _first_nonempty(row.get("storage_path"))
+    if existing_storage_path:
+        return
+
+    provider_video_url = _first_nonempty(
+        row.get("provider_video_url"),
+        normalized.get("video_url"),
+        normalized.get("download_url"),
+        normalized.get("output_url"),
+    )
+    if not provider_video_url:
+        return
+
+    generation_id = str(row.get("id") or "").strip()
+    if not generation_id:
+        return
+
+    tmp_path = ""
+    try:
+        tmp_path, downloaded_bytes, content_type = await _download_video_to_tempfile(provider_video_url)
+        uploaded = _upload_workspace_video_file(
+            local_path=tmp_path,
+            user_id=user_id,
+            generation_id=generation_id,
+            content_type=content_type,
+        )
+        patch: Dict[str, Any] = {
+            "storage_path": uploaded.get("storage_path"),
+            "file_size_bytes": int(uploaded.get("file_size_bytes") or downloaded_bytes or 0),
+            "mime_type": uploaded.get("mime_type") or content_type or "video/mp4",
+            "error_code": None,
+        }
+        # Keep public_url nullable because bucket is expected to be private.
+        # Save only when available so the column stays harmless for private buckets.
+        if uploaded.get("public_url"):
+            patch["public_url"] = uploaded["public_url"]
+        _update_workspace_generation(generation_id, patch)
+    except Exception as e:
+        _update_workspace_generation(
+            generation_id,
+            {
+                "error_code": "archive_error",
+                "error_message": f"Archive upload failed: {str(e)[:3800]}",
+            },
+        )
+    finally:
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -227,7 +423,7 @@ def _mark_workspace_generation_failed(generation_id: Optional[str], error_messag
         pass
 
 
-def _sync_workspace_generation_by_task(user_id: int, task_id: Optional[str], normalized: Dict[str, Any]) -> None:
+async def _sync_workspace_generation_by_task(user_id: int, task_id: Optional[str], normalized: Dict[str, Any]) -> None:
     task_id_text = str(task_id or normalized.get("task_id") or "").strip()
     if supabase is None or not task_id_text:
         return
@@ -256,6 +452,12 @@ def _sync_workspace_generation_by_task(user_id: int, task_id: Optional[str], nor
         patch["error_message"] = (error_message or "Provider task failed")[:4000]
 
     supabase.table(_WORKSPACE_VIDEO_GENERATIONS_TABLE).update(patch).eq("user_id", str(user_id)).eq("task_id", task_id_text).execute()
+
+    if db_status == "completed" and provider_video_url:
+        try:
+            await _archive_workspace_video_if_needed(user_id, task_id_text, normalized)
+        except Exception:
+            pass
 
 
 class TelegramAuthPayload(BaseModel):
@@ -489,7 +691,7 @@ async def workspace_kling3_task(task_id: str, user: Dict[str, Any] = Depends(get
         task = await get_kling3_task(task_id)
         normalized = _normalize_kling3_task(task if isinstance(task, dict) else {"raw": task})
         try:
-            _sync_workspace_generation_by_task(uid, task_id, normalized)
+            await _sync_workspace_generation_by_task(uid, task_id, normalized)
         except Exception:
             pass
         return {"ok": True, "task": task, "normalized": normalized}
