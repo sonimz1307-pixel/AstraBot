@@ -44,6 +44,9 @@ const state = {
     enableAudio: !!DEFAULT_VIDEO_STATE.enableAudio,
     quality: DEFAULT_VIDEO_STATE.quality || 'pro',
     outputUrl: DEFAULT_VIDEO_STATE.outputUrl || '',
+    downloadUrl: DEFAULT_VIDEO_STATE.downloadUrl || '',
+    coverUrl: DEFAULT_VIDEO_STATE.coverUrl || '',
+    percent: Number.isFinite(Number(DEFAULT_VIDEO_STATE.percent)) ? Number(DEFAULT_VIDEO_STATE.percent) : null,
     providerTaskId: DEFAULT_VIDEO_STATE.providerTaskId || '',
     statusText: DEFAULT_VIDEO_STATE.statusText || 'Здесь будут превью, статусы и готовые видео.',
     errorText: DEFAULT_VIDEO_STATE.errorText || '',
@@ -300,6 +303,9 @@ function saveState() {
     enableAudio: state.video.enableAudio,
     quality: state.video.quality,
     outputUrl: state.video.outputUrl,
+    downloadUrl: state.video.downloadUrl,
+    coverUrl: state.video.coverUrl,
+    percent: state.video.percent,
     providerTaskId: state.video.providerTaskId,
     statusText: state.video.statusText,
     errorText: state.video.errorText,
@@ -702,6 +708,11 @@ function videoStatusLabel(status) {
   return map[value] || (status || 'Ожидание');
 }
 
+function isVideoTaskFailed(status) {
+  const value = String(status || '').toLowerCase();
+  return ['failed', 'error', 'cancelled', 'canceled'].includes(value);
+}
+
 function isVideoTaskFinished(status) {
   const value = String(status || '').toLowerCase();
   return ['succeeded', 'completed', 'success', 'finished', 'done', 'failed', 'error', 'cancelled', 'canceled'].includes(value);
@@ -713,6 +724,7 @@ function extractVideoTaskStatus(task) {
     task?.state ||
     task?.task_status ||
     task?.task_state ||
+    task?.provider_status ||
     task?.output?.status ||
     task?.data?.status ||
     task?.data?.task_status ||
@@ -723,26 +735,69 @@ function extractVideoTaskStatus(task) {
 
 function extractVideoTaskUrl(task) {
   const candidates = [
-    task?.output?.video_url,
-    task?.output?.url,
+    task?.output_url,
     task?.video_url,
     task?.url,
+    task?.download_url,
+    task?.output?.video_url,
+    task?.output?.url,
+    task?.output?.download_url,
     task?.data?.video_url,
     task?.data?.url,
+    task?.data?.download_url,
     task?.data?.output?.video_url,
     task?.data?.output?.url,
+    task?.data?.output?.download_url,
   ].filter(Boolean);
   return candidates[0] || '';
 }
 
+function extractVideoTaskDownloadUrl(task) {
+  const candidates = [
+    task?.download_url,
+    task?.output?.download_url,
+    task?.data?.download_url,
+    task?.data?.output?.download_url,
+  ].filter(Boolean);
+  return candidates[0] || '';
+}
+
+function extractVideoTaskCoverUrl(task) {
+  const candidates = [
+    task?.cover_url,
+    task?.output?.cover_url,
+    task?.data?.cover_url,
+    task?.data?.output?.cover_url,
+  ].filter(Boolean);
+  return candidates[0] || '';
+}
+
+function extractVideoTaskPercent(task) {
+  const raw = (
+    task?.percent ??
+    task?.output?.percent ??
+    task?.data?.percent ??
+    task?.data?.output?.percent ??
+    null
+  );
+  if (raw === null || raw === undefined || raw === '') return null;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return null;
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
 function extractVideoTaskError(task) {
   const candidates = [
-    task?.error?.message,
     task?.error_message,
+    task?.error?.message,
+    task?.error?.raw_message,
+    task?.message,
+    task?.detail,
     task?.data?.error?.message,
     task?.data?.error_message,
     task?.output?.error?.message,
     task?.output?.error_message,
+    task?.output?.message,
   ].filter(Boolean);
 
   if (candidates.length) return String(candidates[0]);
@@ -754,6 +809,26 @@ function extractVideoTaskError(task) {
   return '';
 }
 
+function getVideoLoadingHeadline(percent, status) {
+  if (isVideoTaskFailed(status)) return 'Генерация завершилась с ошибкой';
+  if (percent !== null && percent >= 95) return 'Получаем итоговый файл';
+  if (percent !== null && percent >= 65) return 'Собираем видео';
+  if (percent !== null && percent >= 25) return 'Генерируем кадры';
+  if (['completed', 'success', 'succeeded', 'finished', 'done'].includes(String(status || '').toLowerCase())) {
+    return 'Провайдер завершил задачу';
+  }
+  return 'Генерация в работе';
+}
+
+function getVideoLoadingSubline(percent, status) {
+  if (isVideoTaskFailed(status)) return state.video.errorText || state.video.statusText || 'Не удалось завершить генерацию.';
+  if (['completed', 'success', 'succeeded', 'finished', 'done'].includes(String(status || '').toLowerCase()) && !state.video.outputUrl) {
+    return 'PiAPI уже собрал задачу. Забираем видео и подготавливаем его для рабочей зоны.';
+  }
+  if (percent !== null) return `Прогресс провайдера: ${percent}%. Как только ссылка будет готова, ролик появится по центру.`;
+  return state.video.statusText || 'Ждём ответ провайдера и готовый ролик.';
+}
+
 function stopVideoPolling() {
   if (runtime.videoPollTimer) {
     clearInterval(runtime.videoPollTimer);
@@ -762,11 +837,11 @@ function stopVideoPolling() {
 }
 
 function startVideoPolling({ immediate = false } = {}) {
-  if (!state.video.providerTaskId || state.video.outputUrl) return;
+  if (!state.video.providerTaskId || state.video.outputUrl || isVideoTaskFailed(state.video.lastStatus)) return;
   stopVideoPolling();
   runtime.videoPollTimer = setInterval(() => {
     pollVideoTask({ silent: true, fromAuto: true }).catch(() => {});
-  }, 8000);
+  }, 5000);
   if (immediate) {
     pollVideoTask({ silent: true, fromAuto: true }).catch(() => {});
   }
@@ -775,6 +850,9 @@ function startVideoPolling({ immediate = false } = {}) {
 function clearVideoRunState({ keepPrompt = true } = {}) {
   stopVideoPolling();
   state.video.outputUrl = '';
+  state.video.downloadUrl = '';
+  state.video.coverUrl = '';
+  state.video.percent = null;
   state.video.providerTaskId = '';
   state.video.errorText = '';
   state.video.lastStatus = 'idle';
@@ -800,26 +878,45 @@ function renderVideoWorkspace() {
     mediaCard('Source video', sourceVideo, true),
     mediaCard('Reference images', refs, false, true),
   ].filter(Boolean).join('');
+
   const statusTone = videoStatusTone(state.video.lastStatus);
   const statusLabel = videoStatusLabel(state.video.lastStatus);
   const showRunInfo = !!(state.video.providerTaskId || state.video.prompt || state.video.outputUrl || state.video.errorText);
+  const progressValue = Number.isFinite(Number(state.video.percent)) ? Math.max(0, Math.min(100, Number(state.video.percent))) : null;
+  const loadingHeadline = getVideoLoadingHeadline(progressValue, state.video.lastStatus);
+  const loadingSubline = getVideoLoadingSubline(progressValue, state.video.lastStatus);
+  const downloadHref = state.video.downloadUrl || state.video.outputUrl;
   const outputBlock = state.video.outputUrl ? `
     <div style="display:grid; gap:16px; width:min(980px, 100%);">
-      <video class="preview-media" src="${escapeHtml(state.video.outputUrl)}" controls playsinline></video>
+      <video class="preview-media" src="${escapeHtml(state.video.outputUrl)}" controls playsinline poster="${escapeHtml(state.video.coverUrl || '')}"></video>
       <div class="result-card">
         <div class="field-head"><h4>Видео готово</h4><span class="badge ok">${escapeHtml(statusLabel)}</span></div>
         <small>${escapeHtml(state.video.statusText || 'Результат получен и сохранён в рабочей зоне.')}</small>
         <div class="actions compact-gap" style="margin-top:12px; flex-wrap:wrap;">
           <a class="btn primary" href="${escapeHtml(state.video.outputUrl)}" target="_blank" rel="noopener">Открыть видео</a>
-          <a class="btn ghost" href="${escapeHtml(state.video.outputUrl)}" download>Скачать</a>
+          <a class="btn ghost" href="${escapeHtml(downloadHref)}" download>Скачать</a>
           ${state.video.providerTaskId ? `<button class="btn outline" data-action="poll-video-task">Проверить статус</button>` : ''}
         </div>
       </div>
     </div>
   ` : state.video.providerTaskId ? `
-    <div class="empty-copy">
-      <strong>${escapeHtml(state.video.errorText ? 'Генерация завершилась с ошибкой' : 'Генерация в работе')}</strong>
-      <div>${escapeHtml(state.video.errorText || state.video.statusText || 'Задача создана. Ждём ответ провайдера и готовый ролик.')}</div>
+    <div class="video-loader-shell">
+      <div class="video-loader">
+        <div class="video-loader-ring"></div>
+        <div class="video-loader-ring ring-2"></div>
+        <div class="video-loader-core">▶</div>
+      </div>
+      <div class="video-loader-copy">
+        <strong>${escapeHtml(loadingHeadline)}</strong>
+        <div>${escapeHtml(loadingSubline)}</div>
+      </div>
+      <div class="video-progress-track ${progressValue !== null ? 'determinate' : 'indeterminate'}">
+        <div class="video-progress-fill" style="${progressValue !== null ? `width:${progressValue}%;` : ''}"></div>
+      </div>
+      <div class="video-progress-meta">
+        <span>${escapeHtml(videoStatusLabel(state.video.lastStatus))}</span>
+        <span>${progressValue !== null ? `${Math.round(progressValue)}%` : 'Ожидание ответа провайдера'}</span>
+      </div>
       <div class="actions compact-gap" style="margin-top:16px; justify-content:center; flex-wrap:wrap;">
         <button class="btn primary" data-action="poll-video-task">Проверить статус</button>
         <button class="btn ghost" data-action="clear-video-run">Сбросить запуск</button>
@@ -846,6 +943,7 @@ function renderVideoWorkspace() {
               <div class="table-row"><span class="muted">Task ID</span><span>${escapeHtml(state.video.providerTaskId || '—')}</span></div>
               <div class="table-row"><span class="muted">Режим</span><span>${escapeHtml(state.video.mode || '—')}</span></div>
               <div class="table-row"><span class="muted">Prompt</span><span>${escapeHtml(state.video.prompt || '—')}</span></div>
+              <div class="table-row"><span class="muted">Прогресс</span><span>${state.video.percent !== null && state.video.percent !== undefined ? escapeHtml(String(state.video.percent) + '%') : '—'}</span></div>
             </div>
             <div class="actions compact-gap" style="margin-top:12px; flex-wrap:wrap;">
               ${state.video.providerTaskId ? `<button class="btn ghost" data-action="poll-video-task">Проверить статус</button>` : ''}
@@ -1843,6 +1941,9 @@ async function runVideo() {
       const data = await res.json();
       state.video.providerTaskId = data.provider_task_id || '';
       state.video.outputUrl = '';
+      state.video.downloadUrl = '';
+      state.video.coverUrl = '';
+      state.video.percent = 0;
       state.video.errorText = '';
       state.video.lastStatus = 'submitted';
       state.video.statusText = `Генерация запущена. Task ID: ${state.video.providerTaskId || '—'}. Видео появится в рабочей зоне после готовности.`;
@@ -1864,6 +1965,7 @@ async function runVideo() {
   toast('info', 'Режим пока не подключён', 'UI для этого сценария уже готов, но web-endpoint под него ещё не вынесен в backend.');
 }
 
+
 async function pollVideoTask(options = {}) {
   const { silent = false, fromAuto = false } = options;
   if (!state.video.providerTaskId) {
@@ -1873,17 +1975,26 @@ async function pollVideoTask(options = {}) {
   try {
     const res = await apiFetch(`/api/workspace/kling3/task/${encodeURIComponent(state.video.providerTaskId)}`);
     const data = await res.json();
-    const task = data.task || data || {};
+    const normalizedTask = data.normalized || null;
+    const rawTask = data.task || data || {};
+    const task = normalizedTask || rawTask;
+
     const rawStatus = extractVideoTaskStatus(task);
     const status = String(rawStatus || 'unknown').toLowerCase();
-    const maybeUrl = extractVideoTaskUrl(task);
-    const errorText = extractVideoTaskError(task);
+    const maybeUrl = extractVideoTaskUrl(task) || extractVideoTaskUrl(rawTask);
+    const downloadUrl = extractVideoTaskDownloadUrl(task) || extractVideoTaskDownloadUrl(rawTask);
+    const coverUrl = extractVideoTaskCoverUrl(task) || extractVideoTaskCoverUrl(rawTask);
+    const errorText = extractVideoTaskError(task) || extractVideoTaskError(rawTask);
+    const percent = extractVideoTaskPercent(task) ?? extractVideoTaskPercent(rawTask);
 
     state.video.lastStatus = status;
     state.video.errorText = errorText || '';
+    state.video.percent = percent;
+    state.video.coverUrl = coverUrl || '';
+    state.video.downloadUrl = downloadUrl || maybeUrl || '';
 
-    if (maybeUrl) {
-      state.video.outputUrl = maybeUrl;
+    if (maybeUrl || downloadUrl) {
+      state.video.outputUrl = maybeUrl || downloadUrl;
       state.video.statusText = 'Видео готово и загружено в рабочую зону.';
       stopVideoPolling();
       saveState();
@@ -1893,7 +2004,7 @@ async function pollVideoTask(options = {}) {
       return;
     }
 
-    if (status in {failed:1, error:1, cancelled:1, canceled:1}) {
+    if (isVideoTaskFailed(status)) {
       state.video.statusText = errorText || 'Генерация завершилась с ошибкой.';
       stopVideoPolling();
       saveState();
@@ -1903,19 +2014,20 @@ async function pollVideoTask(options = {}) {
       return;
     }
 
-    state.video.statusText = `Статус: ${videoStatusLabel(status)}. Как только провайдер отдаст видео, результат появится в рабочей зоне.`;
+    if (['completed', 'success', 'succeeded', 'finished', 'done'].includes(status)) {
+      state.video.statusText = 'Провайдер уже завершил задачу. Получаем ссылку на итоговое видео…';
+    } else if (percent !== null) {
+      state.video.statusText = `Статус: ${videoStatusLabel(status)} · ${percent}%. Видео появится в рабочей зоне автоматически.`;
+    } else {
+      state.video.statusText = `Статус: ${videoStatusLabel(status)}. Как только провайдер отдаст видео, результат появится в рабочей зоне.`;
+    }
+
     saveState();
     render();
 
-    if (isVideoTaskFinished(status) && !maybeUrl) {
-      stopVideoPolling();
-      if (!silent) toast('info', 'Статус обновлён', `Задача завершилась со статусом: ${videoStatusLabel(status)}.`);
-      return;
-    }
-
-    if (!fromAuto && !silent) {
+    if (!fromAuto) {
       startVideoPolling();
-      toast('success', 'Статус обновлён', `Текущий статус: ${videoStatusLabel(status)}.`);
+      if (!silent) toast('success', 'Статус обновлён', `Текущий статус: ${videoStatusLabel(status)}.`);
     }
   } catch (e) {
     if (!fromAuto) {
@@ -1930,6 +2042,7 @@ async function pollVideoTask(options = {}) {
 }
 
 async function runVoice() {
+
   if (!state.voice.text.trim()) {
     toast('error', 'Нужен текст', 'Введи текст для озвучки.');
     return;
@@ -2269,7 +2382,7 @@ async function init() {
   if (state.authToken) await loadMe();
   if (state.voice.voices.length === 0) loadVoices();
   if (state.studio === 'library' || state.prompts.categories.length === 0) loadPromptCategories();
-  if (state.video.providerTaskId && !state.video.outputUrl && !isVideoTaskFinished(state.video.lastStatus)) {
+  if (state.video.providerTaskId && !state.video.outputUrl && !isVideoTaskFailed(state.video.lastStatus)) {
     startVideoPolling({ immediate: true });
   }
   render();
