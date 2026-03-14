@@ -221,6 +221,95 @@ def _extract_storage_public_url(public_result: Any) -> Optional[str]:
     return None
 
 
+def _extract_storage_signed_url(signed_result: Any) -> Optional[str]:
+    if isinstance(signed_result, str):
+        return signed_result
+    if isinstance(signed_result, dict):
+        return (
+            signed_result.get("signedURL")
+            or signed_result.get("signedUrl")
+            or signed_result.get("signed_url")
+            or signed_result.get("url")
+        )
+    return None
+
+
+def _absolutize_supabase_url(url: Optional[str]) -> Optional[str]:
+    value = str(url or "").strip()
+    if not value:
+        return None
+    if value.startswith("http://") or value.startswith("https://"):
+        return value
+    base = (os.getenv("SUPABASE_URL", "") or "").strip().rstrip("/")
+    if base and value.startswith("/"):
+        return f"{base}{value}"
+    return value
+
+
+def _build_workspace_video_access_urls(*, storage_path: Optional[str], fallback_url: Optional[str], expires_in: int = 3600) -> Dict[str, Optional[str]]:
+    storage_path_text = str(storage_path or "").strip()
+    fallback_text = str(fallback_url or "").strip() or None
+    signed_url: Optional[str] = None
+
+    if storage_path_text and supabase is not None:
+        try:
+            signed_result = supabase.storage.from_(_WORKSPACE_VIDEOS_BUCKET).create_signed_url(storage_path_text, expires_in)
+            signed_url = _absolutize_supabase_url(_extract_storage_signed_url(signed_result))
+        except Exception:
+            signed_url = None
+        if not signed_url:
+            try:
+                public_result = supabase.storage.from_(_WORKSPACE_VIDEOS_BUCKET).get_public_url(storage_path_text)
+                signed_url = _absolutize_supabase_url(_extract_storage_public_url(public_result))
+            except Exception:
+                signed_url = None
+
+    access_url = signed_url or fallback_text
+    return {
+        "video_url": access_url,
+        "download_url": access_url,
+        "signed_url": signed_url,
+    }
+
+
+def _serialize_workspace_generation(row: Dict[str, Any], *, signed_expires_in: int = 3600) -> Dict[str, Any]:
+    access = _build_workspace_video_access_urls(
+        storage_path=row.get("storage_path"),
+        fallback_url=row.get("provider_video_url"),
+        expires_in=signed_expires_in,
+    )
+    return {
+        "id": row.get("id"),
+        "user_id": row.get("user_id"),
+        "provider": row.get("provider"),
+        "model": row.get("model"),
+        "mode": row.get("mode"),
+        "task_id": row.get("task_id"),
+        "prompt": row.get("prompt"),
+        "status": row.get("status"),
+        "aspect_ratio": row.get("aspect_ratio"),
+        "duration_sec": row.get("duration_sec"),
+        "resolution": row.get("resolution"),
+        "enable_audio": row.get("enable_audio"),
+        "provider_video_url": row.get("provider_video_url"),
+        "storage_path": row.get("storage_path"),
+        "thumbnail_path": row.get("thumbnail_path"),
+        "file_size_bytes": row.get("file_size_bytes"),
+        "mime_type": row.get("mime_type"),
+        "error_code": row.get("error_code"),
+        "error_message": row.get("error_message"),
+        "origin": row.get("origin"),
+        "is_favorite": row.get("is_favorite"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "completed_at": row.get("completed_at"),
+        "video_url": access.get("video_url"),
+        "download_url": access.get("download_url"),
+        "signed_url": access.get("signed_url"),
+        "has_storage_file": bool(str(row.get("storage_path") or "").strip()),
+    }
+
+
 def _get_workspace_generation_by_task(user_id: int, task_id: Optional[str]) -> Optional[Dict[str, Any]]:
     task_id_text = str(task_id or "").strip()
     if supabase is None or not task_id_text:
@@ -699,6 +788,80 @@ async def workspace_kling3_task(task_id: str, user: Dict[str, Any] = Depends(get
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal error: {e}")
+
+
+@router.get("/history")
+async def workspace_history(
+    limit: int = 20,
+    offset: int = 0,
+    user: Dict[str, Any] = Depends(get_current_workspace_user),
+) -> Dict[str, Any]:
+    uid = int(user["telegram_user_id"])
+    safe_limit = max(1, min(int(limit or 20), 100))
+    safe_offset = max(0, int(offset or 0))
+
+    if supabase is None:
+        return {"ok": True, "items": [], "limit": safe_limit, "offset": safe_offset}
+
+    try:
+        resp = (
+            supabase.table(_WORKSPACE_VIDEO_GENERATIONS_TABLE)
+            .select(
+                "id,user_id,provider,model,mode,task_id,prompt,status,aspect_ratio,duration_sec,resolution,enable_audio,provider_video_url,storage_path,thumbnail_path,file_size_bytes,mime_type,error_code,error_message,origin,is_favorite,created_at,updated_at,completed_at"
+            )
+            .eq("user_id", str(uid))
+            .is_("deleted_at", "null")
+            .order("created_at", desc=True)
+            .range(safe_offset, safe_offset + safe_limit - 1)
+            .execute()
+        )
+        rows = getattr(resp, "data", None) or []
+        items = [_serialize_workspace_generation(row) for row in rows if isinstance(row, dict)]
+        return {
+            "ok": True,
+            "items": items,
+            "limit": safe_limit,
+            "offset": safe_offset,
+            "count": len(items),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"History load failed: {e}")
+
+
+@router.get("/history/{generation_id}")
+async def workspace_history_item(
+    generation_id: str,
+    user: Dict[str, Any] = Depends(get_current_workspace_user),
+) -> Dict[str, Any]:
+    uid = int(user["telegram_user_id"])
+    generation_id_text = str(generation_id or "").strip()
+    if not generation_id_text:
+        raise HTTPException(status_code=400, detail="Missing generation_id")
+
+    if supabase is None:
+        raise HTTPException(status_code=404, detail="Generation not found")
+
+    try:
+        resp = (
+            supabase.table(_WORKSPACE_VIDEO_GENERATIONS_TABLE)
+            .select(
+                "id,user_id,provider,model,mode,task_id,prompt,status,aspect_ratio,duration_sec,resolution,enable_audio,provider_video_url,storage_path,thumbnail_path,file_size_bytes,mime_type,error_code,error_message,origin,is_favorite,created_at,updated_at,completed_at"
+            )
+            .eq("id", generation_id_text)
+            .eq("user_id", str(uid))
+            .is_("deleted_at", "null")
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(resp, "data", None) or []
+        if not rows or not isinstance(rows[0], dict):
+            raise HTTPException(status_code=404, detail="Generation not found")
+        item = _serialize_workspace_generation(rows[0])
+        return {"ok": True, "item": item}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"History item load failed: {e}")
 
 
 @router.get("/tts/voices")
