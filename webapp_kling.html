@@ -420,11 +420,17 @@
     <div id="klingBlock">
       <div class="card">
         <h3>Kling — версия</h3>
-        <div class="seg" role="radiogroup" aria-label="Версия Kling">
+        <div class="seg cols3" role="radiogroup" aria-label="Версия Kling">
           <input id="kling_v16" type="radio" name="kling_version" value="1_6" checked>
           <label for="kling_v16">
-            <span class="name">Standard</span>
-            <span class="desc">Kling 1.6 (текущий)</span>
+            <span class="name">1.6</span>
+            <span class="desc">Motion + Image → Video</span>
+          </label>
+
+          <input id="kling_v25" type="radio" name="kling_version" value="2_5">
+          <label for="kling_v25">
+            <span class="name">2.5 Turbo Pro</span>
+            <span class="desc">Text / Image → Video</span>
           </label>
 
           <input id="kling_v30" type="radio" name="kling_version" value="3_0">
@@ -433,7 +439,7 @@
             <span class="desc">720/1080 + audio</span>
           </label>
         </div>
-        <div class="hint">Standard — дешёвая версия. PRO 3.0 — версия 2026 года.</div>
+        <div class="hint">1.6 — legacy ветка. 2.5 Turbo Pro — новый Replicate режим. 3.0 — отдельная premium версия.</div>
       </div>
 
       <div class="card" id="kling3Options" style="display:none;">
@@ -528,21 +534,27 @@
         <div class="hint">Эти настройки применяются только если выбран Kling PRO 3.0.</div>
       </div>
       <div class="card" id="klingFlowCard">
-        <h3>Тип генерации</h3>
+        <h3 id="klingFlowTitle">Тип генерации</h3>
         <div class="seg" role="radiogroup" aria-label="Тип генерации">
           <input id="flow_motion" type="radio" name="flow" value="motion" checked>
-          <label for="flow_motion">
+          <label for="flow_motion" id="flowMotionLabel">
             <span class="name">Motion Control</span>
             <span class="desc">Фото + видео 3–30 сек</span>
           </label>
 
           <input id="flow_i2v" type="radio" name="flow" value="i2v">
-          <label for="flow_i2v">
+          <label for="flow_i2v" id="flowI2VLabel">
             <span class="name">Image → Video</span>
             <span class="desc">Только фото</span>
           </label>
+
+          <input id="flow_t2v" type="radio" name="flow" value="t2v">
+          <label for="flow_t2v" id="flowT2VLabel" style="display:none;">
+            <span class="name">Text → Video</span>
+            <span class="desc">Только промпт</span>
+          </label>
         </div>
-        <div class="hint">Для Motion Control(Avatar) длительность задаётся референс-видео (3–30 сек) Image Video - оживление фото.</div>
+        <div class="hint" id="klingFlowHint">Для Motion Control(Avatar) длительность задаётся референс-видео (3–30 сек). Image → Video — оживление фото.</div>
       </div>
 
       <div class="card" id="klingLegacyModeCard">
@@ -573,7 +585,17 @@
           <option value="5">5 секунд</option>
           <option value="10">10 секунд</option>
         </select>
-        <div class="hint">Длительность применяется только для Image → Video.</div>
+        <div class="hint" id="durationHint">Длительность применяется только для Image → Video.</div>
+      </div>
+
+      <div class="card" id="kling25AspectCard" style="display:none;">
+        <h3>Формат</h3>
+        <select id="kling25_aspect" aria-label="Формат Kling 2.5">
+          <option value="16:9" selected>16:9 (YouTube)</option>
+          <option value="9:16">9:16 (Reels)</option>
+          <option value="1:1">1:1</option>
+        </select>
+        <div class="hint">Для Kling 2.5 Text → Video. В Image → Video формат берётся из стартового кадра.</div>
       </div>
     </div>
 
@@ -784,6 +806,7 @@
     function getKling3GenMode(){ return qs('input[name="kling3_gen_mode"]:checked')?.value || "i2v"; }
     function getKling3Aspect(){ return qs('#kling3_aspect')?.value || "16:9"; }
     function getKling3PreferMultiShots(){ return !!qs('#kling3_multishot')?.checked; }
+    function getKling25Aspect(){ return qs('#kling25_aspect')?.value || "16:9"; }
 
 
     // Veo getters
@@ -791,23 +814,63 @@
     function getVeoFlow(){ return qs('input[name="veo_flow"]:checked')?.value || "text"; }   // text|image
 
     function updateKlingUI(){
-      const flow = getFlow();
+      let flow = getFlow();
       const version = getKlingVersion();
 
       const durCard = qs('#durationCard');
       const kling3Options = qs('#kling3Options');
-
-      // Existing Kling 1.6 UI
-      if (durCard) durCard.style.display = (version === '1_6' && flow === 'i2v') ? 'block' : 'none';
-
-      // Kling 3.0 options card
-      if (kling3Options) kling3Options.style.display = (version === '3_0') ? 'block' : 'none';
-
-      // Hide 1.6-specific controls when 3.0 selected (to avoid user confusion)
       const flowCard = qs('#klingFlowCard');
       const legacyModeCard = qs('#klingLegacyModeCard');
-      if (flowCard) flowCard.style.display = (version === '1_6') ? 'block' : 'none';
-      if (legacyModeCard) legacyModeCard.style.display = (version === '1_6') ? 'block' : 'none';
+      const aspectCard = qs('#kling25AspectCard');
+      const flowMotionLabel = qs('#flowMotionLabel');
+      const flowI2VLabel = qs('#flowI2VLabel');
+      const flowT2VLabel = qs('#flowT2VLabel');
+      const flowHint = qs('#klingFlowHint');
+      const durationHint = qs('#durationHint');
+
+      if (version === '1_6'){
+        if (flowT2VLabel) flowT2VLabel.style.display = 'none';
+        if (flowMotionLabel) flowMotionLabel.style.display = 'flex';
+        if (flowI2VLabel) flowI2VLabel.style.display = 'flex';
+        if (!['motion','i2v'].includes(flow)){
+          const el = qs('#flow_motion');
+          if (el) el.checked = true;
+          flow = 'motion';
+        }
+        if (durCard) durCard.style.display = (flow === 'i2v') ? 'block' : 'none';
+        if (durationHint) durationHint.textContent = 'Длительность применяется только для Image → Video.';
+        if (aspectCard) aspectCard.style.display = 'none';
+        if (flowCard) flowCard.style.display = 'block';
+        if (legacyModeCard) legacyModeCard.style.display = 'block';
+        if (kling3Options) kling3Options.style.display = 'none';
+        if (flowHint) flowHint.textContent = 'Для Motion Control(Avatar) длительность задаётся референс-видео (3–30 сек). Image → Video — оживление фото.';
+        return;
+      }
+
+      if (version === '2_5'){
+        if (flowMotionLabel) flowMotionLabel.style.display = 'none';
+        if (flowI2VLabel) flowI2VLabel.style.display = 'flex';
+        if (flowT2VLabel) flowT2VLabel.style.display = 'flex';
+        if (!['t2v','i2v'].includes(flow)){
+          const el = qs('#flow_t2v');
+          if (el) el.checked = true;
+          flow = 't2v';
+        }
+        if (durCard) durCard.style.display = 'block';
+        if (durationHint) durationHint.textContent = 'Kling 2.5: длительность применяется и для Text → Video, и для Image → Video.';
+        if (aspectCard) aspectCard.style.display = (flow === 't2v') ? 'block' : 'none';
+        if (flowCard) flowCard.style.display = 'block';
+        if (legacyModeCard) legacyModeCard.style.display = 'none';
+        if (kling3Options) kling3Options.style.display = 'none';
+        if (flowHint) flowHint.textContent = 'Kling 2.5 Turbo Pro: Text → Video по одному промпту или Image → Video по стартовому фото.';
+        return;
+      }
+
+      if (durCard) durCard.style.display = 'none';
+      if (aspectCard) aspectCard.style.display = 'none';
+      if (kling3Options) kling3Options.style.display = 'block';
+      if (flowCard) flowCard.style.display = 'none';
+      if (legacyModeCard) legacyModeCard.style.display = 'none';
     }
 
     function updateTokenRateHint(){
@@ -817,6 +880,11 @@
 
       if (version === '3_0'){
         el.innerHTML = 'Kling PRO 3.0: <b>720p и 1080p = 2 токена/сек</b>. <b>Audio = +1 токен/сек</b> сверху. Длительность 3–15 сек.';
+        return;
+      }
+
+      if (version === '2_5'){
+        el.innerHTML = 'Kling 2.5 Turbo Pro — <b>1 сек = 1 токен (≈9 ₽)</b>. Режим один, без переключателя Standard / Pro.';
         return;
       }
 
@@ -1032,6 +1100,11 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
           return { known:false, tokens:null, note:'по длительности референс-видео' };
         }
 
+        if (kling_version === '2_5'){
+          const seconds = parseInt((qs('#duration')?.value || '5'), 10);
+          return { known:true, tokens: seconds, note:'' };
+        }
+
         // Kling PRO 3.0
         const enable_audio = !!qs('#kling3_audio')?.checked;
         const seconds = parseInt((qs('#kling3_duration')?.value || "5"), 10);
@@ -1093,7 +1166,6 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
         if (provider === 'kling'){
           const kling_version = getKlingVersion();
 
-          // Keep legacy payload for Kling 1.6 (so existing bot logic keeps working)
           if (kling_version === '1_6'){
             const flow = getFlow();
             const mode = getMode();
@@ -1103,6 +1175,20 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
             if (flow === 'i2v'){
               const durEl = qs('#duration');
               payload.duration = durEl ? parseInt(durEl.value, 10) : 10;
+            }
+          } else if (kling_version === '2_5') {
+            const flow = getFlow();
+            const duration = parseInt((qs('#duration')?.value || "5"), 10);
+            payload = {
+              type: "kling_settings",
+              provider: "kling",
+              kling_version,
+              flow,
+              duration,
+              model_slug: "kwaivgi/kling-v2.5-turbo-pro"
+            };
+            if (flow === 't2v'){
+              payload.aspect_ratio = getKling25Aspect();
             }
           } else {
             // Kling PRO 3.0 settings (PiAPI)
