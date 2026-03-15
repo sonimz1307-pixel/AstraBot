@@ -8,6 +8,8 @@ const runtime = {
   files: {},
   lastChatBootstrapLoaded: false,
   videoPollTimer: null,
+  chatScrollTop: 0,
+  chatStickToBottom: true,
 };
 
 const state = {
@@ -740,6 +742,39 @@ function renderRecentRuns() {
       <small>${formatDate(run.ts)}</small>
     </div>
   `).join('');
+}
+
+
+function captureChatFeedState() {
+  const feed = document.getElementById('chatFeed');
+  if (!feed) return;
+  runtime.chatScrollTop = feed.scrollTop;
+  const distanceFromBottom = feed.scrollHeight - (feed.scrollTop + feed.clientHeight);
+  runtime.chatStickToBottom = distanceFromBottom <= 120;
+}
+
+function restoreChatFeedState(options = {}) {
+  const { forceBottom = false } = options;
+  const feed = document.getElementById('chatFeed');
+  if (!feed) return;
+  if (forceBottom || runtime.chatStickToBottom) {
+    feed.scrollTop = feed.scrollHeight;
+    runtime.chatScrollTop = feed.scrollTop;
+    runtime.chatStickToBottom = true;
+    return;
+  }
+  feed.scrollTop = Math.max(0, Number(runtime.chatScrollTop) || 0);
+}
+
+function bindChatFeedScroll() {
+  const feed = document.getElementById('chatFeed');
+  if (!feed || feed.dataset.scrollBound === '1') return;
+  feed.dataset.scrollBound = '1';
+  feed.addEventListener('scroll', () => {
+    runtime.chatScrollTop = feed.scrollTop;
+    const distanceFromBottom = feed.scrollHeight - (feed.scrollTop + feed.clientHeight);
+    runtime.chatStickToBottom = distanceFromBottom <= 120;
+  });
 }
 
 function renderWorkspace() {
@@ -2183,9 +2218,11 @@ async function sendChat() {
     : '';
   const userMessage = [outgoing, filePreview].filter(Boolean).join('\n\n') || filePreview;
 
+  runtime.chatStickToBottom = true;
   state.chat.messages.push({ role: 'user', content: userMessage });
   state.chat.input = '';
   render();
+  restoreChatFeedState({ forceBottom: true });
   saveState();
 
   try {
@@ -2226,14 +2263,16 @@ async function sendChat() {
     state.chat.messages.push({ role: 'assistant', content: data.answer || 'Пустой ответ.' });
     pushRun({ studio: 'ChatGPT', title: `Chat · ${state.chat.mode === 'prompt_builder' ? 'Prompt Builder' : 'Chat'}`, summary: (outgoing || filePreview).slice(0, 100) });
     clearChatAttachments();
+    runtime.chatStickToBottom = true;
     render();
+    restoreChatFeedState({ forceBottom: true });
     saveState();
-    const feed = document.getElementById('chatFeed');
-    if (feed) feed.scrollTop = feed.scrollHeight;
   } catch (e) {
     state.chat.input = outgoing;
+    runtime.chatStickToBottom = true;
     state.chat.messages.push({ role: 'system', content: `Ошибка: ${String(e.message || e)}` });
     render();
+    restoreChatFeedState({ forceBottom: true });
     saveState();
   }
 }
@@ -2854,12 +2893,17 @@ function runCurrentStudio() {
 
 function render() {
   ensureChatModeCompatibility();
+  if (state.studio === 'chat') captureChatFeedState();
   renderNav();
   renderHeader();
   renderRecentRuns();
   renderWorkspace();
   renderInspector();
   enhanceCustomSelects();
+  if (state.studio === 'chat') {
+    bindChatFeedScroll();
+    restoreChatFeedState();
+  }
 }
 
 document.addEventListener('click', (e) => {
