@@ -142,10 +142,19 @@ textarea { resize: vertical; min-height: 110px; }
 .asset-card small, .result-card small, .history-card small, .library-card small, .billing-card small, .profile-card small { color: var(--muted); display: block; margin-top: 6px; }
 .asset-thumb { width: 100%; height: 160px; border-radius: 16px; object-fit: cover; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06); }
 .asset-empty { min-height: 140px; display: grid; place-items: center; border-radius: 16px; border: 1px dashed rgba(255,255,255,0.12); color: var(--muted); }
-.chat-shell { display: grid; grid-template-rows: 1fr auto; min-height: 560px; gap: 14px; }
+.workspace-body,
+.workspace-grid,
+.workspace-main.placeholder-stage.chat,
+.chat-shell { min-height: 0; }
+.workspace-main.placeholder-stage.chat { height: calc(100vh - 220px); overflow: hidden; }
+.chat-shell { display: grid; grid-template-rows: minmax(0, 1fr) auto; height: 100%; min-height: 0; gap: 14px; }
 .chat-feed {
-  padding: 18px; overflow: auto; display: flex; flex-direction: column; gap: 12px;
+  min-height: 0; padding: 18px; overflow: auto; display: flex; flex-direction: column; gap: 12px;
 }
+.chat-bubble-wrap { display: flex; flex-direction: column; gap: 8px; }
+.chat-bubble-wrap.user { align-items: flex-end; }
+.chat-bubble-wrap.assistant { align-items: flex-start; }
+.chat-bubble-wrap.system { align-items: center; }
 .chat-bubble {
   max-width: 78%; padding: 14px 16px; border-radius: 20px; line-height: 1.55; white-space: pre-wrap;
   border: 1px solid rgba(255,255,255,0.06);
@@ -153,7 +162,13 @@ textarea { resize: vertical; min-height: 110px; }
 .chat-bubble.user { align-self: flex-end; background: linear-gradient(145deg, rgba(124,92,255,0.26), rgba(124,92,255,0.10)); }
 .chat-bubble.assistant { align-self: flex-start; background: rgba(255,255,255,0.04); }
 .chat-bubble.system { align-self: center; background: rgba(34,211,238,0.08); color: #b9f5ff; }
-.chat-composer { padding: 14px; display: grid; gap: 12px; }
+.chat-bubble-actions { display: flex; gap: 8px; }
+.chat-composer {
+  position: sticky; bottom: 0; z-index: 6; padding: 14px; display: grid; gap: 12px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+  background: linear-gradient(180deg, rgba(7,10,19,0.10), rgba(7,10,19,0.96) 22%);
+  backdrop-filter: blur(16px);
+}
 .quick-chips { display: flex; gap: 8px; flex-wrap: wrap; }
 .chip { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08); color: var(--text); border-radius: 999px; padding: 9px 12px; }
 .chip:hover { border-color: rgba(124,92,255,.4); }
