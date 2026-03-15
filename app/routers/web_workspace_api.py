@@ -877,7 +877,7 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
         temperature = _clamp_float(form.get("temperature"), 0.6, 0.0, 1.5)
         max_tokens = _clamp_int(form.get("max_tokens"), 900, 150, 4000)
         resolved_model = _resolve_workspace_chat_model(form.get("model"), mode)
-        files = [f for f in form.getlist("files") if isinstance(f, UploadFile)]
+        files = [f for f in form.getlist("files") if getattr(f, "filename", None)]
     else:
         payload = WorkspaceChatIn.model_validate(await request.json())
         text_value = payload.text.strip()
