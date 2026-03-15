@@ -77,7 +77,7 @@ async def openai_chat_answer(
                 {"role": "user", "content": user_content},
             ],
             "temperature": temperature,
-            "max_tokens": max_tokens,
+            "max_completion_tokens": max_tokens,
         }
     else:
         msgs: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
