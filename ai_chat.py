@@ -19,19 +19,41 @@ import httpx
 
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-PROMPT_BUILDER_MAX_IMAGES = 4
+MAX_VISION_IMAGES = 4
 
 
-def _detect_image_type(b: bytes) -> Tuple[str, str]:
-    if not b:
+def _detect_image_type(data: bytes) -> Tuple[str, str]:
+    if not data:
         return ("jpg", "image/jpeg")
-    if b.startswith(b"\xFF\xD8\xFF"):
+    if data.startswith(b"\xFF\xD8\xFF"):
         return ("jpg", "image/jpeg")
-    if b.startswith(b"\x89PNG\r\n\x1a\n"):
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return ("png", "image/png")
-    if b.startswith(b"RIFF") and len(b) >= 12 and b[8:12] == b"WEBP":
+    if data.startswith(b"RIFF") and len(data) >= 12 and data[8:12] == b"WEBP":
         return ("webp", "image/webp")
     return ("jpg", "image/jpeg")
+
+
+def _supports_temperature(model: str) -> bool:
+    name = str(model or "").strip().lower()
+    if not name:
+        return True
+    blocked_prefixes = ("gpt-5", "o1", "o3", "o4")
+    return not any(name.startswith(prefix) for prefix in blocked_prefixes)
+
+
+def _extract_text_content(message_content: Any) -> str:
+    if isinstance(message_content, str):
+        return message_content.strip()
+    if isinstance(message_content, list):
+        parts: List[str] = []
+        for item in message_content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                text = str(item.get("text") or "").strip()
+                if text:
+                    parts.append(text)
+        return "\n".join(parts).strip()
+    return str(message_content or "").strip()
 
 
 async def openai_chat_answer(
@@ -41,44 +63,46 @@ async def openai_chat_answer(
     temperature: float = 0.5,
     max_tokens: int = 800,
     history: Optional[List[Dict[str, str]]] = None,
-    model: str = "gpt-4o-mini",
+    model: Optional[str] = None,
     image_bytes_list: Optional[List[bytes]] = None,
 ) -> str:
     if not OPENAI_API_KEY:
         return "OPENAI_API_KEY не задан в переменных окружения."
 
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
-    }
+    resolved_model = (model or "gpt-4o-mini").strip() or "gpt-4o-mini"
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
 
     images_to_send: List[bytes] = []
     if image_bytes_list:
-        images_to_send.extend([bytes(b) for b in image_bytes_list if isinstance(b, (bytes, bytearray))])
+        for item in image_bytes_list:
+            if isinstance(item, (bytes, bytearray)) and item:
+                images_to_send.append(bytes(item))
     elif image_bytes is not None:
         images_to_send.append(image_bytes)
+
+    payload: Dict[str, Any] = {
+        "model": resolved_model,
+        "messages": [],
+        "max_completion_tokens": max_tokens,
+    }
+    if _supports_temperature(resolved_model):
+        payload["temperature"] = temperature
 
     if images_to_send:
         user_content: List[Dict[str, Any]] = []
         if user_text:
             user_content.append({"type": "text", "text": user_text})
-        for img in images_to_send[:PROMPT_BUILDER_MAX_IMAGES]:
+        for img in images_to_send[:MAX_VISION_IMAGES]:
             _ext, mime = _detect_image_type(img)
             b64 = base64.b64encode(img).decode("utf-8")
             user_content.append({
                 "type": "image_url",
                 "image_url": {"url": f"data:{mime};base64,{b64}"},
             })
-
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
-            "temperature": temperature,
-            "max_completion_tokens": max_tokens,
-        }
+        payload["messages"] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ]
     else:
         msgs: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
         if history:
@@ -89,22 +113,16 @@ async def openai_chat_answer(
                     and isinstance(m.get("content"), str)
                     and m["content"].strip()
                 ):
-                    msgs.append({"role": m["role"], "content": m["content"]})
-
+                    msgs.append({"role": str(m["role"]), "content": str(m["content"])})
         msgs.append({"role": "user", "content": user_text})
-
-        payload = {
-            "model": model,
-            "messages": msgs,
-            "temperature": temperature,
-            "max_completion_tokens": max_tokens,
-        }
+        payload["messages"] = msgs
 
     async with httpx.AsyncClient(timeout=120) as client:
-        r = await client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
+        response = await client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
 
-    if r.status_code != 200:
-        return f"Ошибка OpenAI ({r.status_code}): {r.text[:1600]}"
+    if response.status_code != 200:
+        return f"Ошибка OpenAI ({response.status_code}): {response.text[:1600]}"
 
-    data = r.json()
-    return (data["choices"][0]["message"]["content"] or "").strip() or "Пустой ответ от модели."
+    data = response.json()
+    message = (((data.get("choices") or [{}])[0]).get("message") or {})
+    return _extract_text_content(message.get("content")) or "Пустой ответ от модели."
