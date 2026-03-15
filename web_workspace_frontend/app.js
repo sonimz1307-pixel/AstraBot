@@ -813,21 +813,11 @@ function renderChatWorkspace() {
       <button class="chip" data-action="chat-quick" data-prompt="Усиль мой prompt: сделай его более cinematic, realistic и production-ready.">Усилить промпт</button>
     </div>
   ` : '';
-  const modeBanner = isPromptBuilder
-    ? '<div class="chat-mode-banner">GPT 5.4 работает только как Prompt Builder и возвращает только готовый промпт.</div>'
-    : '<div class="chat-mode-banner">GPT 4 mini работает как обычный чат для диалога и рабочих задач.</div>';
 
   return `
     <div class="workspace-grid single">
       <div class="workspace-main placeholder-stage chat">
         <div class="chat-shell">
-          <div class="chat-workspace-head">
-            <div>
-              <div class="section-title">Диалог</div>
-              <div class="help-text">Поле ввода закреплено внизу. Для GPT 5.4 доступен только Prompt Builder. Для GPT 4 mini — обычный чат.</div>
-            </div>
-          </div>
-          ${modeBanner}
           <div class="chat-feed" id="chatFeed">${messages}</div>
           <div class="chat-composer">
             ${quickChips}
@@ -840,7 +830,6 @@ function renderChatWorkspace() {
                 <button class="btn primary" data-action="send-chat">Отправить</button>
               </div>
             </div>
-            <div class="help-text">Можно прикреплять изображения и текстовые файлы. В Prompt Builder для Seedance референсы автоматически передаются как @image1, @image2 и далее.</div>
           </div>
         </div>
       </div>
@@ -1535,11 +1524,6 @@ function renderChatInspector() {
       <div class="input-group"><label class="label">Режим</label>
         <input type="text" value="${isPromptBuilder ? 'Prompt Builder' : 'Chat'}" disabled>
       </div>
-      <div class="help-text">GPT 5.4 жёстко работает только как Prompt Builder и выдаёт только готовый промпт. GPT 4 mini остаётся обычным чатом.</div>
-    </div>
-    <div class="inspector-card">
-      <div class="section-title">Логика режима</div>
-      <div class="help-text">Для Seedance при наличии референсов GPT 5.4 должен использовать теги @image1, @image2 и далее прямо внутри итогового prompt. Под ответом доступна кнопка копирования промпта.</div>
     </div>
   `;
 }
