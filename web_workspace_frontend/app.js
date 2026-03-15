@@ -489,6 +489,37 @@ function getFile(key) {
   return runtime.files[key] || null;
 }
 
+function getChatAttachments() {
+  const files = getFile('chat.attachments');
+  return Array.isArray(files) ? files : [];
+}
+
+function clearChatAttachments() {
+  const files = getChatAttachments();
+  files.forEach((item) => {
+    if (item?.url) {
+      try { URL.revokeObjectURL(item.url); } catch (_e) {}
+    }
+  });
+  delete runtime.files['chat.attachments'];
+  const input = document.getElementById('chat_attachments');
+  if (input) input.value = '';
+}
+
+function removeChatAttachment(index) {
+  const files = getChatAttachments();
+  if (!files.length) return;
+  const next = files.filter((_, i) => i !== Number(index));
+  const removed = files.find((_, i) => i === Number(index));
+  if (removed?.url) {
+    try { URL.revokeObjectURL(removed.url); } catch (_e) {}
+  }
+  if (next.length) runtime.files['chat.attachments'] = next;
+  else delete runtime.files['chat.attachments'];
+  const input = document.getElementById('chat_attachments');
+  if (input && !next.length) input.value = '';
+}
+
 function getCurrentVideoModel() {
   const provider = VIDEO_REGISTRY[state.video.provider];
   return provider?.models?.[state.video.model] || null;
@@ -745,6 +776,17 @@ function renderChatWorkspace() {
   `).join('');
   const promptBuilderLocked = !isPromptBuilderAvailable();
   const showQuickChips = state.chat.model === 'gpt-5.4';
+  const attachments = getChatAttachments();
+  const attachmentsHtml = attachments.length ? `
+    <div class="chat-attachment-strip">
+      ${attachments.map((item, index) => `
+        <div class="chat-file-pill">
+          <span>📎 ${escapeHtml(trimText(item.name || 'file', 34))}</span>
+          <button type="button" class="chat-file-pill-remove" data-action="remove-chat-file" data-index="${index}" aria-label="Удалить файл">×</button>
+        </div>
+      `).join('')}
+    </div>
+  ` : '';
   return `
     <div class="workspace-grid single">
       <div class="workspace-main placeholder-stage chat">
@@ -766,10 +808,16 @@ function renderChatWorkspace() {
                 <button class="chip" data-action="chat-quick" data-prompt="Напиши идею песни, припев и теги для Suno в коммерческом стиле.">Песня / Suno</button>
               </div>
             ` : ''}
+            ${attachmentsHtml}
             <div class="composer-row">
               <textarea id="chatInput" placeholder="Напиши задачу для ChatGPT, попроси промпт, сценарий, идею ролика или текст песни...">${escapeHtml(state.chat.input || '')}</textarea>
-              <button class="btn primary" data-action="send-chat">Отправить</button>
+              <div class="composer-actions">
+                <input id="chat_attachments" class="hidden" type="file" multiple>
+                <button class="btn ghost icon-btn" data-action="pick-chat-files" title="Прикрепить файлы" aria-label="Прикрепить файлы">📎</button>
+                <button class="btn primary" data-action="send-chat">Отправить</button>
+              </div>
             </div>
+            <div class="help-text">К чату можно прикреплять изображения, TXT, JSON, CSV, DOCX и другие файлы. PDF пока загружается, но без автоматического чтения текста на сервере.</div>
           </div>
         </div>
       </div>
@@ -2114,34 +2162,65 @@ async function loadPromptItems(groupId) {
 }
 
 async function sendChat() {
-  if (!state.chat.input.trim()) {
-    toast('error', 'Пустое сообщение', 'Введите текст в чат.');
+  const outgoing = state.chat.input.trim();
+  const attachments = getChatAttachments();
+  if (!outgoing && !attachments.length) {
+    toast('error', 'Пустое сообщение', 'Введите текст в чат или прикрепите файл.');
     return;
   }
-  state.chat.messages.push({ role: 'user', content: state.chat.input.trim() });
-  const outgoing = state.chat.input.trim();
+
+  const filePreview = attachments.length
+    ? `📎 Файлы: ${attachments.map((item) => item.name).join(', ')}`
+    : '';
+  const userMessage = [outgoing, filePreview].filter(Boolean).join('\n\n') || filePreview;
+
+  state.chat.messages.push({ role: 'user', content: userMessage });
   state.chat.input = '';
   render();
   saveState();
+
   try {
-    const res = await apiFetch('/api/workspace/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        text: outgoing,
-        history: state.chat.messages.filter(m => m.role === 'user' || m.role === 'assistant').slice(-12),
-        model: state.chat.model,
-        mode: state.chat.mode,
-      }),
-    });
+    const history = state.chat.messages.filter(m => m.role === 'user' || m.role === 'assistant').slice(-12);
+    let res;
+
+    if (attachments.length) {
+      const form = new FormData();
+      form.append('text', outgoing);
+      form.append('history', JSON.stringify(history));
+      form.append('model', state.chat.model);
+      form.append('mode', state.chat.mode);
+      form.append('temperature', String(state.chat.temperature));
+      form.append('max_tokens', String(state.chat.maxTokens));
+      attachments.forEach((item) => {
+        if (item?.file) form.append('files', item.file, item.name || item.file.name || 'file');
+      });
+      res = await apiFetch('/api/workspace/chat', {
+        method: 'POST',
+        body: form,
+      });
+    } else {
+      res = await apiFetch('/api/workspace/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: outgoing,
+          history,
+          model: state.chat.model,
+          mode: state.chat.mode,
+        }),
+      });
+    }
+
     const data = await res.json();
     state.chat.messages.push({ role: 'assistant', content: data.answer || 'Пустой ответ.' });
-    pushRun({ studio: 'ChatGPT', title: `Chat · ${state.chat.mode === 'prompt_builder' ? 'Prompt Builder' : 'Chat'}`, summary: outgoing.slice(0, 100) });
+    pushRun({ studio: 'ChatGPT', title: `Chat · ${state.chat.mode === 'prompt_builder' ? 'Prompt Builder' : 'Chat'}`, summary: (outgoing || filePreview).slice(0, 100) });
+    clearChatAttachments();
     render();
     saveState();
     const feed = document.getElementById('chatFeed');
     if (feed) feed.scrollTop = feed.scrollHeight;
   } catch (e) {
+    state.chat.input = outgoing;
     state.chat.messages.push({ role: 'system', content: `Ошибка: ${String(e.message || e)}` });
     render();
   }
@@ -2527,6 +2606,7 @@ function resetCurrentStudio() {
     case 'chat':
       state.chat.input = '';
       state.chat.messages = [{ role: 'system', content: 'Новый чат. Задай задачу или попроси создать промпт.' }];
+      clearChatAttachments();
       break;
     case 'video':
       clearVideoRunState({ keepPrompt: false });
@@ -2565,6 +2645,7 @@ function handleInputChange(target) {
     video_sourceVideo: ['video.sourceVideo', false],
     image_sourceImage: ['image.sourceImage', false],
     image_baseImage: ['image.baseImage', false],
+    chat_attachments: ['chat.attachments', true],
   };
   if (fileMap[id]) {
     const [key, multiple] = fileMap[id];
@@ -2676,6 +2757,15 @@ function handleAction(action, dataset = {}) {
       saveState();
       break;
     case 'send-chat': sendChat(); break;
+    case 'pick-chat-files': {
+      const input = document.getElementById('chat_attachments');
+      if (input) input.click();
+      break;
+    }
+    case 'remove-chat-file':
+      removeChatAttachment(Number(dataset.index || -1));
+      render();
+      break;
     case 'chat-quick':
       state.chat.input = dataset.prompt || '';
       render();
