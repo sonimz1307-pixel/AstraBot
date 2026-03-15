@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import io
+import json
 import mimetypes
 import os
+import re
 import tempfile
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -11,7 +15,7 @@ from uuid import uuid4
 
 import httpx
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel, Field
 
 from ai_chat import openai_chat_answer
@@ -32,6 +36,199 @@ router = APIRouter(prefix="/api/workspace", tags=["workspace"])
 OPENAI_CHAT_MODEL = (os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini") or "gpt-4o-mini").strip()
 PROMPT_BUILDER_MODEL = (os.getenv("PROMPT_BUILDER_MODEL", "gpt-5.4") or "gpt-5.4").strip()
 _tts_client: ElevenTTS | None = None
+
+
+CHAT_MODEL_LABEL_DEFAULT = "gpt-4o-mini"
+PROMPT_MODEL_LABEL = "gpt-5.4"
+MAX_CHAT_ATTACHMENTS = 6
+MAX_CHAT_IMAGE_ATTACHMENTS = 4
+MAX_CHAT_ATTACHMENT_BYTES = 8 * 1024 * 1024
+MAX_CHAT_ATTACHMENT_TEXT_PER_FILE = 12000
+MAX_CHAT_ATTACHMENT_TEXT_TOTAL = 28000
+_TEXT_ATTACHMENT_EXTS = {
+    ".txt", ".md", ".csv", ".json", ".js", ".ts", ".tsx", ".jsx", ".py", ".html", ".css",
+    ".xml", ".yml", ".yaml", ".sql", ".ini", ".cfg", ".log", ".rtf", ".sh", ".bat"
+}
+
+
+def _normalize_chat_mode_value(value: Any) -> str:
+    return "prompt_builder" if str(value or "").strip() == "prompt_builder" else "chat"
+
+
+def _clamp_float(value: Any, default: float, low: float, high: float) -> float:
+    try:
+        out = float(value)
+    except Exception:
+        out = float(default)
+    return max(low, min(high, out))
+
+
+def _clamp_int(value: Any, default: int, low: int, high: int) -> int:
+    try:
+        out = int(value)
+    except Exception:
+        out = int(default)
+    return max(low, min(high, out))
+
+
+def _sanitize_chat_history(value: Any) -> List[Dict[str, str]]:
+    raw = value
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            raw = []
+    out: List[Dict[str, str]] = []
+    if not isinstance(raw, list):
+        return out
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip()
+        content = str(item.get("content") or "").strip()
+        if role in ("user", "assistant") and content:
+            out.append({"role": role, "content": content[:8000]})
+    return out
+
+
+def _resolve_workspace_chat_model(requested_model: Any, mode: str) -> Dict[str, str]:
+    mode_value = _normalize_chat_mode_value(mode)
+    requested = str(requested_model or "").strip()
+    if mode_value == "prompt_builder":
+        return {"label": PROMPT_MODEL_LABEL, "actual": PROMPT_BUILDER_MODEL}
+    if requested == PROMPT_MODEL_LABEL:
+        return {"label": PROMPT_MODEL_LABEL, "actual": PROMPT_BUILDER_MODEL}
+    if requested in {OPENAI_CHAT_MODEL, PROMPT_BUILDER_MODEL}:
+        return {"label": requested, "actual": requested}
+    return {"label": CHAT_MODEL_LABEL_DEFAULT, "actual": OPENAI_CHAT_MODEL}
+
+
+def _decode_text_bytes(raw: bytes) -> str:
+    for enc in ("utf-8", "utf-8-sig", "cp1251", "latin-1"):
+        try:
+            return raw.decode(enc)
+        except Exception:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def _extract_docx_text(raw: bytes) -> str:
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            xml = zf.read("word/document.xml").decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+    text = re.sub(r"<w:tab[^>]*/>", "\t", xml)
+    text = re.sub(r"<w:br[^>]*/>", "\n", text)
+    text = re.sub(r"</w:p>", "\n", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _guess_attachment_kind(filename: str, content_type: str) -> str:
+    ext = Path(filename or "").suffix.lower()
+    ctype = (content_type or "").lower()
+    if ctype.startswith("image/"):
+        return "image"
+    if ext == ".pdf" or ctype == "application/pdf":
+        return "pdf"
+    if ext == ".docx" or ctype == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        return "docx"
+    if ext in _TEXT_ATTACHMENT_EXTS or ctype.startswith("text/") or ctype in {
+        "application/json", "application/xml", "text/csv", "application/javascript"
+    }:
+        return "text"
+    return "binary"
+
+
+async def _prepare_workspace_chat_attachments(files: List[UploadFile]) -> Dict[str, Any]:
+    prepared: List[Dict[str, Any]] = []
+    notices: List[str] = []
+    text_blocks: List[str] = []
+    image_bytes_list: List[bytes] = []
+    total_text = 0
+
+    for file in files[:MAX_CHAT_ATTACHMENTS]:
+        filename = Path(getattr(file, "filename", "") or "file").name or "file"
+        content_type = (
+            getattr(file, "content_type", "")
+            or mimetypes.guess_type(filename)[0]
+            or "application/octet-stream"
+        ).strip().lower()
+        raw = await file.read()
+        size_bytes = len(raw or b"")
+        kind = _guess_attachment_kind(filename, content_type)
+        item = {
+            "name": filename,
+            "kind": kind,
+            "content_type": content_type,
+            "size_bytes": size_bytes,
+            "parsed": False,
+        }
+
+        if not raw:
+            notices.append(f"{filename}: файл пустой.")
+            prepared.append(item)
+            continue
+
+        if size_bytes > MAX_CHAT_ATTACHMENT_BYTES:
+            notices.append(f"{filename}: файл больше 8 МБ, пропущен.")
+            prepared.append(item)
+            continue
+
+        if kind == "image":
+            if len(image_bytes_list) < MAX_CHAT_IMAGE_ATTACHMENTS:
+                image_bytes_list.append(raw)
+                item["parsed"] = True
+            else:
+                notices.append(
+                    f"{filename}: превышен лимит изображений, учитываю только первые {MAX_CHAT_IMAGE_ATTACHMENTS}."
+                )
+            prepared.append(item)
+            continue
+
+        extracted = ""
+        if kind == "text":
+            extracted = _decode_text_bytes(raw)
+        elif kind == "docx":
+            extracted = _extract_docx_text(raw)
+        elif kind == "pdf":
+            notices.append(f"{filename}: PDF принят, но автоматическое извлечение текста на сервере пока не включено.")
+        else:
+            notices.append(f"{filename}: файл прикреплён, но этот формат пока не разбирается автоматически.")
+
+        cleaned = extracted.replace("\x00", "").strip()
+        if cleaned:
+            cleaned = cleaned[:MAX_CHAT_ATTACHMENT_TEXT_PER_FILE]
+            remaining = max(0, MAX_CHAT_ATTACHMENT_TEXT_TOTAL - total_text)
+            if remaining > 0:
+                block = f"[Файл: {filename}]\n{cleaned[:remaining]}"
+                text_blocks.append(block)
+                total_text += len(block)
+                item["parsed"] = True
+        elif kind == "docx":
+            notices.append(f"{filename}: не удалось извлечь текст из DOCX.")
+
+        prepared.append(item)
+
+    summary_lines = [
+        f"- {item['name']} · {item['kind']} · {max(1, round((item['size_bytes'] or 0) / 1024))} KB"
+        for item in prepared
+    ]
+    context_parts: List[str] = []
+    if summary_lines:
+        context_parts.append("Пользователь приложил файлы:\n" + "\n".join(summary_lines))
+    if notices:
+        context_parts.append("Служебные заметки по вложениям:\n" + "\n".join(f"- {note}" for note in notices))
+    if text_blocks:
+        context_parts.append("Извлечённое содержимое файлов:\n\n" + "\n\n".join(text_blocks))
+
+    return {
+        "items": prepared,
+        "context": "\n\n".join(part for part in context_parts if part).strip(),
+        "image_bytes_list": image_bytes_list,
+    }
 
 
 def _chat_models() -> List[str]:
@@ -668,23 +865,63 @@ async def workspace_balance(user: Dict[str, Any] = Depends(get_current_workspace
 
 
 @router.post("/chat")
-async def workspace_chat(payload: WorkspaceChatIn, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
-    model = (payload.model or "").strip() or (PROMPT_BUILDER_MODEL if payload.mode == "prompt_builder" else OPENAI_CHAT_MODEL)
-    hist = []
-    if payload.history:
-        hist = [{"role": item.role, "content": item.content} for item in payload.history if item.role in ("user", "assistant")]
-    answer = await openai_chat_answer(
-        user_text=payload.text.strip(),
-        system_prompt=(
-            "Ты — AstraBot Prompt Builder. Отвечай как сильный AI prompt engineer и creative strategist. Строй ответ структурно: идея, основной промпт, улучшенная версия, опции под video/image/music. Если запрос расплывчатый — делай лучшую рабочую версию без лишних вопросов."
-            if payload.mode == "prompt_builder"
-            else "Ты — AstraBot Workspace Assistant. Помогай как product-minded AI co-pilot: сценарии, промпты, creative direction, тексты, планы и упаковка идей в рабочий пайплайн. Пиши по делу, понятно и удобно для дальнейшего запуска в video/image/voice/music студиях."
-        ),
-        history=hist,
-        temperature=payload.temperature,
-        max_tokens=payload.max_tokens,
+async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
+    content_type = (request.headers.get("content-type") or "").lower()
+    files: List[UploadFile] = []
+
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        text_value = str(form.get("text") or "").strip()
+        mode = _normalize_chat_mode_value(form.get("mode"))
+        history = _sanitize_chat_history(form.get("history"))
+        temperature = _clamp_float(form.get("temperature"), 0.6, 0.0, 1.5)
+        max_tokens = _clamp_int(form.get("max_tokens"), 900, 150, 4000)
+        resolved_model = _resolve_workspace_chat_model(form.get("model"), mode)
+        files = [f for f in form.getlist("files") if isinstance(f, UploadFile)]
+    else:
+        payload = WorkspaceChatIn.model_validate(await request.json())
+        text_value = payload.text.strip()
+        mode = _normalize_chat_mode_value(payload.mode)
+        history = [{"role": item.role, "content": item.content} for item in (payload.history or []) if item.role in ("user", "assistant")]
+        temperature = payload.temperature
+        max_tokens = payload.max_tokens
+        resolved_model = _resolve_workspace_chat_model(payload.model, mode)
+
+    if not text_value and not files:
+        raise HTTPException(status_code=400, detail="Введите текст или прикрепите хотя бы один файл.")
+
+    prepared_files = await _prepare_workspace_chat_attachments(files) if files else {"items": [], "context": "", "image_bytes_list": []}
+
+    user_text = text_value or "Проанализируй приложенные файлы и кратко скажи, что в них находится, затем предложи полезные следующие шаги."
+    if prepared_files.get("context"):
+        user_text = f"{user_text}\n\n{prepared_files['context']}"
+
+    model_label = resolved_model["label"]
+    model_actual = resolved_model["actual"]
+    system_prompt = (
+        "Ты — AstraBot Prompt Builder. Отвечай как сильный AI prompt engineer и creative strategist. Строй ответ структурно: идея, основной промпт, улучшенная версия, опции под video/image/music. Если запрос расплывчатый — делай лучшую рабочую версию без лишних вопросов."
+        if mode == "prompt_builder"
+        else "Ты — AstraBot Workspace Assistant. Помогай как product-minded AI co-pilot: сценарии, промпты, creative direction, тексты, планы и упаковка идей в рабочий пайплайн. Пиши по делу, понятно и удобно для дальнейшего запуска в video/image/voice/music студиях."
     )
-    return {"ok": True, "answer": answer, "mode": payload.mode, "model": model}
+    system_prompt += f"\n\nТекущая выбранная модель в интерфейсе сайта: {model_label}. Если пользователь спрашивает, какая модель выбрана в интерфейсе, отвечай именно этим значением."
+
+    answer = await openai_chat_answer(
+        user_text=user_text,
+        system_prompt=system_prompt,
+        history=history,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        model=model_actual,
+        image_bytes_list=prepared_files.get("image_bytes_list") or None,
+    )
+    return {
+        "ok": True,
+        "answer": answer,
+        "mode": mode,
+        "model": model_label,
+        "resolved_model": model_actual,
+        "attachments": prepared_files.get("items") or [],
+    }
 
 
 @router.post("/kling3/create")
