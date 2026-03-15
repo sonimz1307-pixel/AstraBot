@@ -596,9 +596,11 @@ function renderHeader() {
   const meta = STUDIO_META[state.studio];
   const shell = document.querySelector('.shell');
   const inspector = document.querySelector('.inspector');
+  const workspaceTopline = document.querySelector('.workspace-topline');
   const globalRunBtn = document.getElementById('globalRunBtn');
   shell?.classList.toggle('chat-no-inspector', false);
   if (inspector) inspector.setAttribute('aria-hidden', state.studio === 'chat' ? 'true' : 'false');
+  if (workspaceTopline) workspaceTopline.style.display = state.studio === 'chat' ? 'none' : '';
   if (globalRunBtn) globalRunBtn.style.display = state.studio === 'chat' ? 'none' : '';
   document.getElementById('headerTitle').textContent = meta.title;
   document.getElementById('headerSubtitle').textContent = meta.subtitle;
