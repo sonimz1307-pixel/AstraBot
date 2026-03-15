@@ -18,7 +18,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from db_supabase import track_user_activity, get_basic_stats, supabase as sb
-from kling_flow import run_motion_control_from_bytes, run_image_to_video_from_bytes
+from kling_flow import run_motion_control_from_bytes, run_image_to_video_from_bytes, run_text_to_video_from_prompt
 from veo_flow import run_veo_text_to_video, run_veo_image_to_video
 from veo_billing import calc_veo_charge, format_veo_charge_line
 from billing_db import (
@@ -4649,11 +4649,65 @@ async def webhook(secret: str, request: Request):
 
             return {"ok": True}
 
-        # из WebApp может прилетать примерно так: {"flow":"motion","mode":"pro"}
+        # из WebApp может прилетать Kling 1.6 / 2.5 / 3.0
+        kling_version = (payload.get("kling_version") or "1_6").lower().strip()
         flow = (payload.get("flow") or payload.get("gen_type") or payload.get("genType") or "").lower().strip()
         quality = (payload.get("mode") or payload.get("quality") or "std").lower().strip()
 
-        # нормализация flow
+        if kling_version == "2_5":
+            if flow in ("i2v", "image_to_video", "image2video", "image->video"):
+                flow = "i2v"
+            elif flow in ("t2v", "text", "text_to_video", "text2video", "text->video"):
+                flow = "t2v"
+            else:
+                flow = "t2v"
+
+            try:
+                duration = int(payload.get("duration") or payload.get("seconds") or payload.get("sec") or 5)
+            except Exception:
+                duration = 5
+            if duration not in (5, 10):
+                duration = 5
+
+            aspect_ratio = str(payload.get("aspect_ratio") or "16:9").strip()
+            if aspect_ratio not in ("16:9", "9:16", "1:1"):
+                aspect_ratio = "16:9"
+
+            st["kling_settings"] = {
+                "kling_version": "2_5",
+                "flow": flow,
+                "quality": "turbo_pro",
+                "duration": duration,
+                "aspect_ratio": aspect_ratio,
+                "model_slug": str(payload.get("model_slug") or "kwaivgi/kling-v2.5-turbo-pro").strip(),
+                "product": "kling_2_5_turbo_pro",
+            }
+            st["ts"] = _now()
+
+            if flow == "t2v":
+                _set_mode(chat_id, user_id, "kling_t2v")
+                st["kling_t2v"] = {"step": "need_prompt", "duration": duration, "aspect_ratio": aspect_ratio}
+                await tg_send_message(
+                    chat_id,
+                    f"✅ Настройки сохранены: Kling 2.5 Turbo Pro • Text → Video • {duration} сек • {aspect_ratio}\n\n"
+                    "Теперь просто напиши промпт одним сообщением.\n"
+                    "Пример: «Кинематографичный пролёт камеры над неоновым городом ночью, дождь, реализм».\n"
+                    "Можно просто: Старт",
+                    reply_markup=_help_menu_for(user_id),
+                )
+            else:
+                _set_mode(chat_id, user_id, "kling_i2v")
+                st["kling_i2v"] = {"step": "need_image", "image_bytes": None, "duration": duration}
+                await tg_send_message(
+                    chat_id,
+                    f"✅ Настройки сохранены: Kling 2.5 Turbo Pro • Image → Video • {duration} сек\n\n"
+                    "Шаг 1) Пришли СТАРТОВОЕ ФОТО.\n"
+                    "Шаг 2) Потом текстом опиши, что должно происходить (или просто: Старт).",
+                    reply_markup=_help_menu_for(user_id),
+                )
+            return {"ok": True}
+
+        # legacy Kling 1.6
         if flow in ("motion", "motion_control", "mc"):
             flow = "motion"
         elif flow in ("i2v", "image_to_video", "image2video", "image->video"):
@@ -4661,14 +4715,11 @@ async def webhook(secret: str, request: Request):
         else:
             flow = "motion" if not flow else flow
 
-        # нормализация quality
         quality = "pro" if quality in ("pro", "professional") else "std"
 
-        # сохраняем настройки Kling в state
-        st["kling_settings"] = {"flow": flow, "quality": quality}
+        st["kling_settings"] = {"kling_version": "1_6", "flow": flow, "quality": quality}
         st["ts"] = _now()
 
-        # после сохранения — запускаем нужный сценарий и выходим из апдейта
         if flow == "motion":
             _set_mode(chat_id, user_id, "kling_mc")
             st["kling_mc"] = {"step": "need_avatar", "avatar_bytes": None, "video_bytes": None}
@@ -4682,8 +4733,6 @@ async def webhook(secret: str, request: Request):
                 reply_markup=_help_menu_for(user_id),
             )
         else:
-            # Image → Video
-            # сохраняем выбранную длительность (5/10 сек) из WebApp, если она пришла
             try:
                 duration = int(payload.get("duration") or payload.get("seconds") or payload.get("sec") or 5)
             except Exception:
@@ -7392,11 +7441,48 @@ async def webhook(secret: str, request: Request):
             st["ts"] = _now()
             return {"ok": True}
 
-        # ---- KLING Motion Control: step=need_prompt ----            return {"ok": True}
+        # ---- KLING 2.5 Text → Video: запуск по тексту ----
+        if st.get("mode") == "kling_t2v":
+            kt = st.get("kling_t2v") or {}
+            step = (kt.get("step") or "need_prompt")
 
-        
-        # ---- KLING Motion Control: step=need_prompt ----
-        
+            if step != "need_prompt":
+                st["kling_t2v"] = {"step": "need_prompt"}
+
+            user_prompt = incoming_text.strip()
+            if user_prompt.lower() in ("старт", "start", "go"):
+                user_prompt = "Cinematic realistic video, subtle natural motion, high detail, natural lighting."
+
+            ks = st.get("kling_settings") or {}
+            duration = int((ks.get("duration") or kt.get("duration") or 5))
+            aspect_ratio = str(ks.get("aspect_ratio") or kt.get("aspect_ratio") or "16:9")
+            model_slug = str(ks.get("model_slug") or "kwaivgi/kling-v2.5-turbo-pro")
+            product = str(ks.get("product") or "kling_2_5_turbo_pro")
+
+            await tg_send_message(chat_id, f"🎬 Генерирую Kling 2.5 Turbo Pro ({duration} сек, {aspect_ratio})…", reply_markup=_main_menu_for(user_id))
+
+            _busy_start(int(user_id), "Kling 2.5 T2V")
+
+            try:
+                out_url = await run_text_to_video_from_prompt(
+                    user_id=user_id,
+                    prompt=user_prompt,
+                    duration_seconds=duration,
+                    aspect_ratio=aspect_ratio,
+                    model_slug=model_slug,
+                    product=product,
+                    billing_meta={"flow": "t2v", "kling_version": "2_5", "model": "kling-v2.5-turbo-pro"},
+                )
+                await tg_send_message(chat_id, f"✅ Готово!\n{out_url}", reply_markup=_main_menu_for(user_id))
+            except Exception as e:
+                await tg_send_message(chat_id, f"❌ Ошибка Kling 2.5 Text → Video: {e}", reply_markup=_main_menu_for(user_id))
+            finally:
+                st["kling_t2v"] = {"step": "need_prompt", "duration": duration, "aspect_ratio": aspect_ratio}
+                _set_mode(chat_id, user_id, "chat")
+                _busy_end(int(user_id))
+
+            return {"ok": True}
+
         # ---- KLING Image → Video: запуск по тексту ----
         if st.get("mode") == "kling_i2v":
             ki = st.get("kling_i2v") or {}
@@ -7416,11 +7502,23 @@ async def webhook(secret: str, request: Request):
                 user_prompt = "Cinematic realistic video, subtle natural motion, high quality."
 
             ks = st.get("kling_settings") or {}
+            kling_version = (ks.get("kling_version") or "1_6").lower()
             quality = (ks.get("quality") or "std").lower()
             duration = int((ks.get("duration") or ki.get("duration") or 5))
             kling_mode = "pro" if quality in ("pro", "professional") else "std"
 
-            await tg_send_message(chat_id, f"🎬 Генерирую видео ({duration} сек, {kling_mode.upper()})…", reply_markup=_main_menu_for(user_id))
+            if kling_version == "2_5":
+                model_label = "Kling 2.5 Turbo Pro"
+                aspect_ratio = str(ks.get("aspect_ratio") or "16:9")
+                model_slug = str(ks.get("model_slug") or "kwaivgi/kling-v2.5-turbo-pro")
+                product = str(ks.get("product") or "kling_2_5_turbo_pro")
+                await tg_send_message(chat_id, f"🎬 Генерирую {model_label} ({duration} сек)…", reply_markup=_main_menu_for(user_id))
+            else:
+                model_label = f"Kling Image → Video {kling_mode.upper()}"
+                aspect_ratio = str(ks.get("aspect_ratio") or "16:9")
+                model_slug = None
+                product = None
+                await tg_send_message(chat_id, f"🎬 Генерирую видео ({duration} сек, {kling_mode.upper()})…", reply_markup=_main_menu_for(user_id))
 
             _busy_start(int(user_id), "Kling I2V")
 
@@ -7430,19 +7528,21 @@ async def webhook(secret: str, request: Request):
                     start_image_bytes=start_image_bytes,
                     prompt=user_prompt,
                     duration_seconds=duration,
-                    mode=kling_mode,
-                    billing_meta={"flow": "i2v"},
+                    mode=("pro" if kling_version == "2_5" else kling_mode),
+                    aspect_ratio=aspect_ratio,
+                    model_slug=model_slug,
+                    product=product,
+                    billing_meta={"flow": "i2v", "kling_version": kling_version, "model": model_label},
                 )
                 await tg_send_message(chat_id, f"✅ Готово!\n{out_url}", reply_markup=_main_menu_for(user_id))
             except Exception as e:
-                await tg_send_message(chat_id, f"❌ Ошибка Kling Image → Video: {e}", reply_markup=_main_menu_for(user_id))
+                await tg_send_message(chat_id, f"❌ Ошибка {model_label}: {e}", reply_markup=_main_menu_for(user_id))
             finally:
                 st["kling_i2v"] = {"step": "need_image", "image_bytes": None, "duration": duration}
                 _set_mode(chat_id, user_id, "chat")
                 _busy_end(int(user_id))
 
             return {"ok": True}
-
 
         if st.get("mode") == "kling_mc":
             km = st.get("kling_mc") or {}
