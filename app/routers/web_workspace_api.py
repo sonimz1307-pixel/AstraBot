@@ -864,6 +864,7 @@ async def workspace_balance(user: Dict[str, Any] = Depends(get_current_workspace
     return {"ok": True, "balance_tokens": balance}
 
 
+
 @router.post("/chat")
 async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
     content_type = (request.headers.get("content-type") or "").lower()
@@ -887,10 +888,13 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
         max_tokens = payload.max_tokens
         resolved_model = _resolve_workspace_chat_model(payload.model, mode)
 
+    mode = "prompt_builder" if resolved_model["label"] == PROMPT_MODEL_LABEL else mode
+
     if not text_value and not files:
         raise HTTPException(status_code=400, detail="Введите текст или прикрепите хотя бы один файл.")
 
     prepared_files = await _prepare_workspace_chat_attachments(files) if files else {"items": [], "context": "", "image_bytes_list": []}
+    image_refs = [f"@image{i}" for i in range(1, len(prepared_files.get("image_bytes_list") or []) + 1)]
 
     user_text = text_value or "Проанализируй приложенные файлы и кратко скажи, что в них находится, затем предложи полезные следующие шаги."
     if prepared_files.get("context"):
@@ -898,12 +902,30 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
 
     model_label = resolved_model["label"]
     model_actual = resolved_model["actual"]
-    system_prompt = (
-        "Ты — AstraBot Prompt Builder. Отвечай как сильный AI prompt engineer и creative strategist. Строй ответ структурно: идея, основной промпт, улучшенная версия, опции под video/image/music. Если запрос расплывчатый — делай лучшую рабочую версию без лишних вопросов."
-        if mode == "prompt_builder"
-        else "Ты — AstraBot Workspace Assistant. Помогай как product-minded AI co-pilot: сценарии, промпты, creative direction, тексты, планы и упаковка идей в рабочий пайплайн. Пиши по делу, понятно и удобно для дальнейшего запуска в video/image/voice/music студиях."
-    )
-    system_prompt += f"\n\nТекущая выбранная модель в интерфейсе сайта: {model_label}. Если пользователь спрашивает, какая модель выбрана в интерфейсе, отвечай именно этим значением."
+    if mode == "prompt_builder":
+        seedance_hint = ""
+        if image_refs:
+            seedance_hint = (
+                f" Если пользователь просит prompt для Seedance и приложены изображения, используй в итоговом prompt теги: {', '.join(image_refs)}."
+                " Не заменяй эти теги словами вроде reference image или attached image."
+            )
+        system_prompt = (
+            "Ты — AstraBot Prompt Builder. "
+            "Работаешь только как сильный prompt engineer. "
+            "Твоя задача — возвращать только один готовый production-ready prompt. "
+            "Не пиши объяснений, вступлений, комментариев, заметок по модели, списков и вариантов. "
+            "Не задавай лишних уточнений, если пользователь уже дал достаточно данных. "
+            "Если пользователь спрашивает, какая модель выбрана в интерфейсе, отвечай только названием модели: "
+            f"{model_label}."
+            + seedance_hint
+        )
+    else:
+        system_prompt = (
+            "Ты — AstraBot Workspace Assistant. "
+            "Помогай как product-minded AI co-pilot: сценарии, промпты, creative direction, тексты, планы и упаковка идей в рабочий пайплайн. "
+            "Пиши по делу, понятно и удобно для дальнейшего запуска в video/image/voice/music студиях. "
+            f"Если пользователь спрашивает, какая модель выбрана в интерфейсе, отвечай только названием модели: {model_label}."
+        )
 
     answer = await openai_chat_answer(
         user_text=user_text,
