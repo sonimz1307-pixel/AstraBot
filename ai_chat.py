@@ -97,7 +97,7 @@ async def openai_chat_answer(
             "model": model,
             "messages": msgs,
             "temperature": temperature,
-            "max_tokens": max_tokens,
+            "max_completion_tokens": max_tokens,
         }
 
     async with httpx.AsyncClient(timeout=120) as client:
