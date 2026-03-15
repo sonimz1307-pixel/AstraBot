@@ -151,6 +151,56 @@ textarea { resize: vertical; min-height: 110px; }
 .chat-feed {
   min-height: 0; padding: 18px; overflow: auto; display: flex; flex-direction: column; gap: 12px;
 }
+.chat-feed,
+.workspace-main.scroll,
+.workspace-side.scroll,
+.inspector-body,
+.recent-list {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(124,92,255,0.72) rgba(255,255,255,0.04);
+}
+.chat-feed::-webkit-scrollbar,
+.workspace-main.scroll::-webkit-scrollbar,
+.workspace-side.scroll::-webkit-scrollbar,
+.inspector-body::-webkit-scrollbar,
+.recent-list::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.chat-feed::-webkit-scrollbar-track,
+.workspace-main.scroll::-webkit-scrollbar-track,
+.workspace-side.scroll::-webkit-scrollbar-track,
+.inspector-body::-webkit-scrollbar-track,
+.recent-list::-webkit-scrollbar-track {
+  background: rgba(255,255,255,0.03);
+  border-radius: 999px;
+}
+.chat-feed::-webkit-scrollbar-thumb,
+.workspace-main.scroll::-webkit-scrollbar-thumb,
+.workspace-side.scroll::-webkit-scrollbar-thumb,
+.inspector-body::-webkit-scrollbar-thumb,
+.recent-list::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, rgba(124,92,255,0.95), rgba(34,211,238,0.85));
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.chat-feed::-webkit-scrollbar-thumb:hover,
+.workspace-main.scroll::-webkit-scrollbar-thumb:hover,
+.workspace-side.scroll::-webkit-scrollbar-thumb:hover,
+.inspector-body::-webkit-scrollbar-thumb:hover,
+.recent-list::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, rgba(124,92,255,1), rgba(34,211,238,0.95));
+}
+.chat-feed::-webkit-scrollbar-button,
+.workspace-main.scroll::-webkit-scrollbar-button,
+.workspace-side.scroll::-webkit-scrollbar-button,
+.inspector-body::-webkit-scrollbar-button,
+.recent-list::-webkit-scrollbar-button {
+  width: 0;
+  height: 0;
+  display: none;
+}
 .chat-bubble-wrap { display: flex; flex-direction: column; gap: 8px; }
 .chat-bubble-wrap.user { align-items: flex-end; }
 .chat-bubble-wrap.assistant { align-items: flex-start; }
