@@ -9,7 +9,7 @@ import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -45,57 +45,6 @@ MAX_CHAT_IMAGE_ATTACHMENTS = 4
 MAX_CHAT_ATTACHMENT_BYTES = 8 * 1024 * 1024
 MAX_CHAT_ATTACHMENT_TEXT_PER_FILE = 12000
 MAX_CHAT_ATTACHMENT_TEXT_TOTAL = 28000
-
-PROMPT_ENGINE_RULES: Dict[str, Dict[str, Any]] = {
-    "kling": {
-        "label": "Kling",
-        "asset_types": ["video"],
-        "ref_syntax": "@image_1",
-        "inline_refs": True,
-        "blocks": ["subject + movement", "background + movement", "camera", "style", "dialogue"],
-        "notes": "Если есть референсы, используй теги @image_1, @image_2 прямо внутри итогового prompt.",
-    },
-    "veo": {
-        "label": "Veo",
-        "asset_types": ["video"],
-        "ref_syntax": None,
-        "inline_refs": False,
-        "blocks": ["subject", "action", "scene", "camera angle", "camera movement", "lighting", "mood", "style", "ambiance", "audio"],
-        "notes": "Не вставляй внутрь prompt служебные API-параметры. Пиши кинематографично и структурно.",
-    },
-    "seedance": {
-        "label": "Seedance",
-        "asset_types": ["video"],
-        "ref_syntax": "@image1",
-        "inline_refs": True,
-        "blocks": ["refs", "subject", "action", "environment", "style/camera/motion"],
-        "notes": "Если есть референсы, используй @image1, @image2 без underscore.",
-    },
-    "sora2": {
-        "label": "Sora 2",
-        "asset_types": ["video"],
-        "ref_syntax": None,
-        "inline_refs": False,
-        "blocks": ["style/look", "subject", "framing", "action beats", "lighting/palette", "dialogue", "sound"],
-        "notes": "Размер, длительность и персонажей не превращай в prose, держи prompt как режиссёрское описание сцены.",
-    },
-    "nano_banana": {
-        "label": "Nano Banana",
-        "asset_types": ["photo", "improve", "universal"],
-        "ref_syntax": None,
-        "inline_refs": False,
-        "blocks": ["style", "subject", "setting", "action/pose", "composition", "lighting", "typography"],
-        "notes": "Для фото используй структуру style + subject + setting + composition.",
-    },
-    "photosession": {
-        "label": "Фотосессия",
-        "asset_types": ["photo", "improve", "universal"],
-        "ref_syntax": None,
-        "inline_refs": False,
-        "blocks": ["subject", "look", "wardrobe", "setting", "lighting", "pose", "camera", "retouch level"],
-        "notes": "Подходит для fashion, portrait, editorial и luxury-подачи.",
-    },
-}
 _TEXT_ATTACHMENT_EXTS = {
     ".txt", ".md", ".csv", ".json", ".js", ".ts", ".tsx", ".jsx", ".py", ".html", ".css",
     ".xml", ".yml", ".yaml", ".sql", ".ini", ".cfg", ".log", ".rtf", ".sh", ".bat"
@@ -154,297 +103,54 @@ def _resolve_workspace_chat_model(requested_model: Any, mode: str) -> Dict[str, 
     return {"label": CHAT_MODEL_LABEL_DEFAULT, "actual": OPENAI_CHAT_MODEL}
 
 
-
-def _coerce_prompt_session(value: Any) -> Dict[str, Any]:
-    raw = value
-    if hasattr(raw, "model_dump"):
-        raw = raw.model_dump(exclude_none=True)
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except Exception:
-            raw = {}
-    if not isinstance(raw, dict):
-        raw = {}
-    out: Dict[str, Any] = {}
-    for key in ("asset_type", "engine", "goal", "output_mode", "reference_role"):
-        val = str(raw.get(key) or "").strip()
-        if val:
-            out[key] = val
-    if "has_references" in raw:
-        out["has_references"] = bool(raw.get("has_references"))
-    if "reference_count" in raw:
-        try:
-            out["reference_count"] = max(0, int(raw.get("reference_count") or 0))
-        except Exception:
-            out["reference_count"] = 0
-    if "ready" in raw:
-        out["ready"] = bool(raw.get("ready"))
-    missing_slots = raw.get("missing_slots")
-    if isinstance(missing_slots, list):
-        out["missing_slots"] = [str(item).strip() for item in missing_slots if str(item or "").strip()]
-    return out
+_PROMPT_KEYWORDS = (
+    "промпт", "prompt", "улучши", "усиль", "сцена", "референс", "reference", "кадр", "ракурс", "анимац",
+    "видео", "video", "фото", "image", "изображен", "seedance", "kling", "veo", "sora", "nano banana",
+    "cinematic", "camera", "lighting", "style", "shot", "motion", "aspect ratio", "negative prompt",
+)
 
 
-def _normalize_asset_type(value: Any) -> str:
-    text = str(value or "").strip().lower()
-    mapping = {
-        "video": "video", "видео": "video", "video prompt": "video",
-        "photo": "photo", "image": "photo", "foto": "photo", "фото": "photo", "картинка": "photo",
-        "универсальный": "universal", "universal": "universal",
-        "improve": "improve", "улучшить": "improve", "improve_prompt": "improve",
-    }
-    return mapping.get(text, "")
-
-
-def _normalize_prompt_engine(value: Any) -> str:
-    text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-    aliases = {
-        "kling": "kling", "veo": "veo", "seedance": "seedance",
-        "sora": "sora2", "sora2": "sora2", "sora_2": "sora2",
-        "nano": "nano_banana", "nano_banana": "nano_banana", "nanobanana": "nano_banana", "banana": "nano_banana",
-        "photosession": "photosession", "фотосессия": "photosession", "photo_session": "photosession",
-        "auto": "",
-    }
-    return aliases.get(text, "")
-
-
-def _normalize_output_mode(value: Any) -> str:
-    text = str(value or "").strip().lower()
-    if not text:
-        return "prompt_only"
-    if any(token in text for token in ("negative", "негатив")):
-        return "prompt_plus_negative"
-    if any(token in text for token in ("settings", "настрой", "params", "параметр")):
-        return "prompt_plus_settings"
-    if any(token in text for token in ("shotlist", "shots", "раскадров")):
-        return "prompt_plus_shotlist"
-    if any(token in text for token in ("ru/en", "ru en", "двуязы", "русском и англий")):
-        return "prompt_ru_en"
-    return "prompt_only"
-
-
-def _guess_asset_type_from_text(text: str) -> str:
-    source = str(text or "").lower()
-    video_hits = ("видео", "video", "ролик", "анимац", "motion", "camera move", "shot", "scene")
-    photo_hits = ("фото", "photo", "image", "poster", "афиша", "портрет", "баннер", "картинк")
-    improve_hits = ("улучши", "доработай", "усиль", "перепиши", "optimize", "improve my prompt", "improve prompt")
-    if any(token in source for token in improve_hits):
-        return "improve"
-    if any(token in source for token in video_hits):
-        return "video"
-    if any(token in source for token in photo_hits):
-        return "photo"
-    return ""
-
-
-def _guess_engine_from_text(text: str) -> str:
-    source = str(text or "").lower()
-    if "kling" in source:
-        return "kling"
-    if "veo" in source:
-        return "veo"
-    if "seedance" in source:
-        return "seedance"
-    if "sora" in source:
-        return "sora2"
-    if "nano banana" in source or "nanobanana" in source or "banana" in source:
-        return "nano_banana"
-    if "фотосесс" in source or "photosession" in source:
-        return "photosession"
-    return ""
-
-
-def _guess_reference_role_from_text(text: str) -> str:
-    source = str(text or "").lower()
-    if any(token in source for token in ("первый кадр", "first frame", "start frame")):
-        return "first_frame"
-    if any(token in source for token in ("товар", "product", "флакон", "предмет")):
-        return "product"
-    if any(token in source for token in ("персонаж", "character", "внешность", "лицо", "герой")):
-        return "subject"
-    if any(token in source for token in ("компози", "ракурс", "frame", "pose")):
-        return "composition"
-    if any(token in source for token in ("стиль", "палитр", "lighting", "look and feel", "атмосфер")):
-        return "style"
-    return ""
-
-
-def _looks_like_prompt_request(text: str, session: Dict[str, Any], has_files: bool = False) -> bool:
-    source = str(text or "").strip().lower()
-    if session.get("asset_type") or session.get("engine") or has_files:
+def _is_prompt_builder_request(text: str, has_files: bool) -> bool:
+    value = str(text or "").strip().lower()
+    if has_files:
         return True
-    prompt_tokens = (
-        "prompt", "промпт", "сделай промпт", "напиши промпт", "собери промпт", "улучши prompt",
-        "улучши промпт", "доработай промпт", "для видео", "для фото", "cinematic", "camera",
-        "scene", "shot", "lighting", "negative prompt", "production-ready", "референс", "reference"
+    if not value:
+        return False
+    return any(token in value for token in _PROMPT_KEYWORDS)
+
+
+def _prompt_builder_redirect_message() -> str:
+    return (
+        "Сейчас включён режим Prompt Builder. "
+        "Опиши, какой prompt нужен: для фото, видео, улучшения черновика или по референсу."
     )
-    return any(token in source for token in prompt_tokens)
 
 
-def _is_slot_like_answer(text: str) -> bool:
-    source = str(text or "").strip().lower()
-    slot_values = {
-        "video", "видео", "photo", "фото", "универсальный", "universal", "improve", "улучшить",
-        "kling", "veo", "seedance", "sora", "sora 2", "nano banana", "фотосессия", "photosession",
-        "subject", "style", "product", "composition", "first frame", "персонаж", "стиль", "товар", "композиция"
-    }
-    return not source or source in slot_values or len(source) <= 10
-
-
-def _is_generic_prompt_request(text: str) -> bool:
-    source = str(text or "").strip().lower()
-    generic_patterns = (
-        "сделай промпт", "напиши промпт", "собери промпт", "нужен промпт", "хочу промпт",
-        "make prompt", "build prompt", "prompt please", "улучши промпт", "improve prompt"
-    )
-    if any(source == p or source.startswith(f"{p} ") for p in generic_patterns):
-        return True
-    return len(source) < 24 and ("prompt" in source or "промпт" in source)
-
-
-def _merge_prompt_session(text: str, prompt_session: Optional[Dict[str, Any]], prepared_files: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    session = _coerce_prompt_session(prompt_session)
-    source = str(text or "").strip()
-    image_count = len((prepared_files or {}).get("image_bytes_list") or [])
-    asset_type = _normalize_asset_type(session.get("asset_type")) or _guess_asset_type_from_text(source)
-    engine = _normalize_prompt_engine(session.get("engine")) or _guess_engine_from_text(source)
-    goal = str(session.get("goal") or "").strip()
-    if source and not _is_slot_like_answer(source) and not _is_generic_prompt_request(source):
-        goal = source[:1600]
-    return {
-        "asset_type": asset_type,
-        "engine": engine,
-        "goal": goal,
-        "output_mode": _normalize_output_mode(session.get("output_mode") or source),
-        "has_references": bool(session.get("has_references")) or image_count > 0,
-        "reference_count": max(image_count, int(session.get("reference_count") or 0)),
-        "reference_role": str(session.get("reference_role") or "").strip() or _guess_reference_role_from_text(source),
-        "ready": False,
-        "missing_slots": [],
-    }
-
-
-def _compute_missing_prompt_slots(session: Dict[str, Any]) -> List[str]:
-    missing: List[str] = []
-    if not str(session.get("asset_type") or "").strip():
-        missing.append("asset_type")
-    if str(session.get("asset_type") or "").strip() and str(session.get("asset_type") or "").strip() != "universal" and not str(session.get("engine") or "").strip():
-        missing.append("engine")
-    if bool(session.get("has_references")) and not str(session.get("reference_role") or "").strip():
-        missing.append("reference_role")
-    if not str(session.get("goal") or "").strip():
-        missing.append("goal")
-    return missing
-
-
-def _build_prompt_clarify_question(session: Dict[str, Any]) -> str:
-    missing = list(session.get("missing_slots") or [])
-    first = missing[0] if missing else ""
-    if first == "asset_type":
-        return "Это промпт для видео, для фото, универсальный или нужно улучшить уже готовый черновик?"
-    if first == "engine":
-        if str(session.get("asset_type") or "") == "video":
-            return "Под какой движок собрать итоговый prompt: Kling, Veo, Seedance или Sora 2?"
-        return "Под что собрать итоговый prompt: Nano Banana или режим фотосессии?"
-    if first == "reference_role":
-        return "Что именно нужно взять из референса: персонажа, стиль, товар, композицию или первый кадр?"
-    if first == "goal":
-        return "Что именно должно получиться в финале? Опиши итоговую сцену, стиль, действие и желаемый результат одной фразой."
-    return "Уточни недостающие детали, и я соберу готовый prompt."
-
-
-def _inline_reference_tokens(engine: str, count: int) -> str:
-    if count <= 0:
-        return ""
-    normalized = _normalize_prompt_engine(engine)
-    if normalized == "seedance":
-        return ", ".join(f"@image{i}" for i in range(1, count + 1))
-    if normalized == "kling":
-        return ", ".join(f"@image_{i}" for i in range(1, count + 1))
-    return ""
-
-
-def _build_prompt_builder_system_prompt(session: Dict[str, Any]) -> str:
-    asset_type = str(session.get("asset_type") or "").strip() or "universal"
-    engine = _normalize_prompt_engine(session.get("engine"))
-    output_mode = str(session.get("output_mode") or "prompt_only").strip() or "prompt_only"
-    has_references = bool(session.get("has_references"))
-    reference_count = int(session.get("reference_count") or 0)
-    reference_role = str(session.get("reference_role") or "").strip() or "mixed"
-    engine_rule = PROMPT_ENGINE_RULES.get(engine, {})
-    engine_label = str(engine_rule.get("label") or engine or "Universal").strip()
-    blocks = engine_rule.get("blocks") or []
-    notes = str(engine_rule.get("notes") or "").strip()
-    ref_tokens = _inline_reference_tokens(engine, reference_count)
-    refs_line = ""
-    if has_references:
-        if ref_tokens:
-            refs_line = f"У пользователя есть {reference_count} референс(а). Используй inline-теги {ref_tokens}. Роль референса: {reference_role}."
-        else:
-            refs_line = f"У пользователя есть {reference_count} референс(а). Не выдумывай inline-теги. Роль референса: {reference_role}."
+def _build_prompt_builder_system_prompt(model_label: str, image_refs: List[str]) -> str:
+    ref_hint = ""
+    if image_refs:
+        ref_hint = (
+            " Если пользователь просит prompt для Seedance и приложены изображения, используй теги "
+            + ", ".join(image_refs)
+            + ". Для Kling используй формат @image_1, @image_2. Для Veo, Sora и Nano Banana не придумывай inline-теги, если они не нужны."
+        )
     return (
         "Ты — AstraBot Prompt Builder. "
-        "Верни только один готовый production-ready prompt без вступлений, без комментариев, без markdown, без заголовков и без списков. "
-        "Не объясняй, что ты сделал. Не предлагай варианты. Не добавляй служебные заметки. "
-        f"Тип задачи: {asset_type}. Целевой движок: {engine_label}. Формат ответа: {output_mode}. "
-        f"Структурируй итоговый prompt по логике движка через блоки: {', '.join(blocks) if blocks else 'subject, action, scene, style'}. "
-        f"{notes} {refs_line} "
-        "Если движок требует inline-ссылки на референсы, используй только заданные теги и не заменяй их словами attached image или reference image. "
-        "Если пользователь просит улучшить черновик, перепиши его в более сильный и чистый production-ready prompt, сохранив намерение пользователя."
-    ).strip()
-
-
-async def _build_prompt_builder_reply(text: str, history: List[Dict[str, str]], prompt_session: Dict[str, Any], model: str, prepared_files: Dict[str, Any]) -> Dict[str, Any]:
-    user_text = str(text or "").strip()
-    session = _merge_prompt_session(user_text, prompt_session, prepared_files)
-    if not _looks_like_prompt_request(user_text, session, has_files=bool((prepared_files or {}).get("items"))):
-        session["missing_slots"] = ["asset_type", "goal"]
-        return {
-            "answer": "Сейчас включён режим Prompt Builder. Опиши, какой промпт нужен: фото, видео, улучшение черновика или работа по референсу.",
-            "response_kind": "guardrail",
-            "is_prompt": False,
-            "prompt_session": session,
-            "engine": session.get("engine") or "",
-            "asset_type": session.get("asset_type") or "",
-            "output_mode": session.get("output_mode") or "prompt_only",
-        }
-    missing = _compute_missing_prompt_slots(session)
-    session["missing_slots"] = missing
-    session["ready"] = not missing
-    if missing:
-        return {
-            "answer": _build_prompt_clarify_question(session),
-            "response_kind": "clarify",
-            "is_prompt": False,
-            "prompt_session": session,
-            "engine": session.get("engine") or "",
-            "asset_type": session.get("asset_type") or "",
-            "output_mode": session.get("output_mode") or "prompt_only",
-        }
-    final_user_text = str(session.get("goal") or user_text or "").strip()
-    if prepared_files.get("context"):
-        final_user_text = f"{final_user_text}\n\n{prepared_files['context']}"
-    prompt_text = await openai_chat_answer(
-        user_text=final_user_text,
-        system_prompt=_build_prompt_builder_system_prompt(session),
-        history=history[-10:] if history else None,
-        temperature=0.3,
-        max_tokens=1200,
-        model=model,
-        image_bytes_list=prepared_files.get("image_bytes_list") or None,
+        "Ты работаешь только с промптами и их улучшением. "
+        "Если запрос не относится к созданию, адаптации или усилению промпта, ответь точно одной фразой: "
+        "'Сейчас включён режим Prompt Builder. Опиши, какой prompt нужен: для фото, видео, улучшения черновика или по референсу.' "
+        "Если запрос относится к промпту, сам выбери лучшую структуру ответа без лишних надстроек, уточняй только если это критично, "
+        "и возвращай один сильный готовый prompt либо один короткий уточняющий вопрос, если без него нельзя. "
+        "Не пиши объяснений, списков, вариантов, вступлений и служебных комментариев. "
+        f"Если пользователь спрашивает, какая модель выбрана в интерфейсе, отвечай только названием модели: {model_label}."
+        + ref_hint
     )
-    session["ready"] = True
-    session["missing_slots"] = []
-    return {
-        "answer": str(prompt_text or "").strip() or "Пустой ответ от модели.",
-        "response_kind": "prompt",
-        "is_prompt": True,
-        "prompt_session": session,
-        "engine": session.get("engine") or "",
-        "asset_type": session.get("asset_type") or "",
-        "output_mode": session.get("output_mode") or "prompt_only",
-    }
+
+
+def _is_prompt_builder_output(answer: str) -> bool:
+    value = str(answer or "").strip()
+    return bool(value) and value != _prompt_builder_redirect_message()
+
 
 def _decode_text_bytes(raw: bytes) -> str:
     for enc in ("utf-8", "utf-8-sig", "cp1251", "latin-1"):
@@ -1098,18 +804,6 @@ class ChatTurn(BaseModel):
     content: str = Field(..., min_length=1, max_length=8000)
 
 
-class PromptSessionIn(BaseModel):
-    asset_type: Optional[str] = None
-    engine: Optional[str] = None
-    goal: Optional[str] = None
-    output_mode: Optional[str] = None
-    has_references: Optional[bool] = None
-    reference_count: Optional[int] = None
-    reference_role: Optional[str] = None
-    ready: Optional[bool] = None
-    missing_slots: Optional[List[str]] = None
-
-
 class WorkspaceChatIn(BaseModel):
     text: str = Field(..., min_length=1, max_length=12000)
     history: Optional[List[ChatTurn]] = None
@@ -1117,7 +811,6 @@ class WorkspaceChatIn(BaseModel):
     mode: str = Field(default="chat", pattern="^(chat|prompt_builder)$")
     temperature: float = Field(default=0.6, ge=0.0, le=1.5)
     max_tokens: int = Field(default=900, ge=150, le=4000)
-    prompt_session: Optional[PromptSessionIn] = None
 
 
 class WorkspaceKlingCreateIn(BaseModel):
@@ -1225,7 +918,6 @@ async def workspace_balance(user: Dict[str, Any] = Depends(get_current_workspace
 async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
     content_type = (request.headers.get("content-type") or "").lower()
     files: List[UploadFile] = []
-    incoming_prompt_session: Dict[str, Any] = {}
 
     if "multipart/form-data" in content_type:
         form = await request.form()
@@ -1234,7 +926,6 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
         history = _sanitize_chat_history(form.get("history"))
         temperature = _clamp_float(form.get("temperature"), 0.6, 0.0, 1.5)
         max_tokens = _clamp_int(form.get("max_tokens"), 900, 150, 4000)
-        incoming_prompt_session = _coerce_prompt_session(form.get("prompt_session"))
         resolved_model = _resolve_workspace_chat_model(form.get("model"), mode)
         files = [f for f in form.getlist("files") if getattr(f, "filename", None)]
     else:
@@ -1244,7 +935,6 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
         history = [{"role": item.role, "content": item.content} for item in (payload.history or []) if item.role in ("user", "assistant")]
         temperature = payload.temperature
         max_tokens = payload.max_tokens
-        incoming_prompt_session = _coerce_prompt_session(payload.prompt_session)
         resolved_model = _resolve_workspace_chat_model(payload.model, mode)
 
     mode = "prompt_builder" if resolved_model["label"] == PROMPT_MODEL_LABEL else mode
@@ -1253,43 +943,34 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
         raise HTTPException(status_code=400, detail="Введите текст или прикрепите хотя бы один файл.")
 
     prepared_files = await _prepare_workspace_chat_attachments(files) if files else {"items": [], "context": "", "image_bytes_list": []}
+    image_refs = [f"@image{i}" for i in range(1, len(prepared_files.get("image_bytes_list") or []) + 1)]
 
     user_text = text_value or "Проанализируй приложенные файлы и кратко скажи, что в них находится, затем предложи полезные следующие шаги."
-    if prepared_files.get("context") and mode != "prompt_builder":
+    if prepared_files.get("context"):
         user_text = f"{user_text}\n\n{prepared_files['context']}"
 
     model_label = resolved_model["label"]
     model_actual = resolved_model["actual"]
-
     if mode == "prompt_builder":
-        reply = await _build_prompt_builder_reply(
-            text=text_value,
-            history=history,
-            prompt_session=incoming_prompt_session,
-            model=model_actual,
-            prepared_files=prepared_files,
+        if not _is_prompt_builder_request(text_value, bool(files)):
+            answer = _prompt_builder_redirect_message()
+            return {
+                "ok": True,
+                "answer": answer,
+                "mode": mode,
+                "model": model_label,
+                "resolved_model": model_actual,
+                "attachments": prepared_files.get("items") or [],
+                "is_prompt": False,
+            }
+        system_prompt = _build_prompt_builder_system_prompt(model_label, image_refs)
+    else:
+        system_prompt = (
+            "Ты — AstraBot Workspace Assistant. "
+            "Помогай как product-minded AI co-pilot: сценарии, промпты, creative direction, тексты, планы и упаковка идей в рабочий пайплайн. "
+            "Пиши по делу, понятно и удобно для дальнейшего запуска в video/image/voice/music студиях. "
+            f"Если пользователь спрашивает, какая модель выбрана в интерфейсе, отвечай только названием модели: {model_label}."
         )
-        return {
-            "ok": True,
-            "answer": reply["answer"],
-            "mode": mode,
-            "model": model_label,
-            "resolved_model": model_actual,
-            "attachments": prepared_files.get("items") or [],
-            "response_kind": reply.get("response_kind") or "system",
-            "is_prompt": bool(reply.get("is_prompt")),
-            "prompt_session": reply.get("prompt_session") or {},
-            "engine": reply.get("engine") or "",
-            "asset_type": reply.get("asset_type") or "",
-            "output_mode": reply.get("output_mode") or "prompt_only",
-        }
-
-    system_prompt = (
-        "Ты — AstraBot Workspace Assistant. "
-        "Помогай как product-minded AI co-pilot: сценарии, промпты, creative direction, тексты, планы и упаковка идей в рабочий пайплайн. "
-        "Пиши по делу, понятно и удобно для дальнейшего запуска в video/image/voice/music студиях. "
-        f"Если пользователь спрашивает, какая модель выбрана в интерфейсе, отвечай только названием модели: {model_label}."
-    )
 
     answer = await openai_chat_answer(
         user_text=user_text,
@@ -1307,12 +988,7 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
         "model": model_label,
         "resolved_model": model_actual,
         "attachments": prepared_files.get("items") or [],
-        "response_kind": "chat",
-        "is_prompt": False,
-        "prompt_session": incoming_prompt_session or {},
-        "engine": "",
-        "asset_type": "",
-        "output_mode": "prompt_only",
+        "is_prompt": _is_prompt_builder_output(answer) if mode == "prompt_builder" else False,
     }
 
 
