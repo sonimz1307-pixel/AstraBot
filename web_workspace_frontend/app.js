@@ -535,11 +535,16 @@ function isPromptBuilderAvailable() {
 }
 
 function ensureChatModeCompatibility(showToast = false) {
-  if (state.chat.mode === 'prompt_builder' && !isPromptBuilderAvailable()) {
-    state.chat.mode = 'chat';
-    if (showToast) {
-      toast('info', 'Режим изменён', 'Prompt Builder доступен только для GPT 5.4. Переключил чат в обычный режим.');
+  if (isPromptBuilderAvailable()) {
+    if (state.chat.mode !== 'prompt_builder') {
+      state.chat.mode = 'prompt_builder';
+      if (showToast) toast('info', 'Режим изменён', 'Для GPT 5.4 включён только Prompt Builder.');
     }
+    return;
+  }
+  if (state.chat.mode !== 'chat') {
+    state.chat.mode = 'chat';
+    if (showToast) toast('info', 'Режим изменён', 'Для GPT 4 mini доступен только обычный чат.');
   }
 }
 
@@ -769,13 +774,23 @@ function renderInspector() {
   }
 }
 
+
 function renderChatWorkspace() {
   ensureChatModeCompatibility();
-  const messages = state.chat.messages.map((m) => `
-    <div class="chat-bubble ${m.role}">${escapeHtml(m.content)}</div>
-  `).join('');
-  const promptBuilderLocked = !isPromptBuilderAvailable();
-  const showQuickChips = state.chat.model === 'gpt-5.4';
+  const isPromptBuilder = state.chat.mode === 'prompt_builder';
+  const messages = state.chat.messages.map((m) => {
+    const canCopyPrompt = m.role === 'assistant' && isPromptBuilder;
+    return `
+      <div class="chat-bubble-wrap ${m.role}">
+        <div class="chat-bubble ${m.role}">${escapeHtml(m.content)}</div>
+        ${canCopyPrompt ? `
+          <div class="chat-bubble-actions">
+            <button class="btn ghost small" data-action="copy-chat-prompt" data-text="${encodeURIComponent(m.content || '')}">Скопировать промпт</button>
+          </div>
+        ` : ''}
+      </div>
+    `;
+  }).join('');
   const attachments = getChatAttachments();
   const attachmentsHtml = attachments.length ? `
     <div class="chat-attachment-strip">
@@ -787,6 +802,21 @@ function renderChatWorkspace() {
       `).join('')}
     </div>
   ` : '';
+  const placeholder = isPromptBuilder
+    ? 'Опиши, какой готовый промпт нужен: модель, сцена, стиль, движение, формат, референсы…'
+    : 'Напиши задачу для ChatGPT, попроси идею, анализ, текст или помощь по проекту...';
+  const quickChips = isPromptBuilder ? `
+    <div class="quick-chips">
+      <button class="chip" data-action="chat-quick" data-prompt="Собери готовый prompt для Kling 3: cinematic commercial, premium lighting, dynamic camera, realistic motion.">Промпт для Kling</button>
+      <button class="chip" data-action="chat-quick" data-prompt="Собери готовый prompt для Veo: ad-style scene, realistic motion, premium product reveal, clean background.">Промпт для Veo</button>
+      <button class="chip" data-action="chat-quick" data-prompt="Собери готовый prompt для Seedance. Если есть референс, используй @image1 прямо в prompt.">Prompt для Seedance</button>
+      <button class="chip" data-action="chat-quick" data-prompt="Усиль мой prompt: сделай его более cinematic, realistic и production-ready.">Усилить промпт</button>
+    </div>
+  ` : '';
+  const modeBanner = isPromptBuilder
+    ? '<div class="chat-mode-banner">GPT 5.4 работает только как Prompt Builder и возвращает только готовый промпт.</div>'
+    : '<div class="chat-mode-banner">GPT 4 mini работает как обычный чат для диалога и рабочих задач.</div>';
+
   return `
     <div class="workspace-grid single">
       <div class="workspace-main placeholder-stage chat">
@@ -794,30 +824,23 @@ function renderChatWorkspace() {
           <div class="chat-workspace-head">
             <div>
               <div class="section-title">Диалог</div>
-              <div class="help-text">Справа оставлены только логически важные настройки: модель и режим. Новый чат убран из интерфейса, потому что для сброса уже есть Reset в правом верхнем углу. Отправка — только внизу у поля ввода.</div>
+              <div class="help-text">Поле ввода закреплено внизу. Для GPT 5.4 доступен только Prompt Builder. Для GPT 4 mini — обычный чат.</div>
             </div>
           </div>
-          ${promptBuilderLocked ? `<div class="chat-mode-banner">Prompt Builder доступен только для GPT 5.4.</div>` : ''}
+          ${modeBanner}
           <div class="chat-feed" id="chatFeed">${messages}</div>
           <div class="chat-composer">
-            ${showQuickChips ? `
-              <div class="quick-chips">
-                <button class="chip" data-action="chat-quick" data-prompt="Придумай 3 идеи для вирусного видео и подготовь промпт для Kling.">Идеи для видео</button>
-                <button class="chip" data-action="chat-quick" data-prompt="Улучши мой промпт для Nano Banana Pro и сделай версию на русском и английском.">Улучшить промпт</button>
-                <button class="chip" data-action="chat-quick" data-prompt="Сделай структуру рекламного ролика и отдельно текст для озвучки.">Сценарий + voiceover</button>
-                <button class="chip" data-action="chat-quick" data-prompt="Напиши идею песни, припев и теги для Suno в коммерческом стиле.">Песня / Suno</button>
-              </div>
-            ` : ''}
+            ${quickChips}
             ${attachmentsHtml}
             <div class="composer-row">
-              <textarea id="chatInput" placeholder="Напиши задачу для ChatGPT, попроси промпт, сценарий, идею ролика или текст песни...">${escapeHtml(state.chat.input || '')}</textarea>
+              <textarea id="chatInput" placeholder="${escapeHtml(placeholder)}">${escapeHtml(state.chat.input || '')}</textarea>
               <div class="composer-actions">
                 <input id="chat_attachments" class="hidden" type="file" multiple>
                 <button class="btn ghost icon-btn" data-action="pick-chat-files" title="Прикрепить файлы" aria-label="Прикрепить файлы">📎</button>
                 <button class="btn primary" data-action="send-chat">Отправить</button>
               </div>
             </div>
-            <div class="help-text">К чату можно прикреплять изображения, TXT, JSON, CSV, DOCX и другие файлы. PDF пока загружается, но без автоматического чтения текста на сервере.</div>
+            <div class="help-text">Можно прикреплять изображения и текстовые файлы. В Prompt Builder для Seedance референсы автоматически передаются как @image1, @image2 и далее.</div>
           </div>
         </div>
       </div>
@@ -1496,8 +1519,9 @@ function mediaCard(title, asset, isVideo = false, multiple = false) {
   `;
 }
 
+
 function renderChatInspector() {
-  const promptBuilderLocked = !isPromptBuilderAvailable();
+  const isPromptBuilder = isPromptBuilderAvailable();
   return `
     <div class="inspector-card">
       <div class="section-title">ChatGPT Studio</div>
@@ -1508,17 +1532,14 @@ function renderChatInspector() {
           <option value="gpt-5.4" ${state.chat.model === 'gpt-5.4' ? 'selected' : ''}>GPT 5.4</option>
         </select>
       </div>
-      <div class="input-group"><label class="label">Mode</label>
-        <select id="chat_mode">
-          <option value="chat" ${state.chat.mode === 'chat' ? 'selected' : ''}>Chat</option>
-          <option value="prompt_builder" ${state.chat.mode === 'prompt_builder' ? 'selected' : ''} ${promptBuilderLocked ? 'disabled' : ''}>Prompt Builder${promptBuilderLocked ? ' · только GPT 5.4' : ''}</option>
-        </select>
+      <div class="input-group"><label class="label">Режим</label>
+        <input type="text" value="${isPromptBuilder ? 'Prompt Builder' : 'Chat'}" disabled>
       </div>
-      <div class="help-text">Prompt Builder — отдельный режим и он доступен только для GPT 5.4. Для GPT 4 mini оставляем обычный чат без лишних технических параметров.</div>
+      <div class="help-text">GPT 5.4 жёстко работает только как Prompt Builder и выдаёт только готовый промпт. GPT 4 mini остаётся обычным чатом.</div>
     </div>
     <div class="inspector-card">
       <div class="section-title">Логика режима</div>
-      <div class="help-text">Убраны только технические поля: Temperature, Max tokens, кнопка отправки и кнопка нового чата из правой панели. Основные выборы модели и режима оставлены здесь.</div>
+      <div class="help-text">Для Seedance при наличии референсов GPT 5.4 должен использовать теги @image1, @image2 и далее прямо внутри итогового prompt. Под ответом доступна кнопка копирования промпта.</div>
     </div>
   `;
 }
@@ -2161,7 +2182,9 @@ async function loadPromptItems(groupId) {
   }
 }
 
+
 async function sendChat() {
+  ensureChatModeCompatibility();
   const outgoing = state.chat.input.trim();
   const attachments = getChatAttachments();
   if (!outgoing && !attachments.length) {
@@ -2180,7 +2203,7 @@ async function sendChat() {
   saveState();
 
   try {
-    const history = state.chat.messages.filter(m => m.role === 'user' || m.role === 'assistant').slice(-12);
+    const history = state.chat.messages.filter((m) => m.role === 'user' || m.role === 'assistant').slice(-12);
     let res;
 
     if (attachments.length) {
@@ -2207,6 +2230,8 @@ async function sendChat() {
           history,
           model: state.chat.model,
           mode: state.chat.mode,
+          temperature: state.chat.temperature,
+          max_tokens: state.chat.maxTokens,
         }),
       });
     }
@@ -2223,6 +2248,7 @@ async function sendChat() {
     state.chat.input = outgoing;
     state.chat.messages.push({ role: 'system', content: `Ошибка: ${String(e.message || e)}` });
     render();
+    saveState();
   }
 }
 
@@ -2636,6 +2662,7 @@ function handleInputChange(target) {
   if (!id) return;
 
   const fileMap = {
+    chat_attachments: ['chat.attachments', true],
     video_startFrame: ['video.startFrame', false],
     video_endFrame: ['video.endFrame', false],
     video_lastFrame: ['video.lastFrame', false],
@@ -2645,7 +2672,6 @@ function handleInputChange(target) {
     video_sourceVideo: ['video.sourceVideo', false],
     image_sourceImage: ['image.sourceImage', false],
     image_baseImage: ['image.baseImage', false],
-    chat_attachments: ['chat.attachments', true],
   };
   if (fileMap[id]) {
     const [key, multiple] = fileMap[id];
@@ -2661,10 +2687,6 @@ function handleInputChange(target) {
     case 'chatInput': state.chat.input = value; break;
     case 'chat_model':
       state.chat.model = value;
-      ensureChatModeCompatibility(true);
-      break;
-    case 'chat_mode':
-      state.chat.mode = value;
       ensureChatModeCompatibility(true);
       break;
     case 'chat_temperature': state.chat.temperature = Number(value); break;
@@ -2766,6 +2788,11 @@ function handleAction(action, dataset = {}) {
       removeChatAttachment(Number(dataset.index || -1));
       render();
       break;
+    case 'copy-chat-prompt': {
+      const text = decodeURIComponent(dataset.text || '');
+      navigator.clipboard.writeText(text).then(() => toast('success', 'Скопировано', 'Промпт скопирован в буфер обмена.')).catch(() => toast('error', 'Не удалось скопировать', 'Скопируй текст вручную.'));
+      break;
+    }
     case 'chat-quick':
       state.chat.input = dataset.prompt || '';
       render();
