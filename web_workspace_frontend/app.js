@@ -8,8 +8,6 @@ const runtime = {
   files: {},
   lastChatBootstrapLoaded: false,
   videoPollTimer: null,
-  chatScrollTop: 0,
-  chatStickToBottom: true,
 };
 
 const state = {
@@ -31,8 +29,9 @@ const state = {
     temperature: Number(localStorage.getItem('astrabot:chatTemperature') || '0.6'),
     maxTokens: Number(localStorage.getItem('astrabot:chatMaxTokens') || '900'),
     input: '',
+    promptSession: JSON.parse(localStorage.getItem('astrabot:chatPromptSession') || 'null'),
     messages: JSON.parse(localStorage.getItem('astrabot:chatMessages') || JSON.stringify([
-      { role: 'system', content: 'Добро пожаловать в AstraBot Workspace. Здесь чат, генерации и проекты живут в одной рабочей зоне.' }
+      { role: 'system', content: 'Добро пожаловать в AstraBot Workspace. Здесь чат, генерации и проекты живут в одной рабочей зоне.', kind: 'system', isPrompt: false }
     ])),
   },
   video: {
@@ -304,6 +303,7 @@ function saveState() {
   localStorage.setItem('astrabot:chatMode', state.chat.mode);
   localStorage.setItem('astrabot:chatTemperature', String(state.chat.temperature));
   localStorage.setItem('astrabot:chatMaxTokens', String(state.chat.maxTokens));
+  localStorage.setItem('astrabot:chatPromptSession', JSON.stringify(state.chat.promptSession || null));
   localStorage.setItem('astrabot:chatMessages', JSON.stringify(state.chat.messages.slice(-50)));
   localStorage.setItem('astrabot:videoState', JSON.stringify({
     provider: state.video.provider,
@@ -520,6 +520,55 @@ function removeChatAttachment(index) {
   else delete runtime.files['chat.attachments'];
   const input = document.getElementById('chat_attachments');
   if (input && !next.length) input.value = '';
+}
+
+function getChatFeed() {
+  return document.getElementById('chatFeed');
+}
+
+function captureChatFeedState() {
+  const feed = getChatFeed();
+  if (!feed) return null;
+  const threshold = 56;
+  const distanceToBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight;
+  return {
+    scrollTop: feed.scrollTop,
+    pinnedToBottom: distanceToBottom <= threshold,
+  };
+}
+
+function restoreChatFeedState(snapshot, forceBottom = false) {
+  const feed = getChatFeed();
+  if (!feed) return;
+  if (forceBottom || snapshot?.pinnedToBottom) {
+    feed.scrollTop = feed.scrollHeight;
+    return;
+  }
+  if (snapshot && Number.isFinite(snapshot.scrollTop)) {
+    feed.scrollTop = snapshot.scrollTop;
+  }
+}
+
+function getChatPlaceholder() {
+  const isPromptBuilder = state.chat.mode === 'prompt_builder';
+  if (!isPromptBuilder) {
+    return 'Напиши задачу для ChatGPT, попроси идею, анализ, текст или помощь по проекту...';
+  }
+  const session = state.chat.promptSession || {};
+  const missing = Array.isArray(session.missing_slots) ? session.missing_slots : [];
+  if (missing.includes('asset_type')) {
+    return 'Опиши, нужен промпт для фото, видео, универсальный вариант или улучшение черновика...';
+  }
+  if (missing.includes('engine')) {
+    return 'Укажи движок: Kling, Veo, Seedance, Sora 2, Nano Banana или Фотосессия...';
+  }
+  if (missing.includes('reference_role')) {
+    return 'Напиши, что брать из референса: персонажа, стиль, товар, композицию или первый кадр...';
+  }
+  if (missing.includes('goal')) {
+    return 'Опиши, что именно должно получиться в финале: сцена, стиль, действие и результат...';
+  }
+  return 'Опиши задачу свободно. Я уточню только недостающие данные и выдам один готовый production-ready prompt.';
 }
 
 function getCurrentVideoModel() {
@@ -744,39 +793,6 @@ function renderRecentRuns() {
   `).join('');
 }
 
-
-function captureChatFeedState() {
-  const feed = document.getElementById('chatFeed');
-  if (!feed) return;
-  runtime.chatScrollTop = feed.scrollTop;
-  const distanceFromBottom = feed.scrollHeight - (feed.scrollTop + feed.clientHeight);
-  runtime.chatStickToBottom = distanceFromBottom <= 120;
-}
-
-function restoreChatFeedState(options = {}) {
-  const { forceBottom = false } = options;
-  const feed = document.getElementById('chatFeed');
-  if (!feed) return;
-  if (forceBottom || runtime.chatStickToBottom) {
-    feed.scrollTop = feed.scrollHeight;
-    runtime.chatScrollTop = feed.scrollTop;
-    runtime.chatStickToBottom = true;
-    return;
-  }
-  feed.scrollTop = Math.max(0, Number(runtime.chatScrollTop) || 0);
-}
-
-function bindChatFeedScroll() {
-  const feed = document.getElementById('chatFeed');
-  if (!feed || feed.dataset.scrollBound === '1') return;
-  feed.dataset.scrollBound = '1';
-  feed.addEventListener('scroll', () => {
-    runtime.chatScrollTop = feed.scrollTop;
-    const distanceFromBottom = feed.scrollHeight - (feed.scrollTop + feed.clientHeight);
-    runtime.chatStickToBottom = distanceFromBottom <= 120;
-  });
-}
-
 function renderWorkspace() {
   const el = document.getElementById('workspaceBody');
   switch (state.studio) {
@@ -816,10 +832,12 @@ function renderChatWorkspace() {
   ensureChatModeCompatibility();
   const isPromptBuilder = state.chat.mode === 'prompt_builder';
   const messages = state.chat.messages.map((m) => {
-    const canCopyPrompt = m.role === 'assistant' && isPromptBuilder;
+    const kind = String(m.kind || (m.role === 'assistant' && isPromptBuilder ? 'assistant' : 'system')).toLowerCase();
+    const bubbleClass = `chat-bubble ${m.role}${kind ? ` ${kind}` : ''}`;
+    const canCopyPrompt = m.role === 'assistant' && isPromptBuilder && m.isPrompt === true && kind === 'prompt';
     return `
       <div class="chat-bubble-wrap ${m.role}">
-        <div class="chat-bubble ${m.role}">${escapeHtml(m.content)}</div>
+        <div class="${bubbleClass}">${escapeHtml(m.content)}</div>
         ${canCopyPrompt ? `
           <div class="chat-bubble-actions">
             <button class="btn ghost small" data-action="copy-chat-prompt" data-text="${encodeURIComponent(m.content || '')}">Скопировать промпт</button>
@@ -839,17 +857,7 @@ function renderChatWorkspace() {
       `).join('')}
     </div>
   ` : '';
-  const placeholder = isPromptBuilder
-    ? 'Опиши, какой готовый промпт нужен: модель, сцена, стиль, движение, формат, референсы…'
-    : 'Напиши задачу для ChatGPT, попроси идею, анализ, текст или помощь по проекту...';
-  const quickChips = isPromptBuilder ? `
-    <div class="quick-chips">
-      <button class="chip" data-action="chat-quick" data-prompt="Собери готовый prompt для Kling 3: cinematic commercial, premium lighting, dynamic camera, realistic motion.">Промпт для Kling</button>
-      <button class="chip" data-action="chat-quick" data-prompt="Собери готовый prompt для Veo: ad-style scene, realistic motion, premium product reveal, clean background.">Промпт для Veo</button>
-      <button class="chip" data-action="chat-quick" data-prompt="Собери готовый prompt для Seedance. Если есть референс, используй @image1 прямо в prompt.">Prompt для Seedance</button>
-      <button class="chip" data-action="chat-quick" data-prompt="Усиль мой prompt: сделай его более cinematic, realistic и production-ready.">Усилить промпт</button>
-    </div>
-  ` : '';
+  const placeholder = getChatPlaceholder();
 
   return `
     <div class="workspace-grid single">
@@ -857,7 +865,6 @@ function renderChatWorkspace() {
         <div class="chat-shell">
           <div class="chat-feed" id="chatFeed">${messages}</div>
           <div class="chat-composer">
-            ${quickChips}
             ${attachmentsHtml}
             <div class="composer-row">
               <textarea id="chatInput" placeholder="${escapeHtml(placeholder)}">${escapeHtml(state.chat.input || '')}</textarea>
@@ -2205,11 +2212,13 @@ async function loadPromptItems(groupId) {
 
 
 async function sendChat() {
+  if (!requireAuth()) return;
   ensureChatModeCompatibility();
-  const outgoing = state.chat.input.trim();
+
+  const outgoing = String(state.chat.input || '').trim();
   const attachments = getChatAttachments();
-  if (!outgoing && !attachments.length) {
-    toast('error', 'Пустое сообщение', 'Введите текст в чат или прикрепите файл.');
+  if (!outgoing && attachments.length === 0) {
+    toast('error', 'Пустое сообщение', 'Напиши текст или прикрепи файл.');
     return;
   }
 
@@ -2218,15 +2227,18 @@ async function sendChat() {
     : '';
   const userMessage = [outgoing, filePreview].filter(Boolean).join('\n\n') || filePreview;
 
-  runtime.chatStickToBottom = true;
-  state.chat.messages.push({ role: 'user', content: userMessage });
+  const beforeRender = captureChatFeedState();
+  state.chat.messages.push({ role: 'user', content: userMessage, kind: 'user', isPrompt: false });
   state.chat.input = '';
   render();
-  restoreChatFeedState({ forceBottom: true });
+  restoreChatFeedState(beforeRender, true);
   saveState();
 
   try {
-    const history = state.chat.messages.filter((m) => m.role === 'user' || m.role === 'assistant').slice(-12);
+    const history = state.chat.messages
+      .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .slice(-12)
+      .map((m) => ({ role: m.role, content: m.content }));
     let res;
 
     if (attachments.length) {
@@ -2237,6 +2249,7 @@ async function sendChat() {
       form.append('mode', state.chat.mode);
       form.append('temperature', String(state.chat.temperature));
       form.append('max_tokens', String(state.chat.maxTokens));
+      form.append('prompt_session', JSON.stringify(state.chat.promptSession || null));
       attachments.forEach((item) => {
         if (item?.file) form.append('files', item.file, item.name || item.file.name || 'file');
       });
@@ -2255,24 +2268,34 @@ async function sendChat() {
           mode: state.chat.mode,
           temperature: state.chat.temperature,
           max_tokens: state.chat.maxTokens,
+          prompt_session: state.chat.promptSession || null,
         }),
       });
     }
 
     const data = await res.json();
-    state.chat.messages.push({ role: 'assistant', content: data.answer || 'Пустой ответ.' });
+    state.chat.promptSession = data.prompt_session || null;
+    const beforeAssistantRender = captureChatFeedState();
+    state.chat.messages.push({
+      role: 'assistant',
+      content: data.answer || 'Пустой ответ.',
+      kind: data.response_kind || 'assistant',
+      isPrompt: !!data.is_prompt,
+      engine: data.engine || '',
+      assetType: data.asset_type || '',
+      outputMode: data.output_mode || 'prompt_only',
+    });
     pushRun({ studio: 'ChatGPT', title: `Chat · ${state.chat.mode === 'prompt_builder' ? 'Prompt Builder' : 'Chat'}`, summary: (outgoing || filePreview).slice(0, 100) });
     clearChatAttachments();
-    runtime.chatStickToBottom = true;
     render();
-    restoreChatFeedState({ forceBottom: true });
+    restoreChatFeedState(beforeAssistantRender, true);
     saveState();
   } catch (e) {
     state.chat.input = outgoing;
-    runtime.chatStickToBottom = true;
-    state.chat.messages.push({ role: 'system', content: `Ошибка: ${String(e.message || e)}` });
+    const beforeErrorRender = captureChatFeedState();
+    state.chat.messages.push({ role: 'system', content: `Ошибка: ${String(e.message || e)}`, kind: 'system', isPrompt: false });
     render();
-    restoreChatFeedState({ forceBottom: true });
+    restoreChatFeedState(beforeErrorRender, true);
     saveState();
   }
 }
@@ -2713,6 +2736,7 @@ function handleInputChange(target) {
     case 'chat_model':
       state.chat.model = value;
       ensureChatModeCompatibility(true);
+      if (state.chat.mode !== 'prompt_builder') state.chat.promptSession = null;
       break;
     case 'chat_temperature': state.chat.temperature = Number(value); break;
     case 'chat_maxTokens': state.chat.maxTokens = Number(value); break;
@@ -2818,10 +2842,6 @@ function handleAction(action, dataset = {}) {
       navigator.clipboard.writeText(text).then(() => toast('success', 'Скопировано', 'Промпт скопирован в буфер обмена.')).catch(() => toast('error', 'Не удалось скопировать', 'Скопируй текст вручную.'));
       break;
     }
-    case 'chat-quick':
-      state.chat.input = dataset.prompt || '';
-      render();
-      break;
     case 'run-video': runVideo(); break;
     case 'poll-video-task': pollVideoTask(); break;
     case 'clear-video-run': clearVideoRunState({ keepPrompt: true }); render(); break;
@@ -2893,17 +2913,12 @@ function runCurrentStudio() {
 
 function render() {
   ensureChatModeCompatibility();
-  if (state.studio === 'chat') captureChatFeedState();
   renderNav();
   renderHeader();
   renderRecentRuns();
   renderWorkspace();
   renderInspector();
   enhanceCustomSelects();
-  if (state.studio === 'chat') {
-    bindChatFeedScroll();
-    restoreChatFeedState();
-  }
 }
 
 document.addEventListener('click', (e) => {
