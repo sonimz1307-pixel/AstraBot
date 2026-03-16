@@ -12,7 +12,8 @@
 <body>
   <div class="editor-shell">
     <header class="editor-header">
-      <div>
+      <div class="header-main">
+        <a id="backLink" href="https://astrabot-workspace.onrender.com" class="back-link">← Назад в Workspace</a>
         <div class="eyebrow">AstraBot</div>
         <h1>Video Editor v2</h1>
         <p>Монтаж без лишней технички: клипы, музыка, резка, переходы и экспорт проекта.</p>
@@ -23,6 +24,13 @@
         <button id="renderBtn" class="btn primary">Экспорт</button>
       </div>
     </header>
+
+    <section id="authBanner" class="auth-banner hidden">
+      <div>
+        <strong>Редактор открыт без авторизации Workspace.</strong>
+        <p>Из-за разных доменов токен не подтягивается автоматически. Открывай редактор из кнопки на сайте, которая передаёт токен, тогда появятся история генераций, медиатека и сохранение проектов.</p>
+      </div>
+    </section>
 
     <section class="editor-grid">
       <aside class="panel library-panel">
