@@ -33,26 +33,31 @@ const state = {
       { role: 'system', content: 'Добро пожаловать в AstraBot Workspace. Здесь чат, генерации и проекты живут в одной рабочей зоне.' }
     ])),
   },
-  video: {
-    provider: DEFAULT_VIDEO_STATE.provider || 'kling',
-    model: DEFAULT_VIDEO_STATE.model || 'kling-3.0',
-    mode: DEFAULT_VIDEO_STATE.mode || 'text_to_video',
-    prompt: DEFAULT_VIDEO_STATE.prompt || '',
-    duration: DEFAULT_VIDEO_STATE.duration || '5',
-    resolution: DEFAULT_VIDEO_STATE.resolution || '720',
-    aspectRatio: DEFAULT_VIDEO_STATE.aspectRatio || '16:9',
-    enableAudio: !!DEFAULT_VIDEO_STATE.enableAudio,
-    quality: DEFAULT_VIDEO_STATE.quality || 'pro',
-    outputUrl: DEFAULT_VIDEO_STATE.outputUrl || '',
-    downloadUrl: DEFAULT_VIDEO_STATE.downloadUrl || '',
-    coverUrl: DEFAULT_VIDEO_STATE.coverUrl || '',
-    percent: Number.isFinite(Number(DEFAULT_VIDEO_STATE.percent)) ? Number(DEFAULT_VIDEO_STATE.percent) : null,
-    generationId: DEFAULT_VIDEO_STATE.generationId || '',
-    providerTaskId: DEFAULT_VIDEO_STATE.providerTaskId || '',
-    statusText: DEFAULT_VIDEO_STATE.statusText || 'Здесь будут превью, статусы и готовые видео.',
-    errorText: DEFAULT_VIDEO_STATE.errorText || '',
-    lastStatus: DEFAULT_VIDEO_STATE.lastStatus || 'idle',
-  },
+
+video: {
+  provider: DEFAULT_VIDEO_STATE.provider || 'kling',
+  model: DEFAULT_VIDEO_STATE.model || 'kling-3.0',
+  mode: DEFAULT_VIDEO_STATE.mode || 'text_to_video',
+  prompt: DEFAULT_VIDEO_STATE.prompt || '',
+  duration: DEFAULT_VIDEO_STATE.duration || '5',
+  resolution: DEFAULT_VIDEO_STATE.resolution || '720',
+  aspectRatio: DEFAULT_VIDEO_STATE.aspectRatio || '16:9',
+  enableAudio: !!DEFAULT_VIDEO_STATE.enableAudio,
+  quality: DEFAULT_VIDEO_STATE.quality || 'pro',
+  outputUrl: '',
+  downloadUrl: '',
+  coverUrl: '',
+  percent: null,
+  generationId: '',
+  providerTaskId: '',
+  statusText: 'Выбери модель, настрой параметры и нажми запуск.',
+  errorText: '',
+  lastStatus: 'idle',
+  panel: DEFAULT_VIDEO_STATE.panel || 'params',
+  motionDurationSec: Number.isFinite(Number(DEFAULT_VIDEO_STATE.motionDurationSec)) ? Number(DEFAULT_VIDEO_STATE.motionDurationSec) : null,
+  isGenerating: false,
+},
+
   image: {
     provider: 'nano_banana_pro',
     model: 'nano-banana-pro',
@@ -125,37 +130,36 @@ const STUDIO_META = {
   profile: { emoji: '👤', title: 'Profile', subtitle: 'Связка сайта и Telegram-аккаунта, базовые настройки и состояние системы.' },
 };
 
+
 const VIDEO_REGISTRY = {
   kling: {
     name: 'Kling',
     models: {
-      'kling-1.6': {
-        name: 'Kling 1.6',
-        backend: 'planned',
+      'motion-control': {
+        name: 'Motion Control',
+        backend: 'live',
         modes: {
           motion_control: { name: 'Motion Control', fields: ['avatarImage', 'motionVideo', 'prompt', 'quality'] },
-          image_to_video: { name: 'Image → Video', fields: ['startFrame', 'prompt', 'duration', 'quality'] },
+        },
+      },
+      'kling-1.6': {
+        name: 'Kling 1.6',
+        backend: 'live',
+        modes: {
+          image_to_video: { name: 'Image → Video', fields: ['startFrame', 'prompt', 'durationLegacy', 'quality'] },
         },
       },
       'kling-2.5': {
         name: 'Kling 2.5',
-        backend: 'planned',
+        backend: 'live',
         modes: {
           text_to_video: { name: 'Text → Video', fields: ['prompt', 'duration', 'aspectRatio'] },
-          image_to_video: { name: 'Image → Video', fields: ['startFrame', 'prompt', 'duration', 'aspectRatio'] },
-        },
-      },
-      'kling-2.6': {
-        name: 'Kling 2.6',
-        backend: 'planned',
-        modes: {
-          text_to_video: { name: 'Text → Video', fields: ['prompt', 'duration', 'aspectRatio'] },
-          image_to_video: { name: 'Image → Video', fields: ['startFrame', 'prompt', 'duration', 'aspectRatio'] },
+          image_to_video: { name: 'Image → Video', fields: ['startFrame', 'endFrame', 'prompt', 'duration', 'aspectRatio'] },
         },
       },
       'kling-3.0': {
         name: 'Kling 3.0',
-        backend: 'partial',
+        backend: 'live',
         modes: {
           text_to_video: { name: 'Text → Video', fields: ['prompt', 'duration', 'resolution', 'aspectRatio', 'enableAudio'] },
           image_to_video: { name: 'Image → Video', fields: ['startFrame', 'endFrame', 'prompt', 'duration', 'resolution', 'aspectRatio', 'enableAudio'] },
@@ -169,15 +173,15 @@ const VIDEO_REGISTRY = {
     models: {
       'veo-fast': {
         name: 'Veo Fast',
-        backend: 'planned',
+        backend: 'live',
         modes: {
           text_to_video: { name: 'Text → Video', fields: ['prompt', 'durationVeo', 'aspectRatioVeo', 'generateAudio'] },
           image_to_video: { name: 'Image → Video', fields: ['startFrame', 'prompt', 'durationVeo', 'aspectRatioVeo', 'generateAudio'] },
         },
       },
       'veo-3.1-pro': {
-        name: 'Veo 3.1 Pro',
-        backend: 'planned',
+        name: 'Veo 3.1',
+        backend: 'live',
         modes: {
           text_to_video: { name: 'Text → Video', fields: ['prompt', 'durationVeo', 'aspectRatioVeo', 'generateAudio'] },
           image_to_video: { name: 'Image → Video', fields: ['startFrame', 'lastFrame', 'referenceImages', 'prompt', 'durationVeo', 'aspectRatioVeo', 'generateAudio'] },
@@ -190,16 +194,15 @@ const VIDEO_REGISTRY = {
     models: {
       'seedance-preview': {
         name: 'Seedance Preview',
-        backend: 'planned',
+        backend: 'live',
         modes: {
           text_to_video: { name: 'Text → Video', fields: ['prompt', 'durationSeedance', 'aspectRatioSeedance'] },
           image_to_video: { name: 'Image → Video', fields: ['referenceImages', 'prompt', 'durationSeedance', 'aspectRatioSeedance'] },
-          extend_video: { name: 'Extend Video', fields: ['sourceVideo', 'prompt', 'durationSeedance'] },
         },
       },
       'seedance-fast': {
         name: 'Seedance Fast',
-        backend: 'planned',
+        backend: 'live',
         modes: {
           text_to_video: { name: 'Text → Video', fields: ['prompt', 'durationSeedance', 'aspectRatioSeedance'] },
           image_to_video: { name: 'Image → Video', fields: ['referenceImages', 'prompt', 'durationSeedance', 'aspectRatioSeedance'] },
@@ -212,7 +215,7 @@ const VIDEO_REGISTRY = {
     models: {
       'sora-2': {
         name: 'Sora 2',
-        backend: 'planned',
+        backend: 'live',
         modes: {
           text_to_video: { name: 'Text → Video', fields: ['prompt', 'durationSora', 'aspectRatioSora'] },
         },
@@ -320,15 +323,8 @@ function saveState() {
     aspectRatio: state.video.aspectRatio,
     enableAudio: state.video.enableAudio,
     quality: state.video.quality,
-    outputUrl: state.video.outputUrl,
-    downloadUrl: state.video.downloadUrl,
-    coverUrl: state.video.coverUrl,
-    percent: state.video.percent,
-    generationId: state.video.generationId,
-    providerTaskId: state.video.providerTaskId,
-    statusText: state.video.statusText,
-    errorText: state.video.errorText,
-    lastStatus: state.video.lastStatus,
+    panel: state.video.panel,
+    motionDurationSec: state.video.motionDurationSec,
   }));
 }
 
@@ -580,6 +576,165 @@ function currentMeta() {
     case 'profile': return { studio: 'Profile', provider: 'User State', model: 'Telegram', mode: 'System' };
     default: return { studio: 'AstraBot', provider: 'Workspace', model: '—', mode: '—' };
   }
+}
+
+
+
+function videoProviderConfig() {
+  return VIDEO_REGISTRY[state.video.provider] || VIDEO_REGISTRY.kling;
+}
+
+function videoModelConfig() {
+  return videoProviderConfig().models[state.video.model] || Object.values(videoProviderConfig().models)[0];
+}
+
+function videoModeConfig() {
+  return videoModelConfig().modes[state.video.mode] || Object.values(videoModelConfig().modes)[0];
+}
+
+function syncVideoSelection() {
+  const provider = VIDEO_REGISTRY[state.video.provider] ? state.video.provider : 'kling';
+  state.video.provider = provider;
+  const providerConfig = VIDEO_REGISTRY[provider];
+  if (!providerConfig.models[state.video.model]) {
+    state.video.model = Object.keys(providerConfig.models)[0];
+  }
+  const modelConfig = providerConfig.models[state.video.model];
+  if (!modelConfig.modes[state.video.mode]) {
+    state.video.mode = Object.keys(modelConfig.modes)[0];
+  }
+}
+
+function pluralizeTokens(value) {
+  const n = Math.abs(Number(value) || 0);
+  const n10 = n % 10;
+  const n100 = n % 100;
+  if (n10 === 1 && n100 !== 11) return 'токен';
+  if (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14)) return 'токена';
+  return 'токенов';
+}
+
+function getVideoRunCost() {
+  syncVideoSelection();
+  const duration = Number(state.video.duration || 0);
+  const quality = String(state.video.quality || 'pro').toLowerCase();
+  const model = state.video.model;
+  if (model === 'motion-control') {
+    const seconds = Number(state.video.motionDurationSec || 0);
+    if (!seconds) return { known: false, label: '▶ Запуск', helper: 'Стоимость зависит от длины референс-видео.' };
+    const rate = quality === 'standard' ? 1 : 2;
+    const tokens = Math.max(1, Math.ceil(seconds)) * rate;
+    return { known: true, tokens, label: `▶ Запуск • ${tokens} ${pluralizeTokens(tokens)}` };
+  }
+  if (model === 'kling-1.6') {
+    const rate = quality === 'standard' ? 1 : 2;
+    const tokens = Math.max(1, duration) * rate;
+    return { known: true, tokens, label: `▶ Запуск • ${tokens} ${pluralizeTokens(tokens)}` };
+  }
+  if (model === 'kling-2.5') {
+    const tokens = Math.max(1, duration);
+    return { known: true, tokens, label: `▶ Запуск • ${tokens} ${pluralizeTokens(tokens)}` };
+  }
+  if (model === 'kling-3.0') {
+    const rate = state.video.enableAudio ? 3 : 2;
+    const tokens = Math.max(1, duration) * rate;
+    return { known: true, tokens, label: `▶ Запуск • ${tokens} ${pluralizeTokens(tokens)}` };
+  }
+  if (model === 'veo-fast') {
+    const rate = state.video.enableAudio ? 2 : 1;
+    const tokens = Math.max(1, duration) * rate;
+    return { known: true, tokens, label: `▶ Запуск • ${tokens} ${pluralizeTokens(tokens)}` };
+  }
+  if (model === 'veo-3.1-pro') {
+    const rate = state.video.enableAudio ? 3 : 2;
+    const tokens = Math.max(1, duration) * rate;
+    return { known: true, tokens, label: `▶ Запуск • ${tokens} ${pluralizeTokens(tokens)}` };
+  }
+  if (model === 'seedance-preview') {
+    const tokens = Math.max(1, duration) * 2;
+    return { known: true, tokens, label: `▶ Запуск • ${tokens} ${pluralizeTokens(tokens)}` };
+  }
+  if (model === 'seedance-fast') {
+    const tokens = Math.max(1, duration);
+    return { known: true, tokens, label: `▶ Запуск • ${tokens} ${pluralizeTokens(tokens)}` };
+  }
+  if (model === 'sora-2') {
+    const costMap = { 4: 5, 8: 10, 12: 15 };
+    const tokens = costMap[duration] || 5;
+    return { known: true, tokens, label: `▶ Запуск • ${tokens} ${pluralizeTokens(tokens)}` };
+  }
+  return { known: false, label: '▶ Запуск' };
+}
+
+function videoRunButtonLabel() {
+  if (state.video.isGenerating) return '⏳ Генерация...';
+  const cost = getVideoRunCost();
+  if (cost.known) return cost.label;
+  return cost.label || '▶ Запуск';
+}
+
+function setVideoPanel(panel) {
+  state.video.panel = panel === 'library' ? 'library' : 'params';
+  if (state.video.panel === 'library' && state.authToken) {
+    loadVideoHistory({ silent: true, keepSelection: true }).catch(() => {});
+  }
+  saveState();
+  render();
+}
+
+function historySelectedItem() {
+  if (!state.history.selectedId) return null;
+  return state.history.items.find((item) => item.id === state.history.selectedId) || state.history.selectedItem || null;
+}
+
+function historyVideoUrl(item) {
+  if (!item) return '';
+  return item.video_url || item.download_url || item.signed_url || item.provider_video_url || '';
+}
+
+function historyVideoDownloadUrl(item) {
+  if (!item) return '';
+  return item.download_url || item.video_url || item.signed_url || item.provider_video_url || '';
+}
+
+function historyStatusLabel(status) {
+  const value = String(status || '').toLowerCase();
+  if (['completed', 'success', 'succeeded', 'done', 'finished'].includes(value)) return 'Готово';
+  if (['failed', 'error'].includes(value)) return 'Ошибка';
+  if (['queued', 'pending', 'submitted'].includes(value)) return 'В очереди';
+  if (['processing', 'running', 'in_progress'].includes(value)) return 'Генерация';
+  return value ? value : 'Ожидание';
+}
+
+function historyStatusTone(status) {
+  const value = String(status || '').toLowerCase();
+  if (['completed', 'success', 'succeeded', 'done', 'finished'].includes(value)) return 'ok';
+  if (['failed', 'error'].includes(value)) return 'danger';
+  if (['queued', 'pending', 'submitted', 'processing', 'running', 'in_progress'].includes(value)) return 'warn';
+  return 'muted';
+}
+
+async function probeMotionDuration(fileObj) {
+  if (!fileObj?.url) {
+    state.video.motionDurationSec = null;
+    saveState();
+    render();
+    return;
+  }
+  const video = document.createElement('video');
+  video.preload = 'metadata';
+  video.src = fileObj.url;
+  video.onloadedmetadata = () => {
+    const duration = Number(video.duration || 0);
+    state.video.motionDurationSec = Number.isFinite(duration) && duration > 0 ? Math.ceil(duration) : null;
+    saveState();
+    render();
+  };
+  video.onerror = () => {
+    state.video.motionDurationSec = null;
+    saveState();
+    render();
+  };
 }
 
 function renderNav() {
@@ -1012,7 +1167,7 @@ function stopVideoPolling() {
 }
 
 function startVideoPolling({ immediate = false } = {}) {
-  if (!state.video.providerTaskId || state.video.outputUrl || isVideoTaskFailed(state.video.lastStatus)) return;
+  if (!state.video.generationId || state.video.outputUrl || isVideoTaskFailed(state.video.lastStatus)) return;
   stopVideoPolling();
   runtime.videoPollTimer = setInterval(() => {
     pollVideoTask({ silent: true, fromAuto: true }).catch(() => {});
@@ -1032,53 +1187,40 @@ function clearVideoRunState({ keepPrompt = true } = {}) {
   state.video.providerTaskId = '';
   state.video.errorText = '';
   state.video.lastStatus = 'idle';
-  state.video.statusText = 'Поля очищены. Выбери модель и режим заново.';
+  state.video.isGenerating = false;
+  state.video.statusText = 'Выбери модель, настрой параметры и нажми запуск.';
   if (!keepPrompt) state.video.prompt = '';
   saveState();
 }
 
-function renderVideoWorkspace() {
-  const startFrame = getFile('video.startFrame');
-  const endFrame = getFile('video.endFrame');
-  const lastFrame = getFile('video.lastFrame');
-  const motionVideo = getFile('video.motionVideo');
-  const avatarImage = getFile('video.avatarImage');
-  const refs = getFile('video.referenceImages');
-  const sourceVideo = getFile('video.sourceVideo');
-  const uploadedCards = [
-    mediaCard('Start frame', startFrame),
-    mediaCard('End frame', endFrame),
-    mediaCard('Last frame', lastFrame),
-    mediaCard('Avatar image', avatarImage),
-    mediaCard('Motion video', motionVideo, true),
-    mediaCard('Source video', sourceVideo, true),
-    mediaCard('Reference images', refs, false, true),
-  ].filter(Boolean).join('');
 
+function renderVideoWorkspace() {
+  const activeItem = historySelectedItem();
+  const showHistoryVideo = state.video.panel === 'library' && activeItem && historyVideoUrl(activeItem);
+  const previewUrl = showHistoryVideo ? historyVideoUrl(activeItem) : state.video.outputUrl;
   const statusTone = videoStatusTone(state.video.lastStatus);
   const statusLabel = videoStatusLabel(state.video.lastStatus);
-  const showRunInfo = !!(state.video.providerTaskId || state.video.prompt || state.video.outputUrl || state.video.errorText);
-  const progressValue = Number.isFinite(Number(state.video.percent)) ? Math.max(0, Math.min(100, Number(state.video.percent))) : null;
-  const loadingHeadline = getVideoLoadingHeadline(progressValue, state.video.lastStatus);
-  const loadingSubline = getVideoLoadingSubline(progressValue, state.video.lastStatus);
-  const loadingPhase = getVideoLoadingPhase(state.video.lastStatus);
-  const downloadHref = state.video.downloadUrl || state.video.outputUrl;
-  const historyShelf = renderVideoHistoryShelf();
+  const loadingHeadline = getVideoLoadingHeadline(state.video.percent, state.video.lastStatus);
+  const loadingSubline = getVideoLoadingSubline(state.video.percent, state.video.lastStatus);
+  const assets = [
+    mediaCard('Start frame', getFile('video.startFrame')),
+    mediaCard('End frame', getFile('video.endFrame')),
+    mediaCard('Last frame', getFile('video.lastFrame')),
+    mediaCard('Avatar image', getFile('video.avatarImage')),
+    mediaCard('Motion video', getFile('video.motionVideo'), true),
+    mediaCard('Reference images', getFile('video.referenceImages'), false, true),
+  ].filter(Boolean).join('');
 
-  const outputBlock = state.video.outputUrl ? `
-    <div style="display:grid; gap:16px; width:min(980px, 100%);">
-      <video class="preview-media" src="${escapeHtml(state.video.outputUrl)}" controls playsinline poster="${escapeHtml(state.video.coverUrl || '')}"></video>
-      <div class="result-card">
-        <div class="field-head"><h4>Видео готово</h4><span class="badge ok">${escapeHtml(statusLabel)}</span></div>
-        <small>${escapeHtml(state.video.statusText || 'Результат получен и сохранён в рабочей зоне.')}</small>
-        <div class="actions compact-gap" style="margin-top:12px; flex-wrap:wrap;">
-          <a class="btn primary" href="${escapeHtml(downloadHref)}" download>Скачать видео</a>
-          <button class="btn ghost" data-action="switch-studio" data-studio="history">История видео</button>
-          ${state.video.providerTaskId ? `<button class="btn outline" data-action="clear-video-run">Очистить запуск</button>` : ''}
-        </div>
+  const stageInner = previewUrl ? `
+    <div class="video-stage-result">
+      <video class="preview-media" src="${escapeHtml(previewUrl)}" controls playsinline poster="${escapeHtml(state.video.coverUrl || '')}"></video>
+      <div class="actions compact-gap" style="justify-content:center; flex-wrap:wrap; margin-top:14px;">
+        <a class="btn primary" href="${escapeHtml(state.video.downloadUrl || previewUrl)}" download>Скачать видео</a>
+        <button class="btn ghost" data-action="show-video-library">История видео</button>
+        <button class="btn outline" data-action="clear-video-run">Очистить</button>
       </div>
     </div>
-  ` : state.video.providerTaskId ? `
+  ` : (state.video.generationId ? `
     <div class="video-loader-shell video-loader-shell-scan">
       <div class="video-scan-stage">
         <div class="video-scan-grid"></div>
@@ -1095,58 +1237,39 @@ function renderVideoWorkspace() {
         <strong>${escapeHtml(loadingHeadline)}</strong>
         <div>${escapeHtml(loadingSubline)}</div>
       </div>
-      <div class="video-scan-meta">
-        <span class="meta-pill subtle">AI scan / render engine</span>
-        <span class="meta-pill subtle">${escapeHtml(loadingPhase)}</span>
-      </div>
-      <div class="video-scan-steps">
-        <div class="scan-step active"><span class="scan-dot"></span><b>Задача отправлена</b></div>
-        <div class="scan-step active"><span class="scan-dot"></span><b>Нейросеть собирает видео</b></div>
-        <div class="scan-step ${['completed', 'success', 'succeeded', 'finished', 'done'].includes(String(state.video.lastStatus || '').toLowerCase()) ? 'active' : ''}"><span class="scan-dot"></span><b>Подтягиваем итоговый файл</b></div>
-      </div>
-      <div class="actions compact-gap" style="margin-top:16px; justify-content:center; flex-wrap:wrap;">
-        <button class="btn primary" data-action="poll-video-task">Проверить статус</button>
-        <button class="btn ghost" data-action="clear-video-run">Сбросить запуск</button>
-      </div>
     </div>
   ` : `
     <div class="empty-copy">
-      <strong>Video workspace</strong>
-      <div>Выбери модель, режим и нужные входы справа. После запуска статус, ошибки, история и готовые видео будут появляться прямо здесь, в рабочей зоне.</div>
+      <strong>Видео появится здесь</strong>
+      <div>При открытии студии всегда показывается чистая рабочая область. Выбери модель справа, укажи параметры и нажми запуск.</div>
     </div>
-  `;
+  `);
 
   return `
-    <div class="workspace-grid single">
-      <div class="workspace-main scroll">
-        <div class="placeholder-stage video">
-          ${outputBlock}
-        </div>
-        <div class="result-card" style="margin-top:16px;">
-          <div class="field-head"><h4>Текущий запуск</h4><span class="badge ${statusTone}">${escapeHtml(statusLabel)}</span></div>
-          <small>${escapeHtml(state.video.errorText || state.video.statusText || 'Состояние запуска будет показано здесь.')}</small>
-          ${showRunInfo ? `
-            <div class="tableish" style="margin-top:12px;">
-              <div class="table-row"><span class="muted">Generation ID</span><span>${escapeHtml(state.video.generationId || '—')}</span></div>
-              <div class="table-row"><span class="muted">Task ID</span><span>${escapeHtml(state.video.providerTaskId || '—')}</span></div>
-              <div class="table-row"><span class="muted">Режим</span><span>${escapeHtml(state.video.mode || '—')}</span></div>
-              <div class="table-row"><span class="muted">Prompt</span><span>${escapeHtml(state.video.prompt || '—')}</span></div>
-              <div class="table-row"><span class="muted">Индикация</span><span>${state.video.outputUrl ? 'Видео готово' : state.video.providerTaskId ? 'Авто · без процентов' : '—'}</span></div>
+    <div class="workspace-grid single video-workspace-grid">
+      <div class="workspace-main scroll video-workspace-main">
+        <div class="result-card video-stage-card">
+          <div class="video-stage-head">
+            <div>
+              <h4 style="margin:0 0 6px;">Рабочая область</h4>
+              <small>${escapeHtml(state.video.errorText || state.video.statusText || 'Здесь появится текущее видео или выбранный ролик из библиотеки.')}</small>
             </div>
-            <div class="actions compact-gap" style="margin-top:12px; flex-wrap:wrap;">
-              ${state.video.providerTaskId ? `<button class="btn outline" data-action="clear-video-run">Очистить запуск</button>` : ''}
-              <button class="btn ghost" data-action="switch-studio" data-studio="history">Открыть историю</button>
+            <div class="actions compact-gap" style="margin-top:0; flex-wrap:wrap;">
+              <span class="badge ${statusTone}">${escapeHtml(statusLabel)}</span>
+              <button class="btn ghost small" data-action="show-video-library">История видео</button>
+              <button class="btn outline small" data-action="show-video-params">Параметры</button>
             </div>
-          ` : ''}
+          </div>
+          <div class="placeholder-stage video video-stage-clean">
+            ${stageInner}
+          </div>
         </div>
-        ${historyShelf}
-        <div class="upload-grid two" style="margin-top:16px;">
-          ${uploadedCards || `<div class="asset-card"><h4>Нет загруженных ассетов</h4><small>Когда справа появятся поля start frame / last frame / refs / motion video — выбранные файлы будут видны здесь.</small></div>`}
-        </div>
+        ${assets ? `<div class="upload-grid two" style="margin-top:16px;">${assets}</div>` : ''}
       </div>
     </div>
   `;
 }
+
 
 function renderImageWorkspace() {
   const source = getFile('image.sourceImage');
@@ -1312,125 +1435,45 @@ function renderPlanningWorkspace() {
   `;
 }
 
+
 function renderHistoryWorkspace() {
   const items = state.history.items || [];
   const selected = historySelectedItem();
   const previewUrl = historyVideoUrl(selected);
-  const selectedPrompt = trimText(selected?.prompt || '', 320);
-  const selectedStatus = historyStatusLabel(selected?.status || 'idle');
-  const selectedTone = historyStatusTone(selected?.status || 'idle');
-  const selectedMeta = selected ? [
-    selected.provider || 'video',
-    selected.model || 'model',
-    selected.mode || 'mode',
-  ].filter(Boolean).join(' · ') : '';
-
   return `
-    <div class="workspace-grid">
-      <div class="workspace-main scroll">
-        <div class="result-card">
-          <div class="field-head" style="align-items:flex-start; flex-wrap:wrap; gap:12px;">
-            <div>
-              <h4 style="margin:0 0 6px;">Предпросмотр</h4>
-              <small style="margin:0;">Выбери ролик из библиотеки ниже. После выбора его можно скачать или вернуть в Video Studio.</small>
-            </div>
-            <div class="actions compact-gap" style="margin-top:0; flex-wrap:wrap;">
-              <button class="btn ghost small" data-action="refresh-history">Обновить</button>
-              ${selected?.id ? `<button class="btn outline small" data-action="use-history-item" data-generation-id="${escapeHtml(selected.id)}">В рабочую зону</button>` : ''}
-            </div>
+    <div class="history-browser">
+      <div class="history-preview-panel">
+        <div class="field-head" style="align-items:flex-start; flex-wrap:wrap; gap:12px;">
+          <div>
+            <h4 style="margin:0 0 6px;">Предпросмотр</h4>
+            <small>Лишние сводки и управление убраны. Здесь только ролик и действия с ним.</small>
           </div>
-
-          ${state.history.loading && !selected ? `
-            <div class="history-preview-empty" style="margin-top:14px;">
-              <div>
-                <strong>Подтягиваем библиотеку</strong>
-                <div>Собираем сохранённые видео пользователя из Supabase Storage и базы генераций.</div>
-              </div>
-            </div>
-          ` : selected && previewUrl ? `
-            <div class="history-preview-media" style="margin-top:14px;">
-              <video class="preview-media" src="${escapeHtml(previewUrl)}" controls playsinline></video>
-            </div>
-          ` : `
-            <div class="history-preview-empty" style="margin-top:14px;">
-              <div>
-                <strong>${state.authToken ? 'Выбери видео из списка' : 'Нужна авторизация'}</strong>
-                <div>${state.authToken ? 'Ниже показаны все сохранённые генерации. Нажми «Просмотр», чтобы открыть ролик здесь.' : 'Сначала войди через Telegram, чтобы увидеть свои прошлые генерации.'}</div>
-              </div>
-            </div>
-          `}
-
-          <div class="tableish" style="margin-top:14px;">
-            <div class="table-row"><span class="muted">Статус</span><span>${escapeHtml(selectedStatus)}</span><span class="badge ${selectedTone}">${escapeHtml(selected ? selectedStatus : 'History')}</span></div>
-            <div class="table-row"><span class="muted">Источник</span><span>${escapeHtml(selectedMeta || '—')}</span><span class="badge muted">${escapeHtml(selected?.has_storage_file ? 'AstraBot Cloud' : (selected ? 'Provider URL' : 'Library'))}</span></div>
-            <div class="table-row"><span class="muted">Создано</span><span>${escapeHtml(selected ? formatDate(selected.completed_at || selected.created_at) : '—')}</span><span class="badge muted">${escapeHtml(selected?.aspect_ratio || '—')}</span></div>
-            <div class="table-row"><span class="muted">Размер файла</span><span>${escapeHtml(selected ? formatFileSize(selected.file_size_bytes) : '—')}</span><span class="badge muted">${escapeHtml(selected?.mime_type || 'video/mp4')}</span></div>
-          </div>
-
-          <small style="margin-top:12px;">${escapeHtml(selectedPrompt || 'После выбора ролика здесь появятся его prompt и детали.')}</small>
-
-          ${selected ? `
-            <div class="actions compact-gap" style="margin-top:12px; flex-wrap:wrap;">
-              ${previewUrl ? `<a class="btn primary" href="${escapeHtml(historyVideoDownloadUrl(selected) || previewUrl)}" download>Скачать видео</a>` : ''}
-              <button class="btn ghost" data-action="use-history-item" data-generation-id="${escapeHtml(selected.id || '')}">Открыть в Video Studio</button>
-            </div>
-          ` : ''}
-        </div>
-
-        <div class="result-card" style="margin-top:16px;">
-          <div class="field-head" style="align-items:flex-start; flex-wrap:wrap; gap:12px;">
-            <div>
-              <h4 style="margin:0 0 6px;">Библиотека видео</h4>
-              <small style="margin:0;">Новые ролики приходят из workspace_video_generations. Старые записи без Storage остаются доступны через fallback на provider URL.</small>
-            </div>
-            <span class="badge muted">${items.length}</span>
-          </div>
-
-          <div class="mini-list" style="margin-top:14px;">
-            ${state.history.lastError ? `<div class="empty-state">${escapeHtml(state.history.lastError)}</div>` : ''}
-            ${items.length ? items.map((item) => {
-              const isActive = selected?.id === item.id;
-              const href = historyVideoUrl(item);
-              return `
-                <div class="history-library-item ${isActive ? 'active' : ''}">
-                  <div class="history-item-row">
-                    <strong>${escapeHtml(trimText(item.prompt || `${item.provider || 'video'} · ${item.model || ''}`, 120) || 'Видео')}</strong>
-                    <span class="badge ${historyStatusTone(item.status)}">${escapeHtml(historyStatusLabel(item.status))}</span>
-                  </div>
-                  <small>${escapeHtml(formatDate(item.completed_at || item.created_at))}</small>
-                  <small>${escapeHtml(trimText([item.provider, item.model, item.mode].filter(Boolean).join(' · '), 140) || '—')}</small>
-                  <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;">
-                    <button class="btn ghost small" data-action="preview-history-item" data-generation-id="${escapeHtml(item.id || '')}">Просмотр</button>
-                    <button class="btn outline small" data-action="use-history-item" data-generation-id="${escapeHtml(item.id || '')}">В рабочую зону</button>
-                    ${href ? `<a class="btn outline small" href="${escapeHtml(historyVideoDownloadUrl(item) || href)}" download>Скачать</a>` : ''}
-                  </div>
-                </div>
-              `;
-            }).join('') : `<div class="empty-state">Пока нет сохранённых видео. Запусти Kling 3.0 и дождись completed — ролик появится здесь автоматически.</div>`}
+          <div class="actions compact-gap" style="margin-top:0; flex-wrap:wrap;">
+            <button class="btn ghost small" data-action="refresh-history">Обновить</button>
+            <button class="btn outline small" data-action="switch-studio" data-studio="video">Video Studio</button>
           </div>
         </div>
+        ${previewUrl ? `<div class="history-preview-media" style="margin-top:14px;"><video class="preview-media" src="${escapeHtml(previewUrl)}" controls playsinline></video></div>` : `<div class="history-preview-empty" style="margin-top:14px;"><div><strong>${state.authToken ? 'Выбери ролик справа' : 'Нужна авторизация'}</strong><div>${state.authToken ? 'Библиотека открывается справа. Нажми «Просмотр» у нужного ролика.' : 'Сначала войди через Telegram, чтобы увидеть свою библиотеку видео.'}</div></div></div>`}
+        ${selected ? `<div class="actions compact-gap" style="margin-top:14px; flex-wrap:wrap;">${previewUrl ? `<a class="btn primary" href="${escapeHtml(historyVideoDownloadUrl(selected) || previewUrl)}" download>Скачать видео</a>` : ''}<button class="btn ghost" data-action="use-history-item" data-generation-id="${escapeHtml(selected.id || '')}">В рабочую зону</button></div>` : ''}
       </div>
-
-      <div class="workspace-side scroll">
-        <div class="result-card">
-          <h4>Сводка</h4>
-          <small>${state.authToken ? `Сохранённых роликов: ${items.length}. Выбранный ролик можно просмотреть, скачать или вернуть в центральную рабочую зону.` : 'После входа через Telegram здесь появится облачная история всех твоих генераций.'}</small>
-        </div>
-        <div class="result-card">
-          <h4>Выбранный ролик</h4>
-          <small>${escapeHtml(selected ? selectedMeta || 'Видео из истории' : 'Ничего не выбрано')}</small>
-        </div>
-        <div class="result-card">
-          <h4>Управление</h4>
-          <div class="actions compact-gap" style="flex-direction:column;">
-            <button class="btn secondary full" data-action="refresh-history">Обновить историю</button>
-            <button class="btn ghost full" data-action="switch-studio" data-studio="video">Перейти в Video Studio</button>
-          </div>
+      <div class="history-library-panel">
+        <div class="field-head"><h4 style="margin:0;">Библиотека видео</h4><span class="badge muted">${items.length}</span></div>
+        <div class="history-library-list" style="margin-top:14px;">
+          ${state.history.lastError ? `<div class="empty-state">${escapeHtml(state.history.lastError)}</div>` : ''}
+          ${items.length ? items.map((item) => `
+            <div class="history-library-item ${selected?.id === item.id ? 'active' : ''}">
+              <div class="history-item-row"><strong>${escapeHtml(trimText(item.prompt || `${item.provider || 'video'} · ${item.model || ''}`, 96) || 'Видео')}</strong><span class="badge ${historyStatusTone(item.status)}">${escapeHtml(historyStatusLabel(item.status))}</span></div>
+              <small>${escapeHtml(formatDate(item.completed_at || item.created_at))}</small>
+              <small>${escapeHtml(trimText([item.provider, item.model, item.mode].filter(Boolean).join(' · '), 120) || '—')}</small>
+              <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;"><button class="btn ghost small" data-action="preview-history-item" data-generation-id="${escapeHtml(item.id || '')}">Просмотр</button><button class="btn outline small" data-action="use-history-item" data-generation-id="${escapeHtml(item.id || '')}">В рабочую зону</button></div>
+            </div>
+          `).join('') : `<div class="empty-state">Пока нет сохранённых видео.</div>`}
         </div>
       </div>
     </div>
   `;
 }
+
 
 function renderBillingWorkspace() {
   const runs = state.recentRuns.length;
@@ -1529,225 +1572,103 @@ function renderChatInspector() {
   `;
 }
 
+
 function renderVideoInspector() {
-  const providerOptions = Object.entries(VIDEO_REGISTRY).map(([id, provider]) => `<option value="${id}" ${state.video.provider === id ? 'selected' : ''}>${escapeHtml(provider.name)}</option>`).join('');
-  const provider = VIDEO_REGISTRY[state.video.provider];
-  const modelOptions = Object.entries(provider.models).map(([id, model]) => `<option value="${id}" ${state.video.model === id ? 'selected' : ''}>${escapeHtml(model.name)}</option>`).join('');
-  const model = provider.models[state.video.model];
-  const modeOptions = Object.entries(model.modes).map(([id, mode]) => `<option value="${id}" ${state.video.mode === id ? 'selected' : ''}>${escapeHtml(mode.name)}</option>`).join('');
+  syncVideoSelection();
+  const providerOptions = Object.entries(VIDEO_REGISTRY).map(([id, provider]) => `
+    <button class="seg-chip ${state.video.provider === id ? 'active' : ''}" data-action="set-video-provider" data-provider="${id}">${escapeHtml(provider.name)}</button>
+  `).join('');
+  const modelOptions = Object.entries(videoProviderConfig().models).map(([id, model]) => `
+    <button class="seg-chip ${state.video.model === id ? 'active' : ''}" data-action="set-video-model" data-model="${id}">${escapeHtml(model.name)}</button>
+  `).join('');
+
+  if (state.video.panel === 'library') {
+    const items = state.history.items || [];
+    return `
+      <div class="inspector-card">
+        <div class="field-head" style="margin-bottom:12px;"><div class="section-title" style="margin:0;">Библиотека видео</div><button class="btn ghost small" data-action="show-video-params">Параметры</button></div>
+        <div class="help-text">При нажатии на историю параметры скрываются, а справа открывается библиотека видео.</div>
+        <div class="mini-list" style="margin-top:14px;">
+          ${items.length ? items.map((item) => `
+            <div class="history-item compact ${state.history.selectedId === item.id ? 'active' : ''}">
+              <div class="history-item-row"><strong>${escapeHtml(trimText(item.prompt || `${item.provider || 'video'} · ${item.model || ''}`, 88) || 'Видео')}</strong><span class="badge ${historyStatusTone(item.status)}">${escapeHtml(historyStatusLabel(item.status))}</span></div>
+              <small>${escapeHtml(formatDate(item.completed_at || item.created_at))}</small>
+              <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;"><button class="btn ghost small" data-action="preview-history-item" data-generation-id="${escapeHtml(item.id || '')}">Просмотр</button><button class="btn outline small" data-action="use-history-item" data-generation-id="${escapeHtml(item.id || '')}">В рабочую зону</button></div>
+            </div>
+          `).join('') : `<div class="empty-state">Пока нет сохранённых видео.</div>`}
+        </div>
+      </div>
+    `;
+  }
+
   return `
     <div class="inspector-card">
-      <div class="section-title">Video Studio</div>
-      <div class="input-group"><label class="label">Provider</label><select id="video_provider">${providerOptions}</select></div>
-      <div class="input-group"><label class="label">Model / version</label><select id="video_model">${modelOptions}</select></div>
-      <div class="input-group"><label class="label">Mode</label><select id="video_mode">${modeOptions}</select></div>
-      <div class="help-text">Логика такая: студия → провайдер → модель → режим → только нужные поля. Это позволит без боли добавлять новые версии Kling/Veo дальше.</div>
+      <div class="field-head" style="margin-bottom:12px;"><div class="section-title" style="margin:0;">Video Studio</div><button class="btn ghost small" data-action="show-video-library">История видео</button></div>
+      <div class="input-group"><label class="label">Семейство</label><div class="seg-chips">${providerOptions}</div></div>
+      <div class="input-group" style="margin-top:12px;"><label class="label">Модель</label><div class="seg-chips">${modelOptions}</div></div>
+      ${Object.keys(videoModelConfig().modes).length > 1 ? `<div class="input-group" style="margin-top:12px;"><label class="label">Режим</label><select id="video_mode">${Object.entries(videoModelConfig().modes).map(([id, mode]) => `<option value="${id}" ${state.video.mode === id ? 'selected' : ''}>${escapeHtml(mode.name)}</option>`).join('')}</select></div>` : ''}
     </div>
-    ${renderVideoModeFields(model)}
+    ${renderVideoModeFields(videoModelConfig())}
     <div class="inspector-card">
-      <div class="field-head"><div class="section-title">Запуск</div><span class="badge ${model.backend === 'planned' ? 'warn' : model.backend === 'partial' ? 'warn' : 'ok'}">${model.backend}</span></div>
-      <button class="btn primary full" data-action="run-video">Run video action</button>
-      <div class="help-text" style="margin-top:10px;">Kling 3 Text → Video уже подключён. Остальные ветки интерфейса готовы и ждут web-friendly backend-роуты.</div>
+      <button class="btn primary full video-run-btn ${state.video.isGenerating ? 'loading' : ''}" id="videoRunPrimaryBtn" data-action="run-video" ${state.video.isGenerating ? 'disabled' : ''}>${escapeHtml(videoRunButtonLabel())}</button>
+      <div class="help-text" style="margin-top:10px;">${escapeHtml(getVideoRunCost().helper || 'Стоимость генерации пересчитывается прямо в кнопке.')}</div>
     </div>
   `;
 }
 
 function renderVideoModeFields(model) {
-  const mode = state.video.mode;
   const parts = [];
-  const addTextPrompt = () => parts.push(sectionTextarea('Prompt', 'video_prompt', state.video.prompt, 'Опиши сцену, свет, камеру, атмосферу и поведение объекта.'));
-  const addFieldGridStart = (inner) => parts.push(`<div class="inspector-card"><div class="field-grid two">${inner}</div></div>`);
-  const addUpload = (label, id, help, multiple = false, accept = 'image/*') => parts.push(sectionUpload(label, id, help, multiple, accept));
+  const mode = state.video.mode;
 
-  if (state.video.provider === 'kling' && state.video.model === 'kling-3.0' && mode === 'image_to_video') {
-    parts.push(`
-      <div class="inspector-card accent-card">
-        <div class="field-head"><div class="section-title">Входные кадры Kling</div><span class="badge ok">Показать сразу</span></div>
-        <div class="help-text">Для Kling 3.0 Image → Video сначала загружаются кадры, потом уже вводится промпт и остальные настройки.</div>
-      </div>
-    `);
-  }
+  const addUpload = (label, id, hint, multiple = false, accept = 'image/*') => {
+    parts.push(sectionUpload(label, id, hint, multiple, accept));
+  };
+  const addFields = (html) => parts.push(`<div class="inspector-card"><div class="field-grid two">${html}</div></div>`);
+  const addPrompt = () => parts.push(sectionTextarea('Prompt', 'video_prompt', state.video.prompt, 'Опиши сцену, действие, камеру, свет и ожидаемый результат.'));
 
-  if (['image_to_video', 'multi_shot'].includes(mode)) addUpload('Start frame', 'video_startFrame', 'Загрузочный кадр для старта генерации.');
-  if (['image_to_video', 'multi_shot'].includes(mode) && state.video.provider === 'kling' && state.video.model === 'kling-3.0') addUpload('End frame', 'video_endFrame', 'Финальный кадр, если сценарий этого требует.');
-  if (mode === 'motion_control') {
+  if (state.video.model === 'motion-control') {
     addUpload('Avatar photo', 'video_avatarImage', 'Фото персонажа, который должен повторять движение.');
-    addUpload('Motion video', 'video_motionVideo', 'Видео с движением.', false, 'video/*');
+    addUpload('Motion video', 'video_motionVideo', 'Референс-видео с движением.', false, 'video/*');
+    addPrompt();
+    addFields(`${fieldSelect('Quality', 'video_quality', state.video.quality, [['standard','Standard'],['pro','Pro']])}`);
+    return parts.join('');
   }
-  if (mode === 'extend_video') addUpload('Source video', 'video_sourceVideo', 'Исходное видео для продления.', false, 'video/*');
-  if (state.video.provider === 'veo' && state.video.model === 'veo-3.1-pro' && mode === 'image_to_video') addUpload('Last frame', 'video_lastFrame', 'Последний кадр доступен только для Veo Pro image-to-video.');
-  if (state.video.provider === 'veo' && state.video.model === 'veo-3.1-pro' && mode === 'image_to_video') addUpload('Reference images', 'video_referenceImages', 'До 3 референсов. UI готов, backend подключим отдельно.', true, 'image/*');
-  if (state.video.provider === 'seedance' && ['image_to_video'].includes(mode)) addUpload('Reference images', 'video_referenceImages', 'Можно загрузить несколько изображений для image-to-video.', true, 'image/*');
 
-  addTextPrompt();
+  if (['image_to_video', 'multi_shot'].includes(mode)) addUpload('Start frame', 'video_startFrame', 'Стартовый кадр для генерации.');
+  if (state.video.provider === 'kling' && ['image_to_video', 'multi_shot'].includes(mode) && ['kling-2.5', 'kling-3.0'].includes(state.video.model)) addUpload('End frame', 'video_endFrame', 'Финальный кадр, если нужен переход или финальная поза.');
+  if (state.video.provider === 'veo' && state.video.model === 'veo-3.1-pro' && mode === 'image_to_video') addUpload('Last frame', 'video_lastFrame', 'Финальный кадр для Veo 3.1.');
+  if (state.video.provider === 'veo' && state.video.model === 'veo-3.1-pro' && mode === 'image_to_video') addUpload('Reference images', 'video_referenceImages', 'До 3 референсов.', true, 'image/*');
+  if (state.video.provider === 'seedance' && mode === 'image_to_video') addUpload('Reference images', 'video_referenceImages', 'До 9 референсов.', true, 'image/*');
 
-  if (['text_to_video', 'image_to_video', 'multi_shot'].includes(mode) && state.video.provider === 'kling') {
-    addFieldGridStart(`
-      ${fieldSelect('Duration', 'video_duration', state.video.duration, [['3','3 sec'],['5','5 sec'],['10','10 sec'],['15','15 sec']])}
-      ${fieldSelect('Resolution', 'video_resolution', state.video.resolution, [['720','720p'],['1080','1080p']])}
-      ${fieldSelect('Aspect ratio', 'video_aspectRatio', state.video.aspectRatio, [['16:9','16:9'],['9:16','9:16'],['1:1','1:1']])}
-      ${fieldToggle('Enable audio', 'video_enableAudio', state.video.enableAudio, 'Звук сразу из модели, если выбранная версия поддерживает.')}
-    `);
+  addPrompt();
+
+  if (state.video.model === 'kling-1.6') {
+    addFields(`${fieldSelect('Duration', 'video_durationLegacy', state.video.duration || '5', [['5','5 sec'],['10','10 sec']])}${fieldSelect('Quality', 'video_quality', state.video.quality, [['standard','Standard'],['pro','Pro']])}`);
+    return parts.join('');
+  }
+  if (['kling-2.5', 'kling-3.0'].includes(state.video.model)) {
+    const durationOptions = state.video.model === 'kling-2.5' ? [['5','5 sec'],['10','10 sec']] : [['3','3 sec'],['5','5 sec'],['10','10 sec'],['15','15 sec']];
+    addFields(`${fieldSelect('Duration', 'video_duration', state.video.duration, durationOptions)}${state.video.model === 'kling-3.0' ? fieldSelect('Resolution', 'video_resolution', state.video.resolution, [['720','720p'],['1080','1080p']]) : ''}${fieldSelect('Aspect ratio', 'video_aspectRatio', state.video.aspectRatio, [['16:9','16:9'],['9:16','9:16'],['1:1','1:1']])}${state.video.model === 'kling-3.0' ? fieldToggle('Enable audio', 'video_enableAudio', state.video.enableAudio, 'Звук увеличивает стоимость на 1 токен/сек.') : ''}`);
+    return parts.join('');
   }
   if (state.video.provider === 'veo') {
-    addFieldGridStart(`
-      ${fieldSelect('Duration', 'video_durationVeo', state.video.duration || '6', [['4','4 sec'],['6','6 sec'],['8','8 sec']])}
-      ${fieldSelect('Aspect ratio', 'video_aspectRatioVeo', state.video.aspectRatio || '16:9', [['16:9','16:9'],['9:16','9:16']])}
-      ${fieldToggle('Generate audio', 'video_generateAudio', state.video.enableAudio, 'Для Veo можно отдельно включать генерацию звука.')}
-    `);
+    addFields(`${fieldSelect('Duration', 'video_durationVeo', state.video.duration || '8', [['4','4 sec'],['6','6 sec'],['8','8 sec']])}${fieldSelect('Aspect ratio', 'video_aspectRatioVeo', state.video.aspectRatio || '16:9', [['16:9','16:9'],['9:16','9:16']])}${fieldToggle('Generate audio', 'video_generateAudio', state.video.enableAudio, 'Включает генерацию звука.')}`);
+    return parts.join('');
   }
   if (state.video.provider === 'seedance') {
-    addFieldGridStart(`
-      ${fieldSelect('Duration', 'video_durationSeedance', state.video.duration || '5', [['5','5 sec'],['10','10 sec'],['15','15 sec']])}
-      ${fieldSelect('Aspect ratio', 'video_aspectRatioSeedance', state.video.aspectRatio || '16:9', [['16:9','16:9'],['9:16','9:16'],['4:3','4:3'],['3:4','3:4']])}
-    `);
+    addFields(`${fieldSelect('Duration', 'video_durationSeedance', state.video.duration || '5', [['5','5 sec'],['10','10 sec'],['15','15 sec']])}${fieldSelect('Aspect ratio', 'video_aspectRatioSeedance', state.video.aspectRatio || '16:9', [['16:9','16:9'],['9:16','9:16'],['4:3','4:3'],['3:4','3:4']])}`);
+    return parts.join('');
   }
   if (state.video.provider === 'sora') {
-    addFieldGridStart(`
-      ${fieldSelect('Duration', 'video_durationSora', state.video.duration || '4', [['4','4 sec'],['8','8 sec'],['12','12 sec']])}
-      ${fieldSelect('Aspect ratio', 'video_aspectRatioSora', state.video.aspectRatio || '16:9', [['16:9','16:9'],['9:16','9:16']])}
-    `);
-  }
-  if (['motion_control', 'image_to_video'].includes(mode) && state.video.provider === 'kling' && state.video.model === 'kling-1.6') {
-    addFieldGridStart(`
-      ${fieldSelect('Quality', 'video_quality', state.video.quality, [['standard','Standard'],['pro','Pro']])}
-      ${fieldSelect('Duration', 'video_durationLegacy', state.video.duration || '5', [['5','5 sec'],['10','10 sec']])}
-    `);
+    addFields(`${fieldSelect('Duration', 'video_durationSora', state.video.duration || '4', [['4','4 sec'],['8','8 sec'],['12','12 sec']])}${fieldSelect('Aspect ratio', 'video_aspectRatioSora', state.video.aspectRatio || '16:9', [['16:9','16:9'],['9:16','9:16']])}`);
   }
   return parts.join('');
 }
 
-function renderImageInspector() {
-  const providerOptions = Object.entries(IMAGE_REGISTRY).map(([id, provider]) => `<option value="${id}" ${state.image.provider === id ? 'selected' : ''}>${escapeHtml(provider.name)}</option>`).join('');
-  const provider = IMAGE_REGISTRY[state.image.provider];
-  const modelOptions = Object.entries(provider.models).map(([id, model]) => `<option value="${id}" ${state.image.model === id ? 'selected' : ''}>${escapeHtml(model.name)}</option>`).join('');
-  const model = provider.models[state.image.model];
-  const modeOptions = Object.entries(model.modes).map(([id, mode]) => `<option value="${id}" ${state.image.mode === id ? 'selected' : ''}>${escapeHtml(mode.name)}</option>`).join('');
-  return `
-    <div class="inspector-card">
-      <div class="section-title">Image Studio</div>
-      <div class="input-group"><label class="label">Family / provider</label><select id="image_provider">${providerOptions}</select></div>
-      <div class="input-group"><label class="label">Model / version</label><select id="image_model">${modelOptions}</select></div>
-      <div class="input-group"><label class="label">Mode</label><select id="image_mode">${modeOptions}</select></div>
-      <div class="help-text">Nano Banana и Nano Banana Pro живут внутри одной Image Studio. Новые режимы добавляются dropdown-ами, а не отдельными страницами.</div>
-    </div>
-    ${renderImageModeFields()}
-    <div class="inspector-card">
-      <button class="btn primary full" data-action="run-image">Run image action</button>
-      <div class="help-text" style="margin-top:10px;">Image Studio сейчас архитектурно готова. Как только вынесем web-роуты для Nano Banana / posters / photosession — интерфейс уже не придётся перестраивать.</div>
-    </div>
-  `;
-}
-
-function renderImageModeFields() {
-  const mode = state.image.mode;
-  const blocks = [];
-  if (!['text_to_image', 't2i'].includes(mode)) blocks.push(sectionUpload('Source image', 'image_sourceImage', 'Главное входное изображение для edit / photo / poster flows.'));
-  if (state.image.provider === 'two_images') blocks.push(sectionUpload('Base image', 'image_baseImage', 'Базовое изображение для merge / transfer.'));
-  blocks.push(sectionTextarea('Prompt', 'image_prompt', state.image.prompt, 'Опиши, что нужно изменить, дорисовать, совместить или сгенерировать.'));
-  if (state.image.provider === 'posters' && state.image.mode === 'poster') {
-    blocks.push(`<div class="inspector-card"><div class="input-group"><label class="label">Poster style</label><select id="image_posterStyle"><option value="bright">Ярко</option><option value="cinematic">Кино</option></select></div></div>`);
-  }
-  if (state.image.provider === 'photosession') {
-    blocks.push(`<div class="inspector-card"><div class="field-grid two">
-      ${fieldSelect('Style preset', 'image_stylePreset', state.image.stylePreset, [['cinematic','Cinematic'],['fashion','Fashion'],['editorial','Editorial'],['luxury','Luxury']])}
-      ${fieldSelect('Mood', 'image_moodPreset', state.image.moodPreset || 'soft', [['soft','Soft'],['dramatic','Dramatic'],['clean','Clean'],['bold','Bold']])}
-    </div></div>`);
-  }
-  if (state.image.provider === 'nano_banana_pro') {
-    blocks.push(`<div class="inspector-card"><div class="field-grid two">
-      ${fieldSelect('Resolution', 'image_resolution', state.image.resolution, [['2K','2K'],['4K','4K']])}
-      ${mode === 'text_to_image' ? fieldSelect('Aspect ratio', 'image_aspectRatioText', state.image.aspectRatio || '16:9', [['16:9','16:9'],['9:16','9:16'],['1:1','1:1']]) : fieldSelect('Aspect ratio', 'image_aspectRatio', state.image.aspectRatio, [['match_input_image','Match input'],['16:9','16:9'],['9:16','9:16'],['1:1','1:1']])}
-      ${fieldSelect('Safety level', 'image_safetyLevel', state.image.safetyLevel, [['high','High'],['medium','Medium']])}
-    </div></div>`);
-  }
-  return blocks.join('');
-}
-
-function renderVoiceInspector() {
-  const voiceOptions = (state.voice.voices.length ? state.voice.voices : [{voice_id:'', name:'Загрузи voices'}]).map((v) => `<option value="${escapeHtml(v.voice_id)}" ${state.voice.voiceId === v.voice_id ? 'selected' : ''}>${escapeHtml(v.name)}</option>`).join('');
-  return `
-    <div class="inspector-card">
-      <div class="section-title">Voice Studio</div>
-      <div class="input-group"><label class="label">Voice</label><select id="voice_voiceId">${voiceOptions}</select></div>
-      <div class="field-grid two">
-        ${fieldInput('Model', 'voice_modelId', state.voice.modelId)}
-        ${fieldInput('Format', 'voice_outputFormat', state.voice.outputFormat)}
-      </div>
-      ${sectionTextarea('Text', 'voice_text', state.voice.text, 'Введи текст для озвучки')}
-      <div class="actions two-up compact-gap">
-        <button class="btn ghost" data-action="load-voices">Обновить voices</button>
-        <button class="btn primary" data-action="run-voice">Generate audio</button>
-      </div>
-    </div>
-  `;
-}
-
-function renderMusicInspector() {
-  return `
-    <div class="inspector-card">
-      <div class="section-title">Music Studio</div>
-      <div class="field-grid two">
-        ${fieldSelect('Provider', 'music_provider', state.music.provider, [['suno','Suno'],['udio','Udio']])}
-        ${fieldSelect('Mode', 'music_mode', state.music.mode, [['idea','Idea'],['lyrics','Lyrics']])}
-      </div>
-      <div class="field-grid two">
-        ${fieldSelect('Model / provider', 'music_model', state.music.model, [['sunoapi','SunoAPI'],['piapi','PiAPI'],['auto','Auto']])}
-        ${fieldSelect('Language', 'music_language', state.music.language, [['ru','RU'],['en','EN']])}
-      </div>
-      ${fieldInput('Title', 'music_title', state.music.title)}
-      ${fieldInput('Tags', 'music_tags', state.music.tags)}
-      ${fieldInput('Mood', 'music_mood', state.music.mood)}
-      ${fieldInput('References', 'music_references', state.music.references)}
-      ${sectionTextarea(state.music.mode === 'lyrics' ? 'Lyrics / text' : 'Idea / brief', 'music_text', state.music.text, 'Опиши трек или вставь текст песни.')}
-      <div class="actions two-up compact-gap">
-        <button class="btn secondary" data-action="run-songwriter">Generate songwriter response</button>
-        <button class="btn ghost" data-action="send-music-to-chat">В ChatGPT</button>
-      </div>
-      <div class="help-text" style="margin-top:10px;">Songwriter уже live. Генерацию самих треков можно подключить в этот же UI, когда вынесем web-эндпоинты под Suno/Udio jobs.</div>
-    </div>
-  `;
-}
-
-function renderLibraryInspector() {
-  return `
-    <div class="inspector-card">
-      <div class="section-title">Prompt Library</div>
-      <div class="help-text">Эта студия уже подключена к workspace-роутам библиотеки промптов и использует общую серверную сессию пользователя.</div>
-      <div class="actions compact-gap" style="margin-top:12px; flex-direction:column;">
-        <button class="btn secondary full" data-action="refresh-prompts">Refresh categories</button>
-        <button class="btn ghost full" data-action="goto-chat">Открыть ChatGPT Studio</button>
-      </div>
-    </div>
-  `;
-}
-
-function renderPlanningInspector() {
-  return `
-    <div class="inspector-card">
-      <div class="section-title">Workspace logic</div>
-      <div class="help-text">Это проектная зона. Сюда удобно складывать структуру ролика, тезисы для чата, voice-over, музыку и шаги пайплайна перед запуском генераций.</div>
-      <div class="actions compact-gap" style="margin-top:12px; flex-direction:column;">
-        <button class="btn secondary full" data-action="save-planning">Сохранить заметки</button>
-        <button class="btn ghost full" data-action="seed-plan">Заполнить примером</button>
-      </div>
-    </div>
-  `;
-}
-
 function renderHistoryInspector() {
-  const selected = historySelectedItem();
-  return `
-    <div class="inspector-card">
-      <div class="section-title">History controls</div>
-      <div class="help-text">История уже подтягивается с backend через /api/workspace/history и умеет работать с private bucket через signed URL.</div>
-      <div class="actions compact-gap" style="margin-top:12px; flex-direction:column;">
-        <button class="btn secondary full" data-action="refresh-history">Обновить историю</button>
-        ${selected?.id ? `<button class="btn ghost full" data-action="use-history-item" data-generation-id="${escapeHtml(selected.id)}">Открыть выбранное видео в Video Studio</button>` : ''}
-      </div>
-    </div>
-  `;
+  return `<div class="inspector-card"><div class="section-title">Библиотека</div><div class="help-text">Открой Video Studio и используй правую панель для библиотеки видео.</div></div>`;
 }
+
 
 function renderBillingInspector() {
   return `
@@ -2240,6 +2161,7 @@ async function sendChat() {
 
 
 
+
 async function loadVideoHistory(options = {}) {
   const { silent = false, selectId = '', keepSelection = true } = options;
   if (!state.authToken) {
@@ -2258,29 +2180,21 @@ async function loadVideoHistory(options = {}) {
   if (!silent) render();
 
   try {
-    const qs = new URLSearchParams({
-      limit: String(state.history.limit || 24),
-      offset: String(state.history.offset || 0),
-    });
+    const qs = new URLSearchParams({ limit: String(state.history.limit || 24), offset: String(state.history.offset || 0) });
     const res = await apiFetch(`/api/workspace/history?${qs.toString()}`);
     const data = await res.json();
     const items = Array.isArray(data.items) ? data.items : [];
-
     state.history.items = items;
     state.history.loaded = true;
 
-    const preferredId =
-      String(selectId || '').trim() ||
-      (keepSelection ? String(state.history.selectedId || '').trim() : '') ||
-      String(state.history.selectedItem?.id || '').trim() ||
-      String(items[0]?.id || '').trim();
-
-    state.history.selectedId = items.some((item) => item.id === preferredId)
-      ? preferredId
-      : String(items[0]?.id || '').trim();
-
-    const selectedFromList = items.find((item) => item.id === state.history.selectedId) || null;
-    state.history.selectedItem = selectedFromList;
+    const preferredId = String(selectId || '').trim() || (keepSelection ? String(state.history.selectedId || '').trim() : '');
+    if (preferredId && items.some((item) => item.id === preferredId)) {
+      state.history.selectedId = preferredId;
+      state.history.selectedItem = items.find((item) => item.id === preferredId) || null;
+    } else if (!keepSelection) {
+      state.history.selectedId = '';
+      state.history.selectedItem = null;
+    }
 
     if (!silent) render();
     return items;
@@ -2314,13 +2228,9 @@ async function loadHistoryItem(generationId, options = {}) {
 
     state.history.selectedId = item.id || generationIdText;
     state.history.selectedItem = item;
-
     const idx = state.history.items.findIndex((entry) => entry.id === item.id);
-    if (idx >= 0) {
-      state.history.items[idx] = { ...state.history.items[idx], ...item };
-    } else {
-      state.history.items.unshift(item);
-    }
+    if (idx >= 0) state.history.items[idx] = { ...state.history.items[idx], ...item };
+    else state.history.items.unshift(item);
 
     if (switchStudio) state.studio = 'history';
     saveState();
@@ -2338,13 +2248,11 @@ function applyHistoryItemToVideoWorkspace(item) {
     toast('info', 'История пуста', 'Сначала дождись хотя бы одного сохранённого видео.');
     return;
   }
-
   const videoUrl = historyVideoUrl(selected);
   if (!videoUrl) {
     toast('error', 'Нет ссылки на видео', 'Для этого ролика ещё не найден доступный файл.');
     return;
   }
-
   stopVideoPolling();
   state.video.generationId = selected.id || '';
   state.video.providerTaskId = selected.task_id || '';
@@ -2355,189 +2263,124 @@ function applyHistoryItemToVideoWorkspace(item) {
   state.video.percent = selected.status === 'completed' ? 100 : null;
   state.video.lastStatus = String(selected.status || 'completed').toLowerCase();
   state.video.errorText = selected.error_message || '';
-  state.video.statusText = selected.has_storage_file
-    ? 'Открыт сохранённый ролик из библиотеки AstraBot.'
-    : 'Открыт ролик из истории провайдера.';
+  state.video.statusText = selected.has_storage_file ? 'Открыт сохранённый ролик из библиотеки AstraBot.' : 'Открыт ролик из истории провайдера.';
+  state.video.panel = 'library';
   state.studio = 'video';
   saveState();
   render();
-  toast('success', 'Видео открыто', 'Ролик возвращён в центральную рабочую зону.');
+  toast('success', 'Видео открыто', 'Ролик возвращён в рабочую зону.');
 }
 
 function renderVideoHistoryShelf() {
-  if (!state.authToken) {
-    return `
-      <div class="result-card" style="margin-top:16px;">
-        <div class="field-head"><h4>Сохранённые видео</h4><span class="badge muted">Private cloud</span></div>
-        <small>После входа через Telegram здесь появятся сохранённые ролики, к которым можно вернуться позже.</small>
-      </div>
-    `;
-  }
-
-  const items = state.history.items.slice(0, 6);
-  if (state.history.loading && !items.length) {
-    return `
-      <div class="result-card" style="margin-top:16px;">
-        <div class="field-head"><h4>Сохранённые видео</h4><span class="badge muted">Загрузка…</span></div>
-        <div class="empty-state">Подтягиваем библиотеку видео…</div>
-      </div>
-    `;
-  }
-
-  return `
-    <div class="result-card" style="margin-top:16px;">
-      <div class="field-head">
-        <h4>Сохранённые видео</h4>
-        <div class="actions compact-gap" style="margin-top:0; flex-wrap:wrap;">
-          <button class="btn ghost small" data-action="refresh-history">Обновить</button>
-          <button class="btn outline small" data-action="switch-studio" data-studio="history">Открыть историю</button>
-        </div>
-      </div>
-      <div class="mini-list">
-        ${items.length ? items.map((item) => `
-          <div class="history-item compact">
-            <div class="history-item-row">
-              <strong>${escapeHtml(trimText(item.prompt || `${item.provider || 'video'} · ${item.model || ''}`, 92) || 'Видео')}</strong>
-              <span class="badge ${historyStatusTone(item.status)}">${escapeHtml(historyStatusLabel(item.status))}</span>
-            </div>
-            <small>${escapeHtml(formatDate(item.completed_at || item.created_at))}</small>
-            <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;">
-              <button class="btn ghost small" data-action="preview-history-item" data-generation-id="${escapeHtml(item.id || '')}">Просмотр</button>
-              <button class="btn outline small" data-action="use-history-item" data-generation-id="${escapeHtml(item.id || '')}">В рабочую зону</button>
-            </div>
-          </div>
-        `).join('') : `<div class="empty-state">Пока нет сохранённых видео. Как только первая генерация дойдёт до completed и сохранится в Storage, она появится здесь.</div>`}
-      </div>
-    </div>
-  `;
+  return '';
 }
 
 async function runVideo() {
-  const provider = state.video.provider;
-  const model = state.video.model;
-  const mode = state.video.mode;
-  if (provider === 'kling' && model === 'kling-3.0' && mode === 'text_to_video') {
-    if (!requireAuth()) return;
-    if (!state.video.prompt.trim()) {
-      toast('error', 'Нужен prompt', 'Для Kling 3 Text → Video введи prompt.');
-      return;
-    }
-    try {
-      stopVideoPolling();
-      const res = await apiFetch('/api/workspace/kling3/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prompt: state.video.prompt,
-          duration: Number(state.video.duration),
-          resolution: state.video.resolution,
-          enable_audio: !!state.video.enableAudio,
-          aspect_ratio: state.video.aspectRatio,
-        }),
-      });
-      const data = await res.json();
-      state.video.generationId = data.generation_id || '';
-      state.video.providerTaskId = data.provider_task_id || '';
-      state.video.outputUrl = '';
-      state.video.downloadUrl = '';
-      state.video.coverUrl = '';
-      state.video.percent = null;
-      state.video.errorText = '';
-      state.video.lastStatus = 'submitted';
-      state.video.statusText = `Генерация началась. Task ID: ${state.video.providerTaskId || '—'}. Ожидайте, видео появится в рабочей зоне автоматически.`;
-      pushRun({ studio: 'Video', title: 'Kling 3 Text → Video', summary: state.video.prompt.slice(0, 100) });
-      saveState();
-      startVideoPolling({ immediate: true });
-      toast('success', 'Kling 3 запущен', 'Задача отправлена в backend. Статус и результат будут появляться в центре.');
-      render();
-    } catch (e) {
-      state.video.errorText = String(e.message || e);
-      state.video.lastStatus = 'error';
-      state.video.statusText = 'Не удалось создать задачу.';
-      saveState();
-      render();
-      toast('error', 'Kling 3 create error', String(e.message || e));
-    }
+  if (!requireAuth()) return;
+  syncVideoSelection();
+  if (state.video.isGenerating) return;
+  if (!state.video.prompt.trim()) {
+    toast('error', 'Нужен prompt', 'Введи prompt для генерации видео.');
     return;
   }
-  toast('info', 'Режим пока не подключён', 'UI для этого сценария уже готов, но web-endpoint под него ещё не вынесен в backend.');
+  const form = new FormData();
+  form.append('provider', state.video.provider);
+  form.append('model', state.video.model);
+  form.append('mode', state.video.mode);
+  form.append('prompt', state.video.prompt.trim());
+  form.append('duration', String(state.video.duration || ''));
+  form.append('resolution', String(state.video.resolution || ''));
+  form.append('aspect_ratio', String(state.video.aspectRatio || ''));
+  form.append('enable_audio', state.video.enableAudio ? '1' : '0');
+  form.append('quality', String(state.video.quality || ''));
+
+  const fileFields = {
+    'video.startFrame': 'start_frame',
+    'video.endFrame': 'end_frame',
+    'video.lastFrame': 'last_frame',
+    'video.avatarImage': 'avatar_image',
+    'video.motionVideo': 'motion_video',
+  };
+  Object.entries(fileFields).forEach(([key, field]) => {
+    const file = getFile(key);
+    if (file?.file) form.append(field, file.file, file.name || file.file.name || field);
+  });
+  const refs = getFile('video.referenceImages');
+  if (Array.isArray(refs)) refs.forEach((item) => item?.file && form.append('reference_images', item.file, item.name || item.file.name || 'ref.jpg'));
+
+  state.video.isGenerating = true;
+  state.video.outputUrl = '';
+  state.video.downloadUrl = '';
+  state.video.coverUrl = '';
+  state.video.errorText = '';
+  state.video.lastStatus = 'submitted';
+  state.video.statusText = 'Задача отправлена. Видео появится в рабочей зоне автоматически.';
+  render();
+
+  try {
+    const res = await apiFetch('/api/workspace/video/run', { method: 'POST', body: form });
+    const data = await res.json();
+    state.video.generationId = data.generation_id || '';
+    state.video.providerTaskId = data.task_id || '';
+    state.video.statusText = data.status_text || 'Генерация началась.';
+    pushRun({ studio: 'Video', title: `${currentMeta().provider} · ${currentMeta().model}`, summary: state.video.prompt.slice(0, 120) });
+    saveState();
+    startVideoPolling({ immediate: true });
+    toast('success', 'Запуск выполнен', data.status_text || 'Генерация началась.');
+  } catch (e) {
+    state.video.errorText = String(e.message || e);
+    state.video.lastStatus = 'error';
+    state.video.statusText = 'Не удалось запустить генерацию.';
+    toast('error', 'Ошибка запуска', state.video.errorText);
+  } finally {
+    state.video.isGenerating = false;
+    saveState();
+    render();
+  }
 }
 
-
 async function pollVideoTask(options = {}) {
-  const { silent = false, fromAuto = false } = options;
-  if (!state.video.providerTaskId) {
-    if (!silent) toast('error', 'Нет task id', 'Сначала создай задачу Kling 3.');
-    return;
-  }
+  const { silent = false } = options;
+  if (!state.video.generationId) return;
   try {
-    const res = await apiFetch(`/api/workspace/kling3/task/${encodeURIComponent(state.video.providerTaskId)}`);
+    const res = await apiFetch(`/api/workspace/history/${encodeURIComponent(state.video.generationId)}`);
     const data = await res.json();
-    const normalizedTask = data.normalized || null;
-    const rawTask = data.task || data || {};
-    const task = normalizedTask || rawTask;
+    const item = data.item || null;
+    if (!item) return;
+    state.history.selectedId = item.id || state.history.selectedId;
+    state.history.selectedItem = item;
+    const idx = state.history.items.findIndex((entry) => entry.id === item.id);
+    if (idx >= 0) state.history.items[idx] = { ...state.history.items[idx], ...item };
+    else state.history.items.unshift(item);
 
-    const rawStatus = extractVideoTaskStatus(task);
-    const status = String(rawStatus || 'unknown').toLowerCase();
-    const maybeUrl = extractVideoTaskUrl(task) || extractVideoTaskUrl(rawTask);
-    const downloadUrl = extractVideoTaskDownloadUrl(task) || extractVideoTaskDownloadUrl(rawTask);
-    const coverUrl = extractVideoTaskCoverUrl(task) || extractVideoTaskCoverUrl(rawTask);
-    const errorText = extractVideoTaskError(task) || extractVideoTaskError(rawTask);
-    const percent = extractVideoTaskPercent(task) ?? extractVideoTaskPercent(rawTask);
+    state.video.lastStatus = String(item.status || 'processing').toLowerCase();
+    state.video.errorText = item.error_message || '';
+    state.video.statusText = item.error_message || (['completed'].includes(state.video.lastStatus) ? 'Видео готово и загружено в рабочую зону.' : 'Нейросеть собирает видео. Ожидай финальный файл.');
 
-    state.video.lastStatus = status;
-    state.video.errorText = errorText || '';
-    state.video.percent = percent;
-    state.video.coverUrl = coverUrl || '';
-    state.video.downloadUrl = downloadUrl || maybeUrl || '';
-
-    if (maybeUrl || downloadUrl) {
-      state.video.outputUrl = maybeUrl || downloadUrl;
+    const readyUrl = historyVideoUrl(item);
+    if (readyUrl && state.video.lastStatus === 'completed') {
+      state.video.outputUrl = readyUrl;
+      state.video.downloadUrl = historyVideoDownloadUrl(item) || readyUrl;
       state.video.percent = 100;
-      state.video.statusText = 'Видео готово и загружено в рабочую зону.';
       stopVideoPolling();
       saveState();
       render();
-      if (state.authToken) {
-        loadVideoHistory({ silent: true, selectId: state.video.generationId || '' }).catch(() => {});
-      }
-      if (!silent) toast('success', 'Видео готово', 'Результат появился в центре рабочей зоны.');
-      pushRun({ studio: 'Video', title: 'Kling result ready', summary: state.video.prompt.slice(0, 100) || state.video.providerTaskId });
+      if (!silent) toast('success', 'Видео готово', 'Результат появился в рабочей зоне.');
       return;
     }
 
-    if (isVideoTaskFailed(status)) {
-      state.video.statusText = errorText || 'Генерация завершилась с ошибкой.';
+    if (isVideoTaskFailed(state.video.lastStatus)) {
       stopVideoPolling();
       saveState();
       render();
-      if (!silent) toast('error', 'Ошибка генерации', state.video.statusText);
-      pushRun({ studio: 'Video', title: 'Kling task failed', summary: state.video.statusText.slice(0, 120) });
+      if (!silent) toast('error', 'Ошибка генерации', state.video.errorText || 'Провайдер вернул ошибку.');
       return;
-    }
-
-    if (['completed', 'success', 'succeeded', 'finished', 'done'].includes(status)) {
-      state.video.statusText = 'Провайдер завершил рендер. Подтягиваем итоговый файл в рабочую зону…';
-    } else {
-      state.video.statusText = `Генерация началась. Статус: ${videoStatusLabel(status)}. Ожидайте, видео появится в рабочей зоне автоматически.`;
     }
 
     saveState();
-    render();
-
-    if (!fromAuto) {
-      startVideoPolling();
-      if (!silent) toast('success', 'Статус обновлён', `Текущий статус: ${videoStatusLabel(status)}.`);
-    }
+    if (!silent) render();
   } catch (e) {
-    if (!fromAuto) {
-      state.video.errorText = String(e.message || e);
-      state.video.lastStatus = 'error';
-      state.video.statusText = 'Не удалось получить статус задачи.';
-      saveState();
-      render();
-      if (!silent) toast('error', 'Не удалось проверить статус', String(e.message || e));
-    }
+    if (!silent) toast('error', 'Не удалось проверить статус', String(e.message || e));
   }
 }
 
@@ -2663,6 +2506,7 @@ function handleInputChange(target) {
   if (fileMap[id]) {
     const [key, multiple] = fileMap[id];
     setFile(key, multiple ? files : files[0], multiple);
+    if (id === 'video_motionVideo') probeMotionDuration(getFile('video.motionVideo'));
     render();
     return;
   }
@@ -2683,10 +2527,12 @@ function handleInputChange(target) {
       state.video.provider = value;
       state.video.model = Object.keys(VIDEO_REGISTRY[value].models)[0];
       state.video.mode = Object.keys(VIDEO_REGISTRY[value].models[state.video.model].modes)[0];
+      state.video.panel = 'params';
       break;
     case 'video_model':
       state.video.model = value;
       state.video.mode = Object.keys(VIDEO_REGISTRY[state.video.provider].models[value].modes)[0];
+      state.video.panel = 'params';
       break;
     case 'video_mode': state.video.mode = value; break;
     case 'video_prompt': state.video.prompt = value; break;
@@ -2761,7 +2607,8 @@ function handleAction(action, dataset = {}) {
       state.studio = dataset.studio;
       if (state.studio === 'library' && !state.prompts.categories.length) loadPromptCategories();
       if (state.studio === 'voice' && !state.voice.voices.length) loadVoices();
-      if (state.studio === 'history' && state.authToken) loadVideoHistory({ silent: true });
+      if (state.studio === 'history' && state.authToken) loadVideoHistory({ silent: true, keepSelection: true });
+      if (state.studio === 'video' && state.video.panel === 'library' && state.authToken) loadVideoHistory({ silent: true, keepSelection: true });
       render();
       saveState();
       break;
@@ -2786,10 +2633,39 @@ function handleAction(action, dataset = {}) {
       break;
     case 'run-video': runVideo(); break;
     case 'poll-video-task': pollVideoTask(); break;
+    case 'show-video-library':
+      setVideoPanel('library');
+      break;
+    case 'show-video-params':
+      setVideoPanel('params');
+      break;
+    case 'set-video-provider':
+      state.video.provider = dataset.provider || 'kling';
+      state.video.model = Object.keys(VIDEO_REGISTRY[state.video.provider].models)[0];
+      state.video.mode = Object.keys(VIDEO_REGISTRY[state.video.provider].models[state.video.model].modes)[0];
+      state.video.panel = 'params';
+      saveState();
+      render();
+      break;
+    case 'set-video-model':
+      state.video.model = dataset.model || state.video.model;
+      state.video.mode = Object.keys(VIDEO_REGISTRY[state.video.provider].models[state.video.model].modes)[0];
+      state.video.panel = 'params';
+      saveState();
+      render();
+      break;
     case 'clear-video-run': clearVideoRunState({ keepPrompt: true }); render(); break;
     case 'refresh-history': loadVideoHistory(); break;
     case 'preview-history-item':
-      loadHistoryItem(dataset.generationId, { switchStudio: true });
+      loadHistoryItem(dataset.generationId, { switchStudio: state.studio === 'history' }).then((item) => {
+        if (item && state.studio === 'video') {
+          state.history.selectedId = item.id || state.history.selectedId;
+          state.history.selectedItem = item;
+          state.video.outputUrl = historyVideoUrl(item) || state.video.outputUrl;
+          state.video.downloadUrl = historyVideoDownloadUrl(item) || state.video.downloadUrl;
+          render();
+        }
+      });
       break;
     case 'use-history-item':
       loadHistoryItem(dataset.generationId, { silent: false }).then((item) => {
