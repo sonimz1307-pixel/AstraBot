@@ -1,6 +1,11 @@
-const apiBase = window.localStorage.getItem('astrabot:apiBaseUrl') || 'https://astrabot-tchj.onrender.com';
+const urlParams = new URLSearchParams(window.location.search);
+const incomingApiBase = urlParams.get('api_base') || urlParams.get('apiBase') || '';
+const incomingToken = urlParams.get('token') || urlParams.get('authToken') || '';
+const incomingReturnUrl = urlParams.get('return_url') || urlParams.get('returnUrl') || '';
+
+const apiBase = incomingApiBase || window.localStorage.getItem('astrabot:apiBaseUrl') || 'https://astrabot-tchj.onrender.com';
 const state = {
-  token: window.localStorage.getItem('astrabot:authToken') || '',
+  token: incomingToken || window.localStorage.getItem('astrabot:authToken') || '',
   libraryTab: 'videos',
   projectId: '',
   selectedClipId: '',
@@ -9,6 +14,7 @@ const state = {
   polling: null,
   videos: [],
   audio: [],
+  returnUrl: incomingReturnUrl || 'https://astrabot-workspace.onrender.com',
   project: {
     title: 'Новый видеопроект',
     video_clips: [],
@@ -60,21 +66,30 @@ function fmtSec(v) {
   return `${n.toFixed(1)}с`;
 }
 function saveTokenSilently() {
-  window.localStorage.setItem('astrabot:authToken', state.token || '');
+  if (state.token) window.localStorage.setItem('astrabot:authToken', state.token);
+  if (apiBase) window.localStorage.setItem('astrabot:apiBaseUrl', apiBase);
+}
+
+function configureLinks() {
+  const backLink = $('backLink');
+  if (backLink) backLink.href = state.returnUrl;
 }
 
 function renderSessionState() {
   const status = $('sessionState');
   const hint = $('libraryHint');
-  if (!status || !hint) return;
+  const banner = $('authBanner');
+  if (!status || !hint || !banner) return;
   if (state.token) {
     status.textContent = 'сессия активна';
     status.className = 'badge success';
     hint.textContent = 'Загружай видео и музыку или добавляй материалы из библиотеки.';
+    banner.classList.add('hidden');
   } else {
-    status.textContent = 'нужен вход через Workspace';
+    status.textContent = 'нет авторизации';
     status.className = 'badge muted';
-    hint.textContent = 'Редактор открыт без токена. Открывай его из Workspace, чтобы видеть библиотеку и сохранять проект.';
+    hint.textContent = 'История генераций и сохранение проекта появятся после открытия редактора из Workspace.';
+    banner.classList.remove('hidden');
   }
 }
 
@@ -195,7 +210,7 @@ function renderLibrary() {
         <small>${item.duration_sec || item.duration_sec === 0 ? fmtSec(item.duration_sec) : '—'} · ${item.provider || item.file_type || 'media'}</small>
         <button class="btn secondary full" data-library-add="${item.id}">${state.libraryTab === 'videos' ? 'Добавить в таймлайн' : 'Добавить музыку'}</button>
       </div>`).join('')
-    : `<div class="library-empty">${state.token ? 'Пока пусто. Загрузите файл или сохраните генерацию в библиотеку.' : 'Нет доступа к библиотеке без токена Workspace.'}</div>`;
+    : `<div class="library-empty">${state.token ? 'Пока пусто. Загрузите файл или сохраните генерацию в библиотеку.' : 'История генераций недоступна, потому что редактор открыт без авторизации Workspace.'}</div>`;
   $('libraryList').innerHTML = html;
 }
 
@@ -342,6 +357,7 @@ function applySelectionChanges() {
 }
 
 function rerender() {
+  configureLinks();
   renderSessionState();
   renderPreview();
   renderLibrary();
@@ -424,8 +440,24 @@ document.addEventListener('change', (e) => {
   }
 });
 
+window.addEventListener('message', async (event) => {
+  try {
+    const data = event.data || {};
+    if (!data || data.type !== 'astrabot-workspace-auth') return;
+    if (typeof data.token === 'string' && data.token.trim()) {
+      state.token = data.token.trim();
+      saveTokenSilently();
+      rerender();
+      await loadLibrary();
+    }
+  } catch (e) {
+    console.error(e);
+  }
+});
+
 window.addEventListener('load', async () => {
   saveTokenSilently();
+  configureLinks();
   rerender();
   if (state.token) {
     try { await loadLibrary(); } catch (e) { toast(e.message, 5000); }
