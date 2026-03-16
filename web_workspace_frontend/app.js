@@ -53,7 +53,7 @@ video: {
   statusText: 'Выбери модель, настрой параметры и нажми запуск.',
   errorText: '',
   lastStatus: 'idle',
-  panel: DEFAULT_VIDEO_STATE.panel || 'params',
+  panel: 'params',
   motionDurationSec: Number.isFinite(Number(DEFAULT_VIDEO_STATE.motionDurationSec)) ? Number(DEFAULT_VIDEO_STATE.motionDurationSec) : null,
   isGenerating: false,
 },
@@ -323,7 +323,6 @@ function saveState() {
     aspectRatio: state.video.aspectRatio,
     enableAudio: state.video.enableAudio,
     quality: state.video.quality,
-    panel: state.video.panel,
     motionDurationSec: state.video.motionDurationSec,
   }));
 }
@@ -760,10 +759,28 @@ function renderHeader() {
   const inspector = document.querySelector('.inspector');
   const workspaceTopline = document.querySelector('.workspace-topline');
   const globalRunBtn = document.getElementById('globalRunBtn');
+  const seedDemoBtn = document.getElementById('seedDemoBtn');
+  const topbarActions = document.querySelector('.topbar-actions');
+  const resetStudioBtn = document.getElementById('resetStudioBtn');
+  const inspectorTitle = document.querySelector('.inspector-head h2');
+  const inspectorEyebrow = document.querySelector('.inspector-head .eyebrow');
   shell?.classList.toggle('chat-no-inspector', false);
   if (inspector) inspector.setAttribute('aria-hidden', state.studio === 'chat' ? 'true' : 'false');
   if (workspaceTopline) workspaceTopline.style.display = state.studio === 'chat' ? 'none' : '';
-  if (globalRunBtn) globalRunBtn.style.display = state.studio === 'chat' ? 'none' : '';
+
+  const hideTopActions = state.studio === 'chat' || state.studio === 'video';
+  if (topbarActions) topbarActions.style.display = hideTopActions ? 'none' : '';
+  if (seedDemoBtn) seedDemoBtn.style.display = state.studio === 'video' ? 'none' : '';
+  if (globalRunBtn) globalRunBtn.style.display = state.studio === 'chat' || state.studio === 'video' ? 'none' : '';
+  if (resetStudioBtn) resetStudioBtn.style.display = state.studio === 'video' ? 'none' : '';
+
+  if (inspectorTitle) {
+    inspectorTitle.textContent = state.studio === 'video' && state.video.panel === 'library' ? 'Библиотека видео' : 'Параметры';
+  }
+  if (inspectorEyebrow) {
+    inspectorEyebrow.textContent = state.studio === 'video' && state.video.panel === 'library' ? 'Library' : 'Inspector';
+  }
+
   document.getElementById('headerTitle').textContent = meta.title;
   document.getElementById('headerSubtitle').textContent = meta.subtitle;
   document.getElementById('headerEyebrow').textContent = `${meta.emoji} ${meta.title}`;
@@ -1198,7 +1215,6 @@ function renderVideoWorkspace() {
   const activeItem = historySelectedItem();
   const showHistoryVideo = state.video.panel === 'library' && activeItem && historyVideoUrl(activeItem);
   const previewUrl = showHistoryVideo ? historyVideoUrl(activeItem) : state.video.outputUrl;
-  const statusTone = videoStatusTone(state.video.lastStatus);
   const statusLabel = videoStatusLabel(state.video.lastStatus);
   const loadingHeadline = getVideoLoadingHeadline(state.video.percent, state.video.lastStatus);
   const loadingSubline = getVideoLoadingSubline(state.video.percent, state.video.lastStatus);
@@ -1216,7 +1232,6 @@ function renderVideoWorkspace() {
       <video class="preview-media" src="${escapeHtml(previewUrl)}" controls playsinline poster="${escapeHtml(state.video.coverUrl || '')}"></video>
       <div class="actions compact-gap" style="justify-content:center; flex-wrap:wrap; margin-top:14px;">
         <a class="btn primary" href="${escapeHtml(state.video.downloadUrl || previewUrl)}" download>Скачать видео</a>
-        <button class="btn ghost" data-action="show-video-library">История видео</button>
         <button class="btn outline" data-action="clear-video-run">Очистить</button>
       </div>
     </div>
@@ -1249,15 +1264,10 @@ function renderVideoWorkspace() {
     <div class="workspace-grid single video-workspace-grid">
       <div class="workspace-main scroll video-workspace-main">
         <div class="result-card video-stage-card">
-          <div class="video-stage-head">
+          <div class="video-stage-head video-stage-head-clean">
             <div>
               <h4 style="margin:0 0 6px;">Рабочая область</h4>
-              <small>${escapeHtml(state.video.errorText || state.video.statusText || 'Здесь появится текущее видео или выбранный ролик из библиотеки.')}</small>
-            </div>
-            <div class="actions compact-gap" style="margin-top:0; flex-wrap:wrap;">
-              <span class="badge ${statusTone}">${escapeHtml(statusLabel)}</span>
-              <button class="btn ghost small" data-action="show-video-library">История видео</button>
-              <button class="btn outline small" data-action="show-video-params">Параметры</button>
+              <small>${escapeHtml(state.video.errorText || state.video.statusText || `Статус: ${statusLabel}. Здесь появится текущее видео или выбранный ролик из библиотеки.`)}</small>
             </div>
           </div>
           <div class="placeholder-stage video video-stage-clean">
@@ -1593,7 +1603,7 @@ function renderVideoInspector() {
             <div class="history-item compact ${state.history.selectedId === item.id ? 'active' : ''}">
               <div class="history-item-row"><strong>${escapeHtml(trimText(item.prompt || `${item.provider || 'video'} · ${item.model || ''}`, 88) || 'Видео')}</strong><span class="badge ${historyStatusTone(item.status)}">${escapeHtml(historyStatusLabel(item.status))}</span></div>
               <small>${escapeHtml(formatDate(item.completed_at || item.created_at))}</small>
-              <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;"><button class="btn ghost small" data-action="preview-history-item" data-generation-id="${escapeHtml(item.id || '')}">Просмотр</button><button class="btn outline small" data-action="use-history-item" data-generation-id="${escapeHtml(item.id || '')}">В рабочую зону</button></div>
+              <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;"><button class="btn outline small" data-action="use-history-item" data-generation-id="${escapeHtml(item.id || '')}">В рабочую зону</button></div>
             </div>
           `).join('') : `<div class="empty-state">Пока нет сохранённых видео.</div>`}
         </div>
@@ -2603,8 +2613,10 @@ function handleInputChange(target) {
 
 function handleAction(action, dataset = {}) {
   switch (action) {
-    case 'switch-studio':
+    case 'switch-studio': {
+      const previousStudio = state.studio;
       state.studio = dataset.studio;
+      if (state.studio === 'video' && previousStudio !== 'video') state.video.panel = 'params';
       if (state.studio === 'library' && !state.prompts.categories.length) loadPromptCategories();
       if (state.studio === 'voice' && !state.voice.voices.length) loadVoices();
       if (state.studio === 'history' && state.authToken) loadVideoHistory({ silent: true, keepSelection: true });
@@ -2612,6 +2624,7 @@ function handleAction(action, dataset = {}) {
       render();
       saveState();
       break;
+    }
     case 'send-chat': sendChat(); break;
     case 'pick-chat-files': {
       const input = document.getElementById('chat_attachments');
