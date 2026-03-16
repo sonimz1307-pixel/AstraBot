@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AstraBot Video Editor v2</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/workspace/video-editor-v2/styles.css">
+</head>
+<body>
+  <div class="editor-shell">
+    <header class="editor-header">
+      <div>
+        <div class="eyebrow">AstraBot</div>
+        <h1>Video Editor v2</h1>
+        <p>Нормальный таймлайн: клипы, звук, резка, переходы и сохранение проекта.</p>
+      </div>
+      <div class="header-actions">
+        <button id="refreshLibraryBtn" class="btn ghost">Обновить</button>
+        <button id="saveProjectBtn" class="btn secondary">Сохранить проект</button>
+        <button id="renderBtn" class="btn primary">Экспорт</button>
+      </div>
+    </header>
+
+    <section class="editor-grid">
+      <aside class="panel library-panel">
+        <div class="panel-head"><strong>Библиотека</strong><span id="authState" class="badge">token?</span></div>
+        <div class="auth-box">
+          <label>Bearer token</label>
+          <input id="authTokenInput" type="password" placeholder="Вставь workspace bearer token">
+          <button id="saveTokenBtn" class="btn ghost full">Сохранить токен</button>
+        </div>
+        <div class="upload-box">
+          <label class="upload-btn">+ Загрузить видео<input id="videoUploadInput" type="file" accept="video/*" hidden></label>
+          <label class="upload-btn alt">+ Загрузить музыку<input id="audioUploadInput" type="file" accept="audio/*" hidden></label>
+        </div>
+        <div class="library-tabs">
+          <button class="tab active" data-library-tab="videos">Видео</button>
+          <button class="tab" data-library-tab="audio">Музыка</button>
+        </div>
+        <div id="libraryList" class="library-list"></div>
+      </aside>
+
+      <main class="panel main-panel">
+        <div class="preview-wrap">
+          <video id="previewVideo" controls playsinline></video>
+          <div class="project-bar">
+            <input id="projectTitleInput" type="text" value="Новый видеопроект" maxlength="120">
+            <span id="projectStatus" class="badge muted">черновик</span>
+            <span id="renderStatus" class="badge">не запускался</span>
+          </div>
+        </div>
+
+        <div class="toolbar">
+          <button id="splitBtn" class="tool">Разрезать</button>
+          <button id="deleteClipBtn" class="tool">Удалить</button>
+          <button id="muteClipBtn" class="tool">Mute</button>
+          <button id="addTextBtn" class="tool disabled">Текст скоро</button>
+          <button id="addStickerBtn" class="tool disabled">Стикер скоро</button>
+        </div>
+
+        <div class="timeline-wrap">
+          <div class="timeline-ruler" id="timelineRuler"></div>
+          <div class="track-block">
+            <div class="track-label">Видео</div>
+            <div id="videoTrack" class="track video-track"></div>
+          </div>
+          <div class="track-block">
+            <div class="track-label">Музыка</div>
+            <div id="audioTrack" class="track audio-track"></div>
+          </div>
+        </div>
+      </main>
+
+      <aside class="panel inspector-panel">
+        <div class="panel-head"><strong>Инспектор</strong></div>
+        <div id="inspectorBody" class="inspector-body"></div>
+      </aside>
+    </section>
+
+    <div id="toast" class="toast hidden"></div>
+  </div>
+  <script src="/workspace/video-editor-v2/app.js"></script>
+</body>
+</html>
