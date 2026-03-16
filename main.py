@@ -67,7 +67,7 @@ from app.routers.prompts import router as prompts_router
 from app.routers.prompts_admin import router as prompts_admin_router
 from app.routers.songwriter import router as songwriter_router
 from app.routers.web_workspace_api import router as workspace_router
-from app.routers.video_editor_v2 import router as video_editor_v2_router
+from app.routers.video_editor_v2 import router as video_editor_v2_router, page_router as video_editor_v2_page_router
 app.include_router(leads_router, prefix="/api/leads", tags=["leads"])
 app.include_router(kling3_router, prefix="/api/kling3", tags=["kling3"])
 app.include_router(admin_top_router, prefix="/api/admin", tags=["admin"])
@@ -77,6 +77,7 @@ app.include_router(tts_router)
 app.include_router(songwriter_router)
 app.include_router(workspace_router)
 app.include_router(video_editor_v2_router)
+app.include_router(video_editor_v2_page_router)
 
 APP_VERSION = "v7-suno-callback-dedup-fix"
 try:
