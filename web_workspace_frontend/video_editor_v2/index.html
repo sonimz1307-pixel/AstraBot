@@ -15,7 +15,7 @@
       <div>
         <div class="eyebrow">AstraBot</div>
         <h1>Video Editor v2</h1>
-        <p>Нормальный таймлайн: клипы, звук, резка, переходы и сохранение проекта.</p>
+        <p>Монтаж без лишней технички: клипы, музыка, резка, переходы и экспорт проекта.</p>
       </div>
       <div class="header-actions">
         <button id="refreshLibraryBtn" class="btn ghost">Обновить</button>
@@ -26,15 +26,16 @@
 
     <section class="editor-grid">
       <aside class="panel library-panel">
-        <div class="panel-head"><strong>Библиотека</strong><span id="authState" class="badge">token?</span></div>
-        <div class="auth-box">
-          <label>Bearer token</label>
-          <input id="authTokenInput" type="password" placeholder="Вставь workspace bearer token">
-          <button id="saveTokenBtn" class="btn ghost full">Сохранить токен</button>
+        <div class="panel-head">
+          <div class="panel-title">
+            <strong>Медиатека</strong>
+            <p id="libraryHint">Загружай видео и музыку или добавляй материалы из библиотеки.</p>
+          </div>
+          <span id="sessionState" class="badge muted">проверка…</span>
         </div>
         <div class="upload-box">
           <label class="upload-btn">+ Загрузить видео<input id="videoUploadInput" type="file" accept="video/*" hidden></label>
-          <label class="upload-btn alt">+ Загрузить музыку<input id="audioUploadInput" type="file" accept="audio/*" hidden></label>
+          <label class="upload-btn">+ Загрузить музыку<input id="audioUploadInput" type="file" accept="audio/*" hidden></label>
         </div>
         <div class="library-tabs">
           <button class="tab active" data-library-tab="videos">Видео</button>
@@ -45,7 +46,15 @@
 
       <main class="panel main-panel">
         <div class="preview-wrap">
-          <video id="previewVideo" controls playsinline></video>
+          <div class="preview-frame">
+            <video id="previewVideo" class="hidden" controls playsinline></video>
+            <div id="previewEmpty" class="preview-empty">
+              <div>
+                <strong>Видео появится здесь</strong>
+                <div>Добавь ролик в таймлайн слева или выбери клип, чтобы увидеть превью.</div>
+              </div>
+            </div>
+          </div>
           <div class="project-bar">
             <input id="projectTitleInput" type="text" value="Новый видеопроект" maxlength="120">
             <span id="projectStatus" class="badge muted">черновик</span>
@@ -72,12 +81,17 @@
             <div id="audioTrack" class="track audio-track"></div>
           </div>
         </div>
-      </main>
 
-      <aside class="panel inspector-panel">
-        <div class="panel-head"><strong>Инспектор</strong></div>
-        <div id="inspectorBody" class="inspector-body"></div>
-      </aside>
+        <section class="panel selection-panel">
+          <div class="selection-head">
+            <div>
+              <strong id="selectionTitle">Параметры элемента</strong>
+              <p>Выбери клип или музыку на таймлайне — настройки появятся здесь.</p>
+            </div>
+          </div>
+          <div id="selectionBody"></div>
+        </section>
+      </main>
     </section>
 
     <div id="toast" class="toast hidden"></div>
