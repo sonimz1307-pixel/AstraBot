@@ -1580,12 +1580,9 @@ function renderChatInspector() {
 
 function renderVideoInspector() {
   syncVideoSelection();
-  const providerOptions = Object.entries(VIDEO_REGISTRY).map(([id, provider]) => `
-    <button class="seg-chip ${state.video.provider === id ? 'active' : ''}" data-action="set-video-provider" data-provider="${id}">${escapeHtml(provider.name)}</button>
-  `).join('');
-  const modelOptions = Object.entries(videoProviderConfig().models).map(([id, model]) => `
-    <button class="seg-chip ${state.video.model === id ? 'active' : ''}" data-action="set-video-model" data-model="${id}">${escapeHtml(model.name)}</button>
-  `).join('');
+  const providerOptions = Object.entries(VIDEO_REGISTRY).map(([id, provider]) => `<option value="${escapeHtml(id)}" ${state.video.provider === id ? 'selected' : ''}>${escapeHtml(provider.name)}</option>`).join('');
+  const modelOptions = Object.entries(videoProviderConfig().models).map(([id, model]) => `<option value="${escapeHtml(id)}" ${state.video.model === id ? 'selected' : ''}>${escapeHtml(model.name)}</option>`).join('');
+  const modeOptions = Object.entries(videoModelConfig().modes).map(([id, mode]) => `<option value="${escapeHtml(id)}" ${state.video.mode === id ? 'selected' : ''}>${escapeHtml(mode.name)}</option>`).join('');
 
   if (state.video.panel === 'library') {
     const items = state.history.items || [];
@@ -1610,9 +1607,18 @@ function renderVideoInspector() {
   return `
     <div class="inspector-card">
       <div class="field-head" style="margin-bottom:12px;"><div class="section-title" style="margin:0;">Video Studio</div><button class="btn ghost small" data-action="show-video-library">История видео</button></div>
-      <div class="input-group"><label class="label">Семейство</label><div class="seg-chips">${providerOptions}</div></div>
-      <div class="input-group" style="margin-top:12px;"><label class="label">Модель</label><div class="seg-chips">${modelOptions}</div></div>
-      ${Object.keys(videoModelConfig().modes).length > 1 ? `<div class="input-group" style="margin-top:12px;"><label class="label">Режим</label><select id="video_mode">${Object.entries(videoModelConfig().modes).map(([id, mode]) => `<option value="${id}" ${state.video.mode === id ? 'selected' : ''}>${escapeHtml(mode.name)}</option>`).join('')}</select></div>` : ''}
+      <div class="help-text" style="margin-bottom:12px;">Семейство, модель и режим снова вынесены в выпадающие панели, чтобы выбор был чище и не раздувал правую колонку.</div>
+      <div class="selector-stack">
+        <div class="input-group">
+          <label class="label">Семейство</label>
+          <select id="video_provider">${providerOptions}</select>
+        </div>
+        <div class="input-group">
+          <label class="label">Модель</label>
+          <select id="video_model">${modelOptions}</select>
+        </div>
+        ${Object.keys(videoModelConfig().modes).length > 1 ? `<div class="input-group"><label class="label">Режим</label><select id="video_mode">${modeOptions}</select></div>` : ''}
+      </div>
     </div>
     ${renderVideoModeFields(videoModelConfig())}
     <div class="inspector-card">
@@ -1654,11 +1660,15 @@ function renderVideoModeFields(model) {
   }
   if (['kling-2.5', 'kling-3.0'].includes(state.video.model)) {
     const durationOptions = state.video.model === 'kling-2.5' ? [['5','5 sec'],['10','10 sec']] : [['3','3 sec'],['5','5 sec'],['10','10 sec'],['15','15 sec']];
-    addFields(`${fieldSelect('Duration', 'video_duration', state.video.duration, durationOptions)}${state.video.model === 'kling-3.0' ? fieldSelect('Resolution', 'video_resolution', state.video.resolution, [['720','720p'],['1080','1080p']]) : ''}${fieldSelect('Aspect ratio', 'video_aspectRatio', state.video.aspectRatio, [['16:9','16:9'],['9:16','9:16'],['1:1','1:1']])}${state.video.model === 'kling-3.0' ? fieldToggle('Enable audio', 'video_enableAudio', state.video.enableAudio, 'Звук увеличивает стоимость на 1 токен/сек.') : ''}`);
+    addFields(`${fieldSelect('Duration', 'video_duration', state.video.duration, durationOptions)}${state.video.model === 'kling-3.0' ? fieldSelect('Resolution', 'video_resolution', state.video.resolution, [['720','720p'],['1080','1080p']]) : ''}${fieldSelect('Aspect ratio', 'video_aspectRatio', state.video.aspectRatio, [['16:9','16:9'],['9:16','9:16'],['1:1','1:1']])}`);
+    if (state.video.model === 'kling-3.0') {
+      parts.push(`<div class="inspector-card">${fieldTogglePanel('Enable audio', 'video_enableAudio', state.video.enableAudio, 'Звук увеличивает стоимость на 1 токен за каждую секунду ролика.', state.video.enableAudio ? 'Звук включён' : 'Без звука')}</div>`);
+    }
     return parts.join('');
   }
   if (state.video.provider === 'veo') {
-    addFields(`${fieldSelect('Duration', 'video_durationVeo', state.video.duration || '8', [['4','4 sec'],['6','6 sec'],['8','8 sec']])}${fieldSelect('Aspect ratio', 'video_aspectRatioVeo', state.video.aspectRatio || '16:9', [['16:9','16:9'],['9:16','9:16']])}${fieldToggle('Generate audio', 'video_generateAudio', state.video.enableAudio, 'Включает генерацию звука.')}`);
+    addFields(`${fieldSelect('Duration', 'video_durationVeo', state.video.duration || '8', [['4','4 sec'],['6','6 sec'],['8','8 sec']])}${fieldSelect('Aspect ratio', 'video_aspectRatioVeo', state.video.aspectRatio || '16:9', [['16:9','16:9'],['9:16','9:16']])}`);
+    parts.push(`<div class="inspector-card">${fieldTogglePanel('Generate audio', 'video_generateAudio', state.video.enableAudio, 'Включает генерацию звука в ролике.', state.video.enableAudio ? 'Аудио активно' : 'Аудио отключено')}</div>`);
     return parts.join('');
   }
   if (state.video.provider === 'seedance') {
@@ -1710,12 +1720,22 @@ function sectionUpload(label, id, help, multiple = false, accept = 'image/*') {
   const key = id.replace(/_/g, '.');
   const asset = getFile(key);
   const hint = asset ? (Array.isArray(asset) ? `${asset.length} файлов выбрано` : asset.name) : 'Файл ещё не выбран';
+  const triggerTitle = multiple ? 'Добавить файлы' : 'Добавить файл';
+  const acceptLabel = accept === 'video/*' ? 'MP4 / MOV / WEBM' : 'PNG / JPG / WEBP';
   return `
     <div class="inspector-card">
       <div class="input-group">
         <label class="label">${escapeHtml(label)}</label>
-        <input id="${id}" type="file" ${multiple ? 'multiple' : ''} accept="${escapeHtml(accept)}">
-        <div class="help-text">${escapeHtml(help)}<br><span class="kbd">${escapeHtml(hint)}</span></div>
+        <input class="upload-input-native" id="${id}" type="file" ${multiple ? 'multiple' : ''} accept="${escapeHtml(accept)}">
+        <label class="upload-trigger" for="${id}">
+          <span class="upload-trigger-plus">+</span>
+          <span class="upload-trigger-copy">
+            <strong>${escapeHtml(triggerTitle)}</strong>
+            <small>${escapeHtml(acceptLabel)}</small>
+          </span>
+        </label>
+        <div class="help-text">${escapeHtml(help)}</div>
+        <div class="upload-file-pill ${asset ? 'has-file' : ''}">${escapeHtml(hint)}</div>
       </div>
     </div>
   `;
@@ -1749,6 +1769,21 @@ function fieldToggle(label, id, checked, help) {
         <div class="help-text">${escapeHtml(help)}</div>
       </div>
       <label class="switch"><input id="${id}" type="checkbox" ${checked ? 'checked' : ''}><span></span></label>
+    </div>
+  `;
+}
+
+function fieldTogglePanel(label, id, checked, help, stateLabel = '') {
+  return `
+    <div class="toggle-panel ${checked ? 'is-active' : ''}">
+      <div class="toggle-panel-copy">
+        <div class="toggle-panel-title-row">
+          <strong>${escapeHtml(label)}</strong>
+          ${stateLabel ? `<span class="toggle-panel-badge">${escapeHtml(stateLabel)}</span>` : ''}
+        </div>
+        <div class="help-text">${escapeHtml(help)}</div>
+      </div>
+      <label class="switch switch-lg"><input id="${id}" type="checkbox" ${checked ? 'checked' : ''}><span></span></label>
     </div>
   `;
 }
