@@ -1744,7 +1744,7 @@ function renderVideoWorkspace() {
             <div class="help-text">Старый mini editor v1 убран из интерфейса. Для монтажа открой новый редактор с таймлайном.</div>
           </div>
           <div class="actions compact-gap" style="justify-content:center; flex-wrap:wrap; margin-top:14px;">
-            <a class="btn primary" href="/workspace/video-editor-v2">Открыть редактор видео</a>
+            <a class="btn primary" href="https://astrabot-tchj.onrender.com/workspace/video-editor-v2">Открыть редактор видео</a>
           </div>
         </div>
         ${assets ? `<div class="upload-grid two" style="margin-top:16px;">${assets}</div>` : ''}
