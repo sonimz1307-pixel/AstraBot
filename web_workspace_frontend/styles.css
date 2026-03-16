@@ -508,6 +508,7 @@ textarea { resize: vertical; min-height: 110px; }
 }
 .history-library-item,
 .history-item.compact {
+  position: relative;
   padding: 14px;
   border-radius: 18px;
   background: rgba(255,255,255,0.03);
@@ -624,4 +625,34 @@ textarea { resize: vertical; min-height: 110px; }
 .history-item.compact.active { border-color: rgba(124,92,255,0.55); box-shadow: 0 0 0 1px rgba(124,92,255,0.14) inset; }
 @media (max-width: 900px) {
   .video-stage-clean { min-height: 380px; }
+}
+
+.video-stage-card-plain {
+  padding-top: 12px;
+}
+
+.history-delete-btn {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(10,16,28,0.92);
+  color: rgba(255,255,255,0.84);
+  font-size: 18px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: transform .14s ease, background .14s ease, border-color .14s ease, color .14s ease;
+}
+
+.history-delete-btn:hover {
+  transform: scale(1.04);
+  background: rgba(153,27,27,0.22);
+  border-color: rgba(248,113,113,0.35);
+  color: #fff;
 }
