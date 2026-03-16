@@ -1263,13 +1263,7 @@ function renderVideoWorkspace() {
   return `
     <div class="workspace-grid single video-workspace-grid">
       <div class="workspace-main scroll video-workspace-main">
-        <div class="result-card video-stage-card">
-          <div class="video-stage-head video-stage-head-clean">
-            <div>
-              <h4 style="margin:0 0 6px;">Рабочая область</h4>
-              <small>${escapeHtml(state.video.errorText || state.video.statusText || `Статус: ${statusLabel}. Здесь появится текущее видео или выбранный ролик из библиотеки.`)}</small>
-            </div>
-          </div>
+        <div class="result-card video-stage-card video-stage-card-plain">
           <div class="placeholder-stage video video-stage-clean">
             ${stageInner}
           </div>
@@ -1472,6 +1466,7 @@ function renderHistoryWorkspace() {
           ${state.history.lastError ? `<div class="empty-state">${escapeHtml(state.history.lastError)}</div>` : ''}
           ${items.length ? items.map((item) => `
             <div class="history-library-item ${selected?.id === item.id ? 'active' : ''}">
+              <button class="history-delete-btn" data-action="delete-history-item" data-generation-id="${escapeHtml(item.id || '')}" title="Удалить из истории" aria-label="Удалить из истории">×</button>
               <div class="history-item-row"><strong>${escapeHtml(trimText(item.prompt || `${item.provider || 'video'} · ${item.model || ''}`, 96) || 'Видео')}</strong><span class="badge ${historyStatusTone(item.status)}">${escapeHtml(historyStatusLabel(item.status))}</span></div>
               <small>${escapeHtml(formatDate(item.completed_at || item.created_at))}</small>
               <small>${escapeHtml(trimText([item.provider, item.model, item.mode].filter(Boolean).join(' · '), 120) || '—')}</small>
@@ -1601,6 +1596,7 @@ function renderVideoInspector() {
         <div class="mini-list" style="margin-top:14px;">
           ${items.length ? items.map((item) => `
             <div class="history-item compact ${state.history.selectedId === item.id ? 'active' : ''}">
+              <button class="history-delete-btn" data-action="delete-history-item" data-generation-id="${escapeHtml(item.id || '')}" title="Удалить из истории" aria-label="Удалить из истории">×</button>
               <div class="history-item-row"><strong>${escapeHtml(trimText(item.prompt || `${item.provider || 'video'} · ${item.model || ''}`, 88) || 'Видео')}</strong><span class="badge ${historyStatusTone(item.status)}">${escapeHtml(historyStatusLabel(item.status))}</span></div>
               <small>${escapeHtml(formatDate(item.completed_at || item.created_at))}</small>
               <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;"><button class="btn outline small" data-action="use-history-item" data-generation-id="${escapeHtml(item.id || '')}">В рабочую зону</button></div>
@@ -2281,6 +2277,38 @@ function applyHistoryItemToVideoWorkspace(item) {
   toast('success', 'Видео открыто', 'Ролик возвращён в рабочую зону.');
 }
 
+async function deleteHistoryItem(generationId) {
+  const generationIdText = String(generationId || '').trim();
+  if (!generationIdText) return;
+  if (!state.authToken) {
+    toast('error', 'Нужна авторизация', 'Сначала войди через Telegram, чтобы управлять историей.');
+    return;
+  }
+  const target = state.history.items.find((item) => item.id === generationIdText) || state.history.selectedItem || null;
+  const title = trimText(target?.prompt || 'это видео', 56);
+  if (!window.confirm(`Удалить из истории ${title}?`)) return;
+
+  try {
+    const res = await apiFetch(`/api/workspace/history/${encodeURIComponent(generationIdText)}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error('delete_failed');
+    state.history.items = state.history.items.filter((item) => item.id !== generationIdText);
+    if (state.history.selectedId === generationIdText) {
+      state.history.selectedId = '';
+      state.history.selectedItem = null;
+    }
+    if (String(state.video.generationId || '').trim() === generationIdText) {
+      clearVideoRunState({ keepPrompt: true });
+      state.video.statusText = 'Ролик удалён из истории. Рабочая область очищена.';
+      state.video.panel = 'library';
+    }
+    saveState();
+    render();
+    toast('success', 'Удалено', 'Генерация убрана из истории.');
+  } catch (e) {
+    toast('error', 'Не удалось удалить', String(e.message || e));
+  }
+}
+
 function renderVideoHistoryShelf() {
   return '';
 }
@@ -2684,6 +2712,9 @@ function handleAction(action, dataset = {}) {
       loadHistoryItem(dataset.generationId, { silent: false }).then((item) => {
         if (item) applyHistoryItemToVideoWorkspace(item);
       });
+      break;
+    case 'delete-history-item':
+      deleteHistoryItem(dataset.generationId);
       break;
     case 'run-image': toast('info', 'Image Studio готова архитектурно', 'Для запуска осталось вынести web-friendly image endpoints из backend.'); break;
     case 'load-voices': loadVoices(); break;
