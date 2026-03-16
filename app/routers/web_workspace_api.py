@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import asyncio
 import mimetypes
 import os
 import re
@@ -26,11 +27,26 @@ from app.routers.tts import ALLOWED_VOICE_IDS, ALLOWED_VOICES
 from app.services.eleven_tts import ElevenTTS
 from app.services.telegram_webauth import TelegramWebAuthError, validate_telegram_login_data
 from app.services.workspace_auth import WORKSPACE_SESSION_TTL_SEC, create_access_token, get_current_workspace_user, get_optional_workspace_user
+
 from billing_db import add_tokens, ensure_user_row, get_balance
+from billing_rules import calc_kling_tokens
 from db_supabase import supabase, track_user_activity
 from kling3_flow import Kling3Error, create_kling3_task, get_kling3_task
 from kling3_pricing import calculate_kling3_price
+from kling3_runner import Kling3RunnerError, run_kling3_task_and_wait
+from kling_flow import (
+    REPLICATE_KLING_25_TURBO_PRO_MODEL,
+    REPLICATE_KLING_I2V_PRO_MODEL,
+    REPLICATE_KLING_I2V_STD_MODEL,
+    _norm_aspect_ratio,
+    _run_replicate_model,
+    upload_bytes_to_supabase,
+)
+from kling_motion import run_motion_control
 from songwriter_prompt import SONGWRITER_SYSTEM_PROMPT
+from veo_billing import calc_veo_charge
+from veo_flow import VeoFlowError, run_veo_image_to_video, run_veo_text_to_video
+from video_duration import get_duration_seconds
 
 router = APIRouter(prefix="/api/workspace", tags=["workspace"])
 OPENAI_CHAT_MODEL = (os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini") or "gpt-4o-mini").strip()
@@ -795,6 +811,356 @@ async def _sync_workspace_generation_by_task(user_id: int, task_id: Optional[str
             pass
 
 
+
+_WORKSPACE_SEEDANCE_REF_BUCKET = (os.getenv("SEEDANCE_REF_BUCKET", "seedance-refs") or "seedance-refs").strip() or "seedance-refs"
+_WORKSPACE_SEEDANCE_REF_PREFIX = (os.getenv("SEEDANCE_REF_PREFIX", "refs") or "refs").strip().strip("/") or "refs"
+_PIAPI_BASE_URL = (os.getenv("PIAPI_BASE_URL") or "https://api.piapi.ai").strip().rstrip("/")
+_PIAPI_API_KEY = (os.getenv("PIAPI_API_KEY") or "").strip()
+_OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip()
+_OPENAI_API_BASE = (os.getenv("OPENAI_API_BASE") or "https://api.openai.com/v1").strip().rstrip("/")
+
+
+def _workspace_video_reason(provider: str, model: str) -> str:
+    return f"workspace_video:{provider}:{model}"
+
+
+def _workspace_video_refund_reason(provider: str, model: str) -> str:
+    return f"workspace_video_refund:{provider}:{model}"
+
+
+def _workspace_public_object_url(bucket: str, path: str) -> str:
+    base = (os.getenv("SUPABASE_URL", "") or "").strip().rstrip("/")
+    return f"{base}/storage/v1/object/public/{bucket}/{path.lstrip('/')}"
+
+
+async def _workspace_upload_public_ref(data: bytes, *, ext: str = "jpg") -> str:
+    supabase_url = (os.getenv("SUPABASE_URL", "") or "").strip().rstrip("/")
+    service_key = (os.getenv("SUPABASE_SERVICE_KEY", "") or "").strip()
+    if not supabase_url or not service_key:
+        raise RuntimeError("SUPABASE_URL / SUPABASE_SERVICE_KEY are not configured")
+    key = f"{_WORKSPACE_SEEDANCE_REF_PREFIX}/{uuid4().hex}.{ext}"
+    put_url = f"{supabase_url}/storage/v1/object/{_WORKSPACE_SEEDANCE_REF_BUCKET}/{key}"
+    headers = {
+        "authorization": f"Bearer {service_key}",
+        "apikey": service_key,
+        "x-upsert": "true",
+        "content-type": "image/jpeg" if ext in ("jpg", "jpeg") else f"image/{ext}",
+    }
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        r = await client.put(put_url, headers=headers, content=data)
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase upload failed: {r.status_code} {r.text[:400]}")
+    return _workspace_public_object_url(_WORKSPACE_SEEDANCE_REF_BUCKET, key)
+
+
+async def _workspace_seedance_create_task(*, task_type: str, prompt: Optional[str], duration: int, aspect_ratio: str, image_urls: Optional[List[str]] = None) -> Dict[str, Any]:
+    if not _PIAPI_API_KEY:
+        raise RuntimeError("PIAPI_API_KEY is not configured")
+    payload: Dict[str, Any] = {
+        "model": "seedance",
+        "task_type": task_type,
+        "input": {
+            "prompt": prompt or "",
+            "duration": int(duration),
+            "aspect_ratio": aspect_ratio,
+        },
+        "config": {"service_mode": "public"},
+    }
+    if image_urls:
+        payload["input"]["image_urls"] = image_urls[:9]
+    headers = {"X-API-Key": _PIAPI_API_KEY, "Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        r = await client.post(f"{_PIAPI_BASE_URL}/api/v1/task", headers=headers, json=payload)
+        if r.status_code >= 300:
+            raise RuntimeError(f"Seedance create failed: {r.status_code} {r.text[:500]}")
+        return r.json()
+
+
+async def _workspace_seedance_get_task(task_id: str) -> Dict[str, Any]:
+    headers = {"X-API-Key": _PIAPI_API_KEY}
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        r = await client.get(f"{_PIAPI_BASE_URL}/api/v1/task/{task_id}", headers=headers)
+        if r.status_code >= 300:
+            raise RuntimeError(f"Seedance get failed: {r.status_code} {r.text[:500]}")
+        return r.json()
+
+
+def _workspace_seedance_status(resp: Dict[str, Any]) -> str:
+    if not isinstance(resp, dict):
+        return ""
+    if resp.get("status"):
+        return str(resp.get("status") or "").lower().strip()
+    data = resp.get("data") or {}
+    if isinstance(data, dict):
+        return str(data.get("status") or "").lower().strip()
+    return ""
+
+
+def _workspace_seedance_output_url(resp: Dict[str, Any]) -> Optional[str]:
+    if not isinstance(resp, dict):
+        return None
+    data = resp.get("data") if isinstance(resp.get("data"), dict) else resp
+    output = data.get("output") or {}
+    if isinstance(output, dict):
+        for key in ("video", "video_url", "videoUrl", "url", "mp4_url", "mp4Url", "file_url", "fileUrl"):
+            value = output.get(key)
+            if isinstance(value, str) and value.startswith("http"):
+                return value
+    return None
+
+
+async def _workspace_seedance_wait(task_id: str, *, timeout_s: int = 7200, poll_s: float = 6.0) -> Dict[str, Any]:
+    started = asyncio.get_event_loop().time()
+    while True:
+        data = await _workspace_seedance_get_task(task_id)
+        status = _workspace_seedance_status(data)
+        if status in ("completed", "failed"):
+            return data
+        if (asyncio.get_event_loop().time() - started) > timeout_s:
+            raise TimeoutError("Seedance: timeout while waiting")
+        await asyncio.sleep(poll_s)
+
+
+def _workspace_sora_headers() -> Dict[str, str]:
+    if not _OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not configured")
+    return {"Authorization": f"Bearer {_OPENAI_API_KEY}"}
+
+
+def _workspace_sora_size(aspect_ratio: str) -> str:
+    return "720x1280" if str(aspect_ratio or "16:9").strip() == "9:16" else "1280x720"
+
+
+async def _workspace_sora_create_video(*, prompt: str, duration: int, aspect_ratio: str, model: str = "sora-2") -> Dict[str, Any]:
+    files = [
+        ("model", (None, str(model or "sora-2"))),
+        ("prompt", (None, str(prompt or "").strip())),
+        ("seconds", (None, str(int(duration)))),
+        ("size", (None, _workspace_sora_size(aspect_ratio))),
+    ]
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        r = await client.post(f"{_OPENAI_API_BASE}/videos", headers=_workspace_sora_headers(), files=files)
+    if r.status_code >= 300:
+        raise RuntimeError(f"Sora create failed: {r.text[:500]}")
+    return r.json()
+
+
+async def _workspace_sora_retrieve_video(video_id: str) -> Dict[str, Any]:
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        r = await client.get(f"{_OPENAI_API_BASE}/videos/{video_id}", headers=_workspace_sora_headers())
+    if r.status_code >= 300:
+        raise RuntimeError(f"Sora retrieve failed: {r.text[:500]}")
+    return r.json()
+
+
+async def _workspace_sora_poll(video_id: str, *, timeout_sec: int = 7200, sleep_sec: float = 6.0) -> Dict[str, Any]:
+    started = asyncio.get_event_loop().time()
+    while True:
+        data = await _workspace_sora_retrieve_video(video_id)
+        status = str(data.get("status") or "").strip().lower()
+        if status in ("completed", "failed"):
+            return data
+        if (asyncio.get_event_loop().time() - started) > timeout_sec:
+            raise TimeoutError(f"Sora timeout after {timeout_sec}s")
+        await asyncio.sleep(max(2.0, float(sleep_sec)))
+
+
+async def _workspace_sora_download(video_id: str) -> bytes:
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        r = await client.get(f"{_OPENAI_API_BASE}/videos/{video_id}/content", headers=_workspace_sora_headers(), params={"variant": "video"})
+    if r.status_code >= 300:
+        raise RuntimeError(f"Sora download failed: {r.text[:500]}")
+    return r.content
+
+
+def _workspace_video_tokens(*, model: str, duration: int, resolution: str, enable_audio: bool, quality: str, motion_video_bytes: Optional[bytes]) -> int:
+    if model == "motion-control":
+        if not motion_video_bytes:
+            raise RuntimeError("Нужно референс-видео для Motion Control")
+        seconds = int(get_duration_seconds(video_bytes=motion_video_bytes, suffix=".mp4") or 0)
+        if seconds <= 0:
+            raise RuntimeError("Не удалось определить длительность motion video")
+        return int(calc_kling_tokens(seconds=seconds, mode=("std" if str(quality).lower() in ("standard", "std") else "pro")))
+    if model == "kling-1.6":
+        return int(calc_kling_tokens(seconds=int(duration), mode=("std" if str(quality).lower() in ("standard", "std") else "pro")))
+    if model == "kling-2.5":
+        return int(calc_kling_tokens(seconds=int(duration), mode="pro", product="kling25_t2v"))
+    if model == "kling-3.0":
+        return int(calculate_kling3_price(resolution=("1080" if str(resolution or "720") == "1080" else "720"), enable_audio=bool(enable_audio), duration=int(duration)))
+    if model in ("veo-fast", "veo-3.1-pro"):
+        ch = calc_veo_charge(veo_model=("pro" if model == "veo-3.1-pro" else "fast"), model_slug=("veo-3.1" if model == "veo-3.1-pro" else "veo-3-fast"), generate_audio=bool(enable_audio), duration_sec=int(duration))
+        return int(ch.total_tokens)
+    if model == "seedance-preview":
+        return int(duration) * 2
+    if model == "seedance-fast":
+        return int(duration)
+    if model == "sora-2":
+        return {4: 5, 8: 10, 12: 15}.get(int(duration), 5)
+    return max(1, int(duration or 1))
+
+
+def _workspace_store_video_bytes(*, raw: bytes, user_id: int, generation_id: str, content_type: str = "video/mp4") -> Dict[str, Any]:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=f".{_storage_content_type_to_ext(content_type)}") as tmp:
+        tmp.write(raw)
+        tmp_path = tmp.name
+    try:
+        return _upload_workspace_video_file(local_path=tmp_path, user_id=user_id, generation_id=generation_id, content_type=content_type)
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+async def _workspace_complete_generation_from_url(*, generation_id: str, user_id: int, provider_video_url: str, task_id: Optional[str] = None) -> None:
+    patch: Dict[str, Any] = {
+        "status": "completed",
+        "provider_video_url": provider_video_url,
+        "completed_at": _utc_now_iso(),
+        "error_code": None,
+        "error_message": None,
+    }
+    if task_id:
+        patch["task_id"] = task_id
+    _update_workspace_generation(generation_id, patch)
+    tmp_path = ""
+    try:
+        tmp_path, downloaded_bytes, content_type = await _download_video_to_tempfile(provider_video_url)
+        uploaded = _upload_workspace_video_file(local_path=tmp_path, user_id=user_id, generation_id=generation_id, content_type=content_type)
+        _update_workspace_generation(generation_id, {
+            "storage_path": uploaded.get("storage_path"),
+            "file_size_bytes": int(uploaded.get("file_size_bytes") or downloaded_bytes or 0),
+            "mime_type": uploaded.get("mime_type") or content_type or "video/mp4",
+        })
+    finally:
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+
+async def _workspace_complete_generation_from_bytes(*, generation_id: str, user_id: int, raw: bytes, content_type: str = "video/mp4", task_id: Optional[str] = None) -> None:
+    uploaded = _workspace_store_video_bytes(raw=raw, user_id=user_id, generation_id=generation_id, content_type=content_type)
+    patch: Dict[str, Any] = {
+        "status": "completed",
+        "completed_at": _utc_now_iso(),
+        "storage_path": uploaded.get("storage_path"),
+        "file_size_bytes": int(uploaded.get("file_size_bytes") or len(raw) or 0),
+        "mime_type": uploaded.get("mime_type") or content_type,
+        "error_code": None,
+        "error_message": None,
+    }
+    if task_id:
+        patch["task_id"] = task_id
+    _update_workspace_generation(generation_id, patch)
+
+
+async def _workspace_video_job(*, user_id: int, generation_id: str, provider: str, model: str, mode: str, prompt: str, duration: int, resolution: str, aspect_ratio: str, enable_audio: bool, quality: str, start_frame: Optional[bytes], end_frame: Optional[bytes], last_frame: Optional[bytes], avatar_image: Optional[bytes], motion_video: Optional[bytes], reference_images: List[bytes], charged_tokens: int) -> None:
+    try:
+        task_id: Optional[str] = None
+        if model == "motion-control":
+            if not avatar_image or not motion_video:
+                raise RuntimeError("Для Motion Control нужны avatar photo и motion video")
+            avatar_url = upload_bytes_to_supabase(f"workspace_motion/{user_id}/{uuid4().hex}_avatar.jpg", avatar_image, "image/jpeg")
+            motion_url = upload_bytes_to_supabase(f"workspace_motion/{user_id}/{uuid4().hex}_motion.mp4", motion_video, "video/mp4")
+            out_url = await run_motion_control(image_url=avatar_url, video_url=motion_url, prompt=prompt, mode=("std" if str(quality).lower() in ("standard", "std") else "pro"))
+            await _workspace_complete_generation_from_url(generation_id=generation_id, user_id=user_id, provider_video_url=out_url)
+            return
+
+        if model == "kling-1.6":
+            if not start_frame:
+                raise RuntimeError("Для Kling 1.6 нужен start frame")
+            start_url = upload_bytes_to_supabase(f"workspace_kling/{user_id}/{uuid4().hex}_start.jpg", start_frame, "image/jpeg")
+            input_payload = {
+                "prompt": prompt,
+                "duration": int(duration),
+                "cfg_scale": 0.5,
+                "start_image": start_url,
+                "aspect_ratio": _norm_aspect_ratio(aspect_ratio),
+                "negative_prompt": "",
+            }
+            model_slug = REPLICATE_KLING_I2V_STD_MODEL if str(quality).lower() in ("standard", "std") else REPLICATE_KLING_I2V_PRO_MODEL
+            out_url = await _run_replicate_model(model=model_slug, input_payload=input_payload)
+            await _workspace_complete_generation_from_url(generation_id=generation_id, user_id=user_id, provider_video_url=out_url)
+            return
+
+        if model == "kling-2.5":
+            if mode == "text_to_video":
+                input_payload = {"prompt": prompt, "duration": int(duration), "aspect_ratio": _norm_aspect_ratio(aspect_ratio)}
+            else:
+                if not start_frame:
+                    raise RuntimeError("Для Kling 2.5 image-to-video нужен start frame")
+                start_url = upload_bytes_to_supabase(f"workspace_kling/{user_id}/{uuid4().hex}_start.jpg", start_frame, "image/jpeg")
+                input_payload = {"prompt": prompt, "duration": int(duration), "start_image": start_url}
+                if end_frame:
+                    end_url = upload_bytes_to_supabase(f"workspace_kling/{user_id}/{uuid4().hex}_end.jpg", end_frame, "image/jpeg")
+                    input_payload["end_image"] = end_url
+            out_url = await _run_replicate_model(model=REPLICATE_KLING_25_TURBO_PRO_MODEL, input_payload=input_payload)
+            await _workspace_complete_generation_from_url(generation_id=generation_id, user_id=user_id, provider_video_url=out_url)
+            return
+
+        if model == "kling-3.0":
+            task_id, _last, out_url = await run_kling3_task_and_wait(prompt=prompt, duration=int(duration), resolution=str(resolution or "720"), enable_audio=bool(enable_audio), aspect_ratio=aspect_ratio, prefer_multi_shots=(mode == "multi_shot"), start_image_bytes=start_frame, end_image_bytes=end_frame)
+            if not out_url:
+                raise RuntimeError("Kling 3.0 did not return video url")
+            await _workspace_complete_generation_from_url(generation_id=generation_id, user_id=user_id, provider_video_url=out_url, task_id=task_id)
+            return
+
+        if model in ("veo-fast", "veo-3.1-pro"):
+            veo_model = "pro" if model == "veo-3.1-pro" else "fast"
+            if mode == "text_to_video":
+                out_url = await run_veo_text_to_video(user_id=user_id, model=("veo-3.1" if veo_model == "pro" else "veo-3-fast"), prompt=prompt, duration=int(duration), resolution=("1080p" if veo_model == "pro" else "720p"), aspect_ratio=aspect_ratio, generate_audio=bool(enable_audio))
+            else:
+                if not start_frame:
+                    raise RuntimeError("Для Veo image-to-video нужен start frame")
+                out_url = await run_veo_image_to_video(user_id=user_id, model=("veo-3.1" if veo_model == "pro" else "veo-3-fast"), image_bytes=start_frame, prompt=prompt, duration=int(duration), resolution=("1080p" if veo_model == "pro" else "720p"), aspect_ratio=aspect_ratio, generate_audio=bool(enable_audio), reference_images_bytes=(reference_images[:3] if reference_images else None), last_frame_bytes=last_frame)
+            await _workspace_complete_generation_from_url(generation_id=generation_id, user_id=user_id, provider_video_url=out_url)
+            return
+
+        if model in ("seedance-preview", "seedance-fast"):
+            image_urls: List[str] = []
+            for blob in reference_images[:9]:
+                image_urls.append(await _workspace_upload_public_ref(blob, ext="jpg"))
+            task_type = "seedance-2-fast-preview" if model == "seedance-fast" else "seedance-2-preview"
+            created = await _workspace_seedance_create_task(task_type=task_type, prompt=prompt, duration=int(duration), aspect_ratio=aspect_ratio, image_urls=(image_urls or None))
+            task_id = str(created.get("task_id") or ((created.get("data") or {}).get("task_id")) or "").strip() or None
+            if not task_id:
+                raise RuntimeError("Seedance did not return task_id")
+            _update_workspace_generation(generation_id, {"task_id": task_id})
+            done = await _workspace_seedance_wait(task_id)
+            if _workspace_seedance_status(done) == "failed":
+                raise RuntimeError("Seedance task failed")
+            out_url = _workspace_seedance_output_url(done)
+            if not out_url:
+                raise RuntimeError("Seedance completed but no output url")
+            await _workspace_complete_generation_from_url(generation_id=generation_id, user_id=user_id, provider_video_url=out_url, task_id=task_id)
+            return
+
+        if model == "sora-2":
+            created = await _workspace_sora_create_video(prompt=prompt, duration=int(duration), aspect_ratio=aspect_ratio, model="sora-2")
+            task_id = str(created.get("id") or "").strip() or None
+            if not task_id:
+                raise RuntimeError("Sora did not return video id")
+            _update_workspace_generation(generation_id, {"task_id": task_id})
+            done = await _workspace_sora_poll(task_id)
+            status = str(done.get("status") or "").strip().lower()
+            if status != "completed":
+                err = ((done.get("error") or {}).get("message")) or "Sora generation failed"
+                raise RuntimeError(err)
+            raw = await _workspace_sora_download(task_id)
+            await _workspace_complete_generation_from_bytes(generation_id=generation_id, user_id=user_id, raw=raw, content_type="video/mp4", task_id=task_id)
+            return
+
+        raise RuntimeError("Unsupported video model")
+    except Exception as e:
+        _mark_workspace_generation_failed(generation_id, str(e), error_code="provider_error")
+        if charged_tokens > 0:
+            try:
+                add_tokens(user_id, int(charged_tokens), reason=_workspace_video_refund_reason(provider, model), meta={"error": str(e)[:300], "generation_id": generation_id})
+            except Exception:
+                pass
+
 class TelegramAuthPayload(BaseModel):
     auth_data: Dict[str, Any]
 
@@ -991,6 +1357,99 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
         "is_prompt": _is_prompt_builder_output(answer) if mode == "prompt_builder" else False,
     }
 
+
+
+@router.post("/video/run")
+async def workspace_video_run(request: Request, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
+    uid = int(user["telegram_user_id"])
+    form = await request.form()
+    provider = str(form.get("provider") or "kling").strip().lower()
+    model = str(form.get("model") or "kling-3.0").strip().lower()
+    mode = str(form.get("mode") or "text_to_video").strip().lower()
+    prompt = str(form.get("prompt") or "").strip()
+    duration = int(str(form.get("duration") or "5").strip() or 5)
+    resolution = str(form.get("resolution") or "720").strip() or "720"
+    aspect_ratio = str(form.get("aspect_ratio") or "16:9").strip() or "16:9"
+    enable_audio = str(form.get("enable_audio") or "").strip() in ("1", "true", "yes", "on")
+    quality = str(form.get("quality") or "pro").strip() or "pro"
+
+    async def read_upload(name: str) -> Optional[bytes]:
+        up = form.get(name)
+        if not isinstance(up, UploadFile):
+            return None
+        raw = await up.read()
+        return raw or None
+
+    async def read_many(name: str) -> List[bytes]:
+        out: List[bytes] = []
+        for item in form.getlist(name):
+            if not isinstance(item, UploadFile):
+                continue
+            raw = await item.read()
+            if raw:
+                out.append(raw)
+        return out
+
+    start_frame = await read_upload("start_frame")
+    end_frame = await read_upload("end_frame")
+    last_frame = await read_upload("last_frame")
+    avatar_image = await read_upload("avatar_image")
+    motion_video = await read_upload("motion_video")
+    reference_images = await read_many("reference_images")
+
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Введите prompt для генерации видео.")
+
+    tokens_required = _workspace_video_tokens(model=model, duration=duration, resolution=resolution, enable_audio=enable_audio, quality=quality, motion_video_bytes=motion_video)
+    ensure_user_row(uid)
+    balance = int(get_balance(uid) or 0)
+    if balance < tokens_required:
+        raise HTTPException(status_code=400, detail=f"Недостаточно токенов. Нужно: {tokens_required}, баланс: {balance}")
+
+    add_tokens(uid, -int(tokens_required), reason=_workspace_video_reason(provider, model), meta={"generation": "workspace", "provider": provider, "model": model, "mode": mode, "duration": duration, "resolution": resolution, "aspect_ratio": aspect_ratio, "enable_audio": bool(enable_audio)})
+
+    generation_id = _insert_workspace_generation({
+        "user_id": str(uid),
+        "provider": provider,
+        "model": model,
+        "mode": mode,
+        "prompt": prompt,
+        "status": "processing",
+        "aspect_ratio": aspect_ratio,
+        "duration_sec": int(duration),
+        "resolution": resolution,
+        "enable_audio": bool(enable_audio),
+        "origin": "workspace",
+    })
+
+    asyncio.create_task(_workspace_video_job(
+        user_id=uid,
+        generation_id=generation_id,
+        provider=provider,
+        model=model,
+        mode=mode,
+        prompt=prompt,
+        duration=duration,
+        resolution=resolution,
+        aspect_ratio=aspect_ratio,
+        enable_audio=enable_audio,
+        quality=quality,
+        start_frame=start_frame,
+        end_frame=end_frame,
+        last_frame=last_frame,
+        avatar_image=avatar_image,
+        motion_video=motion_video,
+        reference_images=reference_images,
+        charged_tokens=int(tokens_required),
+    ))
+
+    return {
+        "ok": True,
+        "generation_id": generation_id,
+        "tokens_required": int(tokens_required),
+        "status": "processing",
+        "status_text": "Генерация началась. Видео появится в рабочей зоне автоматически.",
+    }
 
 @router.post("/kling3/create")
 async def workspace_kling3_create(payload: WorkspaceKlingCreateIn, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
