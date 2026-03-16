@@ -3,11 +3,13 @@ const DEFAULT_API_BASE = localStorage.getItem('astrabot:apiBaseUrl') || 'https:/
 const DEFAULT_AUTH_TOKEN = localStorage.getItem('astrabot:authToken') || '';
 const DEFAULT_ME = JSON.parse(localStorage.getItem('astrabot:me') || 'null');
 const DEFAULT_VIDEO_STATE = JSON.parse(localStorage.getItem('astrabot:videoState') || '{}');
+const DEFAULT_VIDEO_EDITOR_STATE = JSON.parse(localStorage.getItem('astrabot:videoEditorState') || 'null');
 
 const runtime = {
   files: {},
   lastChatBootstrapLoaded: false,
   videoPollTimer: null,
+  videoEditPollTimer: null,
 };
 
 const state = {
@@ -57,6 +59,8 @@ video: {
   motionDurationSec: Number.isFinite(Number(DEFAULT_VIDEO_STATE.motionDurationSec)) ? Number(DEFAULT_VIDEO_STATE.motionDurationSec) : null,
   isGenerating: false,
 },
+
+  videoEditor: normalizeVideoEditorState(DEFAULT_VIDEO_EDITOR_STATE),
 
   image: {
     provider: 'nano_banana_pro',
@@ -301,6 +305,469 @@ const IMAGE_REGISTRY = {
   },
 };
 
+function normalizeVideoEditorState(saved) {
+  const base = {
+    activeVideo: {
+      sourceType: 'generation',
+      generationId: '',
+      uploadId: '',
+      videoUrl: '',
+      downloadUrl: '',
+      durationSec: 0,
+      filename: '',
+    },
+    trim: {
+      enabled: false,
+      startSec: 0,
+      endSec: 0,
+    },
+    originalAudio: {
+      mute: false,
+      volume: 100,
+    },
+    audioClips: [],
+    mergeQueue: [],
+    isProcessing: false,
+    lastJobId: '',
+    status: 'idle',
+    errorText: '',
+    noticeText: '',
+  };
+  if (!saved || typeof saved !== 'object') return base;
+  const next = JSON.parse(JSON.stringify(base));
+  next.activeVideo = { ...next.activeVideo, ...(saved.activeVideo || {}) };
+  next.trim = { ...next.trim, ...(saved.trim || {}) };
+  next.originalAudio = { ...next.originalAudio, ...(saved.originalAudio || {}) };
+  next.audioClips = Array.isArray(saved.audioClips) ? saved.audioClips.map((item) => ({
+    uploadId: String(item?.uploadId || ''),
+    filename: String(item?.filename || 'audio'),
+    durationSec: Number(item?.durationSec || 0),
+    audioStart: Number(item?.audioStart || 0),
+    audioEnd: Number(item?.audioEnd || 0),
+    videoStart: Number(item?.videoStart || 0),
+    volume: Number(item?.volume ?? 100),
+  })) : [];
+  next.mergeQueue = Array.isArray(saved.mergeQueue) ? saved.mergeQueue.map((item) => ({
+    type: String(item?.type || 'generation'),
+    id: String(item?.id || ''),
+    filename: String(item?.filename || 'video'),
+    durationSec: Number(item?.durationSec || 0),
+    sourceLabel: String(item?.sourceLabel || ''),
+  })) : [];
+  next.isProcessing = !!saved.isProcessing;
+  next.lastJobId = String(saved.lastJobId || '');
+  next.status = String(saved.status || 'idle');
+  next.errorText = String(saved.errorText || '');
+  next.noticeText = String(saved.noticeText || '');
+  return next;
+}
+
+function resetVideoEditorState(active = null) {
+  state.videoEditor = normalizeVideoEditorState(null);
+  if (active) {
+    state.videoEditor.activeVideo = {
+      sourceType: active.sourceType || 'generation',
+      generationId: active.generationId || '',
+      uploadId: active.uploadId || '',
+      videoUrl: active.videoUrl || '',
+      downloadUrl: active.downloadUrl || active.videoUrl || '',
+      durationSec: Number(active.durationSec || 0),
+      filename: active.filename || '',
+    };
+    state.videoEditor.trim.endSec = Number(active.durationSec || 0);
+  }
+}
+
+function videoEditorHasActiveVideo() {
+  return !!String(state.videoEditor?.activeVideo?.generationId || '').trim() || !!String(state.videoEditor?.activeVideo?.uploadId || '').trim();
+}
+
+function formatSecondsCompact(value) {
+  const seconds = Math.max(0, Number(value || 0));
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+function syncVideoEditorWithHistoryItem(item) {
+  const selected = item || historySelectedItem();
+  if (!selected) {
+    resetVideoEditorState();
+    return;
+  }
+  const duration = Number(selected.duration_sec || 0);
+  resetVideoEditorState({
+    sourceType: 'generation',
+    generationId: selected.id || '',
+    videoUrl: historyVideoUrl(selected),
+    downloadUrl: historyVideoDownloadUrl(selected),
+    durationSec: duration,
+    filename: trimText(selected.prompt || `${selected.provider || 'video'} ${selected.model || ''}`, 88) || 'video',
+  });
+}
+
+function ensureActiveVideoFirstInMergeQueue() {
+  if (!videoEditorHasActiveVideo()) return false;
+  const activeId = String(state.videoEditor.activeVideo.generationId || '').trim();
+  if (!activeId) return false;
+  const exists = state.videoEditor.mergeQueue.some((item) => item.type === 'generation' && item.id === activeId);
+  if (!exists) {
+    state.videoEditor.mergeQueue.unshift({
+      type: 'generation',
+      id: activeId,
+      filename: state.videoEditor.activeVideo.filename || 'Активный ролик',
+      durationSec: Number(state.videoEditor.activeVideo.durationSec || 0),
+      sourceLabel: 'active',
+    });
+  }
+  return true;
+}
+
+function getVideoEditorTimelinePayload() {
+  const durationSec = Math.max(0, Number(state.videoEditor.activeVideo.durationSec || 0));
+  const mergeItems = Array.isArray(state.videoEditor.mergeQueue) ? state.videoEditor.mergeQueue.filter((item) => item?.id) : [];
+  const useMerge = mergeItems.length > 1 || (mergeItems.length === 1 && !(mergeItems[0].type === 'generation' && mergeItems[0].id === state.videoEditor.activeVideo.generationId));
+  const trimStart = Math.max(0, Number(state.videoEditor.trim.startSec || 0));
+  const trimEndRaw = Number(state.videoEditor.trim.endSec || durationSec || 0);
+  const trimEnd = durationSec > 0 ? Math.min(durationSec, trimEndRaw) : trimEndRaw;
+
+  return {
+    source_generation_id: state.videoEditor.activeVideo.generationId,
+    timeline: {
+      trim: {
+        enabled: !!state.videoEditor.trim.enabled,
+        start_sec: trimStart,
+        end_sec: trimEnd,
+      },
+      original_audio: {
+        mute: !!state.videoEditor.originalAudio.mute,
+        volume: Math.max(0, Math.min(100, Number(state.videoEditor.originalAudio.volume || 0))),
+      },
+      audio_clips: state.videoEditor.audioClips.map((item) => ({
+        upload_id: item.uploadId,
+        audio_start: Math.max(0, Number(item.audioStart || 0)),
+        audio_end: Math.max(0, Number(item.audioEnd || 0)),
+        video_start: Math.max(0, Number(item.videoStart || 0)),
+        volume: Math.max(0, Math.min(100, Number(item.volume || 0))),
+      })),
+      merge_items: useMerge ? mergeItems.map((item) => ({ type: item.type, id: item.id })) : [],
+    },
+  };
+}
+
+function stopVideoEditPolling() {
+  if (runtime.videoEditPollTimer) {
+    clearInterval(runtime.videoEditPollTimer);
+    runtime.videoEditPollTimer = null;
+  }
+}
+
+function startVideoEditPolling({ immediate = false } = {}) {
+  stopVideoEditPolling();
+  if (!state.videoEditor.lastJobId) return;
+  runtime.videoEditPollTimer = setInterval(() => {
+    pollVideoEditJob({ silent: true }).catch(() => {});
+  }, 4000);
+  if (immediate) {
+    pollVideoEditJob({ silent: true }).catch(() => {});
+  }
+}
+
+async function uploadWorkspaceEditorFile(file, kindHint = '') {
+  const form = new FormData();
+  form.append('file', file, file.name || 'upload.bin');
+  const res = await apiFetch('/api/workspace/video/upload', { method: 'POST', body: form });
+  const data = await res.json();
+  if (kindHint && data.file_type !== kindHint) {
+    throw new Error(kindHint === 'audio' ? 'Нужен аудиофайл (mp3 / wav / m4a).' : 'Нужен видеофайл (mp4 / mov / webm).');
+  }
+  return data;
+}
+
+async function handleEditorAudioFileSelected(file) {
+  if (!file) return;
+  if (state.videoEditor.audioClips.length >= 3) {
+    toast('info', 'Лимит достигнут', 'В первой версии доступно максимум 3 аудио-куска.');
+    return;
+  }
+  try {
+    const uploaded = await uploadWorkspaceEditorFile(file, 'audio');
+    const duration = Number(uploaded.duration || 0);
+    state.videoEditor.audioClips.push({
+      uploadId: uploaded.upload_id,
+      filename: uploaded.filename || file.name || 'audio',
+      durationSec: duration,
+      audioStart: 0,
+      audioEnd: duration,
+      videoStart: 0,
+      volume: 100,
+    });
+    state.videoEditor.noticeText = 'Аудиофайл загружен и добавлен в монтаж.';
+    state.videoEditor.errorText = '';
+    saveState();
+    render();
+  } catch (e) {
+    toast('error', 'Не удалось загрузить аудио', String(e.message || e));
+  }
+}
+
+async function handleEditorMergeVideoSelected(file) {
+  if (!file) return;
+  if (state.videoEditor.mergeQueue.length >= 10) {
+    toast('info', 'Лимит достигнут', 'В первой версии доступно максимум 10 видео для склейки.');
+    return;
+  }
+  try {
+    ensureActiveVideoFirstInMergeQueue();
+    const uploaded = await uploadWorkspaceEditorFile(file, 'video');
+    state.videoEditor.mergeQueue.push({
+      type: 'upload',
+      id: uploaded.upload_id,
+      filename: uploaded.filename || file.name || 'video',
+      durationSec: Number(uploaded.duration || 0),
+      sourceLabel: 'upload',
+    });
+    state.videoEditor.noticeText = 'Внешний ролик загружен и добавлен в очередь склейки.';
+    state.videoEditor.errorText = '';
+    saveState();
+    render();
+  } catch (e) {
+    toast('error', 'Не удалось загрузить видео', String(e.message || e));
+  }
+}
+
+async function pollVideoEditJob(options = {}) {
+  const { silent = false } = options;
+  if (!state.videoEditor.lastJobId) return;
+  try {
+    const res = await apiFetch(`/api/workspace/video/job/${encodeURIComponent(state.videoEditor.lastJobId)}`);
+    const data = await res.json();
+    const job = data.job || {};
+    const item = data.item || null;
+    state.videoEditor.status = String(job.status || 'processing');
+    state.videoEditor.errorText = String(job.error_message || '');
+    state.videoEditor.noticeText = item && state.videoEditor.status === 'completed'
+      ? 'Новый ролик сохранён в библиотеку.'
+      : (state.videoEditor.status === 'failed' ? '' : 'Обработка видео на backend...');
+    state.videoEditor.isProcessing = ['queued', 'processing'].includes(state.videoEditor.status);
+
+    if (state.videoEditor.status === 'completed') {
+      stopVideoEditPolling();
+      state.videoEditor.isProcessing = false;
+      await loadVideoHistory({ silent: true, keepSelection: true, selectId: item?.id || '' });
+      if (item) {
+        applyHistoryItemToVideoWorkspace(item);
+      }
+      saveState();
+      if (!silent) toast('success', 'Монтаж готов', 'Новый ролик сохранён в библиотеку.');
+      return;
+    }
+
+    if (state.videoEditor.status === 'failed') {
+      stopVideoEditPolling();
+      state.videoEditor.isProcessing = false;
+      saveState();
+      render();
+      if (!silent) toast('error', 'Ошибка обработки', state.videoEditor.errorText || 'FFmpeg вернул ошибку.');
+      return;
+    }
+
+    saveState();
+    if (!silent) render();
+  } catch (e) {
+    if (!silent) toast('error', 'Не удалось проверить монтаж', String(e.message || e));
+  }
+}
+
+async function saveVideoEdit() {
+  if (!requireAuth()) return;
+  if (!videoEditorHasActiveVideo()) {
+    toast('info', 'Нет активного ролика', 'Сначала открой ролик в рабочей зоне.');
+    return;
+  }
+  const payload = getVideoEditorTimelinePayload();
+  if (payload.timeline.trim.enabled && payload.timeline.trim.end_sec <= payload.timeline.trim.start_sec) {
+    toast('error', 'Неверный trim', 'Конец должен быть больше начала.');
+    return;
+  }
+  if (payload.timeline.trim.enabled && (payload.timeline.trim.end_sec - payload.timeline.trim.start_sec) < 0.5) {
+    toast('error', 'Неверный trim', 'Минимальная длина результата — 0.5 сек.');
+    return;
+  }
+
+  state.videoEditor.isProcessing = true;
+  state.videoEditor.status = 'queued';
+  state.videoEditor.errorText = '';
+  state.videoEditor.noticeText = 'Задача монтажа отправлена на backend.';
+  saveState();
+  render();
+
+  try {
+    const res = await apiFetch('/api/workspace/video/edit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    state.videoEditor.lastJobId = data.job_id || '';
+    state.videoEditor.status = String(data.status || 'queued');
+    state.videoEditor.noticeText = 'Обработка видео началась.';
+    saveState();
+    render();
+    startVideoEditPolling({ immediate: true });
+  } catch (e) {
+    state.videoEditor.isProcessing = false;
+    state.videoEditor.status = 'failed';
+    state.videoEditor.errorText = String(e.message || e);
+    state.videoEditor.noticeText = '';
+    saveState();
+    render();
+    toast('error', 'Не удалось запустить монтаж', state.videoEditor.errorText);
+  }
+}
+
+function renderVideoEditor() {
+  if (!videoEditorHasActiveVideo()) {
+    return `
+      <div class="video-editor-block">
+        <div class="video-editor-empty">
+          <strong>Редактор видео</strong>
+          <div>Открой ролик в рабочей зоне, чтобы редактировать его.</div>
+        </div>
+      </div>
+    `;
+  }
+
+  const durationSec = Math.max(0, Number(state.videoEditor.activeVideo.durationSec || 0));
+  const trimEnd = Math.min(durationSec || Number(state.videoEditor.trim.endSec || 0), Number(state.videoEditor.trim.endSec || durationSec || 0));
+  const trimStart = Math.min(trimEnd, Math.max(0, Number(state.videoEditor.trim.startSec || 0)));
+  const mute = !!state.videoEditor.originalAudio.mute;
+
+  const audioCards = state.videoEditor.audioClips.length
+    ? state.videoEditor.audioClips.map((clip, index) => `
+      <div class="video-editor-subcard">
+        <div class="video-editor-row between">
+          <strong>${escapeHtml(clip.filename || `Audio ${index + 1}`)}</strong>
+          <button class="btn ghost small" data-action="editor-remove-audio-clip" data-index="${index}">Удалить</button>
+        </div>
+        <div class="video-editor-mini-grid">
+          <label>audio start<input id="editor_audio_${index}_audio_start" type="number" min="0" step="0.1" value="${Number(clip.audioStart || 0)}"></label>
+          <label>audio end<input id="editor_audio_${index}_audio_end" type="number" min="0" step="0.1" value="${Number(clip.audioEnd || 0)}"></label>
+          <label>video start<input id="editor_audio_${index}_video_start" type="number" min="0" step="0.1" value="${Number(clip.videoStart || 0)}"></label>
+          <label>громкость %<input id="editor_audio_${index}_volume" type="number" min="0" max="100" step="1" value="${Number(clip.volume || 100)}"></label>
+        </div>
+        <small>Длина аудио: ${escapeHtml(formatSecondsCompact(clip.durationSec || 0))}</small>
+      </div>
+    `).join('')
+    : `<div class="video-editor-empty-list">Пока нет аудио-вставок. Можно добавить до 3 кусочков.</div>`;
+
+  const mergeCards = state.videoEditor.mergeQueue.length
+    ? state.videoEditor.mergeQueue.map((item, index) => `
+      <div class="video-editor-subcard">
+        <div class="video-editor-row between">
+          <div>
+            <strong>${escapeHtml(item.filename || 'video')}</strong>
+            <small>${escapeHtml(item.type === 'generation' ? 'Библиотека' : 'Upload')} · ${escapeHtml(formatSecondsCompact(item.durationSec || 0))}</small>
+          </div>
+          <div class="actions compact-gap">
+            <button class="btn ghost small" data-action="editor-merge-up" data-index="${index}">↑</button>
+            <button class="btn ghost small" data-action="editor-merge-down" data-index="${index}">↓</button>
+            <button class="btn ghost small" data-action="editor-merge-remove" data-index="${index}">Удалить</button>
+          </div>
+        </div>
+      </div>
+    `).join('')
+    : `<div class="video-editor-empty-list">Очередь склейки пока пуста. Активный ролик можно добавить кнопкой ниже.</div>`;
+
+  const statusTextMap = {
+    idle: 'Готово к сохранению',
+    queued: 'Обработка...',
+    processing: 'Обработка...',
+    completed: 'Сохранено в библиотеку',
+    failed: 'Ошибка обработки',
+  };
+
+  return `
+    <div class="video-editor-block">
+      <div class="video-editor-head">
+        <div>
+          <div class="section-title" style="margin:0;">Редактор видео</div>
+          <div class="help-text">Активный ролик: ${escapeHtml(state.videoEditor.activeVideo.filename || 'Видео')} · ${escapeHtml(formatSecondsCompact(durationSec))}</div>
+        </div>
+        <span class="badge muted">Mini editor v1</span>
+      </div>
+
+      <div class="video-editor-grid">
+        <div class="video-editor-card">
+          <div class="video-editor-row between">
+            <h4>Обрезка</h4>
+            <label class="switch"><input id="editor_trim_enabled" type="checkbox" ${state.videoEditor.trim.enabled ? 'checked' : ''}><span></span></label>
+          </div>
+          <div class="video-editor-mini-grid">
+            <label>Старт, сек<input id="editor_trim_start_input" type="number" min="0" max="${durationSec}" step="0.1" value="${trimStart.toFixed(1)}"></label>
+            <label>Конец, сек<input id="editor_trim_end_input" type="number" min="0" max="${durationSec}" step="0.1" value="${trimEnd.toFixed(1)}"></label>
+          </div>
+          <div class="video-editor-range-wrap">
+            <input id="editor_trim_start_range" type="range" min="0" max="${durationSec || 0}" step="0.1" value="${trimStart.toFixed(1)}" ${!state.videoEditor.trim.enabled ? 'disabled' : ''}>
+            <input id="editor_trim_end_range" type="range" min="0" max="${durationSec || 0}" step="0.1" value="${trimEnd.toFixed(1)}" ${!state.videoEditor.trim.enabled ? 'disabled' : ''}>
+          </div>
+          <div class="video-editor-row between">
+            <small>${escapeHtml(formatSecondsCompact(trimStart))}</small>
+            <small>${escapeHtml(formatSecondsCompact(trimEnd))}</small>
+          </div>
+          <div class="actions compact-gap" style="margin-top:10px;">
+            <button class="btn ghost small" data-action="editor-reset-trim">Сбросить диапазон</button>
+          </div>
+        </div>
+
+        <div class="video-editor-card">
+          <div class="video-editor-row between">
+            <h4>Звук видео</h4>
+            <label class="switch"><input id="editor_original_audio_mute" type="checkbox" ${mute ? 'checked' : ''}><span></span></label>
+          </div>
+          <div class="video-editor-mini-grid">
+            <label>Громкость, %<input id="editor_original_audio_volume_input" type="number" min="0" max="100" step="1" value="${Number(state.videoEditor.originalAudio.volume || 100)}" ${mute ? 'disabled' : ''}></label>
+          </div>
+          <input id="editor_original_audio_volume" type="range" min="0" max="100" step="1" value="${Number(state.videoEditor.originalAudio.volume || 100)}" ${mute ? 'disabled' : ''}>
+          <small>${mute ? 'Исходный звук будет удалён.' : '0% = фактически mute, 100% = как в исходном ролике.'}</small>
+        </div>
+
+        <div class="video-editor-card">
+          <div class="video-editor-row between">
+            <h4>Аудио-вставки</h4>
+            <button class="btn outline small" data-action="editor-pick-audio">Добавить аудио</button>
+          </div>
+          ${audioCards}
+          <input id="editorAudioUpload" class="hidden" type="file" accept=".mp3,.wav,.m4a,audio/*">
+        </div>
+
+        <div class="video-editor-card">
+          <div class="video-editor-row between">
+            <h4>Склейка роликов</h4>
+            <span class="badge muted">${state.videoEditor.mergeQueue.length}/10</span>
+          </div>
+          <div class="actions compact-gap" style="margin-bottom:12px; flex-wrap:wrap;">
+            <button class="btn outline small" data-action="editor-add-active-video">Активный ролик</button>
+            <button class="btn outline small" data-action="editor-add-history-video">Добавить из библиотеки</button>
+            <button class="btn outline small" data-action="editor-pick-merge-video">Загрузить с компьютера</button>
+          </div>
+          <div class="help-text" style="margin-bottom:10px;">Для кнопки «Добавить из библиотеки» используется выбранный ролик из истории справа.</div>
+          ${mergeCards}
+          <input id="editorMergeUpload" class="hidden" type="file" accept=".mp4,.mov,.webm,video/*">
+        </div>
+      </div>
+
+      <div class="video-editor-footer">
+        <div class="video-editor-status ${escapeHtml(state.videoEditor.status)}">
+          <strong>${escapeHtml(statusTextMap[state.videoEditor.status] || 'Готово к сохранению')}</strong>
+          <div>${escapeHtml(state.videoEditor.errorText || state.videoEditor.noticeText || 'После обработки новый ролик появится в библиотеке как отдельный объект.')}</div>
+        </div>
+        <button class="btn primary full" data-action="save-video-edit" ${state.videoEditor.isProcessing ? 'disabled' : ''}>${state.videoEditor.isProcessing ? 'Обработка...' : 'Сохранить как новый ролик'}</button>
+      </div>
+    </div>
+  `;
+}
+
 function saveState() {
   localStorage.setItem('astrabot:studio', state.studio);
   localStorage.setItem('astrabot:apiBaseUrl', state.apiBaseUrl);
@@ -325,6 +792,7 @@ function saveState() {
     quality: state.video.quality,
     motionDurationSec: state.video.motionDurationSec,
   }));
+  localStorage.setItem('astrabot:videoEditorState', JSON.stringify(state.videoEditor));
 }
 
 function escapeHtml(str = '') {
@@ -1196,6 +1664,7 @@ function startVideoPolling({ immediate = false } = {}) {
 
 function clearVideoRunState({ keepPrompt = true } = {}) {
   stopVideoPolling();
+  stopVideoEditPolling();
   state.video.outputUrl = '';
   state.video.downloadUrl = '';
   state.video.coverUrl = '';
@@ -1206,6 +1675,7 @@ function clearVideoRunState({ keepPrompt = true } = {}) {
   state.video.lastStatus = 'idle';
   state.video.isGenerating = false;
   state.video.statusText = 'Выбери модель, настрой параметры и нажми запуск.';
+  resetVideoEditorState();
   if (!keepPrompt) state.video.prompt = '';
   saveState();
 }
@@ -1268,6 +1738,7 @@ function renderVideoWorkspace() {
             ${stageInner}
           </div>
         </div>
+        ${renderVideoEditor()}
         ${assets ? `<div class="upload-grid two" style="margin-top:16px;">${assets}</div>` : ''}
       </div>
     </div>
@@ -1607,7 +2078,7 @@ function renderVideoInspector() {
   return `
     <div class="inspector-card">
       <div class="field-head" style="margin-bottom:12px;"><div class="section-title" style="margin:0;">Video Studio</div><button class="btn ghost small" data-action="show-video-library">История видео</button></div>
-      <div class="help-text" style="margin-bottom:12px;">Семейство, модель и режим снова вынесены в выпадающие панели, чтобы выбор был чище и не раздувал правую колонку.</div>
+      <div class="help-text" style="margin-bottom:12px;"></div>
       <div class="selector-stack">
         <div class="input-group">
           <label class="label">Семейство</label>
@@ -2307,6 +2778,7 @@ function applyHistoryItemToVideoWorkspace(item) {
   state.video.statusText = selected.has_storage_file ? 'Открыт сохранённый ролик из библиотеки AstraBot.' : 'Открыт ролик из истории провайдера.';
   state.video.panel = 'library';
   state.studio = 'video';
+  syncVideoEditorWithHistoryItem(selected);
   saveState();
   render();
   toast('success', 'Видео открыто', 'Ролик возвращён в рабочую зону.');
@@ -2435,6 +2907,7 @@ async function pollVideoTask(options = {}) {
       state.video.outputUrl = readyUrl;
       state.video.downloadUrl = historyVideoDownloadUrl(item) || readyUrl;
       state.video.percent = 100;
+      syncVideoEditorWithHistoryItem(item);
       stopVideoPolling();
       saveState();
       render();
@@ -2539,6 +3012,7 @@ function resetCurrentStudio() {
       break;
     case 'video':
       clearVideoRunState({ keepPrompt: false });
+      resetVideoEditorState();
       break;
     case 'image':
       state.image.prompt = '';
@@ -2573,10 +3047,22 @@ function handleInputChange(target) {
     video_avatarImage: ['video.avatarImage', false],
     video_motionVideo: ['video.motionVideo', false],
     video_sourceVideo: ['video.sourceVideo', false],
+    editorAudioUpload: ['editor.audioUpload', false],
+    editorMergeUpload: ['editor.mergeUpload', false],
     image_sourceImage: ['image.sourceImage', false],
     image_baseImage: ['image.baseImage', false],
   };
   if (fileMap[id]) {
+    if (id === 'editorAudioUpload') {
+      handleEditorAudioFileSelected(files && files[0] ? files[0] : null);
+      target.value = '';
+      return;
+    }
+    if (id === 'editorMergeUpload') {
+      handleEditorMergeVideoSelected(files && files[0] ? files[0] : null);
+      target.value = '';
+      return;
+    }
     const [key, multiple] = fileMap[id];
     setFile(key, multiple ? files : files[0], multiple);
     if (id === 'video_motionVideo') probeMotionDuration(getFile('video.motionVideo'));
@@ -2585,6 +3071,24 @@ function handleInputChange(target) {
   }
 
   const update = (obj, key, val) => { obj[key] = val; };
+
+  if (id.startsWith('editor_audio_')) {
+    const match = id.match(/^editor_audio_(\d+)_(audio_start|audio_end|video_start|volume)$/);
+    if (match) {
+      const index = Number(match[1]);
+      const field = match[2];
+      const clip = state.videoEditor.audioClips[index];
+      if (clip) {
+        if (field === 'audio_start') clip.audioStart = Number(value || 0);
+        if (field === 'audio_end') clip.audioEnd = Number(value || 0);
+        if (field === 'video_start') clip.videoStart = Number(value || 0);
+        if (field === 'volume') clip.volume = Number(value || 0);
+        saveState();
+        render();
+      }
+    }
+    return;
+  }
 
   switch (id) {
     case 'apiBaseUrl': state.apiBaseUrl = value; break;
@@ -2622,6 +3126,24 @@ function handleInputChange(target) {
     case 'video_enableAudio':
     case 'video_generateAudio': state.video.enableAudio = checked; break;
     case 'video_quality': state.video.quality = value; break;
+    case 'editor_trim_enabled':
+      state.videoEditor.trim.enabled = checked;
+      break;
+    case 'editor_trim_start_input':
+    case 'editor_trim_start_range':
+      state.videoEditor.trim.startSec = Number(value || 0);
+      break;
+    case 'editor_trim_end_input':
+    case 'editor_trim_end_range':
+      state.videoEditor.trim.endSec = Number(value || 0);
+      break;
+    case 'editor_original_audio_mute':
+      state.videoEditor.originalAudio.mute = checked;
+      break;
+    case 'editor_original_audio_volume':
+    case 'editor_original_audio_volume_input':
+      state.videoEditor.originalAudio.volume = Number(value || 0);
+      break;
 
     case 'image_provider':
       state.image.provider = value;
@@ -2709,6 +3231,84 @@ function handleAction(action, dataset = {}) {
       break;
     case 'run-video': runVideo(); break;
     case 'poll-video-task': pollVideoTask(); break;
+    case 'editor-pick-audio': {
+      const input = document.getElementById('editorAudioUpload');
+      if (input) input.click();
+      break;
+    }
+    case 'editor-pick-merge-video': {
+      const input = document.getElementById('editorMergeUpload');
+      if (input) input.click();
+      break;
+    }
+    case 'editor-reset-trim':
+      state.videoEditor.trim.startSec = 0;
+      state.videoEditor.trim.endSec = Number(state.videoEditor.activeVideo.durationSec || 0);
+      saveState();
+      render();
+      break;
+    case 'editor-remove-audio-clip':
+      state.videoEditor.audioClips = state.videoEditor.audioClips.filter((_, i) => i !== Number(dataset.index || -1));
+      saveState();
+      render();
+      break;
+    case 'editor-add-active-video':
+      if (ensureActiveVideoFirstInMergeQueue()) {
+        saveState();
+        render();
+      }
+      break;
+    case 'editor-add-history-video': {
+      const item = historySelectedItem();
+      if (!item || !item.id) {
+        toast('info', 'Нужно выбрать ролик', 'Справа открой историю видео и выбери ролик из библиотеки.');
+        break;
+      }
+      ensureActiveVideoFirstInMergeQueue();
+      const exists = state.videoEditor.mergeQueue.some((entry) => entry.type === 'generation' && entry.id === item.id);
+      if (!exists) {
+        state.videoEditor.mergeQueue.push({
+          type: 'generation',
+          id: item.id,
+          filename: trimText(item.prompt || `${item.provider || 'video'} ${item.model || ''}`, 88) || 'video',
+          durationSec: Number(item.duration_sec || 0),
+          sourceLabel: 'library',
+        });
+      }
+      saveState();
+      render();
+      break;
+    }
+    case 'editor-merge-up': {
+      const index = Number(dataset.index || -1);
+      if (index > 0) {
+        const items = [...state.videoEditor.mergeQueue];
+        [items[index - 1], items[index]] = [items[index], items[index - 1]];
+        state.videoEditor.mergeQueue = items;
+        saveState();
+        render();
+      }
+      break;
+    }
+    case 'editor-merge-down': {
+      const index = Number(dataset.index || -1);
+      if (index >= 0 && index < state.videoEditor.mergeQueue.length - 1) {
+        const items = [...state.videoEditor.mergeQueue];
+        [items[index + 1], items[index]] = [items[index], items[index + 1]];
+        state.videoEditor.mergeQueue = items;
+        saveState();
+        render();
+      }
+      break;
+    }
+    case 'editor-merge-remove':
+      state.videoEditor.mergeQueue = state.videoEditor.mergeQueue.filter((_, i) => i !== Number(dataset.index || -1));
+      saveState();
+      render();
+      break;
+    case 'save-video-edit':
+      saveVideoEdit();
+      break;
     case 'show-video-library':
       setVideoPanel('library');
       break;
@@ -2864,6 +3464,9 @@ async function init() {
   if (state.studio === 'library' || state.prompts.categories.length === 0) loadPromptCategories();
   if (state.video.providerTaskId && !state.video.outputUrl && !isVideoTaskFailed(state.video.lastStatus)) {
     startVideoPolling({ immediate: true });
+  }
+  if (state.videoEditor.lastJobId && ['queued', 'processing'].includes(String(state.videoEditor.status || ''))) {
+    startVideoEditPolling({ immediate: true });
   }
   render();
 }
