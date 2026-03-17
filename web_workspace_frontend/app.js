@@ -1190,13 +1190,28 @@ function imageNeedsBaseImage() {
 
 function imageRunCost() {
   syncImageSelection();
-  return state.image.provider === 'nano_banana' ? 1 : 2;
+  switch (state.image.provider) {
+    case 'nano_banana':
+      return 1;
+    case 'nano_banana_pro':
+      return 2;
+    case 'photosession':
+      return 1;
+    case 'two_images':
+      return 1;
+    case 'posters':
+      return 0;
+    case 'text_to_image':
+      return 0;
+    default:
+      return 0;
+  }
 }
 
 function imageRunButtonLabel() {
   if (state.image.isGenerating) return 'Генерация...';
   const cost = imageRunCost();
-  return `Сгенерировать · ${cost} ток.`;
+  return cost > 0 ? `Сгенерировать · ${cost} ток.` : 'Сгенерировать';
 }
 
 function syncVideoSelection() {
