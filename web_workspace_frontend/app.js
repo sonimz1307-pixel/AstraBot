@@ -3,6 +3,7 @@ const DEFAULT_API_BASE = localStorage.getItem('astrabot:apiBaseUrl') || 'https:/
 const DEFAULT_AUTH_TOKEN = localStorage.getItem('astrabot:authToken') || '';
 const DEFAULT_ME = JSON.parse(localStorage.getItem('astrabot:me') || 'null');
 const DEFAULT_VIDEO_STATE = JSON.parse(localStorage.getItem('astrabot:videoState') || '{}');
+const DEFAULT_IMAGE_STATE = JSON.parse(localStorage.getItem('astrabot:imageState') || '{}');
 const DEFAULT_VIDEO_EDITOR_STATE = JSON.parse(localStorage.getItem('astrabot:videoEditorState') || 'null');
 
 const runtime = {
@@ -11,6 +12,25 @@ const runtime = {
   videoPollTimer: null,
   videoEditPollTimer: null,
 };
+
+const FILE_INPUT_MAP = {
+  chat_attachments: { key: 'chat.attachments', multiple: true },
+  video_startFrame: { key: 'video.startFrame', multiple: false },
+  video_endFrame: { key: 'video.endFrame', multiple: false },
+  video_lastFrame: { key: 'video.lastFrame', multiple: false },
+  video_referenceImages: { key: 'video.referenceImages', multiple: true },
+  video_avatarImage: { key: 'video.avatarImage', multiple: false },
+  video_motionVideo: { key: 'video.motionVideo', multiple: false },
+  video_sourceVideo: { key: 'video.sourceVideo', multiple: false },
+  editorAudioUpload: { key: 'editor.audioUpload', multiple: false },
+  editorMergeUpload: { key: 'editor.mergeUpload', multiple: false },
+  image_sourceImage: { key: 'image.sourceImage', multiple: false },
+  image_baseImage: { key: 'image.baseImage', multiple: false },
+};
+
+function makeRuntimeFileEntry(file) {
+  return { file, name: file.name, url: URL.createObjectURL(file), type: file.type || '', size: file.size || 0, lastModified: file.lastModified || 0 };
+}
 
 const state = {
   apiBaseUrl: DEFAULT_API_BASE,
@@ -63,16 +83,21 @@ video: {
   videoEditor: normalizeVideoEditorState(DEFAULT_VIDEO_EDITOR_STATE),
 
   image: {
-    provider: 'nano_banana_pro',
-    model: 'nano-banana-pro',
-    mode: 'image_to_image',
-    prompt: '',
-    aspectRatio: 'match_input_image',
-    resolution: '2K',
-    safetyLevel: 'high',
-    stylePreset: 'cinematic',
+    provider: DEFAULT_IMAGE_STATE.provider || 'nano_banana_pro',
+    model: DEFAULT_IMAGE_STATE.model || 'nano-banana-pro',
+    mode: DEFAULT_IMAGE_STATE.mode || 'image_to_image',
+    prompt: DEFAULT_IMAGE_STATE.prompt || '',
+    aspectRatio: DEFAULT_IMAGE_STATE.aspectRatio || 'match_input_image',
+    resolution: DEFAULT_IMAGE_STATE.resolution || '2K',
+    safetyLevel: DEFAULT_IMAGE_STATE.safetyLevel || 'high',
+    posterStyle: DEFAULT_IMAGE_STATE.posterStyle || 'cinematic',
+    stylePreset: DEFAULT_IMAGE_STATE.stylePreset || 'editorial',
+    moodPreset: DEFAULT_IMAGE_STATE.moodPreset || 'premium',
     outputUrl: '',
-    statusText: 'Image Studio архитектурно готова. Подключим backend-эндпоинты по мере вынесения в web API.',
+    downloadUrl: '',
+    isGenerating: false,
+    errorText: '',
+    statusText: 'Выбери режим, добавь изображения при необходимости и запусти генерацию.',
   },
   voice: {
     voiceId: '',
@@ -793,6 +818,18 @@ function saveState() {
     motionDurationSec: state.video.motionDurationSec,
   }));
   localStorage.setItem('astrabot:videoEditorState', JSON.stringify(state.videoEditor));
+  localStorage.setItem('astrabot:imageState', JSON.stringify({
+    provider: state.image.provider,
+    model: state.image.model,
+    mode: state.image.mode,
+    prompt: state.image.prompt,
+    aspectRatio: state.image.aspectRatio,
+    resolution: state.image.resolution,
+    safetyLevel: state.image.safetyLevel,
+    posterStyle: state.image.posterStyle,
+    stylePreset: state.image.stylePreset,
+    moodPreset: state.image.moodPreset,
+  }));
 }
 
 function escapeHtml(str = '') {
@@ -945,18 +982,67 @@ function pushRun(run) {
   renderRecentRuns();
 }
 
+function revokeRuntimeFileEntry(entry) {
+  if (entry?.url) {
+    try { URL.revokeObjectURL(entry.url); } catch (_e) {}
+  }
+}
+
+function revokeRuntimeFileValue(value) {
+  if (Array.isArray(value)) {
+    value.forEach((entry) => revokeRuntimeFileEntry(entry));
+    return;
+  }
+  revokeRuntimeFileEntry(value);
+}
+
 function setFile(key, file, multiple = false) {
   if (!file) return;
   if (multiple) {
-    const files = Array.from(file);
-    runtime.files[key] = files.map((f) => ({ file: f, name: f.name, url: URL.createObjectURL(f), type: f.type || '', size: f.size || 0 }));
+    const incoming = Array.from(file || []);
+    const current = Array.isArray(runtime.files[key]) ? runtime.files[key] : [];
+    const merged = [...current];
+    const seen = new Set(current.map((entry) => `${entry.name}::${entry.size}::${entry.lastModified || 0}`));
+    incoming.forEach((item) => {
+      const signature = `${item.name}::${item.size || 0}::${item.lastModified || 0}`;
+      if (seen.has(signature)) return;
+      seen.add(signature);
+      merged.push(makeRuntimeFileEntry(item));
+    });
+    runtime.files[key] = merged;
     return;
   }
-  runtime.files[key] = { file, name: file.name, url: URL.createObjectURL(file), type: file.type || '', size: file.size || 0 };
+  revokeRuntimeFileValue(runtime.files[key]);
+  runtime.files[key] = makeRuntimeFileEntry(file);
 }
 
 function getFile(key) {
   return runtime.files[key] || null;
+}
+
+function removeUploadFile(inputId, index = null) {
+  const config = FILE_INPUT_MAP[inputId];
+  if (!config) return;
+  const current = runtime.files[config.key];
+  if (!current) return;
+
+  if (config.multiple && Array.isArray(current)) {
+    const targetIndex = Number(index);
+    if (!Number.isInteger(targetIndex) || targetIndex < 0 || targetIndex >= current.length) return;
+    const removed = current[targetIndex];
+    revokeRuntimeFileEntry(removed);
+    const next = current.filter((_, itemIndex) => itemIndex !== targetIndex);
+    if (next.length) runtime.files[config.key] = next;
+    else delete runtime.files[config.key];
+  } else {
+    revokeRuntimeFileValue(current);
+    delete runtime.files[config.key];
+  }
+
+  const input = document.getElementById(inputId);
+  if (input) input.value = '';
+  saveState();
+  render();
 }
 
 function getChatAttachments() {
@@ -1057,6 +1143,60 @@ function videoModelConfig() {
 
 function videoModeConfig() {
   return videoModelConfig().modes[state.video.mode] || Object.values(videoModelConfig().modes)[0];
+}
+
+function imageProviderConfig() {
+  return IMAGE_REGISTRY[state.image.provider] || IMAGE_REGISTRY.nano_banana_pro;
+}
+
+function imageModelConfig() {
+  return imageProviderConfig().models[state.image.model] || Object.values(imageProviderConfig().models)[0];
+}
+
+function imageModeConfig() {
+  return imageModelConfig().modes[state.image.mode] || Object.values(imageModelConfig().modes)[0];
+}
+
+function syncImageSelection() {
+  const fallbackProvider = IMAGE_REGISTRY.nano_banana_pro ? 'nano_banana_pro' : Object.keys(IMAGE_REGISTRY)[0];
+  const provider = IMAGE_REGISTRY[state.image.provider] ? state.image.provider : fallbackProvider;
+  state.image.provider = provider;
+  const providerConfig = IMAGE_REGISTRY[provider];
+  const modelIds = Object.keys(providerConfig.models || {});
+  if (!modelIds.includes(state.image.model)) state.image.model = modelIds[0];
+  const modelConfig = providerConfig.models[state.image.model];
+  const modeIds = Object.keys(modelConfig.modes || {});
+  if (!modeIds.includes(state.image.mode)) state.image.mode = modeIds[0];
+
+  if (['text_to_image', 't2i'].includes(state.image.mode) && state.image.aspectRatio === 'match_input_image') {
+    state.image.aspectRatio = '16:9';
+  }
+}
+
+function imageNeedsSourceImage() {
+  syncImageSelection();
+  if (state.image.provider === 'nano_banana') return true;
+  if (state.image.provider === 'nano_banana_pro' && state.image.mode === 'image_to_image') return true;
+  if (state.image.provider === 'posters' && state.image.mode === 'photo_edit') return true;
+  if (state.image.provider === 'photosession') return true;
+  if (state.image.provider === 'two_images') return true;
+  return false;
+}
+
+function imageNeedsBaseImage() {
+  syncImageSelection();
+  return state.image.provider === 'two_images';
+}
+
+function imageRunCost() {
+  syncImageSelection();
+  return state.image.provider === 'nano_banana' ? 1 : 2;
+}
+
+function imageRunButtonLabel() {
+  if (state.image.isGenerating) return 'Генерация...';
+  const cost = imageRunCost();
+  return `Сгенерировать · ${cost} ток.`;
 }
 
 function syncVideoSelection() {
@@ -1236,11 +1376,11 @@ function renderHeader() {
   if (inspector) inspector.setAttribute('aria-hidden', state.studio === 'chat' ? 'true' : 'false');
   if (workspaceTopline) workspaceTopline.style.display = state.studio === 'chat' ? 'none' : '';
 
-  const hideTopActions = state.studio === 'chat' || state.studio === 'video';
+  const hideTopActions = state.studio === 'chat' || state.studio === 'video' || state.studio === 'image';
   if (topbarActions) topbarActions.style.display = hideTopActions ? 'none' : '';
-  if (seedDemoBtn) seedDemoBtn.style.display = state.studio === 'video' ? 'none' : '';
-  if (globalRunBtn) globalRunBtn.style.display = state.studio === 'chat' || state.studio === 'video' ? 'none' : '';
-  if (resetStudioBtn) resetStudioBtn.style.display = state.studio === 'video' ? 'none' : '';
+  if (seedDemoBtn) seedDemoBtn.style.display = (state.studio === 'video' || state.studio === 'image') ? 'none' : '';
+  if (globalRunBtn) globalRunBtn.style.display = state.studio === 'chat' || state.studio === 'video' || state.studio === 'image' ? 'none' : '';
+  if (resetStudioBtn) resetStudioBtn.style.display = state.studio === 'video' || state.studio === 'image' ? 'none' : '';
 
   if (inspectorTitle) {
     inspectorTitle.textContent = state.studio === 'video' && state.video.panel === 'library' ? 'Библиотека видео' : 'Параметры';
@@ -1682,6 +1822,27 @@ function clearVideoRunState({ keepPrompt = true } = {}) {
 
 
 
+
+function clearImageRunState({ keepPrompt = true, keepFiles = true } = {}) {
+  state.image.outputUrl = '';
+  state.image.downloadUrl = '';
+  state.image.errorText = '';
+  state.image.isGenerating = false;
+  state.image.statusText = 'Выбери режим, добавь изображения при необходимости и запусти генерацию.';
+  if (!keepPrompt) state.image.prompt = '';
+  if (!keepFiles) {
+    ['image.sourceImage', 'image.baseImage'].forEach((key) => {
+      revokeRuntimeFileValue(runtime.files[key]);
+      delete runtime.files[key];
+    });
+    ['image_sourceImage', 'image_baseImage'].forEach((id) => {
+      const input = document.getElementById(id);
+      if (input) input.value = '';
+    });
+  }
+  saveState();
+}
+
 function buildVideoEditorLaunchUrl() {
   const baseUrl = String(state.apiBaseUrl || window.location.origin || 'https://astrabot-tchj.onrender.com').replace(/\/$/, '');
   const params = new URLSearchParams();
@@ -1699,11 +1860,11 @@ function renderVideoWorkspace() {
   const loadingHeadline = getVideoLoadingHeadline(state.video.percent, state.video.lastStatus);
   const loadingSubline = getVideoLoadingSubline(state.video.percent, state.video.lastStatus);
   const assets = [
-    mediaCard('Start frame', getFile('video.startFrame')),
-    mediaCard('End frame', getFile('video.endFrame')),
-    mediaCard('Last frame', getFile('video.lastFrame')),
-    mediaCard('Avatar image', getFile('video.avatarImage')),
-    mediaCard('Motion video', getFile('video.motionVideo'), true),
+    mediaCard('Start frame', getFile('video.startFrame'), false, false, 'contain'),
+    mediaCard('End frame', getFile('video.endFrame'), false, false, 'contain'),
+    mediaCard('Last frame', getFile('video.lastFrame'), false, false, 'contain'),
+    mediaCard('Avatar image', getFile('video.avatarImage'), false, false, 'contain'),
+    mediaCard('Motion video', getFile('video.motionVideo'), true, false, 'contain'),
     mediaCard('Reference images', getFile('video.referenceImages'), false, true),
   ].filter(Boolean).join('');
 
@@ -1765,33 +1926,59 @@ function renderVideoWorkspace() {
 
 
 function renderImageWorkspace() {
+  syncImageSelection();
   const source = getFile('image.sourceImage');
   const base = getFile('image.baseImage');
-  return `
-    <div class="workspace-grid">
-      <div class="workspace-main scroll">
-        <div class="placeholder-stage image">
-          ${state.image.outputUrl ? `<img class="preview-media" src="${escapeHtml(state.image.outputUrl)}" alt="Generated image">` : `
-          <div class="empty-copy">
-            <strong>Image workspace</strong>
-            <div>Тут будут карточки результатов, before/after, галерея вариантов, превью референсов и export panel. Архитектура уже знает про Nano Banana, Nano Banana Pro, posters, two-images и text-to-image.</div>
-          </div>`}
+  const assets = [
+    mediaCard('Source image', source, false, false, 'contain'),
+    mediaCard('Base image', base, false, false, 'contain'),
+  ].filter(Boolean).join('');
+
+  const stageInner = state.image.outputUrl ? `
+    <div class="video-stage-result image-stage-result">
+      <img class="preview-media image-preview-media" src="${escapeHtml(state.image.outputUrl)}" alt="Generated image">
+      <div class="actions compact-gap" style="justify-content:center; flex-wrap:wrap; margin-top:14px;">
+        <a class="btn primary" href="${escapeHtml(state.image.downloadUrl || state.image.outputUrl)}" download>Скачать изображение</a>
+        <button class="btn outline" data-action="clear-image-run">Очистить результат</button>
+      </div>
+    </div>
+  ` : (state.image.isGenerating ? `
+    <div class="image-loading-shell">
+      <div class="video-loader-shell video-loader-shell-scan">
+        <div class="video-scan-stage">
+          <div class="video-scan-grid"></div>
+          <div class="video-scan-sweep"></div>
+          <div class="video-scan-glow"></div>
+          <div class="video-loader">
+            <div class="video-loader-ring"></div>
+            <div class="video-loader-ring ring-2"></div>
+            <div class="video-loader-ring ring-3"></div>
+            <div class="video-loader-core">✦</div>
+          </div>
         </div>
-        <div class="upload-grid two" style="margin-top:16px;">
-          ${mediaCard('Source image', source) || ''}
-          ${mediaCard('Base image', base) || ''}
-          ${!source && !base ? `<div class="asset-card"><h4>Ожидаются входные изображения</h4><small>Правые поля будут меняться в зависимости от режима: source image, base image, prompt, resolution, safety level и т.д.</small></div>` : ''}
+        <div class="video-loader-copy">
+          <strong>Собираю изображение</strong>
+          <div>${escapeHtml(state.image.statusText || 'Жди финальный результат в центральной рабочей зоне.')}</div>
         </div>
       </div>
-      <div class="workspace-side scroll">
-        <div class="result-card">
-          <h4>Выбранный сценарий</h4>
-          <small>${escapeHtml(currentMeta().provider)} → ${escapeHtml(currentMeta().model)} → ${escapeHtml(currentMeta().mode)}</small>
+    </div>
+  ` : `
+    <div class="empty-copy">
+      <strong>Изображение появится здесь</strong>
+      <div>Справа выбери семейство, режим, добавь входные изображения при необходимости и запусти генерацию. Рабочая зона теперь сделана по тому же принципу, что и во вкладке видео — без лишних боковых карточек.</div>
+    </div>
+  `);
+
+  return `
+    <div class="workspace-grid single image-workspace-grid">
+      <div class="workspace-main scroll image-workspace-main">
+        <div class="result-card image-stage-card image-stage-card-plain">
+          <div class="placeholder-stage image image-stage-clean">
+            ${stageInner}
+          </div>
         </div>
-        <div class="result-card">
-          <h4>Статус подключения</h4>
-          <small>${escapeHtml(state.image.statusText)}</small>
-        </div>
+        ${assets ? `<div class="upload-grid two" style="margin-top:16px;">${assets}</div>` : ''}
+        ${state.image.errorText ? `<div class="planner-card" style="margin-top:16px;"><h4>Ошибка</h4><div class="help-text">${escapeHtml(state.image.errorText)}</div></div>` : ''}
       </div>
     </div>
   `;
@@ -2024,14 +2211,15 @@ function renderProfileWorkspace() {
   `;
 }
 
-function mediaCard(title, asset, isVideo = false, multiple = false) {
+function mediaCard(title, asset, isVideo = false, multiple = false, fit = 'cover') {
   if (!asset) return '';
+  const thumbClass = `asset-thumb ${fit === 'contain' ? 'fit-contain' : ''}`.trim();
   if (multiple && Array.isArray(asset)) {
     return `
       <div class="asset-card">
         <h4>${escapeHtml(title)}</h4>
         <div class="upload-grid two">
-          ${asset.map((a) => `<img class="asset-thumb" src="${escapeHtml(a.url)}" alt="${escapeHtml(a.name)}">`).join('')}
+          ${asset.map((a) => `<img class="${thumbClass}" src="${escapeHtml(a.url)}" alt="${escapeHtml(a.name)}">`).join('')}
         </div>
         <small>${asset.length} файлов</small>
       </div>
@@ -2040,7 +2228,7 @@ function mediaCard(title, asset, isVideo = false, multiple = false) {
   return `
     <div class="asset-card">
       <h4>${escapeHtml(title)}</h4>
-      ${isVideo ? `<video class="asset-thumb" src="${escapeHtml(asset.url)}" controls></video>` : `<img class="asset-thumb" src="${escapeHtml(asset.url)}" alt="${escapeHtml(asset.name)}">`}
+      ${isVideo ? `<video class="${thumbClass}" src="${escapeHtml(asset.url)}" controls></video>` : `<img class="${thumbClass}" src="${escapeHtml(asset.url)}" alt="${escapeHtml(asset.name)}">`}
       <small>${escapeHtml(asset.name)}</small>
     </div>
   `;
@@ -2170,6 +2358,85 @@ function renderVideoModeFields(model) {
   return parts.join('');
 }
 
+
+function renderImageInspector() {
+  syncImageSelection();
+  const providerOptions = Object.entries(IMAGE_REGISTRY).map(([id, provider]) => `<option value="${escapeHtml(id)}" ${state.image.provider === id ? 'selected' : ''}>${escapeHtml(provider.name)}</option>`).join('');
+  const providerModels = Object.entries(imageProviderConfig().models);
+  const hasMultipleModels = providerModels.length > 1;
+  const modelOptions = providerModels.map(([id, model]) => `<option value="${escapeHtml(id)}" ${state.image.model === id ? 'selected' : ''}>${escapeHtml(model.name)}</option>`).join('');
+  const modeOptions = Object.entries(imageModelConfig().modes).map(([id, mode]) => `<option value="${escapeHtml(id)}" ${state.image.mode === id ? 'selected' : ''}>${escapeHtml(mode.name)}</option>`).join('');
+
+  return `
+    <div class="inspector-card">
+      <div class="field-head" style="margin-bottom:12px;"><div class="section-title" style="margin:0;">Image Studio</div></div>
+      <div class="selector-stack">
+        <div class="input-group">
+          <label class="label">Семейство</label>
+          <select id="image_provider">${providerOptions}</select>
+        </div>
+        ${hasMultipleModels ? `
+          <div class="input-group">
+            <label class="label">Модель</label>
+            <select id="image_model">${modelOptions}</select>
+          </div>
+        ` : ''}
+        ${Object.keys(imageModelConfig().modes).length > 1 ? `<div class="input-group"><label class="label">Режим</label><select id="image_mode">${modeOptions}</select></div>` : ''}
+      </div>
+    </div>
+    ${renderImageModeFields()}
+    <div class="inspector-card">
+      <button class="btn primary full ${state.image.isGenerating ? 'loading' : ''}" data-action="run-image" ${state.image.isGenerating ? 'disabled' : ''}>${escapeHtml(imageRunButtonLabel())}</button>
+      <div class="help-text" style="margin-top:10px;">${escapeHtml(state.image.statusText || 'Стоимость и режим генерации зависят от выбранного семейства.')}</div>
+    </div>
+  `;
+}
+
+function renderImageModeFields() {
+  const parts = [];
+  const addUpload = (label, id, hint, multiple = false, accept = 'image/*') => {
+    parts.push(sectionUpload(label, id, hint, multiple, accept));
+  };
+  const addFields = (html) => parts.push(`<div class="inspector-card"><div class="field-grid two">${html}</div></div>`);
+  const addPrompt = (placeholder = 'Опиши, что нужно создать или изменить: стиль, композицию, свет, детали, фон.') => parts.push(sectionTextarea('Prompt', 'image_prompt', state.image.prompt, placeholder));
+
+  if (imageNeedsBaseImage()) addUpload('Base image', 'image_baseImage', 'Главное фото или база, от которой нужно отталкиваться.');
+  if (imageNeedsSourceImage() || (state.image.provider === 'posters' && state.image.mode === 'poster')) {
+    addUpload('Source image', 'image_sourceImage', state.image.provider === 'posters' && state.image.mode === 'poster' ? 'Опционально: фото, которое нужно встроить в афишу.' : 'Основное изображение для редактирования или фотосессии.');
+  }
+
+  if (state.image.provider === 'posters' && state.image.mode === 'poster') {
+    addPrompt('Опиши афишу: заголовок, стиль, композицию, фон, типографику, настроение.');
+    addFields(`${fieldSelect('Poster style', 'image_posterStyle', state.image.posterStyle || 'cinematic', [['cinematic','Cinematic'],['minimal','Minimal'],['neon','Neon'],['luxury','Luxury'],['editorial','Editorial']])}`);
+    return parts.join('');
+  }
+
+  if (state.image.provider === 'photosession') {
+    addPrompt('Опиши образ, локацию, свет, одежду, позу и итоговую атмосферу фотосессии.');
+    addFields(`${fieldSelect('Style', 'image_stylePreset', state.image.stylePreset || 'editorial', [['editorial','Editorial'],['fashion','Fashion'],['cinematic','Cinematic'],['street','Street'],['luxury','Luxury']])}${fieldSelect('Mood', 'image_moodPreset', state.image.moodPreset || 'premium', [['premium','Premium'],['soft','Soft'],['dramatic','Dramatic'],['bright','Bright'],['romantic','Romantic']])}`);
+    return parts.join('');
+  }
+
+  if (state.image.provider === 'two_images') {
+    addPrompt('Опиши, как объединить два изображения: что взять из base image, что взять из source image, какой нужен итоговый стиль.');
+    addFields(`${fieldSelect('Resolution', 'image_resolution', state.image.resolution || '2K', [['1K','1K'],['2K','2K']])}${fieldSelect('Safety', 'image_safetyLevel', state.image.safetyLevel || 'high', [['high','High'],['medium','Medium'],['low','Low']])}`);
+    return parts.join('');
+  }
+
+  addPrompt();
+  const showImageResolution = true;
+  const showAspect = state.image.mode !== 'image_edit';
+  const aspectOptions = state.image.mode === 'image_to_image'
+    ? [['match_input_image','Match input'],['16:9','16:9'],['9:16','9:16'],['1:1','1:1'],['3:4','3:4'],['4:3','4:3']]
+    : [['16:9','16:9'],['9:16','9:16'],['1:1','1:1'],['3:4','3:4'],['4:3','4:3']];
+  const fieldParts = [];
+  if (showImageResolution) fieldParts.push(fieldSelect('Resolution', 'image_resolution', state.image.resolution || '2K', [['1K','1K'],['2K','2K']]));
+  if (showAspect) fieldParts.push(fieldSelect('Aspect ratio', state.image.mode === 'text_to_image' || state.image.mode === 't2i' ? 'image_aspectRatioText' : 'image_aspectRatio', state.image.aspectRatio || (state.image.mode === 'image_to_image' ? 'match_input_image' : '16:9'), aspectOptions));
+  fieldParts.push(fieldSelect('Safety', 'image_safetyLevel', state.image.safetyLevel || 'high', [['high','High'],['medium','Medium'],['low','Low']]));
+  addFields(fieldParts.join(''));
+  return parts.join('');
+}
+
 function renderHistoryInspector() {
   return `<div class="inspector-card"><div class="section-title">Библиотека</div><div class="help-text">Открой Video Studio и используй правую панель для библиотеки видео.</div></div>`;
 }
@@ -2206,11 +2473,32 @@ function sectionTextarea(label, id, value, placeholder = '') {
 }
 
 function sectionUpload(label, id, help, multiple = false, accept = 'image/*') {
-  const key = id.replace(/_/g, '.');
-  const asset = getFile(key);
-  const hint = asset ? (Array.isArray(asset) ? `${asset.length} файлов выбрано` : asset.name) : 'Файл ещё не выбран';
+  const config = FILE_INPUT_MAP[id];
+  const asset = config ? getFile(config.key) : null;
   const triggerTitle = multiple ? 'Добавить файлы' : 'Добавить файл';
   const acceptLabel = accept === 'video/*' ? 'MP4 / MOV / WEBM' : 'PNG / JPG / WEBP';
+  const selectedMarkup = asset ? (
+    Array.isArray(asset)
+      ? `
+        <div class="upload-file-list">
+          ${asset.map((item, index) => `
+            <div class="upload-file-pill has-file">
+              <span class="upload-file-name">${escapeHtml(item.name || `Файл ${index + 1}`)}</span>
+              <button class="upload-file-remove" type="button" data-action="remove-upload-file" data-upload-id="${escapeHtml(id)}" data-index="${index}" aria-label="Удалить файл" title="Удалить файл">×</button>
+            </div>
+          `).join('')}
+        </div>
+      `
+      : `
+        <div class="upload-file-list">
+          <div class="upload-file-pill has-file">
+            <span class="upload-file-name">${escapeHtml(asset.name || 'Файл выбран')}</span>
+            <button class="upload-file-remove" type="button" data-action="remove-upload-file" data-upload-id="${escapeHtml(id)}" aria-label="Удалить файл" title="Удалить файл">×</button>
+          </div>
+        </div>
+      `
+  ) : `<div class="upload-file-pill">Файл ещё не выбран</div>`;
+
   return `
     <div class="inspector-card">
       <div class="input-group">
@@ -2224,7 +2512,7 @@ function sectionUpload(label, id, help, multiple = false, accept = 'image/*') {
           </span>
         </label>
         <div class="help-text">${escapeHtml(help)}</div>
-        <div class="upload-file-pill ${asset ? 'has-file' : ''}">${escapeHtml(hint)}</div>
+        ${selectedMarkup}
       </div>
     </div>
   `;
@@ -2902,6 +3190,69 @@ async function runVideo() {
   }
 }
 
+
+async function runImage() {
+  if (!requireAuth()) return;
+  syncImageSelection();
+  if (state.image.isGenerating) return;
+  const prompt = String(state.image.prompt || '').trim();
+  if (!prompt) {
+    toast('error', 'Нужен prompt', 'Опиши, что нужно создать или изменить в изображении.');
+    return;
+  }
+  if (imageNeedsSourceImage() && !getFile('image.sourceImage')) {
+    toast('error', 'Нужно изображение', 'Для выбранного режима сначала загрузи source image.');
+    return;
+  }
+  if (imageNeedsBaseImage() && !getFile('image.baseImage')) {
+    toast('error', 'Нужно base image', 'Для режима Картинка + Картинка сначала загрузи base image.');
+    return;
+  }
+
+  const form = new FormData();
+  form.append('provider', state.image.provider);
+  form.append('model', state.image.model);
+  form.append('mode', state.image.mode);
+  form.append('prompt', prompt);
+  form.append('resolution', String(state.image.resolution || '2K'));
+  form.append('aspect_ratio', String(state.image.aspectRatio || ''));
+  form.append('safety_level', String(state.image.safetyLevel || 'high'));
+  form.append('poster_style', String(state.image.posterStyle || ''));
+  form.append('style_preset', String(state.image.stylePreset || ''));
+  form.append('mood_preset', String(state.image.moodPreset || ''));
+
+  const source = getFile('image.sourceImage');
+  const base = getFile('image.baseImage');
+  if (source?.file) form.append('source_image', source.file, source.name || source.file.name || 'source.png');
+  if (base?.file) form.append('base_image', base.file, base.name || base.file.name || 'base.png');
+
+  state.image.isGenerating = true;
+  state.image.outputUrl = '';
+  state.image.downloadUrl = '';
+  state.image.errorText = '';
+  state.image.statusText = 'Задача отправлена. Жди итоговую картинку в рабочей зоне.';
+  saveState();
+  render();
+
+  try {
+    const res = await apiFetch('/api/workspace/image/run', { method: 'POST', body: form });
+    const data = await res.json();
+    state.image.outputUrl = data.image_url || data.output_url || '';
+    state.image.downloadUrl = data.download_url || state.image.outputUrl;
+    state.image.statusText = data.status_text || 'Изображение готово.';
+    pushRun({ studio: 'Image', title: `${currentMeta().provider} · ${currentMeta().model}`, summary: prompt.slice(0, 120) });
+    toast('success', 'Изображение готово', state.image.statusText || 'Результат появился в рабочей зоне.');
+  } catch (e) {
+    state.image.errorText = String(e.message || e);
+    state.image.statusText = 'Не удалось выполнить генерацию.';
+    toast('error', 'Ошибка генерации', state.image.errorText);
+  } finally {
+    state.image.isGenerating = false;
+    saveState();
+    render();
+  }
+}
+
 async function pollVideoTask(options = {}) {
   const { silent = false } = options;
   if (!state.video.generationId) return;
@@ -3033,8 +3384,7 @@ function resetCurrentStudio() {
       resetVideoEditorState();
       break;
     case 'image':
-      state.image.prompt = '';
-      state.image.outputUrl = '';
+      clearImageRunState({ keepPrompt: false, keepFiles: false });
       break;
     case 'voice':
       state.voice.text = '';
@@ -3056,21 +3406,8 @@ function handleInputChange(target) {
   const { id, value, type, checked, files } = target;
   if (!id) return;
 
-  const fileMap = {
-    chat_attachments: ['chat.attachments', true],
-    video_startFrame: ['video.startFrame', false],
-    video_endFrame: ['video.endFrame', false],
-    video_lastFrame: ['video.lastFrame', false],
-    video_referenceImages: ['video.referenceImages', true],
-    video_avatarImage: ['video.avatarImage', false],
-    video_motionVideo: ['video.motionVideo', false],
-    video_sourceVideo: ['video.sourceVideo', false],
-    editorAudioUpload: ['editor.audioUpload', false],
-    editorMergeUpload: ['editor.mergeUpload', false],
-    image_sourceImage: ['image.sourceImage', false],
-    image_baseImage: ['image.baseImage', false],
-  };
-  if (fileMap[id]) {
+  const fileConfig = FILE_INPUT_MAP[id];
+  if (fileConfig) {
     if (id === 'editorAudioUpload') {
       handleEditorAudioFileSelected(files && files[0] ? files[0] : null);
       target.value = '';
@@ -3081,7 +3418,7 @@ function handleInputChange(target) {
       target.value = '';
       return;
     }
-    const [key, multiple] = fileMap[id];
+    const { key, multiple } = fileConfig;
     setFile(key, multiple ? files : files[0], multiple);
     if (id === 'video_motionVideo') probeMotionDuration(getFile('video.motionVideo'));
     render();
@@ -3167,12 +3504,17 @@ function handleInputChange(target) {
       state.image.provider = value;
       state.image.model = Object.keys(IMAGE_REGISTRY[value].models)[0];
       state.image.mode = Object.keys(IMAGE_REGISTRY[value].models[state.image.model].modes)[0];
+      clearImageRunState({ keepPrompt: true, keepFiles: true });
       break;
     case 'image_model':
       state.image.model = value;
       state.image.mode = Object.keys(IMAGE_REGISTRY[state.image.provider].models[value].modes)[0];
+      clearImageRunState({ keepPrompt: true, keepFiles: true });
       break;
-    case 'image_mode': state.image.mode = value; break;
+    case 'image_mode':
+      state.image.mode = value;
+      clearImageRunState({ keepPrompt: true, keepFiles: true });
+      break;
     case 'image_prompt': state.image.prompt = value; break;
     case 'image_resolution': state.image.resolution = value; break;
     case 'image_aspectRatio':
@@ -3369,7 +3711,16 @@ function handleAction(action, dataset = {}) {
     case 'delete-history-item':
       deleteHistoryItem(dataset.generationId);
       break;
-    case 'run-image': toast('info', 'Image Studio готова архитектурно', 'Для запуска осталось вынести web-friendly image endpoints из backend.'); break;
+    case 'remove-upload-file':
+      removeUploadFile(dataset.uploadId, dataset.index);
+      break;
+    case 'clear-image-run':
+      clearImageRunState({ keepPrompt: true, keepFiles: true });
+      render();
+      break;
+    case 'run-image':
+      runImage();
+      break;
     case 'load-voices': loadVoices(); break;
     case 'run-voice': runVoice(); break;
     case 'run-songwriter': runSongwriter(); break;
@@ -3416,7 +3767,7 @@ function runCurrentStudio() {
   switch (state.studio) {
     case 'chat': sendChat(); break;
     case 'video': runVideo(); break;
-    case 'image': toast('info', 'Image Studio', 'Осталось подключить backend-эндпоинты для image flows.'); break;
+    case 'image': runImage(); break;
     case 'voice': runVoice(); break;
     case 'music': runSongwriter(); break;
     case 'library': loadPromptCategories(); break;
