@@ -43,6 +43,8 @@ from veo_flow import VeoFlowError, run_veo_image_to_video, run_veo_text_to_video
 from kling3_pricing import calculate_kling3_price
 from songwriter_prompt import SONGWRITER_SYSTEM_PROMPT
 from queue_redis import enqueue_job
+from nano_banana import run_nano_banana
+from nano_banana_pro import handle_nano_banana_pro
 from app.services.video_editor_service import (
     VIDEO_EDIT_QUEUE_NAME,
     MAX_AUDIO_CLIPS,
@@ -1288,6 +1290,88 @@ async def workspace_bootstrap(user: Optional[Dict[str, Any]] = Depends(get_optio
     return payload
 
 
+
+def _workspace_image_output_path(user_id: int, ext: str) -> str:
+    dt = datetime.now(timezone.utc)
+    safe_ext = (ext or "jpg").strip().lower()
+    if safe_ext not in {"jpg", "jpeg", "png", "webp"}:
+        safe_ext = "jpg"
+    return f"workspace_images/{int(user_id)}/{dt:%Y/%m/%d}/{uuid4().hex}.{safe_ext}"
+
+
+def _workspace_image_content_type(ext: str) -> str:
+    value = (ext or "jpg").strip().lower()
+    if value == "png":
+        return "image/png"
+    if value == "webp":
+        return "image/webp"
+    return "image/jpeg"
+
+
+async def _read_optional_upload_bytes(upload: Any) -> Optional[bytes]:
+    if not upload or not getattr(upload, "filename", None):
+        return None
+    raw = await upload.read()
+    return raw or None
+
+
+def _compose_workspace_pair_image(base_bytes: bytes, source_bytes: bytes) -> bytes:
+    from PIL import Image, ImageOps
+
+    with Image.open(io.BytesIO(base_bytes)) as base_img, Image.open(io.BytesIO(source_bytes)) as source_img:
+        base_rgb = ImageOps.exif_transpose(base_img).convert("RGB")
+        source_rgb = ImageOps.exif_transpose(source_img).convert("RGB")
+        slot_w = 1024
+        slot_h = 1024
+        left = ImageOps.contain(base_rgb, (slot_w, slot_h), method=Image.Resampling.LANCZOS)
+        right = ImageOps.contain(source_rgb, (slot_w, slot_h), method=Image.Resampling.LANCZOS)
+        canvas = Image.new("RGB", (slot_w * 2, slot_h), (11, 16, 28))
+        left_x = (slot_w - left.width) // 2
+        left_y = (slot_h - left.height) // 2
+        right_x = slot_w + (slot_w - right.width) // 2
+        right_y = (slot_h - right.height) // 2
+        canvas.paste(left, (left_x, left_y))
+        canvas.paste(right, (right_x, right_y))
+        out = io.BytesIO()
+        canvas.save(out, format="JPEG", quality=95)
+        return out.getvalue()
+
+
+def _build_workspace_image_prompt(
+    *,
+    provider: str,
+    mode: str,
+    prompt: str,
+    poster_style: str,
+    style_preset: str,
+    mood_preset: str,
+) -> str:
+    base = str(prompt or "").strip()
+    if provider == "posters" and mode == "poster":
+        style = str(poster_style or "cinematic").strip()
+        prefix = f"Create a polished promotional poster design in {style} style"
+        return f"{prefix}. {base}" if base else prefix
+    if provider == "photosession":
+        parts = ["Create a high-end AI photosession result"]
+        if style_preset:
+            parts.append(f"style: {style_preset}")
+        if mood_preset:
+            parts.append(f"mood: {mood_preset}")
+        if base:
+            parts.append(base)
+        return ". ".join(parts)
+    if provider == "two_images":
+        prefix = (
+            "Use the uploaded collage where the left image is the base/reference and the right image is the source/style image. "
+            "Combine important traits from both into one coherent final image."
+        )
+        return f"{prefix} {base}".strip()
+    return base
+
+
+def _workspace_image_cost(provider: str) -> int:
+    return 1 if provider == "nano_banana" else 2
+
 @router.post("/auth/telegram")
 async def workspace_auth_telegram(payload: TelegramAuthPayload) -> Dict[str, Any]:
     try:
@@ -1981,6 +2065,136 @@ async def workspace_video_job_status(
 @router.get("/tts/voices")
 async def workspace_tts_voices(user: Dict[str, Any] = Depends(get_current_workspace_user)) -> List[Dict[str, Any]]:
     return ALLOWED_VOICES
+
+
+@router.post("/image/run")
+async def workspace_image_run(
+    request: Request,
+    user: Dict[str, Any] = Depends(get_current_workspace_user),
+) -> Dict[str, Any]:
+    uid = int(user["telegram_user_id"])
+    form = await request.form()
+
+    provider = str(form.get("provider") or "").strip().lower()
+    model = str(form.get("model") or "").strip()
+    mode = str(form.get("mode") or "").strip().lower()
+    prompt = str(form.get("prompt") or "").strip()
+    resolution = str(form.get("resolution") or "2K").strip().upper() or "2K"
+    aspect_ratio = str(form.get("aspect_ratio") or "").strip() or "match_input_image"
+    safety_level = str(form.get("safety_level") or "high").strip().lower() or "high"
+    poster_style = str(form.get("poster_style") or "").strip()
+    style_preset = str(form.get("style_preset") or "").strip()
+    mood_preset = str(form.get("mood_preset") or "").strip()
+
+    if not provider:
+        raise HTTPException(status_code=400, detail="Missing provider")
+    if not model:
+        raise HTTPException(status_code=400, detail="Missing model")
+    if not mode:
+        raise HTTPException(status_code=400, detail="Missing mode")
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Missing prompt")
+
+    supported = {"nano_banana", "nano_banana_pro", "posters", "photosession", "two_images", "text_to_image"}
+    if provider not in supported:
+        raise HTTPException(status_code=400, detail=f"Provider {provider} is not supported in /image/run")
+
+    source_image = await _read_optional_upload_bytes(form.get("source_image"))
+    base_image = await _read_optional_upload_bytes(form.get("base_image"))
+
+    if provider == "nano_banana" and not source_image:
+        raise HTTPException(status_code=400, detail="Для Nano Banana нужен source image.")
+    if provider == "nano_banana_pro" and mode == "image_to_image" and not source_image:
+        raise HTTPException(status_code=400, detail="Для Image→Image нужен source image.")
+    if provider == "posters" and mode == "photo_edit" and not source_image:
+        raise HTTPException(status_code=400, detail="Для Photo Edit нужен source image.")
+    if provider == "photosession" and not source_image:
+        raise HTTPException(status_code=400, detail="Для нейро фотосессии нужен source image.")
+    if provider == "two_images" and (not source_image or not base_image):
+        raise HTTPException(status_code=400, detail="Для режима Картинка + Картинка нужны base image и source image.")
+
+    if provider in {"nano_banana_pro", "text_to_image"} and mode in {"text_to_image", "t2i"} and aspect_ratio == "match_input_image":
+        aspect_ratio = "16:9"
+
+    run_prompt = _build_workspace_image_prompt(
+        provider=provider,
+        mode=mode,
+        prompt=prompt,
+        poster_style=poster_style,
+        style_preset=style_preset,
+        mood_preset=mood_preset,
+    )
+    if not run_prompt:
+        raise HTTPException(status_code=400, detail="Empty prompt")
+
+    ensure_user_row(uid)
+    try:
+        bal = float(get_balance(uid) or 0)
+    except Exception:
+        bal = 0
+    cost = _workspace_image_cost(provider)
+    if bal < cost:
+        raise HTTPException(status_code=402, detail=f"Недостаточно токенов. Нужно: {cost} ток.")
+
+    charged = False
+    reason = "nano_banana" if provider == "nano_banana" else "nano_banana_pro"
+    ref_id = uuid4().hex
+
+    try:
+        try:
+            add_tokens(uid, -cost, reason=reason, ref_id=ref_id, meta={"origin": "workspace_image", "provider": provider, "mode": mode})
+        except TypeError:
+            add_tokens(uid, -int(cost), reason=reason)
+        charged = True
+
+        if provider == "nano_banana":
+            out_bytes, ext = await run_nano_banana(source_image, run_prompt, output_format="jpg")
+        else:
+            input_image = source_image
+            if provider == "two_images":
+                input_image = _compose_workspace_pair_image(base_image, source_image)
+                aspect_ratio = "match_input_image"
+            elif provider == "text_to_image":
+                input_image = None
+            output_format = "png" if provider == "text_to_image" or mode in {"text_to_image", "t2i"} else "jpg"
+            out_bytes, ext = await handle_nano_banana_pro(
+                input_image,
+                run_prompt,
+                resolution=resolution,
+                output_format=output_format,
+                aspect_ratio=aspect_ratio,
+                safety_level=safety_level,
+            )
+
+        output_path = _workspace_image_output_path(uid, ext)
+        image_url = upload_bytes_to_supabase(output_path, out_bytes, _workspace_image_content_type(ext))
+        try:
+            balance_tokens = int(get_balance(uid) or 0)
+        except Exception:
+            balance_tokens = None
+        return {
+            "ok": True,
+            "provider": provider,
+            "model": model,
+            "mode": mode,
+            "image_url": image_url,
+            "download_url": image_url,
+            "status": "completed",
+            "status_text": "Изображение готово.",
+            "balance_tokens": balance_tokens,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        if charged:
+            try:
+                try:
+                    add_tokens(uid, cost, reason=f"{reason}_refund", ref_id=ref_id, meta={"origin": "workspace_image", "error": str(e)})
+                except TypeError:
+                    add_tokens(uid, int(cost), reason=f"{reason}_refund")
+            except Exception:
+                pass
+        raise HTTPException(status_code=500, detail=f"Image generation failed: {e}")
 
 
 @router.post("/tts/generate")
