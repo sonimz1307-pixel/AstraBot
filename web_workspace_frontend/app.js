@@ -1681,6 +1681,16 @@ function clearVideoRunState({ keepPrompt = true } = {}) {
 }
 
 
+
+function buildVideoEditorLaunchUrl() {
+  const baseUrl = String(state.apiBaseUrl || window.location.origin || 'https://astrabot-tchj.onrender.com').replace(/\/$/, '');
+  const params = new URLSearchParams();
+  if (state.authToken) params.set('token', state.authToken);
+  params.set('api_base', baseUrl);
+  params.set('return_url', window.location.href);
+  return `${baseUrl}/workspace/video-editor-v2?${params.toString()}`;
+}
+
 function renderVideoWorkspace() {
   const activeItem = historySelectedItem();
   const showHistoryVideo = state.video.panel === 'library' && activeItem && historyVideoUrl(activeItem);
@@ -1744,7 +1754,7 @@ function renderVideoWorkspace() {
             <div class="help-text">Старый mini editor v1 убран из интерфейса. Для монтажа открой новый редактор с таймлайном.</div>
           </div>
           <div class="actions compact-gap" style="justify-content:center; flex-wrap:wrap; margin-top:14px;">
-            <a class="btn primary" href="https://astrabot-tchj.onrender.com/workspace/video-editor-v2?token=USER_TOKEN">Открыть редактор видео</a>
+            <a class="btn primary" href="${escapeHtml(buildVideoEditorLaunchUrl())}">Открыть редактор видео</a>
           </div>
         </div>
         ${assets ? `<div class="upload-grid two" style="margin-top:16px;">${assets}</div>` : ''}
