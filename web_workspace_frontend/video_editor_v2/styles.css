@@ -219,6 +219,9 @@ a { color: inherit; }
 .timeline-canvas {
   position: relative;
   min-height: 276px;
+  --timeline-track-label-width: 90px;
+  --timeline-track-gap: 12px;
+  --timeline-track-offset: calc(var(--timeline-track-label-width) + var(--timeline-track-gap));
 }
 .timeline-playhead {
   position: absolute;
@@ -246,6 +249,7 @@ a { color: inherit; }
 .timeline-ruler {
   position: relative;
   height: 44px;
+  margin-left: var(--timeline-track-offset);
   border-radius: 16px 16px 0 0;
   background: rgba(255,255,255,.02);
   border: 1px solid rgba(255,255,255,.08);
