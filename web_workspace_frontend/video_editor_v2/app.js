@@ -174,7 +174,7 @@ function setPlayhead(sec, { syncPreview = true } = {}) {
 function positionPlayhead() {
   const line = $('timelinePlayhead');
   if (!line) return;
-  line.style.left = `${Math.round(state.playheadSec * state.pxPerSec)}px`;
+  line.style.left = `${TRACK_LEFT_OFFSET + Math.round(state.playheadSec * state.pxPerSec)}px`;
 }
 function previewSourceForItem(item, type) {
   if (!item) return '';
@@ -446,6 +446,7 @@ function renderRuler() {
   const ruler = $('timelineRuler');
   if (!ruler) return;
   ruler.style.width = `${timelineWidthPx()}px`;
+  ruler.style.marginLeft = `${TRACK_LEFT_OFFSET}px`;
   ruler.innerHTML = Array.from({ length: total + 1 }, (_, i) => {
     const left = i * state.pxPerSec;
     return `<div class="tick" style="left:${left}px"><span>${i}с</span></div>`;
@@ -524,7 +525,7 @@ function renderAudioTrack() {
 }
 function renderTimeline() {
   const canvas = $('timelineCanvas');
-  if (canvas) canvas.style.width = `${timelineWidthPx()}px`;
+  if (canvas) canvas.style.width = `${timelineWidthPx() + TRACK_LEFT_OFFSET}px`;
   if ($('zoomLabel')) $('zoomLabel').textContent = `${state.pxPerSec} px/с`;
   renderRuler();
   renderVideoTrack();
@@ -558,8 +559,8 @@ function applyFormChanges() {
 function getTimelineSecondsFromClientX(clientX) {
   const scroller = $('timelineScroller');
   if (!scroller) return 0;
-  const rect = scroller.getBoundingClientRect();
-  const x = clientX - rect.left + scroller.scrollLeft;
+  const areaRect = $('videoTrack')?.getBoundingClientRect() || $('timelineRuler')?.getBoundingClientRect() || scroller.getBoundingClientRect();
+  const x = clientX - areaRect.left + scroller.scrollLeft;
   return clamp(x / state.pxPerSec, 0, projectDuration());
 }
 function previewLibraryItem(id) {
