@@ -2,108 +2,154 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>AstraBot Video Editor v2</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AstraBot — Видео редактор v2</title>
   <link rel="stylesheet" href="/workspace/video-editor-v2/styles.css">
 </head>
 <body>
   <div class="editor-shell">
-    <header class="editor-header">
-      <div class="header-main">
-        <a id="backLink" href="https://astrabot-workspace.onrender.com" class="back-link">← Назад в Workspace</a>
-        <div class="eyebrow">AstraBot</div>
-        <h1>Video Editor v2</h1>
-        <p>Монтаж без лишней технички: клипы, музыка, резка, переходы и экспорт проекта.</p>
+    <header class="topbar">
+      <div class="topbar-left">
+        <a id="backLink" class="back-link" href="https://astrabot-workspace.onrender.com">← Назад в Workspace</a>
+        <div>
+          <div class="eyebrow">AstraBot Workspace</div>
+          <h1>Видео редактор v2</h1>
+          <p>Нормальный рабочий layout: медиатека слева, превью и таймлайн по центру, инспектор справа.</p>
+        </div>
       </div>
-      <div class="header-actions">
-        <button id="refreshLibraryBtn" class="btn ghost">Обновить</button>
+      <div class="topbar-actions">
+        <button id="refreshLibraryBtn" class="btn ghost">Обновить библиотеку</button>
         <button id="saveProjectBtn" class="btn secondary">Сохранить проект</button>
-        <button id="renderBtn" class="btn primary">Экспорт</button>
+        <button id="renderBtn" class="btn primary">Экспорт MP4</button>
       </div>
     </header>
 
     <section id="authBanner" class="auth-banner hidden">
       <div>
         <strong>Редактор открыт без авторизации Workspace.</strong>
-        <p>Из-за разных доменов токен не подтягивается автоматически. Открывай редактор из кнопки на сайте, которая передаёт токен, тогда появятся история генераций, медиатека и сохранение проектов.</p>
+        <p>Открой редактор из вашего сайта, тогда подтянутся токен, история генераций, загрузка файлов и сохранение проектов.</p>
       </div>
     </section>
 
-    <section class="editor-grid">
+    <section class="workspace-grid">
       <aside class="panel library-panel">
-        <div class="panel-head">
-          <div class="panel-title">
-            <strong>Медиатека</strong>
-            <p id="libraryHint">Загружай видео и музыку или добавляй материалы из библиотеки.</p>
+        <div class="panel-head sticky-head">
+          <div>
+            <div class="panel-kicker">Медиатека</div>
+            <strong>Видео и музыка</strong>
+            <p id="libraryHint">Загружай свои файлы или добавляй ролики из истории генераций.</p>
           </div>
           <span id="sessionState" class="badge muted">проверка…</span>
         </div>
-        <div class="upload-box">
-          <label class="upload-btn">+ Загрузить видео<input id="videoUploadInput" type="file" accept="video/*" hidden></label>
-          <label class="upload-btn">+ Загрузить музыку<input id="audioUploadInput" type="file" accept="audio/*" hidden></label>
+
+        <div class="upload-stack">
+          <label class="upload-btn">
+            <span>+ Загрузить видео</span>
+            <input id="videoUploadInput" type="file" accept="video/*" hidden>
+          </label>
+          <label class="upload-btn">
+            <span>+ Загрузить музыку</span>
+            <input id="audioUploadInput" type="file" accept="audio/*" hidden>
+          </label>
         </div>
-        <div class="library-tabs">
-          <button class="tab active" data-library-tab="videos">Видео</button>
-          <button class="tab" data-library-tab="audio">Музыка</button>
+
+        <div class="library-tabs" role="tablist" aria-label="Медиатека">
+          <button class="tab active" type="button" data-library-tab="videos">Видео <span id="videoLibraryCount" class="tab-count">0</span></button>
+          <button class="tab" type="button" data-library-tab="audio">Музыка <span id="audioLibraryCount" class="tab-count">0</span></button>
         </div>
+
+        <label class="search-box">
+          <span>Поиск</span>
+          <input id="librarySearchInput" type="text" placeholder="Название файла или prompt">
+        </label>
+
         <div id="libraryList" class="library-list"></div>
       </aside>
 
-      <main class="panel main-panel">
-        <div class="preview-wrap">
+      <main class="center-column">
+        <section class="panel preview-panel">
+          <div class="preview-head">
+            <div>
+              <div class="panel-kicker">Превью</div>
+              <strong>Монтажное окно</strong>
+              <p id="previewMeta">Выбери клип на таймлайне или добавь ролик из медиатеки.</p>
+            </div>
+            <div class="project-meta-line">
+              <span id="projectStatus" class="badge muted">черновик</span>
+              <span id="renderStatus" class="badge">не запускался</span>
+            </div>
+          </div>
+
           <div class="preview-frame">
             <video id="previewVideo" class="hidden" controls playsinline></video>
             <div id="previewEmpty" class="preview-empty">
               <div>
-                <strong>Видео появится здесь</strong>
-                <div>Добавь ролик в таймлайн слева или выбери клип, чтобы увидеть превью.</div>
+                <strong>Здесь будет видео</strong>
+                <p>Добавь ролик в таймлайн слева и выбери его для просмотра.</p>
               </div>
             </div>
           </div>
+
           <div class="project-bar">
-            <input id="projectTitleInput" type="text" value="Новый видеопроект" maxlength="120">
-            <span id="projectStatus" class="badge muted">черновик</span>
-            <span id="renderStatus" class="badge">не запускался</span>
+            <label class="project-title-box">
+              <span>Название проекта</span>
+              <input id="projectTitleInput" type="text" value="Новый видеопроект" maxlength="120">
+            </label>
+            <div id="projectSummary" class="project-summary">0 клипов · 0.0с</div>
           </div>
-        </div>
+        </section>
 
-        <div class="toolbar">
-          <button id="splitBtn" class="tool">Разрезать</button>
-          <button id="deleteClipBtn" class="tool">Удалить</button>
-          <button id="muteClipBtn" class="tool">Mute</button>
-          <button id="addTextBtn" class="tool disabled">Текст скоро</button>
-          <button id="addStickerBtn" class="tool disabled">Стикер скоро</button>
-        </div>
-
-        <div class="timeline-wrap">
-          <div class="timeline-ruler" id="timelineRuler"></div>
-          <div class="track-block">
-            <div class="track-label">Видео</div>
-            <div id="videoTrack" class="track video-track"></div>
-          </div>
-          <div class="track-block">
-            <div class="track-label">Музыка</div>
-            <div id="audioTrack" class="track audio-track"></div>
-          </div>
-        </div>
-
-        <section class="panel selection-panel">
-          <div class="selection-head">
+        <section class="panel timeline-panel">
+          <div class="timeline-head">
             <div>
-              <strong id="selectionTitle">Параметры элемента</strong>
-              <p>Выбери клип или музыку на таймлайне — настройки появятся здесь.</p>
+              <div class="panel-kicker">Timeline</div>
+              <strong>Монтажная лента</strong>
+              <p id="timelineMeta">Клипы идут последовательно. Музыка ставится по времени старта.</p>
+            </div>
+            <div class="toolbar compact">
+              <button id="moveClipLeftBtn" class="tool" type="button">← Влево</button>
+              <button id="moveClipRightBtn" class="tool" type="button">Вправо →</button>
+              <button id="splitBtn" class="tool" type="button">Разрезать</button>
+              <button id="muteClipBtn" class="tool" type="button">Mute</button>
+              <button id="deleteClipBtn" class="tool danger" type="button">Удалить</button>
             </div>
           </div>
-          <div id="selectionBody"></div>
+
+          <div class="timeline-scroller">
+            <div id="timelineCanvas" class="timeline-canvas">
+              <div id="timelineRuler" class="timeline-ruler"></div>
+              <div class="track-row">
+                <div class="track-label">Видео</div>
+                <div class="track-viewport">
+                  <div id="videoTrack" class="track track-video"></div>
+                </div>
+              </div>
+              <div class="track-row">
+                <div class="track-label">Музыка</div>
+                <div class="track-viewport">
+                  <div id="audioTrack" class="track track-audio"></div>
+                </div>
+              </div>
+            </div>
+          </div>
         </section>
       </main>
+
+      <aside class="panel inspector-panel">
+        <div class="panel-head sticky-head">
+          <div>
+            <div class="panel-kicker">Inspector</div>
+            <strong id="selectionTitle">Параметры элемента</strong>
+            <p>Выбери клип или музыку на таймлайне — справа появятся настройки.</p>
+          </div>
+        </div>
+        <div id="selectionBody" class="inspector-body"></div>
+      </aside>
     </section>
 
     <div id="toast" class="toast hidden"></div>
   </div>
+
   <script src="/workspace/video-editor-v2/app.js"></script>
 </body>
 </html>
