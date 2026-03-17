@@ -1369,8 +1369,40 @@ def _build_workspace_image_prompt(
     return base
 
 
-def _workspace_image_cost(provider: str) -> int:
-    return 1 if provider == "nano_banana" else 2
+def _workspace_image_cost(provider: str, mode: str) -> int:
+    provider_key = str(provider or "").strip().lower()
+    mode_key = str(mode or "").strip().lower()
+
+    if provider_key == "nano_banana":
+        return 1
+    if provider_key == "nano_banana_pro":
+        return 2
+    if provider_key == "photosession":
+        return 1
+    if provider_key == "two_images":
+        return 1
+    if provider_key == "posters":
+        return 0
+    if provider_key == "text_to_image":
+        return 0
+
+    return 0
+
+
+def _workspace_image_charge_reason(provider: str, mode: str) -> Optional[str]:
+    provider_key = str(provider or "").strip().lower()
+    mode_key = str(mode or "").strip().lower()
+
+    if provider_key == "nano_banana":
+        return "nano_banana"
+    if provider_key == "nano_banana_pro":
+        return "nano_banana_pro"
+    if provider_key == "photosession":
+        return "photosession_generation"
+    if provider_key == "two_images":
+        return "two_photos"
+
+    return None
 
 @router.post("/auth/telegram")
 async def workspace_auth_telegram(payload: TelegramAuthPayload) -> Dict[str, Any]:
@@ -2132,20 +2164,21 @@ async def workspace_image_run(
         bal = float(get_balance(uid) or 0)
     except Exception:
         bal = 0
-    cost = _workspace_image_cost(provider)
-    if bal < cost:
+    cost = int(_workspace_image_cost(provider, mode))
+    if cost > 0 and bal < cost:
         raise HTTPException(status_code=402, detail=f"Недостаточно токенов. Нужно: {cost} ток.")
 
     charged = False
-    reason = "nano_banana" if provider == "nano_banana" else "nano_banana_pro"
-    ref_id = uuid4().hex
+    reason = _workspace_image_charge_reason(provider, mode)
+    ref_id = uuid4().hex if cost > 0 and reason else ""
 
     try:
-        try:
-            add_tokens(uid, -cost, reason=reason, ref_id=ref_id, meta={"origin": "workspace_image", "provider": provider, "mode": mode})
-        except TypeError:
-            add_tokens(uid, -int(cost), reason=reason)
-        charged = True
+        if cost > 0 and reason:
+            try:
+                add_tokens(uid, -cost, reason=reason, ref_id=ref_id, meta={"origin": "workspace_image", "provider": provider, "mode": mode})
+            except TypeError:
+                add_tokens(uid, -int(cost), reason=reason)
+            charged = True
 
         if provider == "nano_banana":
             out_bytes, ext = await run_nano_banana(source_image, run_prompt, output_format="jpg")
@@ -2177,6 +2210,7 @@ async def workspace_image_run(
             "provider": provider,
             "model": model,
             "mode": mode,
+            "tokens_required": cost,
             "image_url": image_url,
             "download_url": image_url,
             "status": "completed",
