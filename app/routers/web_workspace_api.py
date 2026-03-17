@@ -454,8 +454,10 @@ def _normalize_kling3_task(task: Dict[str, Any]) -> Dict[str, Any]:
 
 
 _WORKSPACE_VIDEO_GENERATIONS_TABLE = "workspace_video_generations"
+_WORKSPACE_IMAGE_GENERATIONS_TABLE = "workspace_image_generations"
 
 _WORKSPACE_VIDEOS_BUCKET = (os.getenv("WORKSPACE_VIDEOS_BUCKET", "workspace-videos") or "workspace-videos").strip() or "workspace-videos"
+_WORKSPACE_IMAGES_BUCKET = (os.getenv("SUPABASE_BUCKET", "") or "").strip()
 
 
 def _storage_content_type_to_ext(content_type: Optional[str], url: Optional[str] = None) -> str:
@@ -1291,12 +1293,16 @@ async def workspace_bootstrap(user: Optional[Dict[str, Any]] = Depends(get_optio
 
 
 
-def _workspace_image_output_path(user_id: int, ext: str) -> str:
+def _workspace_image_storage_path(*, user_id: int, generation_id: str, ext: str) -> str:
     dt = datetime.now(timezone.utc)
     safe_ext = (ext or "jpg").strip().lower()
     if safe_ext not in {"jpg", "jpeg", "png", "webp"}:
         safe_ext = "jpg"
-    return f"workspace_images/{int(user_id)}/{dt:%Y/%m/%d}/{uuid4().hex}.{safe_ext}"
+    return f"workspace_images/{int(user_id)}/{dt:%Y/%m/%d}/{generation_id}.{safe_ext}"
+
+
+def _workspace_image_output_path(user_id: int, ext: str) -> str:
+    return _workspace_image_storage_path(user_id=user_id, generation_id=uuid4().hex, ext=ext)
 
 
 def _workspace_image_content_type(ext: str) -> str:
@@ -1403,6 +1409,68 @@ def _workspace_image_charge_reason(provider: str, mode: str) -> Optional[str]:
         return "two_photos"
 
     return None
+
+
+def _resolve_workspace_image_public_url(storage_path: Optional[str]) -> Optional[str]:
+    storage_path_text = str(storage_path or "").strip()
+    if not storage_path_text or supabase is None or not _WORKSPACE_IMAGES_BUCKET:
+        return None
+    try:
+        public_result = supabase.storage.from_(_WORKSPACE_IMAGES_BUCKET).get_public_url(storage_path_text)
+        return _absolutize_supabase_url(_extract_storage_public_url(public_result))
+    except Exception:
+        return None
+
+
+def _serialize_workspace_image_generation(row: Dict[str, Any]) -> Dict[str, Any]:
+    image_url = str(row.get("image_url") or "").strip() or _resolve_workspace_image_public_url(row.get("storage_path")) or ""
+    download_url = str(row.get("download_url") or "").strip() or image_url
+    return {
+        "id": row.get("id"),
+        "user_id": row.get("user_id"),
+        "provider": row.get("provider"),
+        "model": row.get("model"),
+        "mode": row.get("mode"),
+        "prompt": row.get("prompt"),
+        "status": row.get("status"),
+        "resolution": row.get("resolution"),
+        "aspect_ratio": row.get("aspect_ratio"),
+        "safety_level": row.get("safety_level"),
+        "poster_style": row.get("poster_style"),
+        "style_preset": row.get("style_preset"),
+        "mood_preset": row.get("mood_preset"),
+        "storage_path": row.get("storage_path"),
+        "image_url": image_url,
+        "download_url": download_url,
+        "file_size_bytes": row.get("file_size_bytes"),
+        "mime_type": row.get("mime_type"),
+        "error_code": row.get("error_code"),
+        "error_message": row.get("error_message"),
+        "origin": row.get("origin"),
+        "is_favorite": row.get("is_favorite"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "completed_at": row.get("completed_at"),
+        "has_storage_file": bool(str(row.get("storage_path") or "").strip()),
+    }
+
+
+def _insert_workspace_image_generation_row(payload: Dict[str, Any]) -> None:
+    if supabase is None:
+        return
+    try:
+        supabase.table(_WORKSPACE_IMAGE_GENERATIONS_TABLE).insert(payload).execute()
+    except Exception:
+        pass
+
+
+def _update_workspace_image_generation_row(user_id: int, generation_id: str, patch: Dict[str, Any]) -> None:
+    if supabase is None or not generation_id:
+        return
+    try:
+        supabase.table(_WORKSPACE_IMAGE_GENERATIONS_TABLE).update(patch).eq("id", generation_id).eq("user_id", str(user_id)).execute()
+    except Exception:
+        pass
 
 @router.post("/auth/telegram")
 async def workspace_auth_telegram(payload: TelegramAuthPayload) -> Dict[str, Any]:
@@ -2099,6 +2167,123 @@ async def workspace_tts_voices(user: Dict[str, Any] = Depends(get_current_worksp
     return ALLOWED_VOICES
 
 
+@router.get("/image/history")
+async def workspace_image_history(
+    limit: int = 20,
+    offset: int = 0,
+    user: Dict[str, Any] = Depends(get_current_workspace_user),
+) -> Dict[str, Any]:
+    uid = int(user["telegram_user_id"])
+    safe_limit = max(1, min(int(limit or 20), 100))
+    safe_offset = max(0, int(offset or 0))
+
+    if supabase is None:
+        return {"ok": True, "items": [], "limit": safe_limit, "offset": safe_offset}
+
+    try:
+        resp = (
+            supabase.table(_WORKSPACE_IMAGE_GENERATIONS_TABLE)
+            .select(
+                "id,user_id,provider,model,mode,prompt,status,resolution,aspect_ratio,safety_level,poster_style,style_preset,mood_preset,storage_path,image_url,download_url,file_size_bytes,mime_type,error_code,error_message,origin,is_favorite,created_at,updated_at,completed_at"
+            )
+            .eq("user_id", str(uid))
+            .is_("deleted_at", "null")
+            .order("created_at", desc=True)
+            .range(safe_offset, safe_offset + safe_limit - 1)
+            .execute()
+        )
+        rows = getattr(resp, "data", None) or []
+        items = [_serialize_workspace_image_generation(row) for row in rows if isinstance(row, dict)]
+        return {"ok": True, "items": items, "limit": safe_limit, "offset": safe_offset, "count": len(items)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Image history load failed: {e}")
+
+
+@router.get("/image/history/{generation_id}")
+async def workspace_image_history_item(
+    generation_id: str,
+    user: Dict[str, Any] = Depends(get_current_workspace_user),
+) -> Dict[str, Any]:
+    uid = int(user["telegram_user_id"])
+    generation_id_text = str(generation_id or "").strip()
+    if not generation_id_text:
+        raise HTTPException(status_code=400, detail="Missing generation_id")
+
+    if supabase is None:
+        raise HTTPException(status_code=404, detail="Generation not found")
+
+    try:
+        resp = (
+            supabase.table(_WORKSPACE_IMAGE_GENERATIONS_TABLE)
+            .select(
+                "id,user_id,provider,model,mode,prompt,status,resolution,aspect_ratio,safety_level,poster_style,style_preset,mood_preset,storage_path,image_url,download_url,file_size_bytes,mime_type,error_code,error_message,origin,is_favorite,created_at,updated_at,completed_at"
+            )
+            .eq("id", generation_id_text)
+            .eq("user_id", str(uid))
+            .is_("deleted_at", "null")
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(resp, "data", None) or []
+        if not rows or not isinstance(rows[0], dict):
+            raise HTTPException(status_code=404, detail="Generation not found")
+        return {"ok": True, "item": _serialize_workspace_image_generation(rows[0])}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Image history item load failed: {e}")
+
+
+@router.delete("/image/history/{generation_id}")
+async def workspace_image_history_delete_item(
+    generation_id: str,
+    user: Dict[str, Any] = Depends(get_current_workspace_user),
+) -> Dict[str, Any]:
+    uid = int(user["telegram_user_id"])
+    generation_id_text = str(generation_id or "").strip()
+    if not generation_id_text:
+        raise HTTPException(status_code=400, detail="Missing generation_id")
+
+    if supabase is None:
+        raise HTTPException(status_code=404, detail="Generation not found")
+
+    try:
+        resp = (
+            supabase.table(_WORKSPACE_IMAGE_GENERATIONS_TABLE)
+            .select("id,user_id,storage_path,deleted_at")
+            .eq("id", generation_id_text)
+            .eq("user_id", str(uid))
+            .is_("deleted_at", "null")
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(resp, "data", None) or []
+        if not rows or not isinstance(rows[0], dict):
+            raise HTTPException(status_code=404, detail="Generation not found")
+        row = rows[0]
+
+        storage_path = str(row.get("storage_path") or "").strip()
+        if storage_path and supabase is not None and _WORKSPACE_IMAGES_BUCKET:
+            try:
+                supabase.storage.from_(_WORKSPACE_IMAGES_BUCKET).remove([storage_path])
+            except Exception:
+                pass
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        (
+            supabase.table(_WORKSPACE_IMAGE_GENERATIONS_TABLE)
+            .update({"deleted_at": now_iso, "updated_at": now_iso, "storage_path": None, "image_url": None, "download_url": None})
+            .eq("id", generation_id_text)
+            .eq("user_id", str(uid))
+            .execute()
+        )
+        return {"ok": True, "generation_id": generation_id_text}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Image history delete failed: {e}")
+
+
 @router.post("/image/run")
 async def workspace_image_run(
     request: Request,
@@ -2168,6 +2353,28 @@ async def workspace_image_run(
     if cost > 0 and bal < cost:
         raise HTTPException(status_code=402, detail=f"Недостаточно токенов. Нужно: {cost} ток.")
 
+    generation_id = uuid4().hex
+    created_at = datetime.now(timezone.utc).isoformat()
+    _insert_workspace_image_generation_row({
+        "id": generation_id,
+        "user_id": str(uid),
+        "provider": provider,
+        "model": model,
+        "mode": mode,
+        "prompt": prompt,
+        "status": "processing",
+        "resolution": resolution,
+        "aspect_ratio": aspect_ratio,
+        "safety_level": safety_level,
+        "poster_style": poster_style or None,
+        "style_preset": style_preset or None,
+        "mood_preset": mood_preset or None,
+        "origin": "workspace_image",
+        "is_favorite": False,
+        "created_at": created_at,
+        "updated_at": created_at,
+    })
+
     charged = False
     reason = _workspace_image_charge_reason(provider, mode)
     ref_id = uuid4().hex if cost > 0 and reason else ""
@@ -2175,7 +2382,7 @@ async def workspace_image_run(
     try:
         if cost > 0 and reason:
             try:
-                add_tokens(uid, -cost, reason=reason, ref_id=ref_id, meta={"origin": "workspace_image", "provider": provider, "mode": mode})
+                add_tokens(uid, -cost, reason=reason, ref_id=ref_id, meta={"origin": "workspace_image", "provider": provider, "mode": mode, "generation_id": generation_id})
             except TypeError:
                 add_tokens(uid, -int(cost), reason=reason)
             charged = True
@@ -2199,14 +2406,32 @@ async def workspace_image_run(
                 safety_level=safety_level,
             )
 
-        output_path = _workspace_image_output_path(uid, ext)
-        image_url = upload_bytes_to_supabase(output_path, out_bytes, _workspace_image_content_type(ext))
+        output_path = _workspace_image_storage_path(user_id=uid, generation_id=generation_id, ext=ext)
+        content_type = _workspace_image_content_type(ext)
+        image_url = upload_bytes_to_supabase(output_path, out_bytes, content_type)
         try:
             balance_tokens = int(get_balance(uid) or 0)
         except Exception:
             balance_tokens = None
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        _update_workspace_image_generation_row(uid, generation_id, {
+            "status": "completed",
+            "aspect_ratio": aspect_ratio,
+            "storage_path": output_path,
+            "image_url": image_url,
+            "download_url": image_url,
+            "file_size_bytes": len(out_bytes or b""),
+            "mime_type": content_type,
+            "error_code": None,
+            "error_message": None,
+            "updated_at": now_iso,
+            "completed_at": now_iso,
+        })
+
         return {
             "ok": True,
+            "generation_id": generation_id,
             "provider": provider,
             "model": model,
             "mode": mode,
@@ -2214,20 +2439,32 @@ async def workspace_image_run(
             "image_url": image_url,
             "download_url": image_url,
             "status": "completed",
-            "status_text": "Изображение готово.",
+            "status_text": "Изображение готово и сохранено в истории.",
             "balance_tokens": balance_tokens,
         }
-    except HTTPException:
+    except HTTPException as e:
+        _update_workspace_image_generation_row(uid, generation_id, {
+            "status": "failed",
+            "error_code": "http_error",
+            "error_message": str(e.detail),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
         raise
     except Exception as e:
         if charged:
             try:
                 try:
-                    add_tokens(uid, cost, reason=f"{reason}_refund", ref_id=ref_id, meta={"origin": "workspace_image", "error": str(e)})
+                    add_tokens(uid, cost, reason=f"{reason}_refund", ref_id=ref_id, meta={"origin": "workspace_image", "generation_id": generation_id, "error": str(e)})
                 except TypeError:
                     add_tokens(uid, int(cost), reason=f"{reason}_refund")
             except Exception:
                 pass
+        _update_workspace_image_generation_row(uid, generation_id, {
+            "status": "failed",
+            "error_code": "internal_error",
+            "error_message": str(e),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
         raise HTTPException(status_code=500, detail=f"Image generation failed: {e}")
 
 
