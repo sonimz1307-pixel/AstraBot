@@ -36,7 +36,7 @@ VIDEO_EDITOR_PROJECTS_TABLE = "video_editor_projects"
 VIDEO_EDITOR_RENDER_JOBS_TABLE = "video_editor_render_jobs"
 VIDEO_EDITOR_QUEUE_NAME = (os.getenv("VIDEO_EDITOR_V2_QUEUE", "video_editor_v2") or "video_editor_v2").strip() or "video_editor_v2"
 MAX_PROJECT_CLIPS = int(os.getenv("VIDEO_EDITOR_V2_MAX_CLIPS", "5") or 5)
-MAX_PROJECT_AUDIO_TRACKS = int(os.getenv("VIDEO_EDITOR_V2_MAX_AUDIO_TRACKS", "1") or 1)
+MAX_PROJECT_AUDIO_TRACKS = int(os.getenv("VIDEO_EDITOR_V2_MAX_AUDIO_TRACKS", "8") or 8)
 MAX_RENDER_DURATION_SEC = int(os.getenv("VIDEO_EDITOR_V2_MAX_DURATION_SEC", "300") or 300)
 
 _ALLOWED_TRANSITIONS = {"none", "fade", "dissolve", "slideleft", "slideright", "zoomin"}
@@ -382,7 +382,7 @@ def process_render_job(job_id: str) -> None:
 
         project_audio = project_json.get("audio_tracks") or []
         audio_clips: List[Dict[str, Any]] = []
-        for item in project_audio[:1]:
+        for item in project_audio:
             local_audio, audio_duration, used_upload_id = _resolve_audio_source(user_id, item, temp_dir)
             used_upload_ids.append(used_upload_id or "")
             source_start = max(0.0, float(item.get("source_start") or 0.0))
