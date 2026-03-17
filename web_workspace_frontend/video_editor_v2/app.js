@@ -2,27 +2,54 @@ const urlParams = new URLSearchParams(window.location.search);
 const incomingApiBase = urlParams.get('api_base') || urlParams.get('apiBase') || '';
 const incomingToken = urlParams.get('token') || urlParams.get('authToken') || '';
 const incomingReturnUrl = urlParams.get('return_url') || urlParams.get('returnUrl') || '';
-const incomingProjectId = urlParams.get('project_id') || '';
 
 const apiBase = incomingApiBase || window.localStorage.getItem('astrabot:apiBaseUrl') || 'https://astrabot-tchj.onrender.com';
+const FILTER_OPTIONS = [
+  { value: 'none', label: 'Без фильтра' },
+  { value: 'warm', label: 'Тёплый' },
+  { value: 'cold', label: 'Холодный' },
+  { value: 'bw', label: 'Ч/Б' },
+  { value: 'cinematic', label: 'Cinematic' },
+];
+const EFFECT_OPTIONS = [
+  { value: 'none', label: 'Без эффекта' },
+  { value: 'zoomin', label: 'Zoom in' },
+  { value: 'zoomout', label: 'Zoom out' },
+  { value: 'panleft', label: 'Pan left' },
+  { value: 'panright', label: 'Pan right' },
+];
+const TRANSITION_OPTIONS = [
+  { value: 'none', label: 'Без перехода' },
+  { value: 'fade', label: 'Fade' },
+  { value: 'dissolve', label: 'Dissolve' },
+  { value: 'slideleft', label: 'Slide left' },
+  { value: 'slideright', label: 'Slide right' },
+  { value: 'zoomin', label: 'Zoom in' },
+];
+
 const state = {
   token: incomingToken || window.localStorage.getItem('astrabot:authToken') || '',
-  authReady: false,
+  returnUrl: incomingReturnUrl || 'https://astrabot-workspace.onrender.com',
   libraryTab: 'videos',
   librarySearch: '',
-  projectId: incomingProjectId || '',
-  selectedClipId: '',
-  selectedAudioId: '',
+  projectId: '',
   renderJobId: '',
-  renderOutputUrl: '',
   polling: null,
+  selectedType: 'none',
+  selectedId: '',
   videos: [],
-  audio: [],
-  returnUrl: incomingReturnUrl || window.localStorage.getItem('astrabot:returnUrl') || 'https://astrabot-workspace.onrender.com',
-  pxPerSec: 72,
+  audioLibrary: [],
+  playheadSec: 0,
+  pxPerSec: 92,
+  drag: {
+    videoClipId: '',
+    audioClipId: '',
+    dropIndex: null,
+    audioOffsetX: 0,
+  },
+  previewMode: 'timeline',
   project: {
     title: 'Новый видеопроект',
-    canvas: { width: 1080, height: 1920, fps: 30 },
     video_clips: [],
     audio_tracks: [],
     text_overlays: [],
@@ -31,428 +58,267 @@ const state = {
 };
 
 function $(id) { return document.getElementById(id); }
-function escapeHtml(value = '') {
-  return String(value)
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;');
-}
-function toast(message, ms = 2600) {
+function toast(message, ms = 3200) {
   const el = $('toast');
   if (!el) return;
-  el.textContent = String(message || 'Готово');
+  el.textContent = message;
   el.classList.remove('hidden');
   clearTimeout(el._timer);
   el._timer = setTimeout(() => el.classList.add('hidden'), ms);
 }
 function authHeaders(json = true) {
   const headers = {};
-  if (state.token) headers['Authorization'] = `Bearer ${state.token}`;
+  if (state.token) headers.Authorization = `Bearer ${state.token}`;
   if (json) headers['Content-Type'] = 'application/json';
   return headers;
-}
-function clearAuth() {
-  state.token = '';
-  state.authReady = true;
-  window.localStorage.removeItem('astrabot:authToken');
 }
 async function api(path, options = {}) {
   const res = await fetch(`${apiBase}${path}`, options);
   const text = await res.text();
   let data = {};
   try { data = text ? JSON.parse(text) : {}; } catch { data = { detail: text }; }
-  if (res.status === 401) {
-    clearAuth();
-    rerender();
-  }
   if (!res.ok) throw new Error(data.detail || 'API error');
   return data;
 }
-function saveTokenSilently() {
+function saveAuthSilently() {
   if (state.token) window.localStorage.setItem('astrabot:authToken', state.token);
   if (apiBase) window.localStorage.setItem('astrabot:apiBaseUrl', apiBase);
-  if (state.returnUrl) window.localStorage.setItem('astrabot:returnUrl', state.returnUrl);
 }
-
-function currentClip() {
-  return state.project.video_clips.find((item) => item.id === state.selectedClipId) || null;
-}
-function currentAudio() {
-  return state.project.audio_tracks.find((item) => item.id === state.selectedAudioId) || null;
-}
-function fmtSec(value) {
-  const n = Math.max(0, Number(value || 0));
+function clamp(v, min, max) { return Math.min(max, Math.max(min, v)); }
+function fmtSec(v) {
+  const n = Number(v || 0);
+  if (!Number.isFinite(n)) return '0.0с';
   return `${n.toFixed(1)}с`;
 }
-function fmtDate(value) {
-  if (!value) return '—';
-  try { return new Date(value).toLocaleString('ru-RU'); } catch { return String(value); }
+function escapeHtml(v) {
+  return String(v ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+function slugText(v) {
+  return String(v || '').trim().toLowerCase();
+}
+function findSourceById(id) {
+  return [...state.videos, ...state.audioLibrary].find((x) => x.id === id) || null;
+}
+function currentItem() {
+  if (state.selectedType === 'video') {
+    return state.project.video_clips.find((x) => x.id === state.selectedId) || null;
+  }
+  if (state.selectedType === 'audio') {
+    return state.project.audio_tracks.find((x) => x.id === state.selectedId) || null;
+  }
+  return null;
+}
+function currentVideo() {
+  return state.selectedType === 'video' ? currentItem() : null;
+}
+function currentAudio() {
+  return state.selectedType === 'audio' ? currentItem() : null;
+}
+function setSelection(type, id) {
+  state.selectedType = type || 'none';
+  state.selectedId = id || '';
+}
+function clearSelection() {
+  setSelection('none', '');
 }
 function projectDuration() {
-  return state.project.video_clips.reduce((sum, item) => {
-    const start = Number(item.source_start || 0);
-    const end = Number(item.source_end || 0);
-    return sum + Math.max(0, end - start);
+  const clips = state.project.video_clips || [];
+  const videoEnd = clips.reduce((sum, clip) => sum + clipDuration(clip), 0);
+  const audioEnd = (state.project.audio_tracks || []).reduce((maxEnd, item) => {
+    const end = Number(item.timeline_start || 0) + audioDuration(item);
+    return Math.max(maxEnd, end);
   }, 0);
+  return Math.max(videoEnd, audioEnd, 5);
+}
+function clipDuration(clip) {
+  return Math.max(0, Number(clip.source_end || 0) - Number(clip.source_start || 0));
+}
+function audioDuration(item) {
+  return Math.max(0, Number(item.source_end || 0) - Number(item.source_start || 0));
+}
+function videoStartAtIndex(index) {
+  let cursor = 0;
+  for (let i = 0; i < index; i += 1) cursor += clipDuration(state.project.video_clips[i]);
+  return cursor;
+}
+function getClipProjectStart(clipId) {
+  const idx = state.project.video_clips.findIndex((x) => x.id === clipId);
+  return idx >= 0 ? videoStartAtIndex(idx) : 0;
 }
 function timelineWidthPx() {
-  return Math.max(5, Math.ceil(projectDuration() || 0)) * state.pxPerSec;
+  return Math.max(760, Math.ceil(projectDuration() * state.pxPerSec) + 32);
 }
-function syncSelection() {
-  const clipExists = state.project.video_clips.some((item) => item.id === state.selectedClipId);
-  const audioExists = state.project.audio_tracks.some((item) => item.id === state.selectedAudioId);
-  if (!clipExists) state.selectedClipId = state.project.video_clips[0]?.id || '';
-  if (!audioExists) state.selectedAudioId = state.project.audio_tracks[0]?.id || '';
-  if (state.selectedClipId) state.selectedAudioId = '';
+function syncPlayheadLabel() {
+  const label = `${state.playheadSec.toFixed(1)}с`;
+  if ($('playheadBadge')) $('playheadBadge').textContent = `playhead ${label}`;
+  if ($('timelinePlayheadLabel')) $('timelinePlayheadLabel').textContent = label;
+  if ($('splitHint')) {
+    const selected = currentItem();
+    $('splitHint').textContent = selected
+      ? `Playhead: ${label}. Активный элемент: ${selected.label || 'без названия'}. Разрезание пойдёт именно по этой линии.`
+      : 'Выбери клип или музыку, затем поставь playhead в нужное место и нажми «Разрезать».';
+  }
 }
-function normalizeProject(project) {
-  const data = project && typeof project === 'object' ? project : {};
-  return {
-    title: String(data.title || 'Новый видеопроект'),
-    canvas: data.canvas || { width: 1080, height: 1920, fps: 30 },
-    video_clips: Array.isArray(data.video_clips) ? data.video_clips.map((item, index) => ({
-      id: String(item.id || crypto.randomUUID()),
-      source_type: String(item.source_type || 'generation'),
-      source_id: String(item.source_id || ''),
-      label: String(item.label || `Клип ${index + 1}`),
-      source_start: Number(item.source_start || 0),
-      source_end: Number(item.source_end || 0),
-      volume: Number(item.volume ?? 100),
-      muted: !!item.muted,
-      filter: String(item.filter || 'none'),
-      effect: String(item.effect || 'none'),
-      transition: {
-        type: String(item.transition?.type || (index ? 'fade' : 'none')),
-        duration: Number(item.transition?.duration ?? (index ? 0.4 : 0)),
-      },
-    })) : [],
-    audio_tracks: Array.isArray(data.audio_tracks) ? data.audio_tracks.map((item, index) => ({
-      id: String(item.id || crypto.randomUUID()),
-      source_id: String(item.source_id || ''),
-      label: String(item.label || `Музыка ${index + 1}`),
-      timeline_start: Number(item.timeline_start || 0),
-      source_start: Number(item.source_start || 0),
-      source_end: Number(item.source_end || 0),
-      volume: Number(item.volume ?? 100),
-    })) : [],
-    text_overlays: Array.isArray(data.text_overlays) ? data.text_overlays : [],
-    stickers: Array.isArray(data.stickers) ? data.stickers : [],
-  };
+function setPlayhead(sec, { syncPreview = true } = {}) {
+  const maxTime = projectDuration();
+  state.playheadSec = clamp(Number(sec || 0), 0, maxTime);
+  syncPlayheadLabel();
+  positionPlayhead();
+  if (syncPreview) syncPreviewToPlayhead();
+}
+function positionPlayhead() {
+  const line = $('timelinePlayhead');
+  if (!line) return;
+  line.style.left = `${Math.round(state.playheadSec * state.pxPerSec)}px`;
+}
+function previewSourceForItem(item, type) {
+  if (!item) return '';
+  const source = findSourceById(item.source_id);
+  if (!source) return '';
+  return source.video_url || source.download_url || source.output_url || '';
+}
+function syncPreviewToPlayhead() {
+  const videoEl = $('previewVideo');
+  const clip = currentVideo() || state.project.video_clips[0] || null;
+  if (!videoEl || !clip) return;
+  if (state.selectedType !== 'video' && state.previewMode !== 'timeline') return;
+  const clipStart = getClipProjectStart(clip.id);
+  const localSec = clamp(state.playheadSec - clipStart, 0, clipDuration(clip));
+  const targetTime = Number(clip.source_start || 0) + localSec;
+  if (Number.isFinite(targetTime) && Math.abs((videoEl.currentTime || 0) - targetTime) > 0.35) {
+    try { videoEl.currentTime = targetTime; } catch (_) {}
+  }
 }
 function configureLinks() {
   const backLink = $('backLink');
   if (backLink) backLink.href = state.returnUrl;
 }
-function setButtonsState() {
-  const hasClip = !!currentClip();
-  const hasSelection = !!(currentClip() || currentAudio());
-  $('splitBtn')?.toggleAttribute('disabled', !hasClip);
-  $('muteClipBtn')?.toggleAttribute('disabled', !hasSelection);
-  $('deleteClipBtn')?.toggleAttribute('disabled', !hasSelection);
-  $('moveClipLeftBtn')?.toggleAttribute('disabled', !hasClip);
-  $('moveClipRightBtn')?.toggleAttribute('disabled', !hasClip);
-}
 function renderSessionState() {
   const status = $('sessionState');
   const hint = $('libraryHint');
   const banner = $('authBanner');
-  const isAuthed = !!state.token;
-  if (status) {
-    status.textContent = isAuthed ? 'сессия активна' : 'нет авторизации';
-    status.className = isAuthed ? 'badge success' : 'badge muted';
+  if (!status || !hint || !banner) return;
+  if (state.token) {
+    status.textContent = 'сессия активна';
+    status.className = 'badge success';
+    hint.textContent = 'Загружай видео и музыку, добавляй ролики из генераций и собирай монтаж.';
+    banner.classList.add('hidden');
+  } else {
+    status.textContent = 'нет авторизации';
+    status.className = 'badge muted';
+    hint.textContent = 'История генераций и сохранение проекта появятся после открытия редактора из Workspace.';
+    banner.classList.remove('hidden');
   }
-  if (hint) {
-    hint.textContent = isAuthed
-      ? 'Загружай свои видео и музыку, добавляй ролики из генераций и собирай монтаж.'
-      : 'Без авторизации редактор покажет layout, но не сможет загрузить медиатеку и сохранить проект.';
-  }
-  if (banner) banner.classList.toggle('hidden', isAuthed);
-}
-function sourceUrlForClip(clip) {
-  if (!clip) return '';
-  const source = state.videos.find((item) => item.id === clip.source_id) || state.audio.find((item) => item.id === clip.source_id);
-  return source?.video_url || source?.download_url || source?.output_url || '';
-}
-function previewSource() {
-  const clip = currentClip() || state.project.video_clips[0] || null;
-  return sourceUrlForClip(clip) || state.renderOutputUrl || '';
-}
-function previewMetaText() {
-  const clip = currentClip();
-  const audio = currentAudio();
-  if (clip) {
-    return `${clip.label || 'Клип'} · ${fmtSec(Math.max(0, Number(clip.source_end || 0) - Number(clip.source_start || 0)))} · ${clip.muted ? 'без звука' : `${Number(clip.volume || 100)}%`}`;
-  }
-  if (audio) {
-    return `${audio.label || 'Музыка'} · старт ${fmtSec(audio.timeline_start || 0)} · ${Number(audio.volume || 100)}%`;
-  }
-  if (state.renderOutputUrl) return 'Последний экспорт проекта';
-  return 'Выбери клип на таймлайне или добавь ролик из медиатеки.';
 }
 function renderPreview() {
-  const src = previewSource();
-  const video = $('previewVideo');
+  const videoEl = $('previewVideo');
   const empty = $('previewEmpty');
   const meta = $('previewMeta');
-  const titleInput = $('projectTitleInput');
-  const summary = $('projectSummary');
-  if (meta) meta.textContent = previewMetaText();
-  if (titleInput && titleInput.value !== state.project.title) titleInput.value = state.project.title;
-  if (summary) summary.textContent = `${state.project.video_clips.length} клипов · ${fmtSec(projectDuration())}`;
-  $('projectStatus').textContent = state.projectId ? 'сохранён' : 'черновик';
-  if (src) {
-    if (video.getAttribute('src') !== src) video.src = src;
-    video.classList.remove('hidden');
+  const selected = currentVideo() || state.project.video_clips[0] || null;
+  const src = previewSourceForItem(selected, 'video');
+
+  if (src && selected) {
+    if (videoEl.getAttribute('src') !== src) {
+      videoEl.src = src;
+      videoEl.load();
+    }
+    videoEl.classList.remove('hidden');
     empty.classList.add('hidden');
+    const source = findSourceById(selected.source_id);
+    meta.textContent = `${selected.label || 'Клип'} · ${fmtSec(clipDuration(selected))} · ${source?.provider || source?.file_type || 'source'}`;
   } else {
-    video.pause?.();
-    video.removeAttribute('src');
-    video.load?.();
-    video.classList.add('hidden');
+    videoEl.removeAttribute('src');
+    videoEl.load?.();
+    videoEl.classList.add('hidden');
     empty.classList.remove('hidden');
+    meta.textContent = 'Выберите клип на таймлайне или добавьте новый ролик.';
   }
+
+  $('projectTitleInput').value = state.project.title || 'Новый видеопроект';
+  $('projectStatus').textContent = state.projectId ? 'сохранён' : 'черновик';
+  $('projectSummary').textContent = `${state.project.video_clips.length} клипов · ${fmtSec(projectDuration())}`;
+  syncPlayheadLabel();
+  setTimeout(() => syncPreviewToPlayhead(), 10);
 }
-function filterLibraryItems(items) {
-  const q = String(state.librarySearch || '').trim().toLowerCase();
+function filteredLibraryItems() {
+  const items = state.libraryTab === 'videos' ? state.videos : state.audioLibrary;
+  const q = slugText(state.librarySearch);
   if (!q) return items;
-  return items.filter((item) => {
-    const text = `${item.filename || ''} ${item.prompt || ''} ${item.id || ''}`.toLowerCase();
-    return text.includes(q);
-  });
+  return items.filter((item) => slugText(item.filename || item.prompt || item.id).includes(q));
 }
-function itemMeta(item) {
-  const parts = [fmtSec(item.duration_sec || 0)];
-  if (item.source_type === 'generation') parts.push(item.provider || item.model || 'generation');
-  if (item.source_type === 'upload') parts.push(item.file_type || 'upload');
-  if (item.created_at) parts.push(fmtDate(item.created_at));
-  return parts.filter(Boolean).join(' · ');
+function formatLibraryMeta(item) {
+  const parts = [];
+  if (item.duration_sec || item.duration_sec === 0) parts.push(fmtSec(item.duration_sec));
+  if (item.provider) parts.push(item.provider);
+  if (item.file_type) parts.push(item.file_type);
+  if (item.created_at) parts.push(new Date(item.created_at).toLocaleString('ru-RU'));
+  return parts.join(' · ') || '—';
 }
 function renderLibrary() {
-  const allItems = state.libraryTab === 'videos' ? state.videos : state.audio;
-  const items = filterLibraryItems(allItems);
-  $('videoLibraryCount').textContent = String(state.videos.length);
-  $('audioLibraryCount').textContent = String(state.audio.length);
-  document.querySelectorAll('[data-library-tab]').forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.libraryTab === state.libraryTab);
-  });
-  const html = items.length ? items.map((item) => `
-    <article class="library-item">
-      <div class="library-item-title">${escapeHtml(item.filename || item.prompt || item.id)}</div>
-      <div class="library-item-meta">${escapeHtml(itemMeta(item))}</div>
-      <div class="library-item-actions">
-        <button class="btn secondary" type="button" data-library-add="${escapeHtml(item.id)}">${state.libraryTab === 'videos' ? 'Добавить' : 'Использовать'}</button>
-        ${state.libraryTab === 'videos' ? `<button class="btn ghost" type="button" data-library-preview="${escapeHtml(item.id)}">Превью</button>` : `<button class="btn ghost" type="button" data-library-audition="${escapeHtml(item.id)}">Выбрать</button>`}
-      </div>
-    </article>
-  `).join('') : `<div class="library-empty">${state.token ? 'Пока пусто. Загрузите файл или вернитесь к своим генерациям.' : 'Медиатека станет доступна после открытия редактора из авторизованного Workspace.'}</div>`;
-  $('libraryList').innerHTML = html;
-}
-function renderRuler() {
-  const width = timelineWidthPx();
-  const totalSec = Math.max(5, Math.ceil(projectDuration() || 0));
-  const ticks = Array.from({ length: totalSec + 1 }, (_, i) => `<div class="tick" style="left:${i * state.pxPerSec}px">${i}с</div>`).join('');
-  const ruler = $('timelineRuler');
-  ruler.style.width = `${width}px`;
-  ruler.innerHTML = ticks;
-}
-function clipDuration(clip) {
-  return Math.max(0, Number(clip.source_end || 0) - Number(clip.source_start || 0));
-}
-function renderTimeline() {
-  renderRuler();
-  const canvasWidth = timelineWidthPx();
-  $('timelineCanvas').style.width = `${canvasWidth}px`;
-  const videoTrack = $('videoTrack');
-  const audioTrack = $('audioTrack');
-  videoTrack.style.width = `${canvasWidth}px`;
-  audioTrack.style.width = `${canvasWidth}px`;
-
-  if (!state.project.video_clips.length) {
-    videoTrack.innerHTML = '<div class="track-empty">Добавь клипы из медиатеки. Теперь они занимают место на timeline пропорционально длительности.</div>';
-  } else {
-    let cursor = 0;
-    videoTrack.innerHTML = state.project.video_clips.map((clip, index) => {
-      const duration = clipDuration(clip);
-      const width = Math.max(180, duration * state.pxPerSec);
-      const left = cursor * state.pxPerSec;
-      cursor += duration;
-      const active = clip.id === state.selectedClipId ? 'active' : '';
-      return `
-        <div class="timeline-item video ${active}" data-clip-id="${escapeHtml(clip.id)}" style="left:${left}px; width:${width}px;">
-          <div class="timeline-item-head">
-            <div class="timeline-item-title">${escapeHtml(clip.label || `Клип ${index + 1}`)}</div>
-            <span class="badge">${index + 1}</span>
-          </div>
-          <div class="timeline-item-meta">${escapeHtml(fmtSec(duration))} · ${escapeHtml(clip.transition?.type || 'none')} · ${clip.muted ? 'mute' : `${Number(clip.volume || 100)}%`}</div>
-        </div>`;
-    }).join('');
-  }
-
-  if (!state.project.audio_tracks.length) {
-    audioTrack.innerHTML = '<div class="track-empty">Добавь музыку — она появится отдельной дорожкой и ляжет по времени старта.</div>';
-  } else {
-    audioTrack.innerHTML = state.project.audio_tracks.map((track, index) => {
-      const duration = Math.max(0, Number(track.source_end || 0) - Number(track.source_start || 0));
-      const width = Math.max(180, duration * state.pxPerSec);
-      const left = Math.max(0, Number(track.timeline_start || 0) * state.pxPerSec);
-      const active = track.id === state.selectedAudioId ? 'active' : '';
-      return `
-        <div class="timeline-item audio ${active}" data-audio-id="${escapeHtml(track.id)}" style="left:${left}px; width:${width}px;">
-          <div class="timeline-item-head">
-            <div class="timeline-item-title">${escapeHtml(track.label || `Музыка ${index + 1}`)}</div>
-            <span class="badge">${Number(track.volume || 100)}%</span>
-          </div>
-          <div class="timeline-item-meta">старт ${escapeHtml(fmtSec(track.timeline_start || 0))} · ${escapeHtml(fmtSec(duration))}</div>
-        </div>`;
-    }).join('');
-  }
-
-  const timelineMeta = $('timelineMeta');
-  if (timelineMeta) {
-    timelineMeta.textContent = `Длина проекта: ${fmtSec(projectDuration())}. Видео располагаются последовательно, музыка — по абсолютному времени старта.`;
-  }
-}
-function renderSelectionPanel() {
-  const body = $('selectionBody');
-  const title = $('selectionTitle');
-  const clip = currentClip();
-  const audio = currentAudio();
-  if (clip) {
-    title.textContent = 'Настройки клипа';
-    body.innerHTML = `
-      <div class="inspector-card">
-        <h3>${escapeHtml(clip.label || 'Клип')}</h3>
-        <p>Источник: ${escapeHtml(clip.source_type || 'generation')} · ${escapeHtml(fmtSec(clipDuration(clip)))}</p>
-      </div>
-      <div class="inspector-grid">
-        <label>Название<input id="clipLabelInput" value="${escapeHtml(clip.label || '')}"></label>
-        <label>Громкость, %<input id="clipVolumeInput" type="number" min="0" max="100" step="1" value="${Number(clip.volume || 100)}"></label>
-        <label>Старт фрагмента, сек<input id="clipStartInput" type="number" min="0" step="0.1" value="${Number(clip.source_start || 0)}"></label>
-        <label>Конец фрагмента, сек<input id="clipEndInput" type="number" min="0" step="0.1" value="${Number(clip.source_end || 0)}"></label>
-        <label>Фильтр
-          <select id="clipFilterInput">
-            <option value="none">Без фильтра</option>
-            <option value="warm">Тёплый</option>
-            <option value="cold">Холодный</option>
-            <option value="bw">Ч/Б</option>
-            <option value="cinematic">Cinematic</option>
-          </select>
-        </label>
-        <label>Эффект
-          <select id="clipEffectInput">
-            <option value="none">Без эффекта</option>
-            <option value="zoom_in">Zoom in</option>
-            <option value="zoom_out">Zoom out</option>
-            <option value="blur_intro">Blur intro</option>
-          </select>
-        </label>
-        <label>Переход
-          <select id="clipTransitionTypeInput">
-            <option value="none">Без перехода</option>
-            <option value="fade">Fade</option>
-            <option value="dissolve">Dissolve</option>
-            <option value="slideleft">Slide Left</option>
-            <option value="slideright">Slide Right</option>
-            <option value="zoomin">Zoom Fade</option>
-          </select>
-        </label>
-        <label>Длит. перехода, сек<input id="transitionDurationInput" type="number" min="0" max="1" step="0.1" value="${Number(clip.transition?.duration || 0)}"></label>
-      </div>
-      <div class="inspector-actions">
-        <button class="tool" type="button" id="inspectorMoveLeftBtn">← Переместить</button>
-        <button class="tool" type="button" id="inspectorMoveRightBtn">Переместить →</button>
-        <button class="tool danger" type="button" id="inspectorDeleteBtn">Удалить клип</button>
-      </div>`;
-    $('clipFilterInput').value = clip.filter || 'none';
-    $('clipEffectInput').value = clip.effect || 'none';
-    $('clipTransitionTypeInput').value = clip.transition?.type || 'none';
+  document.querySelectorAll('[data-library-tab]').forEach((btn) => btn.classList.toggle('active', btn.dataset.libraryTab === state.libraryTab));
+  const items = filteredLibraryItems();
+  const list = $('libraryList');
+  if (!list) return;
+  if (!items.length) {
+    list.innerHTML = `<div class="empty-box">${state.token ? 'Ничего не найдено. Загрузите файл или очистите поиск.' : 'История генераций и загрузки недоступны без авторизации Workspace.'}</div>`;
     return;
   }
-  if (audio) {
-    title.textContent = 'Настройки музыки';
-    body.innerHTML = `
-      <div class="inspector-card">
-        <h3>${escapeHtml(audio.label || 'Музыка')}</h3>
-        <p>Музыкальная дорожка проекта. Сейчас backend поддерживает 1 активный audio track.</p>
-      </div>
-      <div class="inspector-grid">
-        <label>Название<input id="audioLabelInput" value="${escapeHtml(audio.label || '')}"></label>
-        <label>Громкость, %<input id="audioVolumeInput" type="number" min="0" max="100" step="1" value="${Number(audio.volume || 100)}"></label>
-        <label>Старт на timeline, сек<input id="audioTimelineInput" type="number" min="0" step="0.1" value="${Number(audio.timeline_start || 0)}"></label>
-        <label>Старт фрагмента, сек<input id="audioStartInput" type="number" min="0" step="0.1" value="${Number(audio.source_start || 0)}"></label>
-        <label>Конец фрагмента, сек<input id="audioEndInput" type="number" min="0" step="0.1" value="${Number(audio.source_end || 0)}"></label>
-      </div>
-      <div class="inspector-actions">
-        <button class="tool danger" type="button" id="inspectorDeleteAudioBtn">Удалить музыку</button>
+  list.innerHTML = items.map((item) => {
+    const title = escapeHtml(item.filename || item.prompt || item.id);
+    const meta = escapeHtml(formatLibraryMeta(item));
+    return `
+      <div class="library-item">
+        <div>
+          <strong>${title}</strong>
+          <small>${meta}</small>
+        </div>
+        <div class="library-actions">
+          <button class="btn secondary" data-library-add="${item.id}">${state.libraryTab === 'videos' ? 'Добавить' : 'Добавить музыку'}</button>
+          <button class="btn ghost" data-library-preview="${item.id}">Превью</button>
+        </div>
       </div>`;
-    return;
-  }
-  title.textContent = 'Параметры проекта';
-  body.innerHTML = `
-    <div class="inspector-card">
-      <h3>Сводка проекта</h3>
-      <p>Справа теперь нет бесполезной пустоты: здесь всегда видны параметры выбранного элемента или общая сводка проекта.</p>
-    </div>
-    <div class="mini-stats">
-      <div class="mini-stat"><span class="mini-stat-label">Клипы</span><strong>${state.project.video_clips.length}</strong></div>
-      <div class="mini-stat"><span class="mini-stat-label">Музыка</span><strong>${state.project.audio_tracks.length}</strong></div>
-      <div class="mini-stat"><span class="mini-stat-label">Длительность</span><strong>${fmtSec(projectDuration())}</strong></div>
-      <div class="mini-stat"><span class="mini-stat-label">Canvas</span><strong>${Number(state.project.canvas?.width || 1080)}×${Number(state.project.canvas?.height || 1920)}</strong></div>
-    </div>`;
-}
-function rerender() {
-  syncSelection();
-  configureLinks();
-  renderSessionState();
-  renderPreview();
-  renderLibrary();
-  renderTimeline();
-  renderSelectionPanel();
-  setButtonsState();
-}
-
-async function loadProjectIfNeeded() {
-  if (!state.projectId || !state.token) return;
-  const data = await api(`/api/video-editor-v2/projects/${encodeURIComponent(state.projectId)}`, { headers: authHeaders(false) });
-  const item = data.item || {};
-  state.projectId = item.id || state.projectId;
-  state.project = normalizeProject(item.project_json || item.project || state.project);
-  state.project.title = String(item.title || state.project.title || 'Новый видеопроект');
-}
-function sortItemsByDateDesc(items) {
-  return [...items].sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+  }).join('');
 }
 async function loadLibrary() {
   if (!state.token) {
-    state.authReady = true;
     state.videos = [];
-    state.audio = [];
-    rerender();
+    state.audioLibrary = [];
+    renderLibrary();
+    renderSessionState();
     return;
   }
-  const [generationVideos, uploadVideos, uploadAudio] = await Promise.all([
+  const [videosRes, uploadedVideosRes, audioRes] = await Promise.all([
     api('/api/video-editor-v2/library/videos', { headers: authHeaders(false) }),
     api('/api/video-editor-v2/library/uploads?file_type=video', { headers: authHeaders(false) }),
     api('/api/video-editor-v2/library/uploads?file_type=audio', { headers: authHeaders(false) }),
   ]);
-  state.videos = sortItemsByDateDesc([
-    ...((uploadVideos.items || []).map((item) => ({ ...item, source_type: 'upload' }))),
-    ...((generationVideos.items || []).map((item) => ({ ...item, source_type: 'generation' }))),
-  ]);
-  state.audio = sortItemsByDateDesc((uploadAudio.items || []).map((item) => ({ ...item, source_type: 'upload' })));
-  state.authReady = true;
-  rerender();
+  const mergedMap = new Map();
+  [...(uploadedVideosRes.items || []), ...(videosRes.items || [])].forEach((item) => mergedMap.set(item.id, item));
+  state.videos = Array.from(mergedMap.values());
+  state.audioLibrary = audioRes.items || [];
+  renderLibrary();
+  renderSessionState();
 }
-function addVideoFromLibrary(id) {
-  if (state.project.video_clips.length >= 5) return toast('Максимум 5 клипов в этом редакторе');
-  const item = state.videos.find((x) => x.id === id);
-  if (!item) return;
-  const duration = Math.max(0.1, Number(item.duration_sec || 5));
-  const clip = {
+function ensureVideoSelection() {
+  if (state.selectedType === 'video' && state.project.video_clips.some((x) => x.id === state.selectedId)) return;
+  if (state.project.video_clips.length) {
+    setSelection('video', state.project.video_clips[0].id);
+  } else if (state.project.audio_tracks.length) {
+    setSelection('audio', state.project.audio_tracks[0].id);
+  } else {
+    clearSelection();
+  }
+}
+function makeVideoClipFromLibrary(item) {
+  const duration = Math.max(0.5, Number(item.duration_sec || 5));
+  return {
     id: crypto.randomUUID(),
-    source_type: item.source_type || (item.file_type === 'video' ? 'upload' : 'generation'),
+    source_type: item.file_type === 'video' ? 'upload' : 'generation',
     source_id: item.id,
     label: item.filename || item.prompt || `Клип ${state.project.video_clips.length + 1}`,
     source_start: 0,
@@ -461,137 +327,303 @@ function addVideoFromLibrary(id) {
     muted: false,
     filter: 'none',
     effect: 'none',
-    transition: { type: state.project.video_clips.length ? 'fade' : 'none', duration: state.project.video_clips.length ? 0.4 : 0 },
+    transition: { type: state.project.video_clips.length ? 'fade' : 'none', duration: state.project.video_clips.length ? 0.5 : 0 },
   };
-  state.project.video_clips.push(clip);
-  state.selectedClipId = clip.id;
-  state.selectedAudioId = '';
-  rerender();
 }
-function addAudioFromLibrary(id) {
-  const item = state.audio.find((x) => x.id === id);
-  if (!item) return;
-  state.project.audio_tracks = [{
+function makeAudioClipFromLibrary(item) {
+  const duration = Math.max(0.5, Number(item.duration_sec || 5));
+  return {
     id: crypto.randomUUID(),
     source_id: item.id,
     label: item.filename || 'Музыка',
     timeline_start: 0,
     source_start: 0,
-    source_end: Number(item.duration_sec || 0),
+    source_end: duration,
     volume: 100,
-  }];
-  state.selectedAudioId = state.project.audio_tracks[0].id;
-  state.selectedClipId = '';
-  toast('Музыка добавлена на дорожку');
+  };
+}
+function addVideoFromLibrary(id) {
+  const item = state.videos.find((x) => x.id === id);
+  if (!item) return;
+  const clip = makeVideoClipFromLibrary(item);
+  state.project.video_clips.push(clip);
+  setSelection('video', clip.id);
+  setPlayhead(getClipProjectStart(clip.id), { syncPreview: false });
   rerender();
 }
-function moveClip(direction) {
-  const clip = currentClip();
-  if (!clip) return;
-  const idx = state.project.video_clips.findIndex((item) => item.id === clip.id);
-  if (idx < 0) return;
-  const nextIndex = idx + direction;
-  if (nextIndex < 0 || nextIndex >= state.project.video_clips.length) return;
-  const items = [...state.project.video_clips];
-  [items[idx], items[nextIndex]] = [items[nextIndex], items[idx]];
-  state.project.video_clips = items;
+function addAudioFromLibrary(id) {
+  const item = state.audioLibrary.find((x) => x.id === id);
+  if (!item) return;
+  const audio = makeAudioClipFromLibrary(item);
+  const endOfVideo = state.project.video_clips.reduce((sum, clip) => sum + clipDuration(clip), 0);
+  audio.timeline_start = endOfVideo > 0 ? 0 : 0;
+  state.project.audio_tracks.push(audio);
+  setSelection('audio', audio.id);
+  setPlayhead(Number(audio.timeline_start || 0), { syncPreview: false });
   rerender();
 }
-function deleteSelection() {
-  if (state.selectedClipId) {
-    state.project.video_clips = state.project.video_clips.filter((item) => item.id !== state.selectedClipId);
-    state.selectedClipId = '';
-    rerender();
-    return;
-  }
-  if (state.selectedAudioId) {
-    state.project.audio_tracks = state.project.audio_tracks.filter((item) => item.id !== state.selectedAudioId);
-    state.selectedAudioId = '';
-    rerender();
-  }
+function renderOptionChips(options, value, datasetName) {
+  return `
+    <div class="chip-row">
+      ${options.map((opt) => `
+        <button class="option-chip ${opt.value === value ? 'active' : ''}" data-${datasetName}="${opt.value}">${escapeHtml(opt.label)}</button>
+      `).join('')}
+    </div>`;
 }
-function splitCurrentClip() {
-  const clip = currentClip();
-  if (!clip) return toast('Сначала выбери клип');
-  const start = Number(clip.source_start || 0);
-  const end = Number(clip.source_end || 0);
-  if (end - start < 1.0) return toast('Клип слишком короткий для разрезания');
-  const mid = Number(((start + end) / 2).toFixed(1));
-  const index = state.project.video_clips.findIndex((item) => item.id === clip.id);
-  const first = { ...clip, id: crypto.randomUUID(), source_end: mid, label: `${clip.label} A` };
-  const second = { ...clip, id: crypto.randomUUID(), source_start: mid, label: `${clip.label} B`, transition: { ...clip.transition } };
-  state.project.video_clips.splice(index, 1, first, second);
-  state.selectedClipId = first.id;
-  rerender();
-}
-function toggleMuteSelection() {
-  const clip = currentClip();
-  if (clip) {
-    clip.muted = !clip.muted;
-    clip.volume = clip.muted ? 0 : (clip.volume > 0 ? clip.volume : 100);
-    rerender();
-    return;
-  }
-  const audio = currentAudio();
-  if (audio) {
-    audio.volume = Number(audio.volume || 0) > 0 ? 0 : 100;
-    rerender();
-  }
-}
-function applySelectionChanges() {
-  const clip = currentClip();
+function renderSelectionPanel() {
+  const title = $('selectionTitle');
+  const body = $('selectionBody');
+  if (!title || !body) return;
+  const clip = currentVideo();
   const audio = currentAudio();
   if (clip) {
-    clip.label = $('clipLabelInput')?.value || clip.label;
-    clip.source_start = Math.max(0, Number($('clipStartInput')?.value || 0));
-    clip.source_end = Math.max(clip.source_start + 0.1, Number($('clipEndInput')?.value || 0));
-    clip.volume = Math.max(0, Math.min(100, Number($('clipVolumeInput')?.value || 100)));
-    clip.muted = clip.volume <= 0 ? true : clip.muted;
-    clip.filter = $('clipFilterInput')?.value || 'none';
-    clip.effect = $('clipEffectInput')?.value || 'none';
-    clip.transition = clip.transition || { type: 'none', duration: 0 };
-    clip.transition.type = $('clipTransitionTypeInput')?.value || 'none';
-    clip.transition.duration = Math.max(0, Math.min(1, Number($('transitionDurationInput')?.value || 0)));
+    const source = findSourceById(clip.source_id);
+    const start = getClipProjectStart(clip.id);
+    title.textContent = 'Настройки клипа';
+    body.innerHTML = `
+      <div class="inspector-summary">
+        <strong>${escapeHtml(clip.label || 'Клип')}</strong>
+        <div class="muted">Источник: ${escapeHtml(source?.filename || source?.prompt || clip.source_type || 'media')} · ${fmtSec(clipDuration(clip))} · старт в проекте ${fmtSec(start)}</div>
+      </div>
+      <div class="inspector-card">
+        <div class="kv-grid">
+          <label class="kv-row"><span>Название</span><input id="clipLabelInput" value="${escapeHtml(clip.label || '')}"></label>
+          <label class="kv-row"><span>Громкость, %</span><input id="clipVolumeInput" type="number" min="0" max="100" step="1" value="${Number(clip.volume || 100)}"></label>
+          <label class="kv-row"><span>Старт фрагмента, сек</span><input id="clipStartInput" type="number" min="0" step="0.1" value="${Number(clip.source_start || 0)}"></label>
+          <label class="kv-row"><span>Конец фрагмента, сек</span><input id="clipEndInput" type="number" min="0" step="0.1" value="${Number(clip.source_end || 0)}"></label>
+          <label class="kv-row"><span>Длит. перехода, сек</span><input id="transitionDurationInput" type="number" min="0" max="1" step="0.1" value="${Number(clip.transition?.duration || 0)}"></label>
+        </div>
+      </div>
+      <div class="inspector-card option-block">
+        <div class="inspector-label">Переход</div>
+        ${renderOptionChips(TRANSITION_OPTIONS, clip.transition?.type || 'none', 'clipTransition')}
+      </div>
+      <div class="inspector-card option-block">
+        <div class="inspector-label">Фильтр</div>
+        ${renderOptionChips(FILTER_OPTIONS, clip.filter || 'none', 'clipFilter')}
+      </div>
+      <div class="inspector-card option-block">
+        <div class="inspector-label">Эффект</div>
+        ${renderOptionChips(EFFECT_OPTIONS, clip.effect || 'none', 'clipEffect')}
+      </div>
+      <div class="inspector-card">
+        <div class="inspector-actions">
+          <button class="tool" data-action="set-in-from-playhead">Поставить start по playhead</button>
+          <button class="tool" data-action="set-out-from-playhead">Поставить end по playhead</button>
+        </div>
+      </div>`;
+    return;
   }
   if (audio) {
-    audio.label = $('audioLabelInput')?.value || audio.label;
-    audio.timeline_start = Math.max(0, Number($('audioTimelineInput')?.value || 0));
-    audio.source_start = Math.max(0, Number($('audioStartInput')?.value || 0));
-    audio.source_end = Math.max(audio.source_start + 0.1, Number($('audioEndInput')?.value || 0));
-    audio.volume = Math.max(0, Math.min(100, Number($('audioVolumeInput')?.value || 100)));
+    const source = findSourceById(audio.source_id);
+    title.textContent = 'Настройки музыки';
+    body.innerHTML = `
+      <div class="inspector-summary">
+        <strong>${escapeHtml(audio.label || 'Музыка')}</strong>
+        <div class="muted">Источник: ${escapeHtml(source?.filename || 'audio')} · ${fmtSec(audioDuration(audio))} · старт в проекте ${fmtSec(audio.timeline_start || 0)}</div>
+      </div>
+      <div class="inspector-card">
+        <div class="kv-grid">
+          <label class="kv-row"><span>Название</span><input id="audioLabelInput" value="${escapeHtml(audio.label || '')}"></label>
+          <label class="kv-row"><span>Громкость, %</span><input id="audioVolumeInput" type="number" min="0" max="100" step="1" value="${Number(audio.volume || 100)}"></label>
+          <label class="kv-row"><span>Старт на таймлайне, сек</span><input id="audioTimelineInput" type="number" min="0" step="0.1" value="${Number(audio.timeline_start || 0)}"></label>
+          <label class="kv-row"><span>Старт фрагмента, сек</span><input id="audioStartInput" type="number" min="0" step="0.1" value="${Number(audio.source_start || 0)}"></label>
+          <label class="kv-row"><span>Конец фрагмента, сек</span><input id="audioEndInput" type="number" min="0" step="0.1" value="${Number(audio.source_end || 0)}"></label>
+        </div>
+      </div>
+      <div class="inspector-card">
+        <div class="inspector-actions">
+          <button class="tool" data-action="set-audio-start-from-playhead">Сдвинуть start в проекте по playhead</button>
+        </div>
+      </div>`;
+    return;
   }
-  rerender();
+  title.textContent = 'Настройки элемента';
+  body.innerHTML = '<div class="empty-box">Выберите клип или музыкальный кусок на таймлайне, чтобы отредактировать параметры.</div>';
+}
+function renderRuler() {
+  const total = Math.ceil(projectDuration());
+  const ruler = $('timelineRuler');
+  if (!ruler) return;
+  ruler.style.width = `${timelineWidthPx()}px`;
+  ruler.innerHTML = Array.from({ length: total + 1 }, (_, i) => {
+    const left = i * state.pxPerSec;
+    return `<div class="tick" style="left:${left}px"><span>${i}с</span></div>`;
+  }).join('');
+}
+function renderTrackDropMarker(trackEl) {
+  if (!trackEl) return;
+  trackEl.querySelectorAll('.track-drop-marker').forEach((node) => node.remove());
+  if (state.drag.dropIndex == null) return;
+  const marker = document.createElement('div');
+  marker.className = 'track-drop-marker';
+  let left = 8;
+  if (state.project.video_clips.length) {
+    const dropIndex = Math.min(state.drag.dropIndex, state.project.video_clips.length);
+    if (dropIndex > 0) {
+      const prev = state.project.video_clips[dropIndex - 1];
+      left = getClipProjectStart(prev.id) * state.pxPerSec + clipDuration(prev) * state.pxPerSec;
+    }
+  }
+  marker.style.left = `${left}px`;
+  trackEl.appendChild(marker);
+}
+function renderVideoTrack() {
+  const track = $('videoTrack');
+  if (!track) return;
+  track.style.width = `${timelineWidthPx()}px`;
+  track.innerHTML = '';
+  if (!state.project.video_clips.length) {
+    track.innerHTML = '<div class="track-empty">Добавьте ролик из библиотеки или загрузите видео.</div>';
+    return;
+  }
+  state.project.video_clips.forEach((clip, index) => {
+    const start = videoStartAtIndex(index);
+    const width = Math.max(82, clipDuration(clip) * state.pxPerSec);
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = `timeline-item video ${state.selectedType === 'video' && state.selectedId === clip.id ? 'active' : ''}`;
+    item.dataset.clipId = clip.id;
+    item.draggable = true;
+    item.style.left = `${start * state.pxPerSec}px`;
+    item.style.width = `${width}px`;
+    item.innerHTML = `
+      <span class="item-handle left"></span>
+      <span class="item-handle right"></span>
+      <div class="timeline-title">${escapeHtml(clip.label || `Клип ${index + 1}`)}</div>
+      <div class="timeline-meta">${fmtSec(clipDuration(clip))} · ${escapeHtml(clip.filter || 'без фильтра')} · ${clip.muted ? 'mute' : `${Number(clip.volume || 100)}%`}</div>`;
+    track.appendChild(item);
+  });
+  renderTrackDropMarker(track);
+}
+function renderAudioTrack() {
+  const track = $('audioTrack');
+  if (!track) return;
+  track.style.width = `${timelineWidthPx()}px`;
+  track.innerHTML = '';
+  if (!state.project.audio_tracks.length) {
+    track.innerHTML = '<div class="track-empty">Добавьте музыку. Её можно разрезать по красной линии и двигать по таймлайну.</div>';
+    return;
+  }
+  state.project.audio_tracks.forEach((item) => {
+    const width = Math.max(90, audioDuration(item) * state.pxPerSec);
+    const node = document.createElement('button');
+    node.type = 'button';
+    node.className = `timeline-item audio ${state.selectedType === 'audio' && state.selectedId === item.id ? 'active' : ''}`;
+    node.dataset.audioClipId = item.id;
+    node.draggable = true;
+    node.style.left = `${Number(item.timeline_start || 0) * state.pxPerSec}px`;
+    node.style.width = `${width}px`;
+    node.innerHTML = `
+      <span class="item-handle left"></span>
+      <span class="item-handle right"></span>
+      <div class="timeline-title">${escapeHtml(item.label || 'Музыка')}</div>
+      <div class="timeline-meta">старт ${fmtSec(item.timeline_start || 0)} · ${fmtSec(audioDuration(item))} · ${Number(item.volume || 100)}%</div>`;
+    track.appendChild(node);
+  });
+}
+function renderTimeline() {
+  const canvas = $('timelineCanvas');
+  if (canvas) canvas.style.width = `${timelineWidthPx()}px`;
+  if ($('zoomLabel')) $('zoomLabel').textContent = `${state.pxPerSec} px/с`;
+  renderRuler();
+  renderVideoTrack();
+  renderAudioTrack();
+  positionPlayhead();
+}
+function applyFormChanges() {
+  const clip = currentVideo();
+  const audio = currentAudio();
+  if (clip) {
+    const source = findSourceById(clip.source_id);
+    const sourceDuration = Number(source?.duration_sec || clip.source_end || 0);
+    clip.label = $('clipLabelInput')?.value?.trim() || clip.label;
+    clip.volume = clamp(Number($('clipVolumeInput')?.value || 100), 0, 100);
+    clip.source_start = clamp(Number($('clipStartInput')?.value || 0), 0, Math.max(0, sourceDuration - 0.1));
+    clip.source_end = clamp(Number($('clipEndInput')?.value || sourceDuration || 0), clip.source_start + 0.1, Math.max(clip.source_start + 0.1, sourceDuration || clip.source_end || clip.source_start + 0.1));
+    clip.transition.duration = clamp(Number($('transitionDurationInput')?.value || 0), 0, 1);
+    if (clip.volume === 0) clip.muted = true; else if (clip.muted && clip.volume > 0) clip.muted = false;
+  }
+  if (audio) {
+    const source = findSourceById(audio.source_id);
+    const sourceDuration = Number(source?.duration_sec || audio.source_end || 0);
+    audio.label = $('audioLabelInput')?.value?.trim() || audio.label;
+    audio.volume = clamp(Number($('audioVolumeInput')?.value || 100), 0, 100);
+    audio.timeline_start = clamp(Number($('audioTimelineInput')?.value || 0), 0, projectDuration());
+    audio.source_start = clamp(Number($('audioStartInput')?.value || 0), 0, Math.max(0, sourceDuration - 0.1));
+    audio.source_end = clamp(Number($('audioEndInput')?.value || sourceDuration || 0), audio.source_start + 0.1, Math.max(audio.source_start + 0.1, sourceDuration || audio.source_end || audio.source_start + 0.1));
+  }
+  rerender({ preservePlayhead: true });
+}
+function getTimelineSecondsFromClientX(clientX) {
+  const scroller = $('timelineScroller');
+  if (!scroller) return 0;
+  const rect = scroller.getBoundingClientRect();
+  const x = clientX - rect.left + scroller.scrollLeft;
+  return clamp(x / state.pxPerSec, 0, projectDuration());
+}
+function previewLibraryItem(id) {
+  const item = findSourceById(id);
+  const src = item?.video_url || item?.download_url || item?.output_url || '';
+  const videoEl = $('previewVideo');
+  const empty = $('previewEmpty');
+  if (!src || !videoEl) return;
+  state.previewMode = 'library';
+  videoEl.src = src;
+  videoEl.load();
+  videoEl.classList.remove('hidden');
+  empty.classList.add('hidden');
+  $('previewMeta').textContent = `${item.filename || item.prompt || item.id} · ${fmtSec(item.duration_sec || 0)}`;
+}
+function rerender({ preservePlayhead = false } = {}) {
+  configureLinks();
+  renderSessionState();
+  ensureVideoSelection();
+  renderLibrary();
+  renderPreview();
+  renderTimeline();
+  renderSelectionPanel();
+  if (!preservePlayhead) setPlayhead(state.playheadSec, { syncPreview: false });
+  positionPlayhead();
+}
+async function uploadMedia(kind, file) {
+  if (!file) return;
+  if (!state.token) return toast('Загрузка доступна только из Workspace');
+  const form = new FormData();
+  form.append('file', file);
+  const data = await api(`/api/video-editor-v2/upload/${kind}`, { method: 'POST', headers: authHeaders(false), body: form });
+  toast(kind === 'video' ? 'Видео загружено' : 'Музыка загружена');
+  await loadLibrary();
+  state.libraryTab = kind === 'video' ? 'videos' : 'audio';
+  const itemId = data?.item?.id;
+  if (itemId) {
+    if (kind === 'video') addVideoFromLibrary(itemId); else addAudioFromLibrary(itemId);
+  }
+  rerender({ preservePlayhead: true });
 }
 async function saveProject() {
-  state.project.title = $('projectTitleInput')?.value.trim() || 'Новый видеопроект';
-  const payload = { title: state.project.title, project_json: state.project };
+  const title = $('projectTitleInput')?.value?.trim() || 'Новый видеопроект';
+  state.project.title = title;
   if (!state.token) return toast('Открой редактор из Workspace, чтобы сохранить проект');
+  const payload = { title, project_json: state.project };
   let data;
   if (state.projectId) {
-    data = await api(`/api/video-editor-v2/projects/${encodeURIComponent(state.projectId)}`, {
-      method: 'PUT', headers: authHeaders(), body: JSON.stringify(payload),
-    });
+    data = await api(`/api/video-editor-v2/projects/${encodeURIComponent(state.projectId)}`, { method: 'PUT', headers: authHeaders(), body: JSON.stringify(payload) });
   } else {
-    data = await api('/api/video-editor-v2/projects', {
-      method: 'POST', headers: authHeaders(), body: JSON.stringify(payload),
-    });
+    data = await api('/api/video-editor-v2/projects', { method: 'POST', headers: authHeaders(), body: JSON.stringify(payload) });
   }
   state.projectId = data.item.id;
   toast('Проект сохранён');
-  rerender();
+  rerender({ preservePlayhead: true });
 }
 async function startRender() {
   if (!state.token) return toast('Открой редактор из Workspace, чтобы запустить экспорт');
   if (!state.project.video_clips.length) return toast('Сначала добавь хотя бы один клип');
   if (!state.projectId) await saveProject();
   if (!state.projectId) return;
-  const data = await api('/api/video-editor-v2/render', {
-    method: 'POST', headers: authHeaders(), body: JSON.stringify({ project_id: state.projectId }),
-  });
+  const data = await api('/api/video-editor-v2/render', { method: 'POST', headers: authHeaders(), body: JSON.stringify({ project_id: state.projectId }) });
   state.renderJobId = data.item.id;
-  state.renderOutputUrl = '';
   $('renderStatus').textContent = 'рендер...';
-  toast('Рендер запущен');
   pollRender();
 }
 async function pollRender() {
@@ -602,148 +634,334 @@ async function pollRender() {
     const item = data.item || {};
     $('renderStatus').textContent = `${item.status || 'queued'} ${item.progress || 0}%`;
     if (item.status === 'completed') {
-      state.renderOutputUrl = item.output_url || '';
-      rerender();
       toast('Рендер завершён');
+      if (item.output_url) {
+        const videoEl = $('previewVideo');
+        videoEl.src = item.output_url;
+        videoEl.classList.remove('hidden');
+        $('previewEmpty').classList.add('hidden');
+        $('previewMeta').textContent = `Результат рендера · ${fmtSec(item.duration_sec || 0)}`;
+      }
       return;
     }
     if (item.status === 'failed') {
-      toast(item.error_text || 'Ошибка рендера', 5000);
+      toast(item.error_text || 'Ошибка рендера', 6000);
       return;
     }
-  } catch (error) {
-    toast(error.message || String(error), 5000);
+  } catch (e) {
+    toast(e.message || String(e), 5000);
     return;
   }
   state.polling = setTimeout(pollRender, 2500);
 }
-async function uploadMedia(kind, file) {
-  if (!file) return;
-  if (!state.token) return toast('Загрузка доступна только из авторизованного Workspace');
-  const form = new FormData();
-  form.append('file', file);
-  const data = await api(`/api/video-editor-v2/upload/${kind}`, { method: 'POST', headers: authHeaders(false), body: form });
-  const uploaded = data.item || null;
-  toast(kind === 'video' ? 'Видео загружено' : 'Музыка загружена');
-  await loadLibrary();
-  if (uploaded?.id) {
-    if (kind === 'video') state.libraryTab = 'videos';
-    if (kind === 'audio') state.libraryTab = 'audio';
+function removeSelected() {
+  if (state.selectedType === 'video' && state.selectedId) {
+    state.project.video_clips = state.project.video_clips.filter((x) => x.id !== state.selectedId);
   }
-  rerender();
+  if (state.selectedType === 'audio' && state.selectedId) {
+    state.project.audio_tracks = state.project.audio_tracks.filter((x) => x.id !== state.selectedId);
+  }
+  clearSelection();
+  rerender({ preservePlayhead: true });
 }
-function selectLibraryPreview(id) {
-  const item = state.videos.find((entry) => entry.id === id);
-  if (!item) return;
-  state.selectedClipId = '';
-  state.selectedAudioId = '';
-  state.renderOutputUrl = item.video_url || item.download_url || item.output_url || '';
-  rerender();
+function moveSelectedVideo(delta) {
+  const clip = currentVideo();
+  if (!clip) return toast('Сначала выбери клип');
+  const idx = state.project.video_clips.findIndex((x) => x.id === clip.id);
+  const next = idx + delta;
+  if (idx < 0 || next < 0 || next >= state.project.video_clips.length) return;
+  const arr = state.project.video_clips;
+  [arr[idx], arr[next]] = [arr[next], arr[idx]];
+  rerender({ preservePlayhead: true });
+}
+function toggleMuteSelected() {
+  const clip = currentVideo();
+  if (!clip) return toast('Сначала выбери клип');
+  clip.muted = !clip.muted;
+  clip.volume = clip.muted ? 0 : Math.max(1, Number(clip.volume || 100));
+  rerender({ preservePlayhead: true });
+}
+function splitSelectedAtPlayhead() {
+  const clip = currentVideo();
+  if (clip) {
+    const idx = state.project.video_clips.findIndex((x) => x.id === clip.id);
+    const clipStart = getClipProjectStart(clip.id);
+    const local = Number((state.playheadSec - clipStart).toFixed(3));
+    const duration = clipDuration(clip);
+    if (local <= 0.05 || local >= duration - 0.05) return toast('Поставь playhead внутрь клипа, а не на край');
+    const splitSourceTime = Number(clip.source_start || 0) + local;
+    const a = {
+      ...clip,
+      id: crypto.randomUUID(),
+      label: `${clip.label} A`,
+      source_end: splitSourceTime,
+      transition: { ...clip.transition },
+    };
+    const b = {
+      ...clip,
+      id: crypto.randomUUID(),
+      label: `${clip.label} B`,
+      source_start: splitSourceTime,
+      transition: { ...clip.transition },
+    };
+    state.project.video_clips.splice(idx, 1, a, b);
+    setSelection('video', b.id);
+    rerender({ preservePlayhead: true });
+    return;
+  }
+  const audio = currentAudio();
+  if (audio) {
+    const local = Number((state.playheadSec - Number(audio.timeline_start || 0)).toFixed(3));
+    const duration = audioDuration(audio);
+    if (local <= 0.05 || local >= duration - 0.05) return toast('Поставь playhead внутрь музыкального куска');
+    const idx = state.project.audio_tracks.findIndex((x) => x.id === audio.id);
+    const splitSourceTime = Number(audio.source_start || 0) + local;
+    const splitTimeline = Number(audio.timeline_start || 0) + local;
+    const a = { ...audio, id: crypto.randomUUID(), label: `${audio.label} A`, source_end: splitSourceTime };
+    const b = { ...audio, id: crypto.randomUUID(), label: `${audio.label} B`, source_start: splitSourceTime, timeline_start: splitTimeline };
+    state.project.audio_tracks.splice(idx, 1, a, b);
+    setSelection('audio', b.id);
+    rerender({ preservePlayhead: true });
+    return;
+  }
+  toast('Выбери клип или музыку, чтобы разрезать по playhead');
+}
+function setClipBoundaryFromPlayhead(kind) {
+  const clip = currentVideo();
+  if (!clip) return toast('Сначала выбери клип');
+  const clipStart = getClipProjectStart(clip.id);
+  const local = clamp(state.playheadSec - clipStart, 0, clipDuration(clip));
+  const sourceValue = Number(clip.source_start || 0) + local;
+  if (kind === 'start') {
+    clip.source_start = Math.min(sourceValue, Number(clip.source_end || 0) - 0.1);
+  } else {
+    clip.source_end = Math.max(sourceValue, Number(clip.source_start || 0) + 0.1);
+  }
+  rerender({ preservePlayhead: true });
+}
+function setAudioTimelineStartFromPlayhead() {
+  const audio = currentAudio();
+  if (!audio) return toast('Сначала выбери музыку');
+  audio.timeline_start = clamp(state.playheadSec, 0, projectDuration());
+  rerender({ preservePlayhead: true });
+}
+function updateClipOption(datasetName, value) {
+  const clip = currentVideo();
+  if (!clip) return;
+  if (datasetName === 'clipFilter') clip.filter = value;
+  if (datasetName === 'clipEffect') clip.effect = value;
+  if (datasetName === 'clipTransition') clip.transition.type = value;
+  rerender({ preservePlayhead: true });
+}
+function reorderClipByDrop(clipId, clientX) {
+  const draggedIndex = state.project.video_clips.findIndex((x) => x.id === clipId);
+  if (draggedIndex < 0) return;
+  const sec = getTimelineSecondsFromClientX(clientX);
+  let dropIndex = state.project.video_clips.length;
+  let cursor = 0;
+  for (let i = 0; i < state.project.video_clips.length; i += 1) {
+    const dur = clipDuration(state.project.video_clips[i]);
+    const mid = cursor + dur / 2;
+    if (sec < mid) {
+      dropIndex = i;
+      break;
+    }
+    cursor += dur;
+  }
+  const arr = [...state.project.video_clips];
+  const [item] = arr.splice(draggedIndex, 1);
+  const adjusted = dropIndex > draggedIndex ? dropIndex - 1 : dropIndex;
+  arr.splice(adjusted, 0, item);
+  state.project.video_clips = arr;
+  state.drag.videoClipId = '';
+  state.drag.dropIndex = null;
+  setSelection('video', item.id);
+  rerender({ preservePlayhead: true });
+}
+function updateDropMarker(clientX) {
+  const sec = getTimelineSecondsFromClientX(clientX);
+  let dropIndex = state.project.video_clips.length;
+  let cursor = 0;
+  for (let i = 0; i < state.project.video_clips.length; i += 1) {
+    const dur = clipDuration(state.project.video_clips[i]);
+    const mid = cursor + dur / 2;
+    if (sec < mid) {
+      dropIndex = i;
+      break;
+    }
+    cursor += dur;
+  }
+  state.drag.dropIndex = dropIndex;
+  renderTrackDropMarker($('videoTrack'));
+}
+function moveAudioByDrop(audioId, clientX) {
+  const audio = state.project.audio_tracks.find((x) => x.id === audioId);
+  if (!audio) return;
+  const sec = getTimelineSecondsFromClientX(clientX);
+  const offsetSec = state.drag.audioOffsetX / state.pxPerSec;
+  audio.timeline_start = clamp(sec - offsetSec, 0, projectDuration());
+  state.drag.audioClipId = '';
+  state.drag.audioOffsetX = 0;
+  setSelection('audio', audio.id);
+  rerender({ preservePlayhead: true });
 }
 
+$('timelineScroller')?.addEventListener('click', (e) => {
+  if (e.target.closest('.timeline-item')) return;
+  setPlayhead(getTimelineSecondsFromClientX(e.clientX));
+});
+$('timelineRuler')?.addEventListener('click', (e) => setPlayhead(getTimelineSecondsFromClientX(e.clientX)));
+$('videoTrack')?.addEventListener('dragover', (e) => {
+  if (!state.drag.videoClipId) return;
+  e.preventDefault();
+  updateDropMarker(e.clientX);
+});
+$('videoTrack')?.addEventListener('drop', (e) => {
+  if (!state.drag.videoClipId) return;
+  e.preventDefault();
+  reorderClipByDrop(state.drag.videoClipId, e.clientX);
+});
+$('audioTrack')?.addEventListener('dragover', (e) => {
+  if (!state.drag.audioClipId) return;
+  e.preventDefault();
+});
+$('audioTrack')?.addEventListener('drop', (e) => {
+  if (!state.drag.audioClipId) return;
+  e.preventDefault();
+  moveAudioByDrop(state.drag.audioClipId, e.clientX);
+});
+$('zoomRange')?.addEventListener('input', (e) => {
+  state.pxPerSec = Number(e.target.value || 92);
+  rerender({ preservePlayhead: true });
+});
+$('previewVideo')?.addEventListener('loadedmetadata', () => syncPreviewToPlayhead());
+$('previewVideo')?.addEventListener('timeupdate', () => {
+  const clip = currentVideo();
+  if (!clip || document.activeElement?.id === 'previewVideo') return;
+});
 
-document.addEventListener('click', async (event) => {
-  const addBtn = event.target.closest('[data-library-add]');
-  const addId = addBtn?.dataset?.libraryAdd;
+document.addEventListener('dragstart', (e) => {
+  const clipEl = e.target.closest?.('[data-clip-id]');
+  if (clipEl) {
+    state.drag.videoClipId = clipEl.dataset.clipId;
+    clipEl.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    return;
+  }
+  const audioEl = e.target.closest?.('[data-audio-clip-id]');
+  if (audioEl) {
+    state.drag.audioClipId = audioEl.dataset.audioClipId;
+    const rect = audioEl.getBoundingClientRect();
+    state.drag.audioOffsetX = e.clientX - rect.left;
+    audioEl.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+  }
+});
+document.addEventListener('dragend', () => {
+  document.querySelectorAll('.dragging').forEach((el) => el.classList.remove('dragging'));
+  state.drag.videoClipId = '';
+  state.drag.audioClipId = '';
+  state.drag.dropIndex = null;
+  state.drag.audioOffsetX = 0;
+  renderTrackDropMarker($('videoTrack'));
+});
+
+document.addEventListener('click', async (e) => {
+  const addId = e.target.dataset.libraryAdd;
   if (addId) {
     if (state.libraryTab === 'videos') addVideoFromLibrary(addId); else addAudioFromLibrary(addId);
     return;
   }
-  const previewBtn = event.target.closest('[data-library-preview]');
-  const previewId = previewBtn?.dataset?.libraryPreview;
-  if (previewId) { selectLibraryPreview(previewId); return; }
-  const auditionBtn = event.target.closest('[data-library-audition]');
-  const auditionId = auditionBtn?.dataset?.libraryAudition;
-  if (auditionId) { addAudioFromLibrary(auditionId); return; }
-
-  const clipCard = event.target.closest('[data-clip-id]');
-  if (clipCard) {
-    state.selectedClipId = clipCard.dataset.clipId;
-    state.selectedAudioId = '';
-    state.renderOutputUrl = '';
-    rerender();
+  const previewId = e.target.dataset.libraryPreview;
+  if (previewId) {
+    previewLibraryItem(previewId);
     return;
   }
-  const audioCard = event.target.closest('[data-audio-id]');
-  if (audioCard) {
-    state.selectedAudioId = audioCard.dataset.audioId;
-    state.selectedClipId = '';
-    rerender();
-    return;
-  }
-
-  if (event.target.id === 'refreshLibraryBtn') {
-    try { await loadLibrary(); toast('Библиотека обновлена'); } catch (error) { toast(error.message || String(error), 5000); }
-    return;
-  }
-  if (event.target.id === 'saveProjectBtn') { saveProject().catch((error) => toast(error.message || String(error), 5000)); return; }
-  if (event.target.id === 'renderBtn') { startRender().catch((error) => toast(error.message || String(error), 5000)); return; }
-  if (event.target.id === 'moveClipLeftBtn' || event.target.id === 'inspectorMoveLeftBtn') { moveClip(-1); return; }
-  if (event.target.id === 'moveClipRightBtn' || event.target.id === 'inspectorMoveRightBtn') { moveClip(1); return; }
-  if (event.target.id === 'deleteClipBtn' || event.target.id === 'inspectorDeleteBtn' || event.target.id === 'inspectorDeleteAudioBtn') { deleteSelection(); return; }
-  if (event.target.id === 'muteClipBtn') { toggleMuteSelection(); return; }
-  if (event.target.id === 'splitBtn') { splitCurrentClip(); return; }
-});
-
-document.addEventListener('input', (event) => {
-  if (event.target.id === 'librarySearchInput') {
-    state.librarySearch = event.target.value || '';
+  const tab = e.target.dataset.libraryTab;
+  if (tab) {
+    state.libraryTab = tab;
     renderLibrary();
     return;
   }
-  if (event.target.id === 'projectTitleInput') {
-    state.project.title = event.target.value || 'Новый видеопроект';
-    renderPreview();
+  const clipNode = e.target.closest?.('[data-clip-id]');
+  const clipId = clipNode?.dataset?.clipId;
+  if (clipId) {
+    state.previewMode = 'timeline';
+    setSelection('video', clipId);
+    const rect = clipNode.getBoundingClientRect();
+    const local = clamp((e.clientX - rect.left) / state.pxPerSec, 0, clipDuration(state.project.video_clips.find((x) => x.id === clipId)));
+    setPlayhead(getClipProjectStart(clipId) + local);
+    rerender({ preservePlayhead: true });
     return;
   }
-  if (event.target.matches('#clipLabelInput,#clipStartInput,#clipEndInput,#clipVolumeInput,#clipFilterInput,#clipEffectInput,#clipTransitionTypeInput,#transitionDurationInput,#audioLabelInput,#audioTimelineInput,#audioStartInput,#audioEndInput,#audioVolumeInput')) {
-    applySelectionChanges();
+  const audioNode = e.target.closest?.('[data-audio-clip-id]');
+  const audioClipId = audioNode?.dataset?.audioClipId;
+  if (audioClipId) {
+    const audio = state.project.audio_tracks.find((x) => x.id === audioClipId);
+    state.previewMode = 'timeline';
+    setSelection('audio', audioClipId);
+    const rect = audioNode.getBoundingClientRect();
+    const local = clamp((e.clientX - rect.left) / state.pxPerSec, 0, audioDuration(audio));
+    setPlayhead(Number(audio?.timeline_start || 0) + local, { syncPreview: false });
+    rerender({ preservePlayhead: true });
+    return;
   }
+  if (e.target.id === 'refreshLibraryBtn') { loadLibrary().catch((err) => toast(err.message, 5000)); return; }
+  if (e.target.id === 'saveProjectBtn') { saveProject().catch((err) => toast(err.message, 5000)); return; }
+  if (e.target.id === 'renderBtn') { startRender().catch((err) => toast(err.message, 6000)); return; }
+  if (e.target.id === 'deleteClipBtn') { removeSelected(); return; }
+  if (e.target.id === 'muteClipBtn') { toggleMuteSelected(); return; }
+  if (e.target.id === 'splitBtn') { splitSelectedAtPlayhead(); return; }
+  if (e.target.id === 'moveLeftBtn') { moveSelectedVideo(-1); return; }
+  if (e.target.id === 'moveRightBtn') { moveSelectedVideo(1); return; }
+
+  if (e.target.dataset.clipFilter) { updateClipOption('clipFilter', e.target.dataset.clipFilter); return; }
+  if (e.target.dataset.clipEffect) { updateClipOption('clipEffect', e.target.dataset.clipEffect); return; }
+  if (e.target.dataset.clipTransition) { updateClipOption('clipTransition', e.target.dataset.clipTransition); return; }
+
+  const action = e.target.dataset.action;
+  if (action === 'set-in-from-playhead') { setClipBoundaryFromPlayhead('start'); return; }
+  if (action === 'set-out-from-playhead') { setClipBoundaryFromPlayhead('end'); return; }
+  if (action === 'set-audio-start-from-playhead') { setAudioTimelineStartFromPlayhead(); return; }
 });
 
-document.addEventListener('change', (event) => {
-  if (event.target.id === 'videoUploadInput') {
-    uploadMedia('video', event.target.files?.[0]).catch((error) => toast(error.message || String(error), 5000)).finally(() => { event.target.value = ''; });
-    return;
-  }
-  if (event.target.id === 'audioUploadInput') {
-    uploadMedia('audio', event.target.files?.[0]).catch((error) => toast(error.message || String(error), 5000)).finally(() => { event.target.value = ''; });
-    return;
+document.addEventListener('change', (e) => {
+  if (e.target.id === 'videoUploadInput') uploadMedia('video', e.target.files?.[0]).catch((err) => toast(err.message, 5000));
+  if (e.target.id === 'audioUploadInput') uploadMedia('audio', e.target.files?.[0]).catch((err) => toast(err.message, 5000));
+  if (e.target.matches('#clipLabelInput,#clipVolumeInput,#clipStartInput,#clipEndInput,#transitionDurationInput,#audioLabelInput,#audioVolumeInput,#audioTimelineInput,#audioStartInput,#audioEndInput')) {
+    applyFormChanges();
   }
 });
-
-document.addEventListener('click', (event) => {
-  const tabBtn = event.target.closest('[data-library-tab]');
-  const tab = tabBtn?.dataset?.libraryTab;
-  if (!tab) return;
-  state.libraryTab = tab;
+$('librarySearchInput')?.addEventListener('input', (e) => {
+  state.librarySearch = e.target.value || '';
   renderLibrary();
 });
-
+$('projectTitleInput')?.addEventListener('input', (e) => {
+  state.project.title = e.target.value || 'Новый видеопроект';
+  $('projectSummary').textContent = `${state.project.video_clips.length} клипов · ${fmtSec(projectDuration())}`;
+});
 window.addEventListener('message', async (event) => {
   try {
     const data = event.data || {};
-    if (data?.type !== 'astrabot-workspace-auth') return;
+    if (!data || data.type !== 'astrabot-workspace-auth') return;
     if (typeof data.token === 'string' && data.token.trim()) {
       state.token = data.token.trim();
-      saveTokenSilently();
+      saveAuthSilently();
+      rerender({ preservePlayhead: true });
       await loadLibrary();
+      rerender({ preservePlayhead: true });
     }
-  } catch (error) {
-    console.error(error);
+  } catch (e) {
+    console.error(e);
   }
 });
-
 window.addEventListener('load', async () => {
-  saveTokenSilently();
+  saveAuthSilently();
   configureLinks();
-  rerender();
+  setPlayhead(0, { syncPreview: false });
+  rerender({ preservePlayhead: true });
   if (state.token) {
-    try {
-      await Promise.all([loadLibrary(), loadProjectIfNeeded()]);
-    } catch (error) {
-      toast(error.message || String(error), 5000);
-    }
+    try { await loadLibrary(); } catch (e) { toast(e.message, 5000); }
   }
-  rerender();
+  rerender({ preservePlayhead: true });
 });
