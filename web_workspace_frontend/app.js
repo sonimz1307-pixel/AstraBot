@@ -95,6 +95,8 @@ video: {
     moodPreset: DEFAULT_IMAGE_STATE.moodPreset || 'premium',
     outputUrl: '',
     downloadUrl: '',
+    generationId: '',
+    panel: DEFAULT_IMAGE_STATE.panel || 'params',
     isGenerating: false,
     errorText: '',
     statusText: 'Выбери режим, добавь изображения при необходимости и запусти генерацию.',
@@ -128,6 +130,16 @@ video: {
     loading: false,
   },
   history: {
+    items: [],
+    loading: false,
+    loaded: false,
+    selectedId: '',
+    selectedItem: null,
+    lastError: '',
+    limit: 24,
+    offset: 0,
+  },
+  imageHistory: {
     items: [],
     loading: false,
     loaded: false,
@@ -829,6 +841,7 @@ function saveState() {
     posterStyle: state.image.posterStyle,
     stylePreset: state.image.stylePreset,
     moodPreset: state.image.moodPreset,
+    panel: state.image.panel,
   }));
 }
 
@@ -1302,6 +1315,30 @@ function setVideoPanel(panel) {
   }
   saveState();
   render();
+}
+
+function setImagePanel(panel) {
+  state.image.panel = panel === 'library' ? 'library' : 'params';
+  if (state.image.panel === 'library' && state.authToken) {
+    loadImageHistory({ silent: true, keepSelection: true }).catch(() => {});
+  }
+  saveState();
+  render();
+}
+
+function imageHistorySelectedItem() {
+  if (!state.imageHistory.selectedId) return null;
+  return state.imageHistory.items.find((item) => item.id === state.imageHistory.selectedId) || state.imageHistory.selectedItem || null;
+}
+
+function imageHistoryPreviewUrl(item) {
+  if (!item) return '';
+  return item.image_url || item.download_url || '';
+}
+
+function imageHistoryDownloadUrl(item) {
+  if (!item) return '';
+  return item.download_url || item.image_url || '';
 }
 
 function historySelectedItem() {
@@ -1841,6 +1878,7 @@ function clearVideoRunState({ keepPrompt = true } = {}) {
 function clearImageRunState({ keepPrompt = true, keepFiles = true } = {}) {
   state.image.outputUrl = '';
   state.image.downloadUrl = '';
+  state.image.generationId = '';
   state.image.errorText = '';
   state.image.isGenerating = false;
   state.image.statusText = 'Выбери режим, добавь изображения при необходимости и запусти генерацию.';
@@ -1944,17 +1982,25 @@ function renderImageWorkspace() {
   syncImageSelection();
   const source = getFile('image.sourceImage');
   const base = getFile('image.baseImage');
+  const selectedHistory = imageHistorySelectedItem();
+  const showHistoryImage = state.image.panel === 'library' && selectedHistory && imageHistoryPreviewUrl(selectedHistory);
+  const previewUrl = showHistoryImage ? imageHistoryPreviewUrl(selectedHistory) : state.image.outputUrl;
+  const previewDownloadUrl = showHistoryImage ? imageHistoryDownloadUrl(selectedHistory) : (state.image.downloadUrl || state.image.outputUrl);
+  const previewPrompt = showHistoryImage ? selectedHistory.prompt : state.image.prompt;
+  const previewMeta = showHistoryImage ? `${selectedHistory.provider || 'image'} · ${selectedHistory.model || ''}` : '';
   const assets = [
     mediaCard('Source image', source, false, false, 'contain'),
     mediaCard('Base image', base, false, false, 'contain'),
   ].filter(Boolean).join('');
 
-  const stageInner = state.image.outputUrl ? `
+  const stageInner = previewUrl ? `
     <div class="video-stage-result image-stage-result">
-      <img class="preview-media image-preview-media" src="${escapeHtml(state.image.outputUrl)}" alt="Generated image">
+      <img class="preview-media image-preview-media" src="${escapeHtml(previewUrl)}" alt="Generated image">
+      ${showHistoryImage ? `<div class="video-meta-row" style="justify-content:center; margin-top:12px; flex-wrap:wrap;"><span class="badge ${historyStatusTone(selectedHistory?.status)}">${escapeHtml(historyStatusLabel(selectedHistory?.status))}</span><span class="muted">${escapeHtml(formatDate(selectedHistory?.completed_at || selectedHistory?.created_at || ''))}</span>${previewMeta ? `<span class="muted">${escapeHtml(previewMeta)}</span>` : ''}</div>` : ''}
+      ${previewPrompt ? `<div class="help-text" style="margin-top:12px; text-align:center; max-width:860px; margin-left:auto; margin-right:auto;">${escapeHtml(trimText(previewPrompt, 240))}</div>` : ''}
       <div class="actions compact-gap" style="justify-content:center; flex-wrap:wrap; margin-top:14px;">
-        <a class="btn primary" href="${escapeHtml(state.image.downloadUrl || state.image.outputUrl)}" download>Скачать изображение</a>
-        <button class="btn outline" data-action="clear-image-run">Очистить результат</button>
+        <a class="btn primary" href="${escapeHtml(previewDownloadUrl || previewUrl)}" download>Скачать изображение</a>
+        ${showHistoryImage ? `<button class="btn outline" data-action="use-image-history-item" data-generation-id="${escapeHtml(selectedHistory?.id || '')}">В рабочую зону</button><button class="btn ghost" data-action="show-image-params">Параметры</button>` : `<button class="btn outline" data-action="clear-image-run">Очистить результат</button>`}
       </div>
     </div>
   ` : (state.image.isGenerating ? `
@@ -1979,8 +2025,8 @@ function renderImageWorkspace() {
     </div>
   ` : `
     <div class="empty-copy">
-      <strong>Изображение появится здесь</strong>
-      <div>Справа выбери семейство, режим, добавь входные изображения при необходимости и запусти генерацию. Рабочая зона теперь сделана по тому же принципу, что и во вкладке видео — без лишних боковых карточек.</div>
+      <strong>${state.image.panel === 'library' ? 'История изображений откроется здесь' : 'Изображение появится здесь'}</strong>
+      <div>${state.image.panel === 'library' ? 'Выбери сохранённую генерацию справа. Любую картинку можно вернуть в рабочую зону и скачать повторно.' : 'Справа выбери семейство, режим, добавь входные изображения при необходимости и запусти генерацию.'}</div>
     </div>
   `);
 
@@ -2382,9 +2428,33 @@ function renderImageInspector() {
   const modelOptions = providerModels.map(([id, model]) => `<option value="${escapeHtml(id)}" ${state.image.model === id ? 'selected' : ''}>${escapeHtml(model.name)}</option>`).join('');
   const modeOptions = Object.entries(imageModelConfig().modes).map(([id, mode]) => `<option value="${escapeHtml(id)}" ${state.image.mode === id ? 'selected' : ''}>${escapeHtml(mode.name)}</option>`).join('');
 
+  if (state.image.panel === 'library') {
+    const items = state.imageHistory.items || [];
+    return `
+      <div class="inspector-card">
+        <div class="field-head" style="margin-bottom:12px;"><div class="section-title" style="margin:0;">История изображений</div><button class="btn ghost small" data-action="show-image-params">Параметры</button></div>
+        <div class="help-text">Список серверных image-генераций. Любую картинку можно открыть снова, скачать или удалить.</div>
+        <div class="actions compact-gap" style="margin-top:12px; flex-wrap:wrap;"><button class="btn outline small" data-action="refresh-image-history">Обновить</button></div>
+        <div class="mini-list" style="margin-top:14px;">
+          ${state.imageHistory.loading ? `<div class="empty-state">Загружаю историю изображений...</div>` : ''}
+          ${!state.imageHistory.loading && items.length ? items.map((item) => `
+            <div class="history-item compact ${state.imageHistory.selectedId === item.id ? 'active' : ''}">
+              <button class="history-delete-btn" data-action="delete-image-history-item" data-generation-id="${escapeHtml(item.id || '')}" title="Удалить из истории" aria-label="Удалить из истории">×</button>
+              ${imageHistoryPreviewUrl(item) ? `<div style="margin-bottom:10px;"><img src="${escapeHtml(imageHistoryPreviewUrl(item))}" alt="preview" style="width:100%; aspect-ratio:1/1; object-fit:cover; border-radius:14px; border:1px solid rgba(255,255,255,0.08);"></div>` : ''}
+              <div class="history-item-row"><strong>${escapeHtml(trimText(item.prompt || `${item.provider || 'image'} · ${item.model || ''}`, 88) || 'Изображение')}</strong><span class="badge ${historyStatusTone(item.status)}">${escapeHtml(historyStatusLabel(item.status))}</span></div>
+              <small>${escapeHtml(formatDate(item.completed_at || item.created_at))}</small>
+              <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;"><button class="btn outline small" data-action="preview-image-history-item" data-generation-id="${escapeHtml(item.id || '')}">Открыть</button><button class="btn ghost small" data-action="use-image-history-item" data-generation-id="${escapeHtml(item.id || '')}">В рабочую зону</button></div>
+            </div>
+          `).join('') : ''}
+          ${!state.imageHistory.loading && !items.length ? `<div class="empty-state">${escapeHtml(state.imageHistory.lastError || 'Пока нет сохранённых изображений.')}</div>` : ''}
+        </div>
+      </div>
+    `;
+  }
+
   return `
     <div class="inspector-card">
-      <div class="field-head" style="margin-bottom:12px;"><div class="section-title" style="margin:0;">Image Studio</div></div>
+      <div class="field-head" style="margin-bottom:12px;"><div class="section-title" style="margin:0;">Image Studio</div><button class="btn ghost small" data-action="show-image-library">История изображений</button></div>
       <div class="selector-stack">
         <div class="input-group">
           <label class="label">Семейство</label>
@@ -3044,6 +3114,142 @@ async function loadVideoHistory(options = {}) {
   }
 }
 
+async function loadImageHistory(options = {}) {
+  const { silent = false, selectId = '', keepSelection = true } = options;
+  if (!state.authToken) {
+    state.imageHistory.items = [];
+    state.imageHistory.selectedId = '';
+    state.imageHistory.selectedItem = null;
+    state.imageHistory.loaded = false;
+    state.imageHistory.loading = false;
+    state.imageHistory.lastError = '';
+    if (!silent) render();
+    return [];
+  }
+
+  state.imageHistory.loading = true;
+  state.imageHistory.lastError = '';
+  if (!silent) render();
+
+  try {
+    const qs = new URLSearchParams({ limit: String(state.imageHistory.limit || 24), offset: String(state.imageHistory.offset || 0) });
+    const res = await apiFetch(`/api/workspace/image/history?${qs.toString()}`);
+    const data = await res.json();
+    const items = Array.isArray(data.items) ? data.items : [];
+    state.imageHistory.items = items;
+    state.imageHistory.loaded = true;
+
+    const preferredId = String(selectId || '').trim() || (keepSelection ? String(state.imageHistory.selectedId || '').trim() : '');
+    if (preferredId && items.some((item) => item.id === preferredId)) {
+      state.imageHistory.selectedId = preferredId;
+      state.imageHistory.selectedItem = items.find((item) => item.id === preferredId) || null;
+    } else if (!keepSelection) {
+      state.imageHistory.selectedId = '';
+      state.imageHistory.selectedItem = null;
+    }
+
+    if (!silent) render();
+    return items;
+  } catch (e) {
+    state.imageHistory.lastError = String(e.message || e);
+    if (!silent) {
+      render();
+      toast('error', 'Не удалось загрузить image history', state.imageHistory.lastError);
+    }
+    return [];
+  } finally {
+    state.imageHistory.loading = false;
+    if (!silent) render();
+  }
+}
+
+async function loadImageHistoryItem(generationId, options = {}) {
+  const { silent = false, switchStudio = false } = options;
+  const generationIdText = String(generationId || '').trim();
+  if (!generationIdText) return null;
+  if (!state.authToken) {
+    if (!silent) toast('error', 'Нужна авторизация', 'Сначала войди через Telegram, чтобы открыть историю изображений.');
+    return null;
+  }
+
+  try {
+    const res = await apiFetch(`/api/workspace/image/history/${encodeURIComponent(generationIdText)}`);
+    const data = await res.json();
+    const item = data.item || null;
+    if (!item) throw new Error('Пустой ответ image history');
+
+    state.imageHistory.selectedId = item.id || generationIdText;
+    state.imageHistory.selectedItem = item;
+    const idx = state.imageHistory.items.findIndex((entry) => entry.id === item.id);
+    if (idx >= 0) state.imageHistory.items[idx] = { ...state.imageHistory.items[idx], ...item };
+    else state.imageHistory.items.unshift(item);
+
+    if (switchStudio) state.studio = 'image';
+    saveState();
+    render();
+    return item;
+  } catch (e) {
+    if (!silent) toast('error', 'Не удалось открыть изображение', String(e.message || e));
+    return null;
+  }
+}
+
+function applyImageHistoryItemToWorkspace(item) {
+  const selected = item || imageHistorySelectedItem();
+  if (!selected) {
+    toast('info', 'История пуста', 'Сначала дождись хотя бы одной сохранённой image-генерации.');
+    return;
+  }
+  const imageUrl = imageHistoryPreviewUrl(selected);
+  if (!imageUrl) {
+    toast('error', 'Нет ссылки на изображение', 'Для этого элемента ещё не найден доступный файл.');
+    return;
+  }
+  state.image.generationId = selected.id || '';
+  state.image.outputUrl = imageUrl;
+  state.image.downloadUrl = imageHistoryDownloadUrl(selected) || imageUrl;
+  state.image.prompt = selected.prompt || state.image.prompt;
+  state.image.errorText = selected.error_message || '';
+  state.image.statusText = selected.has_storage_file ? 'Открыто сохранённое изображение из библиотеки AstraBot.' : 'Открыто изображение из истории.';
+  state.image.panel = 'params';
+  state.studio = 'image';
+  saveState();
+  render();
+  toast('success', 'Изображение открыто', 'Картинка возвращена в рабочую зону.');
+}
+
+async function deleteImageHistoryItem(generationId) {
+  const generationIdText = String(generationId || '').trim();
+  if (!generationIdText) return;
+  if (!state.authToken) {
+    toast('error', 'Нужна авторизация', 'Сначала войди через Telegram, чтобы управлять историей изображений.');
+    return;
+  }
+  const target = state.imageHistory.items.find((item) => item.id === generationIdText) || state.imageHistory.selectedItem || null;
+  const title = trimText(target?.prompt || 'это изображение', 56);
+  if (!window.confirm(`Удалить из истории ${title}?`)) return;
+
+  try {
+    const res = await apiFetch(`/api/workspace/image/history/${encodeURIComponent(generationIdText)}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error('delete_failed');
+    state.imageHistory.items = state.imageHistory.items.filter((item) => item.id !== generationIdText);
+    if (state.imageHistory.selectedId === generationIdText) {
+      state.imageHistory.selectedId = '';
+      state.imageHistory.selectedItem = null;
+    }
+    if (String(state.image.generationId || '').trim() === generationIdText) {
+      clearImageRunState({ keepPrompt: true, keepFiles: true });
+      state.image.statusText = 'Изображение удалено из истории. Рабочая область очищена.';
+    }
+    saveState();
+    render();
+    toast('success', 'Удалено', 'Image-генерация убрана из истории.');
+  } catch (e) {
+    toast('error', 'Не удалось удалить', String(e.message || e));
+  }
+}
+
+
 async function loadHistoryItem(generationId, options = {}) {
   const { silent = false, switchStudio = false } = options;
   const generationIdText = String(generationId || '').trim();
@@ -3244,6 +3450,7 @@ async function runImage() {
   state.image.isGenerating = true;
   state.image.outputUrl = '';
   state.image.downloadUrl = '';
+  state.image.generationId = '';
   state.image.errorText = '';
   state.image.statusText = 'Задача отправлена. Жди итоговую картинку в рабочей зоне.';
   saveState();
@@ -3252,10 +3459,14 @@ async function runImage() {
   try {
     const res = await apiFetch('/api/workspace/image/run', { method: 'POST', body: form });
     const data = await res.json();
+    state.image.generationId = data.generation_id || '';
     state.image.outputUrl = data.image_url || data.output_url || '';
     state.image.downloadUrl = data.download_url || state.image.outputUrl;
     state.image.statusText = data.status_text || 'Изображение готово.';
     pushRun({ studio: 'Image', title: `${currentMeta().provider} · ${currentMeta().model}`, summary: prompt.slice(0, 120) });
+    if (state.authToken) {
+      await loadImageHistory({ silent: true, selectId: state.image.generationId, keepSelection: true });
+    }
     toast('success', 'Изображение готово', state.image.statusText || 'Результат появился в рабочей зоне.');
   } catch (e) {
     state.image.errorText = String(e.message || e);
@@ -3581,6 +3792,7 @@ function handleAction(action, dataset = {}) {
       if (state.studio === 'voice' && !state.voice.voices.length) loadVoices();
       if (state.studio === 'history' && state.authToken) loadVideoHistory({ silent: true, keepSelection: true });
       if (state.studio === 'video' && state.video.panel === 'library' && state.authToken) loadVideoHistory({ silent: true, keepSelection: true });
+      if (state.studio === 'image' && state.image.panel === 'library' && state.authToken) loadImageHistory({ silent: true, keepSelection: true });
       render();
       saveState();
       break;
@@ -3729,6 +3941,28 @@ function handleAction(action, dataset = {}) {
     case 'remove-upload-file':
       removeUploadFile(dataset.uploadId, dataset.index);
       break;
+    case 'show-image-library':
+      setImagePanel('library');
+      break;
+    case 'show-image-params':
+      setImagePanel('params');
+      break;
+    case 'refresh-image-history':
+      loadImageHistory();
+      break;
+    case 'preview-image-history-item':
+      loadImageHistoryItem(dataset.generationId, { switchStudio: state.studio !== 'image' }).then((item) => {
+        if (item && state.studio === 'image' && state.image.panel === 'library') render();
+      });
+      break;
+    case 'use-image-history-item':
+      loadImageHistoryItem(dataset.generationId, { silent: false }).then((item) => {
+        if (item) applyImageHistoryItemToWorkspace(item);
+      });
+      break;
+    case 'delete-image-history-item':
+      deleteImageHistoryItem(dataset.generationId);
+      break;
     case 'clear-image-run':
       clearImageRunState({ keepPrompt: true, keepFiles: true });
       render();
@@ -3843,6 +4077,7 @@ async function init() {
   if (state.authToken) {
     await loadMe();
     loadVideoHistory({ silent: true }).catch(() => {});
+    loadImageHistory({ silent: true }).catch(() => {});
   }
   if (state.voice.voices.length === 0) loadVoices();
   if (state.studio === 'library' || state.prompts.categories.length === 0) loadPromptCategories();
