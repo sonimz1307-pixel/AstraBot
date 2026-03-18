@@ -93,8 +93,13 @@ video: {
     posterStyle: DEFAULT_IMAGE_STATE.posterStyle || 'cinematic',
     stylePreset: DEFAULT_IMAGE_STATE.stylePreset || 'editorial',
     moodPreset: DEFAULT_IMAGE_STATE.moodPreset || 'premium',
+    upscalePreset: DEFAULT_IMAGE_STATE.upscalePreset || 'standard',
     outputUrl: '',
     downloadUrl: '',
+    beforeImageUrl: DEFAULT_IMAGE_STATE.beforeImageUrl || '',
+    afterImageUrl: DEFAULT_IMAGE_STATE.afterImageUrl || '',
+    compareMode: !!DEFAULT_IMAGE_STATE.compareMode,
+    comparePosition: Number.isFinite(Number(DEFAULT_IMAGE_STATE.comparePosition)) ? Number(DEFAULT_IMAGE_STATE.comparePosition) : 50,
     generationId: '',
     panel: DEFAULT_IMAGE_STATE.panel === 'library' ? 'library' : 'params',
     isGenerating: false,
@@ -287,6 +292,18 @@ const IMAGE_REGISTRY = {
         modes: {
           image_to_image: { name: 'Image → Image', fields: ['sourceImage', 'prompt', 'resolutionImage', 'aspectRatioImage', 'safetyLevel'] },
           text_to_image: { name: 'Text → Image', fields: ['prompt', 'resolutionImage', 'aspectRatioImageText', 'safetyLevel'] },
+        },
+      },
+    },
+  },
+  topaz_photo: {
+    name: 'Topaz Upscale Фото',
+    models: {
+      'topaz-photo': {
+        name: 'Topaz Photo AI',
+        backend: 'planned',
+        modes: {
+          upscale: { name: 'Upscale', fields: ['sourceImage', 'upscalePreset'] },
         },
       },
     },
@@ -1193,6 +1210,7 @@ function imageNeedsSourceImage() {
   if (state.image.provider === 'posters' && state.image.mode === 'photo_edit') return true;
   if (state.image.provider === 'photosession') return true;
   if (state.image.provider === 'two_images') return true;
+  if (state.image.provider === 'topaz_photo') return true;
   return false;
 }
 
@@ -1212,6 +1230,12 @@ function imageRunCost() {
       return 1;
     case 'two_images':
       return 1;
+    case 'topaz_photo': {
+      const preset = String(state.image.upscalePreset || 'standard');
+      if (preset === 'detail') return 3;
+      if (preset === 'max') return 4;
+      return 2;
+    }
     case 'posters':
       return 0;
     case 'text_to_image':
@@ -1349,7 +1373,50 @@ function imageHistorySelectedItem() {
 
 function imageHistoryUrl(item) {
   if (!item) return '';
-  return item.download_url || item.image_url || '';
+  return item.download_url || item.image_url || item.after_image_url || '';
+}
+
+function imageHistoryTitle(item) {
+  if (!item) return 'Изображение';
+  if (item.prompt) return trimText(item.prompt, 88);
+  if (item.provider === 'topaz_photo') {
+    const preset = String(item.preset_slug || 'standard').trim();
+    return `Topaz Upscale · ${preset}`;
+  }
+  return trimText(`${item.provider || 'image'} · ${item.model || ''}`, 88) || 'Изображение';
+}
+
+function imageCompareState(sourceItem = null) {
+  const item = sourceItem || (state.image.panel === 'library' ? imageHistorySelectedItem() : null);
+  const beforeUrl = item ? (item.before_image_url || item.source_image_url || '') : (state.image.beforeImageUrl || '');
+  const afterUrl = item ? (item.after_image_url || imageHistoryUrl(item) || '') : (state.image.afterImageUrl || state.image.outputUrl || '');
+  const compareMode = item ? !!item.compare_mode : !!state.image.compareMode;
+  return {
+    beforeUrl,
+    afterUrl,
+    compareMode: !!(compareMode && beforeUrl && afterUrl),
+  };
+}
+
+function renderImageCompareStage(beforeUrl, afterUrl) {
+  const comparePosition = Math.max(0, Math.min(100, Number(state.image.comparePosition || 50)));
+  return `
+    <div class="image-compare-shell">
+      <div class="image-compare" style="--compare-position:${comparePosition};">
+        <img class="image-compare-image image-compare-before" src="${escapeHtml(beforeUrl)}" alt="До апскейла">
+        <div class="image-compare-after-wrap">
+          <img class="image-compare-image image-compare-after" src="${escapeHtml(afterUrl)}" alt="После апскейла">
+        </div>
+        <div class="image-compare-divider" aria-hidden="true">
+          <span class="image-compare-handle">↔</span>
+        </div>
+        <input class="image-compare-range" id="image_compareRange" type="range" min="0" max="100" step="1" value="${comparePosition}" aria-label="Сравнение до и после">
+        <div class="image-compare-label before">До</div>
+        <div class="image-compare-label after">После</div>
+      </div>
+      <div class="help-text image-compare-help">Потяни ползунок по изображению, чтобы посмотреть до и после апскейла.</div>
+    </div>
+  `;
 }
 
 function historyStatusLabel(status) {
@@ -1874,6 +1941,10 @@ function clearVideoRunState({ keepPrompt = true } = {}) {
 function clearImageRunState({ keepPrompt = true, keepFiles = true } = {}) {
   state.image.outputUrl = '';
   state.image.downloadUrl = '';
+  state.image.beforeImageUrl = '';
+  state.image.afterImageUrl = '';
+  state.image.compareMode = false;
+  state.image.comparePosition = 50;
   state.image.generationId = '';
   state.image.errorText = '';
   state.image.isGenerating = false;
@@ -1979,14 +2050,24 @@ function renderImageWorkspace() {
   const source = getFile('image.sourceImage');
   const base = getFile('image.baseImage');
   const historyItem = state.image.panel === 'library' ? imageHistorySelectedItem() : null;
-  const activeUrl = historyItem ? imageHistoryUrl(historyItem) : state.image.outputUrl;
-  const activeDownloadUrl = historyItem ? imageHistoryUrl(historyItem) : (state.image.downloadUrl || state.image.outputUrl);
+  const compareState = imageCompareState(historyItem);
+  const activeUrl = historyItem ? imageHistoryUrl(historyItem) : (state.image.outputUrl || compareState.afterUrl);
+  const activeDownloadUrl = historyItem ? imageHistoryUrl(historyItem) : (state.image.downloadUrl || state.image.outputUrl || compareState.afterUrl);
   const assets = [
     mediaCard('Source image', source, false, false, 'contain'),
     mediaCard('Base image', base, false, false, 'contain'),
   ].filter(Boolean).join('');
 
-  const stageInner = activeUrl ? `
+  const stageInner = compareState.compareMode ? `
+    <div class="video-stage-result image-stage-result">
+      ${renderImageCompareStage(compareState.beforeUrl, compareState.afterUrl)}
+      <div class="actions compact-gap" style="justify-content:center; flex-wrap:wrap; margin-top:14px;">
+        <a class="btn primary" href="${escapeHtml(activeDownloadUrl || compareState.afterUrl)}" download>Скачать изображение</a>
+        ${historyItem ? `<button class="btn outline" data-action="use-image-history-item" data-generation-id="${escapeHtml(historyItem.id || '')}">В рабочую зону</button>` : `<button class="btn outline" data-action="clear-image-run">Очистить результат</button>`}
+      </div>
+      ${historyItem ? `<div class="help-text" style="margin-top:10px;">Открыт сохранённый результат из истории Image Studio.</div>` : ''}
+    </div>
+  ` : activeUrl ? `
     <div class="video-stage-result image-stage-result">
       <img class="preview-media image-preview-media" src="${escapeHtml(activeUrl)}" alt="Generated image">
       <div class="actions compact-gap" style="justify-content:center; flex-wrap:wrap; margin-top:14px;">
@@ -2432,7 +2513,7 @@ function renderImageInspector() {
             <div class="history-item compact ${state.imageHistory.selectedId === item.id ? 'active' : ''}">
               <button class="history-delete-btn" data-action="delete-image-history-item" data-generation-id="${escapeHtml(item.id || '')}" title="Удалить из истории" aria-label="Удалить из истории">×</button>
               ${previewUrl ? `<div style="margin-bottom:10px;"><img src="${escapeHtml(previewUrl)}" alt="preview" style="width:100%; height:132px; object-fit:cover; border-radius:14px; border:1px solid rgba(255,255,255,0.08);"></div>` : ''}
-              <div class="history-item-row"><strong>${escapeHtml(trimText(item.prompt || `${item.provider || 'image'} · ${item.model || ''}`, 88) || 'Изображение')}</strong><span class="badge ${historyStatusTone(item.status)}">${escapeHtml(historyStatusLabel(item.status))}</span></div>
+              <div class="history-item-row"><strong>${escapeHtml(imageHistoryTitle(item))}</strong><span class="badge ${historyStatusTone(item.status)}">${escapeHtml(historyStatusLabel(item.status))}</span></div>
               <small>${escapeHtml(formatDate(item.completed_at || item.created_at))}</small>
               <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;">
                 <button class="btn outline small" data-action="use-image-history-item" data-generation-id="${escapeHtml(item.id || '')}">В рабочую зону</button>
@@ -2487,6 +2568,16 @@ function renderImageModeFields() {
   if (imageNeedsBaseImage()) addUpload('Base image', 'image_baseImage', 'Главное фото или база, от которой нужно отталкиваться.');
   if (imageNeedsSourceImage() || (state.image.provider === 'posters' && state.image.mode === 'poster')) {
     addUpload('Source image', 'image_sourceImage', state.image.provider === 'posters' && state.image.mode === 'poster' ? 'Опционально: фото, которое нужно встроить в афишу.' : 'Основное изображение для редактирования или фотосессии.');
+  }
+
+  if (state.image.provider === 'topaz_photo') {
+    addFields(`${fieldSelect('Preset', 'image_upscalePreset', state.image.upscalePreset || 'standard', [['standard','Standard · 2 ток.'],['detail','Detail · 3 ток.'],['max','Max · 4 ток.']])}`);
+    parts.push(`
+      <div class="inspector-card">
+        <div class="help-text">Topaz Photo Upscale работает без prompt: просто загрузи фото, выбери пресет и получишь compare slider в рабочей зоне.</div>
+      </div>
+    `);
+    return parts.join('');
   }
 
   if (state.image.provider === 'posters' && state.image.mode === 'poster') {
@@ -3209,6 +3300,11 @@ function applyImageHistoryItemToWorkspace(item) {
   state.image.prompt = selected.prompt || state.image.prompt;
   state.image.outputUrl = imageUrl;
   state.image.downloadUrl = imageUrl;
+  state.image.beforeImageUrl = selected.before_image_url || selected.source_image_url || '';
+  state.image.afterImageUrl = selected.after_image_url || imageUrl;
+  state.image.compareMode = !!selected.compare_mode;
+  state.image.comparePosition = 50;
+  if (selected.preset_slug) state.image.upscalePreset = selected.preset_slug;
   state.image.errorText = selected.error_message || '';
   state.image.statusText = selected.has_storage_file ? 'Открыт сохранённый результат из библиотеки AstraBot.' : 'Открыт результат из истории.';
   state.image.panel = 'library';
@@ -3417,7 +3513,7 @@ async function runImage() {
   syncImageSelection();
   if (state.image.isGenerating) return;
   const prompt = String(state.image.prompt || '').trim();
-  if (!prompt) {
+  if (state.image.provider !== 'topaz_photo' && !prompt) {
     toast('error', 'Нужен prompt', 'Опиши, что нужно создать или изменить в изображении.');
     return;
   }
@@ -3441,6 +3537,7 @@ async function runImage() {
   form.append('poster_style', String(state.image.posterStyle || ''));
   form.append('style_preset', String(state.image.stylePreset || ''));
   form.append('mood_preset', String(state.image.moodPreset || ''));
+  form.append('preset_slug', String(state.image.upscalePreset || 'standard'));
 
   const source = getFile('image.sourceImage');
   const base = getFile('image.baseImage');
@@ -3450,6 +3547,10 @@ async function runImage() {
   state.image.isGenerating = true;
   state.image.outputUrl = '';
   state.image.downloadUrl = '';
+  state.image.beforeImageUrl = '';
+  state.image.afterImageUrl = '';
+  state.image.compareMode = false;
+  state.image.comparePosition = 50;
   state.image.generationId = '';
   state.image.errorText = '';
   state.image.statusText = 'Задача отправлена. Жди итоговую картинку в рабочей зоне.';
@@ -3462,6 +3563,11 @@ async function runImage() {
     state.image.generationId = data.generation_id || '';
     state.image.outputUrl = data.image_url || data.output_url || '';
     state.image.downloadUrl = data.download_url || state.image.outputUrl;
+    state.image.beforeImageUrl = data.before_image_url || '';
+    state.image.afterImageUrl = data.after_image_url || state.image.outputUrl;
+    state.image.compareMode = !!data.compare_mode;
+    state.image.comparePosition = 50;
+    if (data.preset_slug) state.image.upscalePreset = data.preset_slug;
     state.image.statusText = data.status_text || 'Изображение готово.';
     state.image.panel = 'params';
     pushRun({ studio: 'Image', title: `${currentMeta().provider} · ${currentMeta().model}`, summary: prompt.slice(0, 120) });
@@ -3753,6 +3859,8 @@ function handleInputChange(target) {
     case 'image_posterStyle': state.image.posterStyle = value; break;
     case 'image_stylePreset': state.image.stylePreset = value; break;
     case 'image_moodPreset': state.image.moodPreset = value; break;
+    case 'image_upscalePreset': state.image.upscalePreset = value; break;
+    case 'image_compareRange': state.image.comparePosition = Number(value || 50); break;
 
     case 'voice_voiceId': state.voice.voiceId = value; break;
     case 'voice_modelId': state.voice.modelId = value; break;
