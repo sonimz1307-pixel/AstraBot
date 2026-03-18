@@ -45,6 +45,8 @@ from songwriter_prompt import SONGWRITER_SYSTEM_PROMPT
 from queue_redis import enqueue_job
 from nano_banana import run_nano_banana
 from nano_banana_pro import handle_nano_banana_pro
+from topaz_image_replicate import TopazImageParams, run_topaz_image_upscale
+from topaz_pricing import get_photo_preset_settings, get_photo_preset_tokens
 from app.services.video_editor_service import (
     VIDEO_EDIT_QUEUE_NAME,
     MAX_AUDIO_CLIPS,
@@ -456,6 +458,8 @@ def _normalize_kling3_task(task: Dict[str, Any]) -> Dict[str, Any]:
 _WORKSPACE_VIDEO_GENERATIONS_TABLE = "workspace_video_generations"
 
 _WORKSPACE_IMAGE_GENERATIONS_TABLE = "workspace_image_generations"
+
+_WORKSPACE_IMAGE_OPTIONAL_COLUMNS = {"preset_slug", "source_image_url", "before_image_url", "after_image_url", "compare_mode"}
 
 _WORKSPACE_VIDEOS_BUCKET = (os.getenv("WORKSPACE_VIDEOS_BUCKET", "workspace-videos") or "workspace-videos").strip() or "workspace-videos"
 
@@ -1333,8 +1337,41 @@ def _upload_workspace_input_image(user_id: int, raw: bytes, *, filename: Optiona
     return upload_bytes_to_supabase(path, raw, _workspace_image_content_type(ext))
 
 
+def _strip_workspace_image_optional_columns(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    return {key: value for key, value in payload.items() if key not in _WORKSPACE_IMAGE_OPTIONAL_COLUMNS}
+
+
+async def _download_workspace_image_bytes(url: str) -> tuple[bytes, str]:
+    target_url = str(url or "").strip()
+    if not target_url:
+        raise RuntimeError("Missing image url")
+
+    timeout = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=60.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        resp = await client.get(target_url)
+        resp.raise_for_status()
+        raw = resp.content or b""
+        if not raw:
+            raise RuntimeError("Downloaded image is empty")
+        content_type = (resp.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+
+    ext = _workspace_detect_image_ext(raw, filename=urlparse(target_url).path, default="jpg")
+    if content_type == "image/png":
+        ext = "png"
+    elif content_type == "image/webp":
+        ext = "webp"
+    elif content_type in {"image/jpeg", "image/jpg"}:
+        ext = "jpg"
+    return raw, ext
+
+
 def _serialize_workspace_image_generation(row: Dict[str, Any]) -> Dict[str, Any]:
-    image_url = _first_nonempty(row.get("download_url"), row.get("image_url"))
+    image_url = _first_nonempty(row.get("download_url"), row.get("image_url"), row.get("after_image_url"))
+    before_image_url = _first_nonempty(row.get("before_image_url"), row.get("source_image_url"))
+    after_image_url = _first_nonempty(row.get("after_image_url"), image_url)
+    compare_mode = bool(row.get("compare_mode")) and bool(before_image_url and after_image_url)
     return {
         "id": row.get("id"),
         "user_id": row.get("user_id"),
@@ -1349,6 +1386,11 @@ def _serialize_workspace_image_generation(row: Dict[str, Any]) -> Dict[str, Any]
         "poster_style": row.get("poster_style"),
         "style_preset": row.get("style_preset"),
         "mood_preset": row.get("mood_preset"),
+        "preset_slug": row.get("preset_slug"),
+        "source_image_url": row.get("source_image_url"),
+        "before_image_url": before_image_url,
+        "after_image_url": after_image_url,
+        "compare_mode": compare_mode,
         "storage_path": row.get("storage_path"),
         "image_url": image_url,
         "download_url": image_url,
@@ -1371,7 +1413,13 @@ def _insert_workspace_image_generation(row: Dict[str, Any]) -> str:
     payload["id"] = generation_id
     if supabase is None:
         return generation_id
-    resp = supabase.table(_WORKSPACE_IMAGE_GENERATIONS_TABLE).insert(payload).execute()
+    try:
+        resp = supabase.table(_WORKSPACE_IMAGE_GENERATIONS_TABLE).insert(payload).execute()
+    except Exception:
+        fallback_payload = _strip_workspace_image_optional_columns(payload)
+        if fallback_payload == payload:
+            raise
+        resp = supabase.table(_WORKSPACE_IMAGE_GENERATIONS_TABLE).insert(fallback_payload).execute()
     data = getattr(resp, "data", None) or []
     if data and isinstance(data[0], dict):
         saved_id = data[0].get("id")
@@ -1383,7 +1431,14 @@ def _insert_workspace_image_generation(row: Dict[str, Any]) -> str:
 def _update_workspace_image_generation(generation_id: Optional[str], patch: Dict[str, Any]) -> None:
     if not generation_id or not patch or supabase is None:
         return
-    supabase.table(_WORKSPACE_IMAGE_GENERATIONS_TABLE).update(patch).eq("id", str(generation_id)).execute()
+    try:
+        supabase.table(_WORKSPACE_IMAGE_GENERATIONS_TABLE).update(patch).eq("id", str(generation_id)).execute()
+    except Exception:
+        fallback_patch = _strip_workspace_image_optional_columns(patch)
+        if fallback_patch == patch:
+            raise
+        if fallback_patch:
+            supabase.table(_WORKSPACE_IMAGE_GENERATIONS_TABLE).update(fallback_patch).eq("id", str(generation_id)).execute()
 
 
 def _mark_workspace_image_generation_failed(generation_id: Optional[str], error_message: str, error_code: Optional[str] = None) -> None:
@@ -1480,9 +1535,10 @@ def _build_workspace_image_prompt(
     return base
 
 
-def _workspace_image_cost(provider: str, mode: str) -> int:
+def _workspace_image_cost(provider: str, mode: str, preset_slug: str = "") -> int:
     provider_key = str(provider or "").strip().lower()
     mode_key = str(mode or "").strip().lower()
+    preset_key = str(preset_slug or "").strip().lower()
 
     if provider_key == "nano_banana":
         return 1
@@ -1492,12 +1548,17 @@ def _workspace_image_cost(provider: str, mode: str) -> int:
         return 1
     if provider_key == "two_images":
         return 1
+    if provider_key == "topaz_photo":
+        try:
+            return int(get_photo_preset_tokens(preset_key or "standard"))
+        except Exception:
+            return int(get_photo_preset_tokens("standard"))
     if provider_key == "posters":
         return 0
     if provider_key == "text_to_image":
         return 0
 
-    return 0
+    raise HTTPException(status_code=400, detail=f"Unsupported image provider: {provider_key} / {mode_key}")
 
 
 def _workspace_image_charge_reason(provider: str, mode: str) -> Optional[str]:
@@ -1512,6 +1573,8 @@ def _workspace_image_charge_reason(provider: str, mode: str) -> Optional[str]:
         return "photosession_generation"
     if provider_key == "two_images":
         return "two_photos"
+    if provider_key == "topaz_photo":
+        return "workspace_topaz_photo"
 
     return None
 
@@ -2227,9 +2290,7 @@ async def workspace_image_history(
     try:
         resp = (
             supabase.table(_WORKSPACE_IMAGE_GENERATIONS_TABLE)
-            .select(
-                "id,user_id,provider,model,mode,prompt,status,resolution,aspect_ratio,safety_level,poster_style,style_preset,mood_preset,storage_path,image_url,download_url,file_size_bytes,mime_type,error_code,error_message,origin,is_favorite,created_at,updated_at,completed_at"
-            )
+            .select("*")
             .eq("user_id", str(uid))
             .is_("deleted_at", "null")
             .order("created_at", desc=True)
@@ -2265,9 +2326,7 @@ async def workspace_image_history_item(
     try:
         resp = (
             supabase.table(_WORKSPACE_IMAGE_GENERATIONS_TABLE)
-            .select(
-                "id,user_id,provider,model,mode,prompt,status,resolution,aspect_ratio,safety_level,poster_style,style_preset,mood_preset,storage_path,image_url,download_url,file_size_bytes,mime_type,error_code,error_message,origin,is_favorite,created_at,updated_at,completed_at"
-            )
+            .select("*")
             .eq("id", generation_id_text)
             .eq("user_id", str(uid))
             .is_("deleted_at", "null")
@@ -2353,6 +2412,7 @@ async def workspace_image_run(
     poster_style = str(form.get("poster_style") or "").strip()
     style_preset = str(form.get("style_preset") or "").strip()
     mood_preset = str(form.get("mood_preset") or "").strip()
+    preset_slug = str(form.get("preset_slug") or "standard").strip().lower() or "standard"
 
     if not provider:
         raise HTTPException(status_code=400, detail="Missing provider")
@@ -2360,10 +2420,10 @@ async def workspace_image_run(
         raise HTTPException(status_code=400, detail="Missing model")
     if not mode:
         raise HTTPException(status_code=400, detail="Missing mode")
-    if not prompt:
+    if provider != "topaz_photo" and not prompt:
         raise HTTPException(status_code=400, detail="Missing prompt")
 
-    supported = {"nano_banana", "nano_banana_pro", "posters", "photosession", "two_images", "text_to_image"}
+    supported = {"nano_banana", "nano_banana_pro", "posters", "photosession", "two_images", "text_to_image", "topaz_photo"}
     if provider not in supported:
         raise HTTPException(status_code=400, detail=f"Provider {provider} is not supported in /image/run")
 
@@ -2382,6 +2442,8 @@ async def workspace_image_run(
         raise HTTPException(status_code=400, detail="Для нейро фотосессии нужен source image.")
     if provider == "two_images" and (not source_image or not base_image):
         raise HTTPException(status_code=400, detail="Для режима Картинка + Картинка нужны base image и source image.")
+    if provider == "topaz_photo" and not source_image:
+        raise HTTPException(status_code=400, detail="Для Topaz Photo Upscale нужен source image.")
 
     if provider in {"nano_banana_pro", "text_to_image"} and mode in {"text_to_image", "t2i"} and aspect_ratio == "match_input_image":
         aspect_ratio = "16:9"
@@ -2394,7 +2456,7 @@ async def workspace_image_run(
         style_preset=style_preset,
         mood_preset=mood_preset,
     )
-    if not run_prompt:
+    if provider != "topaz_photo" and not run_prompt:
         raise HTTPException(status_code=400, detail="Empty prompt")
 
     ensure_user_row(uid)
@@ -2402,7 +2464,7 @@ async def workspace_image_run(
         bal = float(get_balance(uid) or 0)
     except Exception:
         bal = 0
-    cost = int(_workspace_image_cost(provider, mode))
+    cost = int(_workspace_image_cost(provider, mode, preset_slug))
     if cost > 0 and bal < cost:
         raise HTTPException(status_code=402, detail=f"Недостаточно токенов. Нужно: {cost} ток.")
 
@@ -2423,6 +2485,7 @@ async def workspace_image_run(
             "poster_style": poster_style,
             "style_preset": style_preset,
             "mood_preset": mood_preset,
+            "preset_slug": preset_slug if provider == "topaz_photo" else None,
             "origin": "workspace_image",
         }
     )
@@ -2434,6 +2497,10 @@ async def workspace_image_run(
             except TypeError:
                 add_tokens(uid, -int(cost), reason=reason)
             charged = True
+
+        before_image_url: Optional[str] = None
+        after_image_url: Optional[str] = None
+        compare_mode = False
 
         if provider == "nano_banana":
             out_bytes, ext = await run_nano_banana(source_image, run_prompt, output_format="jpg")
@@ -2461,6 +2528,34 @@ async def workspace_image_run(
             out_bytes = await ark_text_to_image(run_prompt, size=_workspace_ark_size(resolution))
             ext = _workspace_detect_image_ext(out_bytes, default="jpg")
             engine = "modelark_seedream"
+        elif provider == "topaz_photo":
+            try:
+                preset_settings = get_photo_preset_settings(preset_slug)
+            except Exception:
+                raise HTTPException(status_code=400, detail=f"Unknown Topaz preset: {preset_slug}")
+
+            source_url = _upload_workspace_input_image(
+                uid,
+                source_image,
+                filename=getattr(source_upload, "filename", None),
+                slot=f"topaz_{preset_slug}",
+            )
+            topaz_result = await run_topaz_image_upscale(
+                TopazImageParams(
+                    image_url=source_url,
+                    enhance_model=str(preset_settings.get("enhance_model") or "Standard V2"),
+                    upscale_factor=str(preset_settings.get("upscale_factor") or "2x"),
+                    output_format=str(preset_settings.get("output_format") or "jpg"),
+                    subject_detection=str(preset_settings.get("subject_detection") or "Foreground"),
+                    face_enhancement=bool(preset_settings.get("face_enhancement")),
+                    face_enhancement_creativity=float(preset_settings.get("face_enhancement_creativity") or 0.0),
+                    face_enhancement_strength=float(preset_settings.get("face_enhancement_strength") or 0.8),
+                )
+            )
+            out_bytes, ext = await _download_workspace_image_bytes(topaz_result.output_url)
+            engine = "topaz_photo_replicate"
+            before_image_url = source_url
+            compare_mode = True
         else:
             input_image = source_image
             if provider == "two_images":
@@ -2479,6 +2574,7 @@ async def workspace_image_run(
 
         output_path = _workspace_image_output_path(uid, ext)
         image_url = upload_bytes_to_supabase(output_path, out_bytes, _workspace_image_content_type(ext))
+        after_image_url = image_url
         now_iso = _utc_now_iso()
         _update_workspace_image_generation(
             generation_id,
@@ -2491,6 +2587,11 @@ async def workspace_image_run(
                 "mime_type": _workspace_image_content_type(ext),
                 "error_code": None,
                 "error_message": None,
+                "preset_slug": preset_slug if provider == "topaz_photo" else None,
+                "source_image_url": before_image_url if provider == "topaz_photo" else None,
+                "before_image_url": before_image_url if provider == "topaz_photo" else None,
+                "after_image_url": after_image_url if provider == "topaz_photo" else image_url,
+                "compare_mode": compare_mode if provider == "topaz_photo" else False,
                 "updated_at": now_iso,
                 "completed_at": now_iso,
             },
@@ -2509,6 +2610,10 @@ async def workspace_image_run(
             "tokens_required": cost,
             "image_url": image_url,
             "download_url": image_url,
+            "before_image_url": before_image_url,
+            "after_image_url": after_image_url or image_url,
+            "compare_mode": bool(compare_mode and before_image_url and (after_image_url or image_url)),
+            "preset_slug": preset_slug if provider == "topaz_photo" else None,
             "status": "completed",
             "status_text": "Изображение готово.",
             "balance_tokens": balance_tokens,
