@@ -3887,8 +3887,13 @@ function handleInputChange(target) {
     'music_provider', 'music_mode', 'music_model',
     'voice_voiceId', 'voice_modelId', 'voice_outputFormat'
   ]);
+  const workspaceRerenderIds = new Set([
+    'image_compareRange'
+  ]);
   if (structuralRerenderIds.has(id) || target.tagName === 'SELECT' || target.type === 'checkbox') {
     render();
+  } else if (workspaceRerenderIds.has(id)) {
+    renderWorkspace();
   } else {
     renderHeader();
   }
