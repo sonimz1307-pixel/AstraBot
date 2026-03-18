@@ -1235,6 +1235,13 @@ class TTSGenerateIn(BaseModel):
     voice_id: str = Field(..., min_length=10, max_length=64)
     model_id: str = Field(default="eleven_multilingual_v2")
     output_format: str = Field(default="mp3_44100_128")
+    language_code: Optional[str] = Field(default=None, max_length=8)
+    manual_voice_settings: bool = False
+    stability: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    similarity_boost: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    style: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    speed: Optional[float] = Field(default=None, ge=0.7, le=1.2)
+    use_speaker_boost: Optional[bool] = None
 
 
 class SongwriterPayload(BaseModel):
@@ -2441,6 +2448,39 @@ async def workspace_video_job_status(
     }
 
 
+_WORKSPACE_TTS_ALLOWED_MODELS = {"eleven_multilingual_v2", "eleven_flash_v2_5", "eleven_turbo_v2_5"}
+_WORKSPACE_TTS_ALLOWED_FORMATS = {"mp3_44100_128", "mp3_44100_192"}
+_WORKSPACE_TTS_ALLOWED_LANGUAGE_CODES = {
+    "auto", "ru", "en", "uk", "de", "fr", "es", "it", "pt", "pl", "tr", "ar", "hi", "zh", "ja", "ko"
+}
+
+
+def _workspace_tts_language_code(value: Optional[str]) -> Optional[str]:
+    code = str(value or "").strip().lower()
+    if not code or code == "auto":
+        return None
+    if code not in _WORKSPACE_TTS_ALLOWED_LANGUAGE_CODES:
+        raise HTTPException(status_code=400, detail="language_code is not allowed")
+    return code
+
+
+def _workspace_tts_voice_settings(payload: TTSGenerateIn) -> Optional[Dict[str, Any]]:
+    if not bool(payload.manual_voice_settings):
+        return None
+    settings: Dict[str, Any] = {}
+    if payload.stability is not None:
+        settings["stability"] = float(payload.stability)
+    if payload.similarity_boost is not None:
+        settings["similarity_boost"] = float(payload.similarity_boost)
+    if payload.style is not None:
+        settings["style"] = float(payload.style)
+    if payload.speed is not None:
+        settings["speed"] = float(payload.speed)
+    if payload.use_speaker_boost is not None:
+        settings["use_speaker_boost"] = bool(payload.use_speaker_boost)
+    return settings or None
+
+
 @router.get("/tts/voices")
 async def workspace_tts_voices(user: Dict[str, Any] = Depends(get_current_workspace_user)) -> List[Dict[str, Any]]:
     return ALLOWED_VOICES
@@ -2451,6 +2491,13 @@ async def workspace_tts_voices(user: Dict[str, Any] = Depends(get_current_worksp
 async def workspace_tts_run(payload: TTSGenerateIn, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
     if payload.voice_id not in ALLOWED_VOICE_IDS:
         raise HTTPException(status_code=400, detail="voice_id is not allowed")
+    if payload.model_id not in _WORKSPACE_TTS_ALLOWED_MODELS:
+        raise HTTPException(status_code=400, detail="model_id is not allowed")
+    if payload.output_format not in _WORKSPACE_TTS_ALLOWED_FORMATS:
+        raise HTTPException(status_code=400, detail="output_format is not allowed")
+
+    language_code = _workspace_tts_language_code(payload.language_code)
+    voice_settings = _workspace_tts_voice_settings(payload)
 
     uid = int(user["telegram_user_id"])
     voice_meta = next((item for item in ALLOWED_VOICES if item.get("voice_id") == payload.voice_id), None) or {}
@@ -2477,6 +2524,8 @@ async def workspace_tts_run(payload: TTSGenerateIn, user: Dict[str, Any] = Depen
             voice_id=payload.voice_id,
             model_id=payload.model_id,
             output_format=payload.output_format,
+            language_code=language_code,
+            voice_settings=voice_settings,
         )
         ext = _workspace_voice_ext(payload.output_format)
         mime_type = _workspace_voice_content_type(payload.output_format)
@@ -2506,6 +2555,8 @@ async def workspace_tts_run(payload: TTSGenerateIn, user: Dict[str, Any] = Depen
             "voice_id": payload.voice_id,
             "voice_name": voice_name,
             "output_format": payload.output_format,
+            "language_code": language_code,
+            "voice_settings": voice_settings,
             "audio_url": audio_url,
             "download_url": audio_url,
             "status": "completed",
@@ -3012,8 +3063,22 @@ async def workspace_image_run(
 async def workspace_tts_generate(payload: TTSGenerateIn, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Response:
     if payload.voice_id not in ALLOWED_VOICE_IDS:
         raise HTTPException(status_code=400, detail="voice_id is not allowed")
+    if payload.model_id not in _WORKSPACE_TTS_ALLOWED_MODELS:
+        raise HTTPException(status_code=400, detail="model_id is not allowed")
+    if payload.output_format not in _WORKSPACE_TTS_ALLOWED_FORMATS:
+        raise HTTPException(status_code=400, detail="output_format is not allowed")
+
+    language_code = _workspace_tts_language_code(payload.language_code)
+    voice_settings = _workspace_tts_voice_settings(payload)
     tts = _get_tts()
-    audio_bytes = await tts.tts(text=payload.text, voice_id=payload.voice_id, model_id=payload.model_id, output_format=payload.output_format)
+    audio_bytes = await tts.tts(
+        text=payload.text,
+        voice_id=payload.voice_id,
+        model_id=payload.model_id,
+        output_format=payload.output_format,
+        language_code=language_code,
+        voice_settings=voice_settings,
+    )
     media_type = "audio/mpeg" if payload.output_format.startswith("mp3") else "application/octet-stream"
     return Response(content=audio_bytes, media_type=media_type)
 
