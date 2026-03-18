@@ -65,6 +65,11 @@ OPENAI_CHAT_MODEL = (os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini") or "gpt-4o-mi
 PROMPT_BUILDER_MODEL = (os.getenv("PROMPT_BUILDER_MODEL", "gpt-5.4") or "gpt-5.4").strip()
 _tts_client: ElevenTTS | None = None
 
+TOPAZ_PUBLIC_BUCKET = (os.getenv("TOPAZ_PUBLIC_BUCKET", "topaz-io") or "topaz-io").strip() or "topaz-io"
+TOPAZ_INPUT_PREFIX = (os.getenv("TOPAZ_INPUT_PREFIX", "inputs") or "inputs").strip().strip("/") or "inputs"
+TOPAZ_IMAGE_CREATE_RETRIES = max(1, int(os.getenv("TOPAZ_IMAGE_CREATE_RETRIES", "3") or "3"))
+TOPAZ_IMAGE_RETRY_DELAY_SEC = max(0.25, float(os.getenv("TOPAZ_IMAGE_RETRY_DELAY_SEC", "1.5") or "1.5"))
+
 
 CHAT_MODEL_LABEL_DEFAULT = "gpt-4o-mini"
 PROMPT_MODEL_LABEL = "gpt-5.4"
@@ -1337,6 +1342,87 @@ def _upload_workspace_input_image(user_id: int, raw: bytes, *, filename: Optiona
     return upload_bytes_to_supabase(path, raw, _workspace_image_content_type(ext))
 
 
+def _supabase_public_object_url(bucket: str, path: str) -> str:
+    base = (os.getenv("SUPABASE_URL", "") or "").strip().rstrip("/")
+    if not base:
+        raise RuntimeError("SUPABASE_URL is not set")
+    return f"{base}/storage/v1/object/public/{bucket}/{path.lstrip('/')}"
+
+
+async def _upload_workspace_topaz_input_image(user_id: int, raw: bytes, *, filename: Optional[str], slot: str) -> str:
+    supabase_url = (os.getenv("SUPABASE_URL", "") or "").strip().rstrip("/")
+    supabase_service_key = (os.getenv("SUPABASE_SERVICE_KEY", "") or "").strip()
+    if not supabase_url or not supabase_service_key:
+        raise RuntimeError("SUPABASE_URL / SUPABASE_SERVICE_KEY are not set")
+
+    ext = _workspace_detect_image_ext(raw, filename=filename)
+    safe_slot = re.sub(r"[^a-z0-9_-]+", "_", str(slot or "source").strip().lower()).strip("_") or "source"
+    dt = datetime.now(timezone.utc)
+    object_key = f"{TOPAZ_INPUT_PREFIX}/{int(user_id)}/{dt:%Y/%m/%d}/{safe_slot}_{uuid4().hex}.{ext}"
+
+    put_url = f"{supabase_url}/storage/v1/object/{TOPAZ_PUBLIC_BUCKET}/{object_key}"
+    headers = {
+        "authorization": f"Bearer {supabase_service_key}",
+        "apikey": supabase_service_key,
+        "x-upsert": "true",
+        "content-type": _workspace_image_content_type(ext),
+    }
+
+    timeout = httpx.Timeout(connect=20.0, read=120.0, write=120.0, pool=120.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.put(put_url, headers=headers, content=raw)
+        if resp.status_code >= 300:
+            raise RuntimeError(f"Topaz input upload failed: {resp.status_code} {resp.text[:400]}")
+
+    return _supabase_public_object_url(TOPAZ_PUBLIC_BUCKET, object_key)
+
+
+def _is_workspace_retryable_topaz_error(exc: Exception) -> bool:
+    message = str(exc or "").lower()
+    markers = (
+        "connection reset by peer",
+        "[errno 104]",
+        "server disconnected",
+        "remoteprotocolerror",
+        "read error",
+        "write error",
+        "transport error",
+        "temporarily unavailable",
+        "connection aborted",
+        "connection refused",
+        "connect timeout",
+        "read timeout",
+        "pool timeout",
+    )
+    if any(marker in message for marker in markers):
+        return True
+
+    cause = getattr(exc, "__cause__", None)
+    if cause and cause is not exc:
+        return _is_workspace_retryable_topaz_error(cause)
+
+    ctx = getattr(exc, "__context__", None)
+    if ctx and ctx is not exc:
+        return _is_workspace_retryable_topaz_error(ctx)
+
+    return False
+
+
+async def _run_workspace_topaz_with_retry(params: TopazImageParams):
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, TOPAZ_IMAGE_CREATE_RETRIES + 1):
+        try:
+            return await run_topaz_image_upscale(params)
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= TOPAZ_IMAGE_CREATE_RETRIES or not _is_workspace_retryable_topaz_error(exc):
+                raise
+            await asyncio.sleep(TOPAZ_IMAGE_RETRY_DELAY_SEC * attempt)
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Topaz upscale failed without exception")
+
+
 def _strip_workspace_image_optional_columns(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
@@ -2534,13 +2620,13 @@ async def workspace_image_run(
             except Exception:
                 raise HTTPException(status_code=400, detail=f"Unknown Topaz preset: {preset_slug}")
 
-            source_url = _upload_workspace_input_image(
+            source_url = await _upload_workspace_topaz_input_image(
                 uid,
                 source_image,
                 filename=getattr(source_upload, "filename", None),
                 slot=f"topaz_{preset_slug}",
             )
-            topaz_result = await run_topaz_image_upscale(
+            topaz_result = await _run_workspace_topaz_with_retry(
                 TopazImageParams(
                     image_url=source_url,
                     enhance_model=str(preset_settings.get("enhance_model") or "Standard V2"),
