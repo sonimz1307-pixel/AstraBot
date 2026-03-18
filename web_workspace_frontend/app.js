@@ -4,6 +4,8 @@ const DEFAULT_AUTH_TOKEN = localStorage.getItem('astrabot:authToken') || '';
 const DEFAULT_ME = JSON.parse(localStorage.getItem('astrabot:me') || 'null');
 const DEFAULT_VIDEO_STATE = JSON.parse(localStorage.getItem('astrabot:videoState') || '{}');
 const DEFAULT_IMAGE_STATE = JSON.parse(localStorage.getItem('astrabot:imageState') || '{}');
+const DEFAULT_VOICE_STATE = JSON.parse(localStorage.getItem('astrabot:voiceState') || '{}');
+const DEFAULT_VOICE_HISTORY_STATE = JSON.parse(localStorage.getItem('astrabot:voiceHistoryState') || '{}');
 const DEFAULT_VIDEO_EDITOR_STATE = JSON.parse(localStorage.getItem('astrabot:videoEditorState') || 'null');
 
 const runtime = {
@@ -117,12 +119,27 @@ video: {
     offset: 0,
   },
   voice: {
-    voiceId: '',
-    modelId: 'eleven_multilingual_v2',
-    outputFormat: 'mp3_44100_128',
-    text: '',
+    voiceId: DEFAULT_VOICE_STATE.voiceId || '',
+    modelId: DEFAULT_VOICE_STATE.modelId || 'eleven_multilingual_v2',
+    outputFormat: DEFAULT_VOICE_STATE.outputFormat || 'mp3_44100_128',
+    text: DEFAULT_VOICE_STATE.text || '',
     audioUrl: '',
+    downloadUrl: '',
+    generationId: DEFAULT_VOICE_STATE.generationId || '',
     voices: [],
+    isGenerating: false,
+    errorText: '',
+    lastGeneratedAt: DEFAULT_VOICE_STATE.lastGeneratedAt || '',
+  },
+  voiceHistory: {
+    items: [],
+    loading: false,
+    loaded: false,
+    selectedId: DEFAULT_VOICE_HISTORY_STATE.selectedId || '',
+    selectedItem: null,
+    lastError: '',
+    limit: 24,
+    offset: 0,
   },
   music: {
     provider: 'suno',
@@ -860,6 +877,17 @@ function saveState() {
     moodPreset: state.image.moodPreset,
     panel: state.image.panel,
   }));
+  localStorage.setItem('astrabot:voiceState', JSON.stringify({
+    voiceId: state.voice.voiceId,
+    modelId: state.voice.modelId,
+    outputFormat: state.voice.outputFormat,
+    text: state.voice.text,
+    generationId: state.voice.generationId || '',
+    lastGeneratedAt: state.voice.lastGeneratedAt || '',
+  }));
+  localStorage.setItem('astrabot:voiceHistoryState', JSON.stringify({
+    selectedId: state.voiceHistory.selectedId || '',
+  }));
 }
 
 function escapeHtml(str = '') {
@@ -899,6 +927,106 @@ function formatFileSize(bytes) {
   }
   const digits = size >= 100 || unitIndex === 0 ? 0 : size >= 10 ? 1 : 2;
   return `${size.toFixed(digits)} ${units[unitIndex]}`;
+}
+
+function selectedVoiceData() {
+  return (state.voice.voices || []).find((item) => item.voice_id === state.voice.voiceId) || null;
+}
+
+function voiceModelLabel(modelId = '') {
+  if (modelId === 'eleven_turbo_v2_5') return 'Eleven Turbo v2.5';
+  if (modelId === 'eleven_multilingual_v2') return 'Eleven Multilingual v2';
+  return modelId || '—';
+}
+
+function voiceOutputLabel(outputFormat = '') {
+  const map = {
+    mp3_44100_128: 'MP3 · 44.1 kHz · 128 kbps',
+    mp3_44100_192: 'MP3 · 44.1 kHz · 192 kbps',
+    pcm_44100: 'PCM · 44.1 kHz',
+  };
+  return map[outputFormat] || outputFormat || '—';
+}
+
+function voiceEstimatedDurationText() {
+  const chars = String(state.voice.text || '').trim().length;
+  if (!chars) return '0 сек';
+  const seconds = Math.max(1, Math.round(chars / 14));
+  return `~${seconds} сек`;
+}
+
+function voiceDownloadFilename() {
+  const voice = selectedVoiceData();
+  const voiceSlug = String(voice?.name || 'voice')
+    .toLowerCase()
+    .replace(/[^a-zа-я0-9]+/gi, '-')
+    .replace(/^-+|-+$/g, '') || 'voice';
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const ext = String(state.voice.outputFormat || '').startsWith('mp3') ? 'mp3' : 'wav';
+  return `${voiceSlug}-${stamp}.${ext}`;
+}
+
+function revokeVoiceAudioUrl() {
+  if (state.voice.audioUrl && String(state.voice.audioUrl).startsWith('blob:')) {
+    try { URL.revokeObjectURL(state.voice.audioUrl); } catch {}
+  }
+}
+
+function clearVoiceRunState({ keepText = true } = {}) {
+  revokeVoiceAudioUrl();
+  state.voice.audioUrl = '';
+  state.voice.downloadUrl = '';
+  state.voice.generationId = '';
+  state.voice.errorText = '';
+  state.voice.isGenerating = false;
+  state.voice.lastGeneratedAt = '';
+  if (!keepText) state.voice.text = '';
+  saveState();
+}
+
+function voiceHistorySelectedItem() {
+  const items = Array.isArray(state.voiceHistory?.items) ? state.voiceHistory.items : [];
+  const selectedId = String(state.voiceHistory?.selectedId || '').trim();
+  if (state.voiceHistory?.selectedItem && state.voiceHistory.selectedItem.id) {
+    return state.voiceHistory.selectedItem;
+  }
+  if (selectedId) {
+    const found = items.find((item) => String(item?.id || '') === selectedId);
+    if (found) return found;
+  }
+  return items[0] || null;
+}
+
+function voiceHistoryAudioUrl(item) {
+  if (!item) return '';
+  const candidates = [item.audio_url, item.download_url].filter(Boolean);
+  return candidates[0] || '';
+}
+
+function voiceHistoryDownloadUrl(item) {
+  if (!item) return '';
+  const candidates = [item.download_url, item.audio_url].filter(Boolean);
+  return candidates[0] || '';
+}
+
+function applyVoiceHistoryItemToWorkspace(item, options = {}) {
+  if (!item) return;
+  const { silent = false } = options;
+  revokeVoiceAudioUrl();
+  state.voiceHistory.selectedId = item.id || '';
+  state.voiceHistory.selectedItem = item;
+  state.voice.generationId = item.id || '';
+  state.voice.audioUrl = voiceHistoryAudioUrl(item);
+  state.voice.downloadUrl = voiceHistoryDownloadUrl(item);
+  state.voice.errorText = item.error_message || '';
+  state.voice.lastGeneratedAt = item.completed_at || item.created_at || '';
+  if (item.voice_id) state.voice.voiceId = item.voice_id;
+  if (item.model) state.voice.modelId = item.model;
+  if (item.output_format) state.voice.outputFormat = item.output_format;
+  if (item.text) state.voice.text = item.text;
+  saveState();
+  render();
+  if (!silent) toast('success', 'Открыто из истории', 'Сохранённая озвучка загружена в рабочую область.');
 }
 
 function historySelectedItem() {
@@ -1419,6 +1547,91 @@ function renderImageCompareStage(beforeUrl, afterUrl) {
   `;
 }
 
+function setImageComparePosition(nextValue, { commit = false } = {}) {
+  const normalized = Math.max(0, Math.min(100, Number(nextValue || 0)));
+  state.image.comparePosition = normalized;
+  syncImageCompareUi();
+  if (commit) saveState();
+}
+
+function syncImageCompareUi() {
+  const compare = document.querySelector('.image-compare');
+  if (!compare) return;
+  const normalized = Math.max(0, Math.min(100, Number(state.image.comparePosition || 50)));
+  compare.style.setProperty('--compare-position', String(normalized));
+  const range = compare.querySelector('#image_compareRange');
+  if (range) range.value = String(normalized);
+}
+
+function attachImageCompareInteractions() {
+  const compare = document.querySelector('.image-compare');
+  if (!compare || compare.dataset.dragReady === '1') return;
+  compare.dataset.dragReady = '1';
+
+  const range = compare.querySelector('#image_compareRange');
+  const handle = compare.querySelector('.image-compare-handle');
+  let dragging = false;
+  let activePointerId = null;
+
+  const updateFromClientX = (clientX, commit = false) => {
+    const rect = compare.getBoundingClientRect();
+    if (!rect.width) return;
+    const ratio = ((clientX - rect.left) / rect.width) * 100;
+    setImageComparePosition(ratio, { commit });
+  };
+
+  const stopDragging = (commit = true) => {
+    if (!dragging) return;
+    dragging = false;
+    activePointerId = null;
+    compare.classList.remove('is-dragging');
+    if (commit) saveState();
+  };
+
+  compare.addEventListener('pointerdown', (event) => {
+    dragging = true;
+    activePointerId = event.pointerId;
+    compare.classList.add('is-dragging');
+    if (compare.setPointerCapture) {
+      try { compare.setPointerCapture(event.pointerId); } catch (_) {}
+    }
+    updateFromClientX(event.clientX, false);
+    event.preventDefault();
+  });
+
+  compare.addEventListener('pointermove', (event) => {
+    if (!dragging) return;
+    if (activePointerId !== null && event.pointerId !== activePointerId) return;
+    updateFromClientX(event.clientX, false);
+    event.preventDefault();
+  });
+
+  compare.addEventListener('pointerup', (event) => {
+    if (activePointerId !== null && event.pointerId !== activePointerId) return;
+    updateFromClientX(event.clientX, false);
+    stopDragging(true);
+  });
+
+  compare.addEventListener('pointercancel', () => stopDragging(true));
+  compare.addEventListener('lostpointercapture', () => stopDragging(true));
+  compare.addEventListener('dragstart', (event) => event.preventDefault());
+
+  if (range) {
+    range.addEventListener('input', (event) => {
+      setImageComparePosition(event.target.value, { commit: false });
+    });
+    range.addEventListener('change', (event) => {
+      setImageComparePosition(event.target.value, { commit: true });
+    });
+  }
+
+  if (handle) {
+    handle.addEventListener('dragstart', (event) => event.preventDefault());
+  }
+
+  syncImageCompareUi();
+}
+
 function historyStatusLabel(status) {
   const value = String(status || '').toLowerCase();
   if (['completed', 'success', 'succeeded', 'done', 'finished'].includes(value)) return 'Готово';
@@ -1659,6 +1872,7 @@ function renderWorkspace() {
     case 'profile': el.innerHTML = renderProfileWorkspace(); break;
     default: el.innerHTML = `<div class="placeholder-stage"><div class="empty-copy"><strong>Студия в разработке</strong><div>Для этой студии пока нет workspace-renderer.</div></div></div>`;
   }
+  attachImageCompareInteractions();
 }
 
 function renderInspector() {
@@ -2119,32 +2333,155 @@ function renderImageWorkspace() {
 }
 
 function renderVoiceWorkspace() {
-  const voiceName = (state.voice.voices.find(v => v.voice_id === state.voice.voiceId) || {}).name || '—';
+  const selectedVoice = selectedVoiceData();
+  const historyItem = voiceHistorySelectedItem();
+  const activeAudioUrl = state.voice.audioUrl || voiceHistoryAudioUrl(historyItem);
+  const activeDownloadUrl = state.voice.downloadUrl || state.voice.audioUrl || voiceHistoryDownloadUrl(historyItem);
+  const voiceName = selectedVoice?.name || historyItem?.voice_name || 'Голос не выбран';
+  const textLength = String(state.voice.text || '').length;
+  const hasAudio = !!activeAudioUrl;
+
   return `
-    <div class="workspace-grid">
-      <div class="workspace-main scroll">
-        <div class="placeholder-stage">
-          ${state.voice.audioUrl ? `
-            <div style="width:min(560px, 100%); display:grid; gap:16px;">
-              <strong style="font-size:22px;">${escapeHtml(voiceName)}</strong>
-              <audio controls src="${escapeHtml(state.voice.audioUrl)}"></audio>
-              <div class="muted">Аудио уже готово. Его можно использовать как voice-over для видео или сохранить в проект.</div>
+    <div class="workspace-grid single voice-workspace-grid">
+      <div class="workspace-main scroll voice-workspace-main">
+        <div class="voice-editor-card">
+          <div class="voice-editor-head">
+            <div>
+              <h3>Текст для озвучки</h3>
+              <p>Главная рабочая зона Voice Studio: пишешь текст, запускаешь генерацию и сразу получаешь готовый звук ниже.</p>
+            </div>
+            <div class="voice-toolbar-meta">
+              <span class="badge muted">${textLength} симв.</span>
+              <span class="badge muted">${escapeHtml(voiceEstimatedDurationText())}</span>
+              <span class="badge ${selectedVoice || historyItem ? 'ok' : 'warn'}">${escapeHtml(voiceName)}</span>
+            </div>
+          </div>
+
+          <textarea id="voice_text" class="voice-textarea" placeholder="Вставь текст для озвучки. Например: приветствие, дикторский текст для рекламы, voice-over для видео, CTA, сценарий ролика...">${escapeHtml(state.voice.text || '')}</textarea>
+
+          <div class="voice-toolbar">
+            <div class="help-text">Выбранный голос: <strong>${escapeHtml(voiceName)}</strong> · ${escapeHtml(voiceModelLabel(state.voice.modelId))} · ${escapeHtml(voiceOutputLabel(state.voice.outputFormat))}</div>
+            <div class="actions compact-gap" style="flex-wrap:wrap;">
+              <button class="btn outline" data-action="clear-voice-stage">Очистить результат</button>
+              <button class="btn primary ${state.voice.isGenerating ? 'loading' : ''}" data-action="run-voice" ${state.voice.isGenerating ? 'disabled' : ''}>${state.voice.isGenerating ? 'Генерация...' : 'Сгенерировать звук'}</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="voice-result-card">
+          <div class="field-head" style="margin-bottom:14px; align-items:flex-start; gap:12px;">
+            <div>
+              <h4 style="margin:0 0 6px;">Результат</h4>
+              <div class="help-text">Здесь появляется готовый audio-файл с прослушиванием и скачиванием.</div>
+            </div>
+            ${state.voice.lastGeneratedAt ? `<span class="badge muted">${escapeHtml(formatDate(state.voice.lastGeneratedAt))}</span>` : ''}
+          </div>
+
+          ${hasAudio ? `
+            <div class="voice-result-shell">
+              <div class="voice-result-summary">
+                <strong>${escapeHtml(voiceName)}</strong>
+                <small>${escapeHtml(voiceModelLabel(state.voice.modelId))}<br>${escapeHtml(voiceOutputLabel(state.voice.outputFormat))}</small>
+              </div>
+              <audio class="voice-audio-player" controls src="${escapeHtml(activeAudioUrl)}"></audio>
+              <div class="actions compact-gap" style="flex-wrap:wrap;">
+                <a class="btn primary" href="${escapeHtml(activeDownloadUrl || activeAudioUrl)}" download="${escapeHtml(voiceDownloadFilename())}">Скачать звук</a>
+                <button class="btn ghost" data-action="goto-chat">В ChatGPT</button>
+              </div>
+              ${historyItem ? `<div class="help-text">Открыта сохранённая озвучка из истории Voice Studio.</div>` : ''}
             </div>
           ` : `
-            <div class="empty-copy"><strong>Voice workspace</strong><div>Выбери голос справа, вставь текст и получай MP3 прямо в центр рабочей зоны.</div></div>
+            <div class="voice-result-empty">
+              <strong>${state.voice.isGenerating ? 'Генерирую аудио...' : 'Пока результата нет'}</strong>
+              <div>${state.voice.isGenerating ? 'Как только ElevenLabs вернёт файл, здесь появится плеер и кнопка скачивания.' : 'Напиши текст, выбери голос справа и запусти генерацию.'}</div>
+            </div>
           `}
+
+          ${state.voice.errorText ? `<div class="planner-card" style="margin-top:16px;"><h4>Ошибка</h4><div class="help-text">${escapeHtml(state.voice.errorText)}</div></div>` : ''}
         </div>
       </div>
-      <div class="workspace-side scroll">
-        <div class="result-card">
-          <h4>Текст</h4>
-          <small>${escapeHtml(state.voice.text || 'Пока текста нет')}</small>
-        </div>
-        <div class="result-card">
-          <h4>Параметры</h4>
-          <small>Voice: ${escapeHtml(voiceName)}<br>Model: ${escapeHtml(state.voice.modelId)}<br>Format: ${escapeHtml(state.voice.outputFormat)}</small>
+    </div>
+  `;
+}
+
+function renderVoiceInspector() {
+  const selectedVoice = selectedVoiceData();
+  const voices = Array.isArray(state.voice.voices) ? state.voice.voices : [];
+  const historyItems = Array.isArray(state.voiceHistory.items) ? state.voiceHistory.items : [];
+  const selectedHistoryId = String(state.voiceHistory.selectedId || '').trim();
+  const modelOptions = [
+    ['eleven_multilingual_v2', 'Eleven Multilingual v2'],
+    ['eleven_turbo_v2_5', 'Eleven Turbo v2.5'],
+  ];
+  const outputOptions = [
+    ['mp3_44100_128', 'MP3 · 128 kbps'],
+    ['mp3_44100_192', 'MP3 · 192 kbps'],
+  ];
+
+  return `
+    <div class="inspector-card">
+      <div class="field-head" style="margin-bottom:12px; align-items:flex-start; gap:12px;">
+        <div class="section-title" style="margin:0;">Voice Studio</div>
+        <div class="actions compact-gap" style="flex-wrap:wrap;">
+          <button class="btn ghost small" data-action="load-voices">Голоса</button>
+          <button class="btn ghost small" data-action="refresh-voice-history">История</button>
         </div>
       </div>
+      <div class="help-text">Правая панель Voice Studio отвечает за выбор голоса и доступ к сохранённой истории озвучек.</div>
+    </div>
+
+    <div class="inspector-card voice-side-stack">
+      <div class="field-head" style="margin-bottom:12px;">
+        <h4 style="margin:0;">Выбор голоса</h4>
+        <span class="badge muted">${voices.length}</span>
+      </div>
+      <div class="voice-voice-grid">
+        ${voices.length ? voices.map((voice) => `
+          <button class="voice-card-btn ${state.voice.voiceId === voice.voice_id ? 'active' : ''}" data-action="select-voice-card" data-voice-id="${escapeHtml(voice.voice_id)}">
+            <strong>${escapeHtml(voice.name || 'Voice')}</strong>
+            <span>${escapeHtml(state.voice.voiceId === voice.voice_id ? 'Выбран' : 'Нажми для выбора')}</span>
+          </button>
+        `).join('') : `<div class="empty-state">Голоса ещё не загружены. Нажми «Голоса».</div>`}
+      </div>
+    </div>
+
+    <div class="inspector-card">
+      <div class="field-grid two">
+        ${fieldSelect('Модель', 'voice_modelId', state.voice.modelId, modelOptions)}
+        ${fieldSelect('Формат', 'voice_outputFormat', state.voice.outputFormat, outputOptions)}
+      </div>
+      <div class="help-text" style="margin-top:12px;">Текущий голос: <strong>${escapeHtml(selectedVoice?.name || 'не выбран')}</strong></div>
+    </div>
+
+    <div class="inspector-card voice-history-panel">
+      <div class="field-head" style="margin-bottom:12px;">
+        <h4 style="margin:0;">История озвучек</h4>
+        <span class="badge muted">${historyItems.length}</span>
+      </div>
+      ${state.voiceHistory.loading ? `<div class="help-text">Загружаю историю...</div>` : historyItems.length ? `
+        <div class="voice-history-list">
+          ${historyItems.map((item) => `
+            <div class="history-item compact ${selectedHistoryId === String(item.id || '') ? 'active' : ''}">
+              <div class="history-item-row">
+                <strong>${escapeHtml(item.voice_name || 'Voice')} · ${escapeHtml(voiceOutputLabel(item.output_format || ''))}</strong>
+                <span class="badge ${String(item.status || '') === 'completed' ? 'ok' : 'warn'}">${escapeHtml(item.status || '—')}</span>
+              </div>
+              <small>${escapeHtml(trimText(item.text || '', 120))}</small>
+              <div class="help-text" style="margin-top:8px;">${escapeHtml(formatDate(item.completed_at || item.created_at || ''))}</div>
+              <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;">
+                <button class="btn ghost small" data-action="use-voice-history-item" data-generation-id="${escapeHtml(item.id || '')}">Открыть</button>
+                <button class="btn ghost small danger" data-action="delete-voice-history-item" data-generation-id="${escapeHtml(item.id || '')}">Удалить</button>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      ` : `<div class="voice-history-empty">Пока нет сохранённых озвучек. После первой генерации они появятся здесь.</div>`}
+      ${state.voiceHistory.lastError ? `<div class="help-text" style="margin-top:10px; color:#ff9b9b;">${escapeHtml(state.voiceHistory.lastError)}</div>` : ''}
+    </div>
+
+    <div class="inspector-card">
+      <button class="btn primary full ${state.voice.isGenerating ? 'loading' : ''}" data-action="run-voice" ${state.voice.isGenerating ? 'disabled' : ''}>${state.voice.isGenerating ? 'Генерация...' : 'Сгенерировать звук'}</button>
+      <div class="help-text" style="margin-top:10px;">Введённый текст из центра отправится в TTS, сохранится в истории и вернётся готовым аудио-файлом прямо в рабочую область.</div>
     </div>
   `;
 }
@@ -3025,10 +3362,99 @@ async function loadVoices() {
     const res = await apiFetch('/api/workspace/tts/voices');
     const data = await res.json();
     state.voice.voices = Array.isArray(data) ? data : [];
-    if (!state.voice.voiceId && state.voice.voices[0]) state.voice.voiceId = state.voice.voices[0].voice_id;
+    const hasCurrentVoice = state.voice.voices.some((item) => item.voice_id === state.voice.voiceId);
+    if ((!state.voice.voiceId || !hasCurrentVoice) && state.voice.voices[0]) state.voice.voiceId = state.voice.voices[0].voice_id;
+    saveState();
     render();
   } catch (e) {
     toast('error', 'Не удалось загрузить voices', String(e.message || e));
+  }
+}
+
+async function loadVoiceHistory(options = {}) {
+  const { silent = false, keepSelection = true, selectId = '' } = options;
+  if (!requireAuth()) return;
+  state.voiceHistory.loading = true;
+  state.voiceHistory.lastError = '';
+  if (!silent) render();
+  try {
+    const res = await apiFetch(`/api/workspace/tts/history?limit=${encodeURIComponent(state.voiceHistory.limit || 24)}&offset=0`);
+    const data = await res.json();
+    const items = Array.isArray(data.items) ? data.items : [];
+    state.voiceHistory.items = items;
+    state.voiceHistory.loaded = true;
+
+    const preferredId = String(selectId || (keepSelection ? state.voiceHistory.selectedId : '') || '').trim();
+    let selected = preferredId ? items.find((item) => String(item.id || '') === preferredId) : null;
+    if (!selected && items[0]) selected = items[0];
+
+    state.voiceHistory.selectedId = selected?.id || '';
+    state.voiceHistory.selectedItem = selected || null;
+
+    if (selected && (!state.voice.audioUrl || selectId || String(state.voice.generationId || '') !== String(selected.id || ''))) {
+      applyVoiceHistoryItemToWorkspace(selected, { silent: true });
+      return;
+    }
+
+    saveState();
+    if (!silent) render();
+  } catch (e) {
+    state.voiceHistory.lastError = String(e.message || e);
+    if (!silent) {
+      render();
+      toast('error', 'Не удалось загрузить историю voice', state.voiceHistory.lastError);
+    }
+  } finally {
+    state.voiceHistory.loading = false;
+    if (!silent) render();
+  }
+}
+
+async function loadVoiceHistoryItem(generationId, options = {}) {
+  const { silent = false } = options;
+  const generationIdText = String(generationId || '').trim();
+  if (!generationIdText) return null;
+  try {
+    const res = await apiFetch(`/api/workspace/tts/history/${encodeURIComponent(generationIdText)}`);
+    const data = await res.json();
+    const item = data.item || null;
+    if (!item) return null;
+    const idx = state.voiceHistory.items.findIndex((entry) => String(entry.id || '') === generationIdText);
+    if (idx >= 0) state.voiceHistory.items[idx] = item;
+    else state.voiceHistory.items.unshift(item);
+    state.voiceHistory.selectedId = item.id || generationIdText;
+    state.voiceHistory.selectedItem = item;
+    saveState();
+    if (!silent) render();
+    return item;
+  } catch (e) {
+    if (!silent) toast('error', 'Не удалось открыть voice item', String(e.message || e));
+    return null;
+  }
+}
+
+async function deleteVoiceHistoryItem(generationId) {
+  const generationIdText = String(generationId || '').trim();
+  if (!generationIdText) return;
+  try {
+    await apiFetch(`/api/workspace/tts/history/${encodeURIComponent(generationIdText)}`, { method: 'DELETE' });
+    state.voiceHistory.items = state.voiceHistory.items.filter((item) => String(item.id || '') !== generationIdText);
+    if (String(state.voiceHistory.selectedId || '') === generationIdText) {
+      state.voiceHistory.selectedId = '';
+      state.voiceHistory.selectedItem = null;
+    }
+    if (String(state.voice.generationId || '') === generationIdText) {
+      clearVoiceRunState({ keepText: true });
+    }
+    if (!state.voice.audioUrl && state.voiceHistory.items[0]) {
+      applyVoiceHistoryItemToWorkspace(state.voiceHistory.items[0], { silent: true });
+      return;
+    }
+    saveState();
+    render();
+    toast('success', 'Удалено', 'Озвучка удалена из истории.');
+  } catch (e) {
+    toast('error', 'Не удалось удалить', String(e.message || e));
   }
 }
 
@@ -3633,7 +4059,7 @@ async function pollVideoTask(options = {}) {
 }
 
 async function runVoice() {
-
+  if (!requireAuth()) return;
   if (!state.voice.text.trim()) {
     toast('error', 'Нужен текст', 'Введи текст для озвучки.');
     return;
@@ -3642,8 +4068,11 @@ async function runVoice() {
     toast('error', 'Нужен голос', 'Сначала загрузи и выбери voice.');
     return;
   }
+  state.voice.isGenerating = true;
+  state.voice.errorText = '';
+  render();
   try {
-    const res = await apiFetch('/api/workspace/tts/generate', {
+    const res = await apiFetch('/api/workspace/tts/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -3653,12 +4082,24 @@ async function runVoice() {
         output_format: state.voice.outputFormat,
       }),
     });
-    const blob = await res.blob();
-    state.voice.audioUrl = URL.createObjectURL(blob);
+    const data = await res.json();
+    revokeVoiceAudioUrl();
+    state.voice.audioUrl = data.audio_url || '';
+    state.voice.downloadUrl = data.download_url || data.audio_url || '';
+    state.voice.generationId = data.generation_id || '';
+    state.voice.lastGeneratedAt = data.completed_at || data.created_at || new Date().toISOString();
+    state.voice.isGenerating = false;
+    state.voice.errorText = '';
     pushRun({ studio: 'Voice', title: 'TTS generate', summary: state.voice.text.slice(0, 100) });
-    toast('success', 'Аудио готово', 'MP3 успешно сгенерирован.');
+    saveState();
+    loadVoiceHistory({ silent: true, keepSelection: true, selectId: state.voice.generationId }).catch(() => {});
+    toast('success', 'Аудио готово', 'Файл сгенерирован и сохранён в истории.');
     render();
   } catch (e) {
+    state.voice.isGenerating = false;
+    state.voice.errorText = String(e.message || e);
+    saveState();
+    render();
     toast('error', 'TTS error', String(e.message || e));
   }
 }
@@ -3720,8 +4161,7 @@ function resetCurrentStudio() {
       clearImageRunState({ keepPrompt: false, keepFiles: false });
       break;
     case 'voice':
-      state.voice.text = '';
-      state.voice.audioUrl = '';
+      clearVoiceRunState({ keepText: false });
       break;
     case 'music':
       state.music.text = '';
@@ -3860,7 +4300,9 @@ function handleInputChange(target) {
     case 'image_stylePreset': state.image.stylePreset = value; break;
     case 'image_moodPreset': state.image.moodPreset = value; break;
     case 'image_upscalePreset': state.image.upscalePreset = value; break;
-    case 'image_compareRange': state.image.comparePosition = Number(value || 50); break;
+    case 'image_compareRange':
+      setImageComparePosition(value, { commit: false });
+      return;
 
     case 'voice_voiceId': state.voice.voiceId = value; break;
     case 'voice_modelId': state.voice.modelId = value; break;
@@ -3887,9 +4329,7 @@ function handleInputChange(target) {
     'music_provider', 'music_mode', 'music_model',
     'voice_voiceId', 'voice_modelId', 'voice_outputFormat'
   ]);
-  const workspaceRerenderIds = new Set([
-    'image_compareRange'
-  ]);
+  const workspaceRerenderIds = new Set([]);
   if (structuralRerenderIds.has(id) || target.tagName === 'SELECT' || target.type === 'checkbox') {
     render();
   } else if (workspaceRerenderIds.has(id)) {
@@ -3907,6 +4347,7 @@ function handleAction(action, dataset = {}) {
       if (state.studio === 'video' && previousStudio !== 'video') state.video.panel = 'params';
       if (state.studio === 'library' && !state.prompts.categories.length) loadPromptCategories();
       if (state.studio === 'voice' && !state.voice.voices.length) loadVoices();
+      if (state.studio === 'voice' && state.authToken) loadVoiceHistory({ silent: true, keepSelection: true }).catch(() => {});
       if (state.studio === 'history' && state.authToken) loadVideoHistory({ silent: true, keepSelection: true });
       if (state.studio === 'video' && state.video.panel === 'library' && state.authToken) loadVideoHistory({ silent: true, keepSelection: true });
       if (state.studio === 'image' && state.image.panel === 'library' && state.authToken) loadImageHistory({ silent: true, keepSelection: true });
@@ -4083,6 +4524,24 @@ function handleAction(action, dataset = {}) {
       runImage();
       break;
     case 'load-voices': loadVoices(); break;
+    case 'refresh-voice-history': loadVoiceHistory(); break;
+    case 'use-voice-history-item':
+      loadVoiceHistoryItem(dataset.generationId, { silent: false }).then((item) => {
+        if (item) applyVoiceHistoryItemToWorkspace(item);
+      });
+      break;
+    case 'delete-voice-history-item':
+      deleteVoiceHistoryItem(dataset.generationId);
+      break;
+    case 'select-voice-card':
+      state.voice.voiceId = dataset.voiceId || '';
+      saveState();
+      render();
+      break;
+    case 'clear-voice-stage':
+      clearVoiceRunState({ keepText: true });
+      render();
+      break;
     case 'run-voice': runVoice(); break;
     case 'run-songwriter': runSongwriter(); break;
     case 'send-music-to-chat':
@@ -4146,6 +4605,7 @@ function render() {
   renderWorkspace();
   renderInspector();
   enhanceCustomSelects();
+  attachImageCompareInteractions();
 }
 
 document.addEventListener('click', (e) => {
@@ -4189,6 +4649,7 @@ async function init() {
   if (state.authToken) {
     await loadMe();
     loadVideoHistory({ silent: true }).catch(() => {});
+    loadVoiceHistory({ silent: true, keepSelection: true }).catch(() => {});
     if (state.image.panel === 'library') loadImageHistory({ silent: true }).catch(() => {});
   }
   if (state.voice.voices.length === 0) loadVoices();
