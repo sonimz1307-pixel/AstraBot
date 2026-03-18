@@ -24,8 +24,11 @@ class ElevenTTS:
             "text": text,
             "model_id": model_id,
         }
+        params = {}
+        if output_format:
+            params["output_format"] = output_format
 
         async with httpx.AsyncClient(timeout=60) as client:
-            r = await client.post(url, headers=headers, json=payload)
+            r = await client.post(url, headers=headers, params=params, json=payload)
             r.raise_for_status()
             return r.content
