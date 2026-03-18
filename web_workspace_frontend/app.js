@@ -2552,9 +2552,12 @@ function renderVoiceInspector() {
           <small>1.0 — стандартная скорость. Ниже — медленнее, выше — быстрее.</small>
         </label>
 
-        <label class="toggle-pill">
+        <label class="toggle-pill toggle-pill-voice-setting">
           <input id="voice_useSpeakerBoost" type="checkbox" ${state.voice.useSpeakerBoost ? 'checked' : ''} ${state.voice.manualVoiceSettings ? '' : 'disabled'}>
-          <span>Speaker boost</span>
+          <span class="toggle-pill-copy">
+            <strong>Усиление сходства голоса</strong>
+            <small>Делает результат ближе к исходному голосу. Может немного увеличить задержку генерации.</small>
+          </span>
         </label>
       </div>
     </div>
