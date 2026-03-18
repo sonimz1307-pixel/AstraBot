@@ -960,7 +960,7 @@ textarea { resize: vertical; min-height: 110px; }
 .voice-editor-head p { margin: 0; color: var(--muted); max-width: 760px; line-height: 1.55; }
 .voice-toolbar-meta { display: flex; gap: 8px; flex-wrap: wrap; }
 .voice-textarea {
-  min-height: 280px;
+  min-height: 180px;
   resize: vertical;
   font-size: 15px;
   line-height: 1.65;
@@ -984,7 +984,7 @@ textarea { resize: vertical; min-height: 110px; }
 }
 .voice-result-summary strong { font-size: 18px; }
 .voice-result-empty {
-  min-height: 220px;
+  min-height: 120px;
   border-radius: 18px;
   border: 1px dashed rgba(255,255,255,0.10);
   background: rgba(255,255,255,0.02);
@@ -1025,6 +1025,12 @@ textarea { resize: vertical; min-height: 110px; }
   .voice-toolbar { align-items: stretch; }
 }
 
+
+.voice-config-card { overflow: hidden; }
+.voice-config-grid { display: grid; gap: 12px; grid-template-columns: 1fr; }
+.voice-config-grid .field-grid,
+.voice-config-grid label,
+.voice-config-grid select { min-width: 0; }
 
 .voice-history-panel { display: grid; gap: 12px; }
 .voice-history-list { display: grid; gap: 10px; max-height: 420px; overflow: auto; padding-right: 2px; }
