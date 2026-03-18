@@ -1042,6 +1042,39 @@ textarea { resize: vertical; min-height: 110px; }
 .voice-config-grid label,
 .voice-config-grid select { min-width: 0; }
 
+.voice-advanced-card { display: grid; gap: 14px; }
+.voice-range-stack { display: grid; gap: 12px; }
+.voice-range-stack.is-disabled { opacity: 0.72; }
+.voice-range-row {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(255,255,255,0.07);
+  background: rgba(255,255,255,0.025);
+}
+.voice-range-row small { color: var(--muted); line-height: 1.45; }
+.voice-range-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.voice-range-top span { font-weight: 600; }
+.voice-range-top strong { color: var(--text); }
+.voice-range-row input[type="range"] { width: 100%; }
+.toggle-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.03);
+  color: var(--text);
+}
+.toggle-pill input { margin: 0; }
+
 .voice-history-panel { display: grid; gap: 12px; }
 .voice-history-list { display: grid; gap: 10px; max-height: 420px; overflow: auto; padding-right: 2px; }
 .voice-history-empty {
