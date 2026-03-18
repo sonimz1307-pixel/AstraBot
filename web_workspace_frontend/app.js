@@ -1704,11 +1704,11 @@ function renderHeader() {
   if (inspector) inspector.setAttribute('aria-hidden', state.studio === 'chat' ? 'true' : 'false');
   if (workspaceTopline) workspaceTopline.style.display = state.studio === 'chat' ? 'none' : '';
 
-  const hideTopActions = state.studio === 'chat' || state.studio === 'video' || state.studio === 'image';
+  const hideTopActions = state.studio === 'chat' || state.studio === 'video' || state.studio === 'image' || state.studio === 'voice';
   if (topbarActions) topbarActions.style.display = hideTopActions ? 'none' : '';
-  if (seedDemoBtn) seedDemoBtn.style.display = (state.studio === 'video' || state.studio === 'image') ? 'none' : '';
-  if (globalRunBtn) globalRunBtn.style.display = state.studio === 'chat' || state.studio === 'video' || state.studio === 'image' ? 'none' : '';
-  if (resetStudioBtn) resetStudioBtn.style.display = state.studio === 'video' || state.studio === 'image' ? 'none' : '';
+  if (seedDemoBtn) seedDemoBtn.style.display = (state.studio === 'video' || state.studio === 'image' || state.studio === 'voice') ? 'none' : '';
+  if (globalRunBtn) globalRunBtn.style.display = state.studio === 'chat' || state.studio === 'video' || state.studio === 'image' || state.studio === 'voice' ? 'none' : '';
+  if (resetStudioBtn) resetStudioBtn.style.display = state.studio === 'video' || state.studio === 'image' || state.studio === 'voice' ? 'none' : '';
 
   if (inspectorTitle) {
     inspectorTitle.textContent = state.studio === 'video' && state.video.panel === 'library' ? 'Библиотека видео' : 'Параметры';
@@ -2363,7 +2363,6 @@ function renderVoiceWorkspace() {
             <div class="help-text">Выбранный голос: <strong>${escapeHtml(voiceName)}</strong> · ${escapeHtml(voiceModelLabel(state.voice.modelId))} · ${escapeHtml(voiceOutputLabel(state.voice.outputFormat))}</div>
             <div class="actions compact-gap" style="flex-wrap:wrap;">
               <button class="btn outline" data-action="clear-voice-stage">Очистить результат</button>
-              <button class="btn primary ${state.voice.isGenerating ? 'loading' : ''}" data-action="run-voice" ${state.voice.isGenerating ? 'disabled' : ''}>${state.voice.isGenerating ? 'Генерация...' : 'Сгенерировать звук'}</button>
             </div>
           </div>
         </div>
@@ -2386,7 +2385,6 @@ function renderVoiceWorkspace() {
               <audio class="voice-audio-player" controls src="${escapeHtml(activeAudioUrl)}"></audio>
               <div class="actions compact-gap" style="flex-wrap:wrap;">
                 <a class="btn primary" href="${escapeHtml(activeDownloadUrl || activeAudioUrl)}" download="${escapeHtml(voiceDownloadFilename())}">Скачать звук</a>
-                <button class="btn ghost" data-action="goto-chat">В ChatGPT</button>
               </div>
               ${historyItem ? `<div class="help-text">Открыта сохранённая озвучка из истории Voice Studio.</div>` : ''}
             </div>
@@ -2419,17 +2417,6 @@ function renderVoiceInspector() {
   ];
 
   return `
-    <div class="inspector-card">
-      <div class="field-head" style="margin-bottom:12px; align-items:flex-start; gap:12px;">
-        <div class="section-title" style="margin:0;">Voice Studio</div>
-        <div class="actions compact-gap" style="flex-wrap:wrap;">
-          <button class="btn ghost small" data-action="load-voices">Голоса</button>
-          <button class="btn ghost small" data-action="refresh-voice-history">История</button>
-        </div>
-      </div>
-      <div class="help-text">Правая панель Voice Studio отвечает за выбор голоса и доступ к сохранённой истории озвучек.</div>
-    </div>
-
     <div class="inspector-card voice-side-stack">
       <div class="field-head" style="margin-bottom:12px;">
         <h4 style="margin:0;">Выбор голоса</h4>
@@ -2441,12 +2428,12 @@ function renderVoiceInspector() {
             <strong>${escapeHtml(voice.name || 'Voice')}</strong>
             <span>${escapeHtml(state.voice.voiceId === voice.voice_id ? 'Выбран' : 'Нажми для выбора')}</span>
           </button>
-        `).join('') : `<div class="empty-state">Голоса ещё не загружены. Нажми «Голоса».</div>`}
+        `).join('') : `<div class="empty-state">Голоса ещё не загружены. Обнови страницу или перезайди во вкладку Voice Studio.</div>`}
       </div>
     </div>
 
-    <div class="inspector-card">
-      <div class="field-grid two">
+    <div class="inspector-card voice-config-card">
+      <div class="voice-config-grid">
         ${fieldSelect('Модель', 'voice_modelId', state.voice.modelId, modelOptions)}
         ${fieldSelect('Формат', 'voice_outputFormat', state.voice.outputFormat, outputOptions)}
       </div>
@@ -2454,9 +2441,12 @@ function renderVoiceInspector() {
     </div>
 
     <div class="inspector-card voice-history-panel">
-      <div class="field-head" style="margin-bottom:12px;">
+      <div class="field-head" style="margin-bottom:12px; align-items:flex-start; gap:10px;">
         <h4 style="margin:0;">История озвучек</h4>
-        <span class="badge muted">${historyItems.length}</span>
+        <div class="actions compact-gap" style="margin-top:0; flex-wrap:wrap; justify-content:flex-end;">
+          <span class="badge muted">${historyItems.length}</span>
+          <button class="btn ghost small" data-action="refresh-voice-history">Обновить</button>
+        </div>
       </div>
       ${state.voiceHistory.loading ? `<div class="help-text">Загружаю историю...</div>` : historyItems.length ? `
         <div class="voice-history-list">
