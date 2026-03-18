@@ -463,10 +463,12 @@ def _normalize_kling3_task(task: Dict[str, Any]) -> Dict[str, Any]:
 _WORKSPACE_VIDEO_GENERATIONS_TABLE = "workspace_video_generations"
 
 _WORKSPACE_IMAGE_GENERATIONS_TABLE = "workspace_image_generations"
+_WORKSPACE_VOICE_GENERATIONS_TABLE = "workspace_voice_generations"
 
 _WORKSPACE_IMAGE_OPTIONAL_COLUMNS = {"preset_slug", "source_image_url", "before_image_url", "after_image_url", "compare_mode"}
 
 _WORKSPACE_VIDEOS_BUCKET = (os.getenv("WORKSPACE_VIDEOS_BUCKET", "workspace-videos") or "workspace-videos").strip() or "workspace-videos"
+_WORKSPACE_VOICE_BUCKET = (os.getenv("SUPABASE_BUCKET") or _WORKSPACE_VIDEOS_BUCKET).strip() or _WORKSPACE_VIDEOS_BUCKET
 
 
 def _storage_content_type_to_ext(content_type: Optional[str], url: Optional[str] = None) -> str:
@@ -1493,6 +1495,91 @@ def _serialize_workspace_image_generation(row: Dict[str, Any]) -> Dict[str, Any]
     }
 
 
+def _workspace_voice_ext(output_format: Optional[str]) -> str:
+    value = str(output_format or "").strip().lower()
+    if value.startswith("mp3"):
+        return "mp3"
+    return "bin"
+
+
+def _workspace_voice_content_type(output_format: Optional[str]) -> str:
+    value = str(output_format or "").strip().lower()
+    if value.startswith("mp3"):
+        return "audio/mpeg"
+    return "application/octet-stream"
+
+
+def _workspace_voice_output_path(user_id: int, ext: str) -> str:
+    dt = datetime.now(timezone.utc)
+    safe_ext = (ext or "mp3").strip().lower() or "mp3"
+    return f"workspace_voice/{int(user_id)}/{dt:%Y/%m/%d}/{uuid4().hex}.{safe_ext}"
+
+
+def _serialize_workspace_voice_generation(row: Dict[str, Any]) -> Dict[str, Any]:
+    audio_url = _first_nonempty(row.get("download_url"), row.get("audio_url"))
+    return {
+        "id": row.get("id"),
+        "user_id": row.get("user_id"),
+        "provider": row.get("provider"),
+        "model": row.get("model"),
+        "voice_id": row.get("voice_id"),
+        "voice_name": row.get("voice_name"),
+        "text": row.get("text"),
+        "status": row.get("status"),
+        "output_format": row.get("output_format"),
+        "audio_url": audio_url,
+        "download_url": audio_url,
+        "storage_path": row.get("storage_path"),
+        "file_size_bytes": row.get("file_size_bytes"),
+        "mime_type": row.get("mime_type"),
+        "error_code": row.get("error_code"),
+        "error_message": row.get("error_message"),
+        "origin": row.get("origin"),
+        "is_favorite": row.get("is_favorite"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "completed_at": row.get("completed_at"),
+        "has_storage_file": bool(str(row.get("storage_path") or "").strip() or audio_url),
+    }
+
+
+def _insert_workspace_voice_generation(row: Dict[str, Any]) -> str:
+    generation_id = str(row.get("id") or uuid4())
+    payload = dict(row)
+    payload["id"] = generation_id
+    if supabase is None:
+        return generation_id
+    resp = supabase.table(_WORKSPACE_VOICE_GENERATIONS_TABLE).insert(payload).execute()
+    data = getattr(resp, "data", None) or []
+    if data and isinstance(data[0], dict):
+        saved_id = data[0].get("id")
+        if saved_id:
+            return str(saved_id)
+    return generation_id
+
+
+def _update_workspace_voice_generation(generation_id: Optional[str], patch: Dict[str, Any]) -> None:
+    if not generation_id or not patch or supabase is None:
+        return
+    supabase.table(_WORKSPACE_VOICE_GENERATIONS_TABLE).update(patch).eq("id", str(generation_id)).execute()
+
+
+def _mark_workspace_voice_generation_failed(generation_id: Optional[str], error_message: str, error_code: Optional[str] = None) -> None:
+    if not generation_id:
+        return
+    patch: Dict[str, Any] = {
+        "status": "failed",
+        "error_message": (error_message or "").strip()[:4000] or "Unknown error",
+        "completed_at": _utc_now_iso(),
+    }
+    if error_code:
+        patch["error_code"] = str(error_code)[:255]
+    try:
+        _update_workspace_voice_generation(generation_id, patch)
+    except Exception:
+        pass
+
+
 def _insert_workspace_image_generation(row: Dict[str, Any]) -> str:
     generation_id = str(row.get("id") or uuid4())
     payload = dict(row)
@@ -2358,6 +2445,199 @@ async def workspace_video_job_status(
 async def workspace_tts_voices(user: Dict[str, Any] = Depends(get_current_workspace_user)) -> List[Dict[str, Any]]:
     return ALLOWED_VOICES
 
+
+
+@router.post("/tts/run")
+async def workspace_tts_run(payload: TTSGenerateIn, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
+    if payload.voice_id not in ALLOWED_VOICE_IDS:
+        raise HTTPException(status_code=400, detail="voice_id is not allowed")
+
+    uid = int(user["telegram_user_id"])
+    voice_meta = next((item for item in ALLOWED_VOICES if item.get("voice_id") == payload.voice_id), None) or {}
+    voice_name = str(voice_meta.get("name") or payload.voice_id)
+    now_iso = _utc_now_iso()
+    generation_id = _insert_workspace_voice_generation({
+        "user_id": str(uid),
+        "provider": "elevenlabs",
+        "model": payload.model_id,
+        "voice_id": payload.voice_id,
+        "voice_name": voice_name,
+        "text": payload.text,
+        "status": "processing",
+        "output_format": payload.output_format,
+        "origin": "workspace_voice",
+        "created_at": now_iso,
+        "updated_at": now_iso,
+    })
+
+    try:
+        tts = _get_tts()
+        audio_bytes = await tts.tts(
+            text=payload.text,
+            voice_id=payload.voice_id,
+            model_id=payload.model_id,
+            output_format=payload.output_format,
+        )
+        ext = _workspace_voice_ext(payload.output_format)
+        mime_type = _workspace_voice_content_type(payload.output_format)
+        output_path = _workspace_voice_output_path(uid, ext)
+        audio_url = upload_bytes_to_supabase(output_path, audio_bytes, mime_type)
+        done_iso = _utc_now_iso()
+        _update_workspace_voice_generation(
+            generation_id,
+            {
+                "status": "completed",
+                "storage_path": output_path,
+                "audio_url": audio_url,
+                "download_url": audio_url,
+                "file_size_bytes": len(audio_bytes or b""),
+                "mime_type": mime_type,
+                "error_code": None,
+                "error_message": None,
+                "updated_at": done_iso,
+                "completed_at": done_iso,
+            },
+        )
+        return {
+            "ok": True,
+            "generation_id": generation_id,
+            "provider": "elevenlabs",
+            "model": payload.model_id,
+            "voice_id": payload.voice_id,
+            "voice_name": voice_name,
+            "output_format": payload.output_format,
+            "audio_url": audio_url,
+            "download_url": audio_url,
+            "status": "completed",
+            "status_text": "Звук готов.",
+            "created_at": done_iso,
+            "completed_at": done_iso,
+        }
+    except HTTPException as e:
+        _mark_workspace_voice_generation_failed(generation_id, str(e.detail), error_code="http_error")
+        raise
+    except Exception as e:
+        _mark_workspace_voice_generation_failed(generation_id, str(e), error_code="provider_error")
+        raise HTTPException(status_code=500, detail=f"Voice generation failed: {e}")
+
+
+@router.get("/tts/history")
+async def workspace_tts_history(
+    limit: int = 20,
+    offset: int = 0,
+    user: Dict[str, Any] = Depends(get_current_workspace_user),
+) -> Dict[str, Any]:
+    uid = int(user["telegram_user_id"])
+    safe_limit = max(1, min(int(limit or 20), 100))
+    safe_offset = max(0, int(offset or 0))
+
+    if supabase is None:
+        return {"ok": True, "items": [], "limit": safe_limit, "offset": safe_offset}
+
+    try:
+        resp = (
+            supabase.table(_WORKSPACE_VOICE_GENERATIONS_TABLE)
+            .select("*")
+            .eq("user_id", str(uid))
+            .is_("deleted_at", "null")
+            .order("created_at", desc=True)
+            .range(safe_offset, safe_offset + safe_limit - 1)
+            .execute()
+        )
+        rows = getattr(resp, "data", None) or []
+        items = [_serialize_workspace_voice_generation(row) for row in rows if isinstance(row, dict)]
+        return {
+            "ok": True,
+            "items": items,
+            "limit": safe_limit,
+            "offset": safe_offset,
+            "count": len(items),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Voice history load failed: {e}")
+
+
+@router.get("/tts/history/{generation_id}")
+async def workspace_tts_history_item(
+    generation_id: str,
+    user: Dict[str, Any] = Depends(get_current_workspace_user),
+) -> Dict[str, Any]:
+    uid = int(user["telegram_user_id"])
+    generation_id_text = str(generation_id or "").strip()
+    if not generation_id_text:
+        raise HTTPException(status_code=400, detail="Missing generation_id")
+
+    if supabase is None:
+        raise HTTPException(status_code=404, detail="Voice generation not found")
+
+    try:
+        resp = (
+            supabase.table(_WORKSPACE_VOICE_GENERATIONS_TABLE)
+            .select("*")
+            .eq("id", generation_id_text)
+            .eq("user_id", str(uid))
+            .is_("deleted_at", "null")
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(resp, "data", None) or []
+        if not rows or not isinstance(rows[0], dict):
+            raise HTTPException(status_code=404, detail="Voice generation not found")
+        return {"ok": True, "item": _serialize_workspace_voice_generation(rows[0])}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Voice history item load failed: {e}")
+
+
+@router.delete("/tts/history/{generation_id}")
+async def workspace_tts_history_delete_item(
+    generation_id: str,
+    user: Dict[str, Any] = Depends(get_current_workspace_user),
+) -> Dict[str, Any]:
+    uid = int(user["telegram_user_id"])
+    generation_id_text = str(generation_id or "").strip()
+    if not generation_id_text:
+        raise HTTPException(status_code=400, detail="Missing generation_id")
+
+    if supabase is None:
+        raise HTTPException(status_code=404, detail="Voice generation not found")
+
+    try:
+        resp = (
+            supabase.table(_WORKSPACE_VOICE_GENERATIONS_TABLE)
+            .select("id,user_id,storage_path,deleted_at")
+            .eq("id", generation_id_text)
+            .eq("user_id", str(uid))
+            .is_("deleted_at", "null")
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(resp, "data", None) or []
+        if not rows or not isinstance(rows[0], dict):
+            raise HTTPException(status_code=404, detail="Voice generation not found")
+        row = rows[0]
+
+        storage_path = str(row.get("storage_path") or "").strip()
+        if storage_path:
+            try:
+                supabase.storage.from_(_WORKSPACE_VOICE_BUCKET).remove([storage_path])
+            except Exception:
+                pass
+
+        now_iso = _utc_now_iso()
+        (
+            supabase.table(_WORKSPACE_VOICE_GENERATIONS_TABLE)
+            .update({"deleted_at": now_iso, "updated_at": now_iso, "storage_path": None, "audio_url": None, "download_url": None})
+            .eq("id", generation_id_text)
+            .eq("user_id", str(uid))
+            .execute()
+        )
+        return {"ok": True, "generation_id": generation_id_text}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Voice history delete failed: {e}")
 
 
 @router.get("/image/history")
