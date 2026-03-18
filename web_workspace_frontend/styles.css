@@ -1074,6 +1074,26 @@ textarea { resize: vertical; min-height: 110px; }
   color: var(--text);
 }
 .toggle-pill input { margin: 0; }
+.toggle-pill-voice-setting {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  gap: 12px;
+}
+.toggle-pill-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.toggle-pill-copy strong {
+  font-size: 14px;
+  line-height: 1.25;
+  font-weight: 700;
+}
+.toggle-pill-copy small {
+  color: var(--muted);
+  line-height: 1.4;
+}
 
 .voice-history-panel { display: grid; gap: 12px; }
 .voice-history-list { display: grid; gap: 10px; max-height: 420px; overflow: auto; padding-right: 2px; }
