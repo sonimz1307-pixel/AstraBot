@@ -122,6 +122,13 @@ video: {
     voiceId: DEFAULT_VOICE_STATE.voiceId || '',
     modelId: DEFAULT_VOICE_STATE.modelId || 'eleven_multilingual_v2',
     outputFormat: DEFAULT_VOICE_STATE.outputFormat || 'mp3_44100_128',
+    languageCode: DEFAULT_VOICE_STATE.languageCode || 'ru',
+    manualVoiceSettings: !!DEFAULT_VOICE_STATE.manualVoiceSettings,
+    stability: Number.isFinite(Number(DEFAULT_VOICE_STATE.stability)) ? Number(DEFAULT_VOICE_STATE.stability) : 0.5,
+    similarityBoost: Number.isFinite(Number(DEFAULT_VOICE_STATE.similarityBoost)) ? Number(DEFAULT_VOICE_STATE.similarityBoost) : 0.75,
+    style: Number.isFinite(Number(DEFAULT_VOICE_STATE.style)) ? Number(DEFAULT_VOICE_STATE.style) : 0,
+    speed: Number.isFinite(Number(DEFAULT_VOICE_STATE.speed)) ? Number(DEFAULT_VOICE_STATE.speed) : 1,
+    useSpeakerBoost: typeof DEFAULT_VOICE_STATE.useSpeakerBoost === 'boolean' ? DEFAULT_VOICE_STATE.useSpeakerBoost : true,
     text: DEFAULT_VOICE_STATE.text || '',
     audioUrl: '',
     downloadUrl: '',
@@ -881,6 +888,13 @@ function saveState() {
     voiceId: state.voice.voiceId,
     modelId: state.voice.modelId,
     outputFormat: state.voice.outputFormat,
+    languageCode: state.voice.languageCode,
+    manualVoiceSettings: !!state.voice.manualVoiceSettings,
+    stability: Number(state.voice.stability),
+    similarityBoost: Number(state.voice.similarityBoost),
+    style: Number(state.voice.style),
+    speed: Number(state.voice.speed),
+    useSpeakerBoost: !!state.voice.useSpeakerBoost,
     text: state.voice.text,
     generationId: state.voice.generationId || '',
     lastGeneratedAt: state.voice.lastGeneratedAt || '',
@@ -934,9 +948,38 @@ function selectedVoiceData() {
 }
 
 function voiceModelLabel(modelId = '') {
+  if (modelId === 'eleven_flash_v2_5') return 'Eleven Flash v2.5';
   if (modelId === 'eleven_turbo_v2_5') return 'Eleven Turbo v2.5';
   if (modelId === 'eleven_multilingual_v2') return 'Eleven Multilingual v2';
   return modelId || '—';
+}
+
+function voiceSettingsBadge(value, digits = 2) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return '—';
+  return num.toFixed(digits).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
+}
+
+function voiceLanguageLabel(languageCode = '') {
+  const map = {
+    auto: 'Авто',
+    ru: 'Русский',
+    en: 'English',
+    uk: 'Українська',
+    de: 'Deutsch',
+    fr: 'Français',
+    es: 'Español',
+    it: 'Italiano',
+    pt: 'Português',
+    pl: 'Polski',
+    tr: 'Türkçe',
+    ar: 'العربية',
+    hi: 'हिन्दी',
+    zh: '中文',
+    ja: '日本語',
+    ko: '한국어',
+  };
+  return map[String(languageCode || '').trim()] || (languageCode || 'Авто');
 }
 
 function voiceOutputLabel(outputFormat = '') {
@@ -2409,11 +2452,30 @@ function renderVoiceInspector() {
   const selectedHistoryId = String(state.voiceHistory.selectedId || '').trim();
   const modelOptions = [
     ['eleven_multilingual_v2', 'Eleven Multilingual v2'],
+    ['eleven_flash_v2_5', 'Eleven Flash v2.5'],
     ['eleven_turbo_v2_5', 'Eleven Turbo v2.5'],
   ];
   const outputOptions = [
     ['mp3_44100_128', 'MP3 · 128 kbps'],
     ['mp3_44100_192', 'MP3 · 192 kbps'],
+  ];
+  const languageOptions = [
+    ['auto', 'Авто'],
+    ['ru', 'Русский'],
+    ['en', 'English'],
+    ['uk', 'Українська'],
+    ['de', 'Deutsch'],
+    ['fr', 'Français'],
+    ['es', 'Español'],
+    ['it', 'Italiano'],
+    ['pt', 'Português'],
+    ['pl', 'Polski'],
+    ['tr', 'Türkçe'],
+    ['ar', 'العربية'],
+    ['hi', 'हिन्दी'],
+    ['zh', '中文'],
+    ['ja', '日本語'],
+    ['ko', '한국어'],
   ];
 
   return `
@@ -2436,8 +2498,65 @@ function renderVoiceInspector() {
       <div class="voice-config-grid">
         ${fieldSelect('Модель', 'voice_modelId', state.voice.modelId, modelOptions)}
         ${fieldSelect('Формат', 'voice_outputFormat', state.voice.outputFormat, outputOptions)}
+        ${fieldSelect('Язык', 'voice_languageCode', state.voice.languageCode || 'auto', languageOptions)}
       </div>
-      <div class="help-text" style="margin-top:12px;">Текущий голос: <strong>${escapeHtml(selectedVoice?.name || 'не выбран')}</strong></div>
+      <div class="help-text" style="margin-top:12px;">Текущий голос: <strong>${escapeHtml(selectedVoice?.name || 'не выбран')}</strong> · Язык: <strong>${escapeHtml(voiceLanguageLabel(state.voice.languageCode || 'auto'))}</strong></div>
+    </div>
+
+    <div class="inspector-card voice-advanced-card">
+      <div class="field-head" style="margin-bottom:12px; align-items:flex-start; gap:12px;">
+        <div>
+          <h4 style="margin:0 0 6px;">Расширенные настройки</h4>
+          <div class="help-text">Эти параметры применяются только к новому запуску на сайте и не переписывают историю.</div>
+        </div>
+        <label class="toggle-pill">
+          <input id="voice_manualVoiceSettings" type="checkbox" ${state.voice.manualVoiceSettings ? 'checked' : ''}>
+          <span>Ручные voice settings</span>
+        </label>
+      </div>
+
+      <div class="voice-range-stack ${state.voice.manualVoiceSettings ? '' : 'is-disabled'}">
+        <label class="voice-range-row">
+          <div class="voice-range-top">
+            <span>Stability</span>
+            <strong>${escapeHtml(voiceSettingsBadge(state.voice.stability))}</strong>
+          </div>
+          <input id="voice_stability" type="range" min="0" max="1" step="0.01" value="${escapeHtml(String(state.voice.stability))}" ${state.voice.manualVoiceSettings ? '' : 'disabled'}>
+          <small>Ниже — больше вариативности и эмоций. Выше — стабильнее и ровнее речь.</small>
+        </label>
+
+        <label class="voice-range-row">
+          <div class="voice-range-top">
+            <span>Similarity boost</span>
+            <strong>${escapeHtml(voiceSettingsBadge(state.voice.similarityBoost))}</strong>
+          </div>
+          <input id="voice_similarityBoost" type="range" min="0" max="1" step="0.01" value="${escapeHtml(String(state.voice.similarityBoost))}" ${state.voice.manualVoiceSettings ? '' : 'disabled'}>
+          <small>Насколько плотно модель держится исходного тембра выбранного голоса.</small>
+        </label>
+
+        <label class="voice-range-row">
+          <div class="voice-range-top">
+            <span>Style</span>
+            <strong>${escapeHtml(voiceSettingsBadge(state.voice.style))}</strong>
+          </div>
+          <input id="voice_style" type="range" min="0" max="1" step="0.01" value="${escapeHtml(String(state.voice.style))}" ${state.voice.manualVoiceSettings ? '' : 'disabled'}>
+          <small>Добавляет больше стилевой выразительности. Чем выше, тем заметнее подача.</small>
+        </label>
+
+        <label class="voice-range-row">
+          <div class="voice-range-top">
+            <span>Speed</span>
+            <strong>${escapeHtml(voiceSettingsBadge(state.voice.speed))}</strong>
+          </div>
+          <input id="voice_speed" type="range" min="0.7" max="1.2" step="0.01" value="${escapeHtml(String(state.voice.speed))}" ${state.voice.manualVoiceSettings ? '' : 'disabled'}>
+          <small>1.0 — стандартная скорость. Ниже — медленнее, выше — быстрее.</small>
+        </label>
+
+        <label class="toggle-pill">
+          <input id="voice_useSpeakerBoost" type="checkbox" ${state.voice.useSpeakerBoost ? 'checked' : ''} ${state.voice.manualVoiceSettings ? '' : 'disabled'}>
+          <span>Speaker boost</span>
+        </label>
+      </div>
     </div>
 
     <div class="inspector-card voice-history-panel">
@@ -4070,6 +4189,13 @@ async function runVoice() {
         voice_id: state.voice.voiceId,
         model_id: state.voice.modelId,
         output_format: state.voice.outputFormat,
+        language_code: state.voice.languageCode || 'auto',
+        manual_voice_settings: !!state.voice.manualVoiceSettings,
+        stability: Number(state.voice.stability),
+        similarity_boost: Number(state.voice.similarityBoost),
+        style: Number(state.voice.style),
+        speed: Number(state.voice.speed),
+        use_speaker_boost: !!state.voice.useSpeakerBoost,
       }),
     });
     const data = await res.json();
@@ -4297,6 +4423,13 @@ function handleInputChange(target) {
     case 'voice_voiceId': state.voice.voiceId = value; break;
     case 'voice_modelId': state.voice.modelId = value; break;
     case 'voice_outputFormat': state.voice.outputFormat = value; break;
+    case 'voice_languageCode': state.voice.languageCode = value || 'auto'; break;
+    case 'voice_manualVoiceSettings': state.voice.manualVoiceSettings = !!target.checked; break;
+    case 'voice_stability': state.voice.stability = Number(value); break;
+    case 'voice_similarityBoost': state.voice.similarityBoost = Number(value); break;
+    case 'voice_style': state.voice.style = Number(value); break;
+    case 'voice_speed': state.voice.speed = Number(value); break;
+    case 'voice_useSpeakerBoost': state.voice.useSpeakerBoost = !!target.checked; break;
     case 'voice_text': state.voice.text = value; break;
 
     case 'music_provider': state.music.provider = value; break;
@@ -4317,13 +4450,26 @@ function handleInputChange(target) {
     'video_provider', 'video_model', 'video_mode',
     'image_provider', 'image_model', 'image_mode',
     'music_provider', 'music_mode', 'music_model',
-    'voice_voiceId', 'voice_modelId', 'voice_outputFormat'
+    'voice_voiceId', 'voice_modelId', 'voice_outputFormat', 'voice_languageCode'
   ]);
   const workspaceRerenderIds = new Set([]);
-  if (structuralRerenderIds.has(id) || target.tagName === 'SELECT' || target.type === 'checkbox') {
+  const inspectorRerenderIds = new Set([
+    'voice_manualVoiceSettings',
+    'voice_stability',
+    'voice_similarityBoost',
+    'voice_style',
+    'voice_speed',
+    'voice_useSpeakerBoost',
+  ]);
+  if (structuralRerenderIds.has(id) || target.tagName === 'SELECT') {
     render();
   } else if (workspaceRerenderIds.has(id)) {
     renderWorkspace();
+  } else if (inspectorRerenderIds.has(id) || (target.type === 'checkbox' && String(id || '').startsWith('voice_'))) {
+    renderInspector();
+    renderHeader();
+  } else if (target.type === 'checkbox') {
+    render();
   } else {
     renderHeader();
   }
