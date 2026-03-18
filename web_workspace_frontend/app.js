@@ -1015,7 +1015,7 @@ function revokeVoiceAudioUrl() {
   }
 }
 
-function clearVoiceRunState({ keepText = true } = {}) {
+function clearVoiceRunState({ keepText = true, clearHistorySelection = true } = {}) {
   revokeVoiceAudioUrl();
   state.voice.audioUrl = '';
   state.voice.downloadUrl = '';
@@ -1024,6 +1024,10 @@ function clearVoiceRunState({ keepText = true } = {}) {
   state.voice.isGenerating = false;
   state.voice.lastGeneratedAt = '';
   if (!keepText) state.voice.text = '';
+  if (clearHistorySelection) {
+    state.voiceHistory.selectedId = '';
+    state.voiceHistory.selectedItem = null;
+  }
   saveState();
 }
 
@@ -1037,7 +1041,7 @@ function voiceHistorySelectedItem() {
     const found = items.find((item) => String(item?.id || '') === selectedId);
     if (found) return found;
   }
-  return items[0] || null;
+  return null;
 }
 
 function voiceHistoryAudioUrl(item) {
@@ -2552,12 +2556,9 @@ function renderVoiceInspector() {
           <small>1.0 — стандартная скорость. Ниже — медленнее, выше — быстрее.</small>
         </label>
 
-        <label class="toggle-pill toggle-pill-voice-setting">
+        <label class="toggle-pill">
           <input id="voice_useSpeakerBoost" type="checkbox" ${state.voice.useSpeakerBoost ? 'checked' : ''} ${state.voice.manualVoiceSettings ? '' : 'disabled'}>
-          <span class="toggle-pill-copy">
-            <strong>Усиление сходства голоса</strong>
-            <small>Делает результат ближе к исходному голосу. Может немного увеличить задержку генерации.</small>
-          </span>
+          <span>Speaker boost</span>
         </label>
       </div>
     </div>
@@ -3497,8 +3498,7 @@ async function loadVoiceHistory(options = {}) {
     state.voiceHistory.loaded = true;
 
     const preferredId = String(selectId || (keepSelection ? state.voiceHistory.selectedId : '') || '').trim();
-    let selected = preferredId ? items.find((item) => String(item.id || '') === preferredId) : null;
-    if (!selected && items[0]) selected = items[0];
+    const selected = preferredId ? items.find((item) => String(item.id || '') === preferredId) : null;
 
     state.voiceHistory.selectedId = selected?.id || '';
     state.voiceHistory.selectedItem = selected || null;
