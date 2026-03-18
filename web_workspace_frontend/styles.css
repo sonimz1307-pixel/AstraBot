@@ -939,14 +939,24 @@ textarea { resize: vertical; min-height: 110px; }
 
 
 /* Voice Studio */
-.voice-workspace-grid { min-height: 0; }
-.voice-workspace-main { display: grid; gap: 16px; }
+.voice-workspace-grid { min-height: 0; align-items: start; }
+.voice-workspace-main {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  align-items: stretch;
+}
 .voice-editor-card,
 .voice-result-card {
   background: rgba(255,255,255,0.035);
   border: 1px solid rgba(255,255,255,0.06);
   border-radius: 22px;
   padding: 18px;
+}
+
+.voice-editor-card,
+.voice-result-card {
+  flex: 0 0 auto;
 }
 .voice-editor-head {
   display: flex;
