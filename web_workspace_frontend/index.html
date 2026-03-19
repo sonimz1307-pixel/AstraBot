@@ -9,111 +9,361 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./styles.css" />
 </head>
-<body>
-  <div class="shell">
-    <aside class="sidebar panel">
-      <div class="brand">
-        <div class="brand-mark">A</div>
+<body class="showcase-view">
+  <header class="site-topbar">
+    <div class="site-topbar__brand">
+      <div class="site-mark">A</div>
+      <div>
+        <div class="site-title">AstraBot</div>
+        <div class="site-subtitle">Фото, видео, музыка, озвучка и сайты в одной системе</div>
+      </div>
+    </div>
+    <div class="site-topbar__actions">
+      <a href="#showcaseStudios" class="btn ghost">Студии</a>
+      <button class="btn primary" data-action="open-workspace" data-studio="video">Открыть workspace</button>
+    </div>
+  </header>
+
+  <main class="site-main">
+    
+    <section id="showcaseView" class="showcase-shell">
+      <section class="showcase-hero">
+        <div class="showcase-hero__copy">
+          <span class="showcase-kicker">NeiroAstra Creative Platform</span>
+          <h1>Одна система для фото, видео, музыки, озвучки и сайтов</h1>
+          <p class="showcase-hero__lead">Генерация изображений, видео, музыки, озвучки и сайтов в одном рабочем пространстве без переключения между сервисами и без потери логики проекта.</p>
+          <div class="showcase-hero__actions">
+            <button class="btn primary" data-action="open-workspace" data-studio="video">Начать создание</button>
+            <a href="#showcaseStudios" class="btn ghost">Смотреть студии</a>
+          </div>
+          <div class="showcase-metrics">
+            <div class="metric-card">
+              <strong>Новая возможность</strong>
+              <span>Освой инструменты, которые уже меняют рынок и открывают новые форматы работы, творчества и монетизации.</span>
+            </div>
+            <div class="metric-card">
+              <strong>Бесплатный Start</strong>
+              <span>Новым пользователям — бесплатные токены для старта, чтобы протестировать возможности платформы и получить результат.</span>
+            </div>
+            <div class="metric-card metric-card--accent metric-card--wide">
+              <strong id="landingStatusPill">Amber showcase live</strong>
+              <span>Удобное пространство, где можно начать работать с AI без сложного входа и лишних настроек.</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="showcase-hero__visual">
+          <article class="hero-media hero-media--primary media-surface">
+            <video class="showcase-video showcase-video--hero" data-autoplay-observe autoplay muted loop playsinline preload="metadata" src="https://storage.yandexcloud.net/astrabot-media-andre/main-video.mp4"></video>
+            <div class="video-scrim"></div>
+            <div class="hero-media__label">Искусственный интеллект не заменяет человека — он усиливает того, кто умеет им пользоваться.</div>
+            <div class="hero-media__content">
+              <span></span>
+              <strong></strong>
+            </div>
+          </article>
+          <div class="hero-stack">
+            <article class="hero-stack-card hero-stack-card--video media-surface">
+              <video class="showcase-video" data-autoplay-observe muted loop playsinline preload="none" src="https://storage.yandexcloud.net/astrabot-media-andre/VIDEO.mp4"></video>
+              <div class="video-scrim"></div>
+              <span>VIDEO</span>
+              <strong></strong>
+            </article>
+            <article class="hero-stack-card hero-stack-card--image media-surface">
+              <video class="showcase-video" data-autoplay-observe muted loop playsinline preload="none" src="https://storage.yandexcloud.net/astrabot-media-andre/Image.mp4"></video>
+              <div class="video-scrim"></div>
+              <span>IMAGE</span>
+              <strong></strong>
+            </article>
+            <article class="hero-stack-card hero-stack-card--audio media-surface">
+              <video class="showcase-video" data-autoplay-observe muted loop playsinline preload="none" src="https://storage.yandexcloud.net/astrabot-media-andre/AUDIO.mp4"></video>
+              <div class="video-scrim"></div>
+              <span>AUDIO</span>
+              <strong></strong>
+            </article>
+            <article class="hero-stack-card hero-stack-card--site media-surface">
+              <video class="showcase-video" data-autoplay-observe muted loop playsinline preload="none" src="https://storage.yandexcloud.net/astrabot-media-andre/upscale.mp4"></video>
+              <div class="video-scrim"></div>
+              <span>UPSCALE</span>
+              <strong></strong>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="featured-strip">
+        <button class="featured-card media-surface" data-action="open-workspace" data-studio="video">
+          <video class="showcase-video" data-autoplay-observe muted loop playsinline preload="metadata" src="https://storage.yandexcloud.net/astrabot-media-andre/wizzgen-seedance-2-0-sound.mp4"></video>
+          <div class="video-scrim"></div>
+          
+          <strong></strong>
+          <small></small>
+        </button>
+        <button class="featured-card media-surface" data-action="open-workspace" data-studio="image">
+          <video class="showcase-video" data-autoplay-observe muted loop playsinline preload="metadata" src="https://storage.yandexcloud.net/astrabot-media-andre/Nano%20Banana%202-6.mp4"></video>
+          <div class="video-scrim"></div>
+          
+          <strong></strong>
+          <small></small>
+        </button>
+        <button class="featured-card media-surface" data-action="open-workspace" data-studio="video">
+          <video class="showcase-video" data-autoplay-observe muted loop playsinline preload="metadata" src="https://storage.yandexcloud.net/astrabot-media-andre/Kling%203.0-1.mp4"></video>
+          <div class="video-scrim"></div>
+          
+          <strong></strong>
+          <small></small>
+        </button>
+      </section>
+
+      <section class="trust-strip">
+        <span>Видео</span>
+        <span>Изображения</span>
+        <span>Музыка</span>
+        <span>Motion Control</span>
+        <span>Upscale</span>
+        <span>Image Edit</span>
+        <span>Сайты</span>
+        <span>Workspace</span>
+      </section>
+
+      <section id="showcaseStudios" class="showcase-block">
+        <div class="section-head">
+          <div>
+            <span class="section-kicker">Студии</span>
+            <h2>Самые популярные модели для креаторов</h2>
+          </div>
+          <p></p>
+        </div>
+        <div class="showcase-studio-grid showcase-studio-grid--media">
+          <button class="showcase-card showcase-card--video media-surface" data-action="open-workspace" data-studio="video">
+            <video class="showcase-video" data-autoplay-observe muted loop playsinline preload="metadata" src="https://storage.yandexcloud.net/astrabot-media-andre/VIDEO.mp4"></video>
+            <div class="video-scrim"></div>
+            <span class="showcase-card__tag">VIDEO</span>
+            <strong>Video Studio</strong>
+            <small>Kling, Veo, Seedance, Sora и генерация роликов из текста или референса</small>
+          </button>
+          <button class="showcase-card showcase-card--image media-surface" data-action="open-workspace" data-studio="image">
+            <video class="showcase-video" data-autoplay-observe muted loop playsinline preload="metadata" src="https://storage.yandexcloud.net/astrabot-media-andre/Image.mp4"></video>
+            <div class="video-scrim"></div>
+            <span class="showcase-card__tag">IMAGE</span>
+            <strong>Image Studio</strong>
+            <small>Нейрофотосессии, постеры, image-to-image и визуальные продукты</small>
+          </button>
+          <button class="showcase-card showcase-card--music media-surface" data-action="open-workspace" data-studio="music">
+            <video class="showcase-video" data-autoplay-observe muted loop playsinline preload="metadata" src="https://storage.yandexcloud.net/astrabot-media-andre/AUDIO.mp4"></video>
+            <div class="video-scrim"></div>
+            <span class="showcase-card__tag">AUDIO</span>
+            <strong>Music Studio</strong>
+            <small>Suno, Udio, songwriter и выдача готовых треков прямо в рабочей зоне</small>
+          </button>
+          <button class="showcase-card showcase-card--voice media-surface" data-action="open-workspace" data-studio="voice">
+            <video class="showcase-video" data-autoplay-observe muted loop playsinline preload="metadata" src="https://storage.yandexcloud.net/astrabot-media-andre/Motion-control.mp4"></video>
+            <div class="video-scrim"></div>
+            <span class="showcase-card__tag">MOTION</span>
+            <strong>Motion Control</strong>
+            <small>Управление движением, motion refs и усиление сцен в video pipeline</small>
+          </button>
+          <button class="showcase-card showcase-card--sites media-surface" data-action="open-workspace" data-studio="image">
+            <video class="showcase-video" data-autoplay-observe muted loop playsinline preload="metadata" src="https://storage.yandexcloud.net/astrabot-media-andre/upscale.mp4"></video>
+            <div class="video-scrim"></div>
+            <span class="showcase-card__tag">UPSCALE</span>
+            <strong>Upscale / Restore</strong>
+            <small>Улучшение качества, before/after и быстрый визуальный вау-эффект</small>
+          </button>
+          <button class="showcase-card showcase-card--prompts media-surface" data-action="open-workspace" data-studio="image">
+            <video class="showcase-video" data-autoplay-observe muted loop playsinline preload="metadata" src="https://storage.yandexcloud.net/astrabot-media-andre/image-edit-1.mp4"></video>
+            <div class="video-scrim"></div>
+            <span class="showcase-card__tag">EDIT</span>
+            <strong>Image Edit</strong>
+            <small>Локальные правки, product fixes, poster retouch и image transformation</small>
+          </button>
+          <button class="showcase-card showcase-card--history" data-action="open-workspace" data-studio="history">
+            <span class="showcase-card__tag">HISTORY</span>
+            <strong>History</strong>
+            <small>Результаты, статусы, история запусков и библиотека генераций внутри workspace</small>
+          </button>
+          <button class="showcase-card showcase-card--billing" data-action="open-workspace" data-studio="billing">
+            <span class="showcase-card__tag">TOKENS</span>
+            <strong>Billing</strong>
+            <small>Баланс, токены и логика стоимости без путаницы и лишних экранов</small>
+          </button>
+        </div>
+      </section>
+
+      <section class="spotlight-banner media-surface">
+        <video class="showcase-video" data-autoplay-observe muted loop playsinline preload="metadata" src="https://storage.yandexcloud.net/astrabot-media-andre/Kling%203.0-1.mp4"></video>
+        <div class="video-scrim"></div>
         <div>
-          <div class="brand-title">AstraBot Workspace</div>
-          <div class="brand-subtitle">Unified AI operating system</div>
+          
+          <h2>Что создадим сегодня?</h2>
+          <p>Изображение, видео, музыку, озвучку или первый AI-проект — начни с идеи, а NeiroAstra поможет превратить её в результат.                             </p>
         </div>
-      </div>
-
-      <nav class="studio-nav" id="studioNav"></nav>
-
-      <div class="soft-panel recent-card">
-        <div class="card-head">
-          <strong>Последние действия</strong>
-          <button id="clearRunsBtn" class="link-btn">очистить</button>
-        </div>
-        <div id="recentRuns" class="recent-list empty-state">Пока пусто</div>
-      </div>
-
-      <div class="account-card soft-panel">
-        <div class="card-head">
-          <strong>Аккаунт</strong>
-          <span id="apiStatus" class="badge muted">offline</span>
-        </div>
-
-        <div class="auth-block" id="authBlock">
-          <div id="authGuestView">
-            <div class="auth-copy">Вход для существующих пользователей AstraBot — через Telegram. ID руками вводить не нужно.</div>
-            <div id="telegramLoginMount" class="telegram-login-mount"></div>
-            <div class="auth-help muted">Если кнопка не появилась, сначала проверь API Base URL и домен в Telegram Web Login.</div>
+        <button class="btn primary" data-action="open-workspace" data-studio="chat">Перейти к созданию</button>
+      </section>
+      <section class="site-footer-panel">
+        <div class="site-footer-panel__grid">
+          <div class="site-footer-panel__intro">
+            <span class="section-kicker">Contacts & legal</span>
+            <h2>Связь и важные страницы</h2>
+            <p></p>
           </div>
 
-          <div id="authUserView" class="auth-user-view hidden">
-            <div class="auth-user-row">
-              <div class="auth-avatar" id="authAvatar">TG</div>
-              <div>
-                <strong id="authUserName">—</strong>
-                <div class="muted" id="authUserMeta">—</div>
+          <div class="site-footer-panel__group">
+            <h3>Контакты</h3>
+            <div class="site-footer-links">
+              <a class="site-footer-link" href="https://t.me/NeiroAstra" target="_blank" rel="noopener noreferrer">
+                <span>Тг-канал</span>
+                <strong>@NeiroAstra</strong>
+              </a>
+              
+              <a class="site-footer-link" href="mailto:sonimz1307@gmail.com">
+                <span>Почта для связи</span>
+                <strong>sonimz1307@gmail.com</strong>
+              </a>
+            </div>
+          </div>
+
+          <div class="site-footer-panel__group">
+            <h3>Документы</h3>
+            <div class="site-footer-links">
+              <a class="site-footer-link" href="./privacy.html">
+                <span>Политика конфиденциальности</span>
+                <strong>Открыть страницу</strong>
+              </a>
+              <a class="site-footer-link" href="./terms.html">
+                <span>Условия использования</span>
+                <strong>Открыть страницу</strong>
+              </a>
+            </div>
+          </div>
+        </div>
+      </section>
+    </section>
+
+
+    <section id="workspaceSection" class="workspace-section">
+      <div class="workspace-portal-head">
+        <div>
+          <span class="section-kicker">NeiroAstra Workspace</span>
+          <h2></h2>
+          <p>Не нужно разбираться в десятках сервисов — в NeiroAstra уже собраны инструменты для фото, видео, музыки и контента в одном месте.</p>
+        </div>
+        <div class="workspace-portal-actions">
+          <button class="btn ghost" data-action="show-showcase">Вернуться к витрине</button>
+          <a class="btn outline" href="./tariffs.html">Тарифы</a>
+          <button class="btn primary" type="button" data-action="login-placeholder">Войти</button>
+        </div>
+      </div>
+
+      <div class="shell">
+        <aside class="sidebar panel">
+          <div class="brand">
+            <div class="brand-mark">A</div>
+            <div>
+              <div class="brand-title">AstraBot Workspace</div>
+              <div class="brand-subtitle">Unified AI operating system</div>
+            </div>
+          </div>
+
+          <nav class="studio-nav" id="studioNav"></nav>
+
+          <div class="soft-panel recent-card">
+            <div class="card-head">
+              <strong>Последние действия</strong>
+              <button id="clearRunsBtn" class="link-btn">очистить</button>
+            </div>
+            <div id="recentRuns" class="recent-list empty-state">Пока пусто</div>
+          </div>
+
+          <div class="account-card soft-panel">
+            <div class="card-head">
+              <strong>Аккаунт</strong>
+              <span id="apiStatus" class="badge muted">offline</span>
+            </div>
+
+            <div class="auth-block" id="authBlock">
+              <div id="authGuestView">
+                <div class="auth-copy">Вход для существующих пользователей AstraBot — через Telegram. ID руками вводить не нужно.</div>
+                <div id="telegramLoginMount" class="telegram-login-mount"></div>
+                <div class="auth-help muted">Если кнопка не появилась, сначала проверь API Base URL и домен в Telegram Web Login.</div>
+              </div>
+
+              <div id="authUserView" class="auth-user-view hidden">
+                <div class="auth-user-row">
+                  <div class="auth-avatar" id="authAvatar">TG</div>
+                  <div>
+                    <strong id="authUserName">—</strong>
+                    <div class="muted" id="authUserMeta">—</div>
+                  </div>
+                </div>
+                <div class="actions two-up compact-gap" style="margin-top:10px;">
+                  <button id="loadBalanceBtn" class="btn primary">Баланс</button>
+                  <button id="logoutBtn" class="btn ghost">Выйти</button>
+                </div>
               </div>
             </div>
-            <div class="actions two-up compact-gap" style="margin-top:10px;">
-              <button id="loadBalanceBtn" class="btn primary">Баланс</button>
-              <button id="logoutBtn" class="btn ghost">Выйти</button>
+
+            <details class="dev-details">
+              <summary>Системные настройки</summary>
+              <label class="label">API Base URL</label>
+              <div class="inline-row">
+                <input id="apiBaseUrl" type="text" placeholder="https://astrabot-tchj.onrender.com">
+                <button id="saveSettingsBtn" class="btn ghost">Сохранить</button>
+              </div>
+              <div class="actions compact-gap" style="margin-top:12px;">
+                <button id="checkApiBtn" class="btn secondary full">Проверить API</button>
+              </div>
+            </details>
+            <div class="balance-block">
+              <small>Баланс</small>
+              <strong id="balanceValue">—</strong>
+              <span id="balanceHint">выполни вход через Telegram</span>
             </div>
           </div>
-        </div>
+        </aside>
 
-        <label class="label">API Base URL</label>
-        <div class="inline-row">
-          <input id="apiBaseUrl" type="text" placeholder="https://astrabot-tchj.onrender.com">
-          <button id="saveSettingsBtn" class="btn ghost">Сохранить</button>
-        </div>
-        <div class="actions compact-gap" style="margin-top:12px;">
-          <button id="checkApiBtn" class="btn secondary full">Проверить API</button>
-        </div>
-        <div class="balance-block">
-          <small>Баланс</small>
-          <strong id="balanceValue">—</strong>
-          <span id="balanceHint">выполни вход через Telegram</span>
-        </div>
-      </div>
-    </aside>
+        <main class="stage">
+          <header class="topbar panel">
+            <div>
+              <div class="eyebrow" id="headerEyebrow">Creative AI studio</div>
+              <h1 id="headerTitle">ChatGPT Studio</h1>
+              <p id="headerSubtitle">Единая рабочая зона: диалоги, генерации, планы, файлы и история.</p>
+            </div>
+            <div class="topbar-actions">
+              <button id="seedDemoBtn" class="btn ghost">Demo</button>
+              <button id="globalRunBtn" class="btn primary">Запустить</button>
+            </div>
+          </header>
 
-    <main class="stage">
-      <header class="topbar panel">
-        <div>
-          <div class="eyebrow" id="headerEyebrow">Creative AI studio</div>
-          <h1 id="headerTitle">ChatGPT Studio</h1>
-          <p id="headerSubtitle">Единая рабочая зона: диалоги, генерации, планы, файлы и история.</p>
-        </div>
-        <div class="topbar-actions">
-          <button id="seedDemoBtn" class="btn ghost">Demo</button>
-          <button id="globalRunBtn" class="btn primary">Запустить</button>
-        </div>
-      </header>
+          <section class="workspace-shell panel">
+            <div class="workspace-topline">
+              <div class="workspace-meta">
+                <span class="meta-pill" id="metaStudio">Studio</span>
+                <span class="meta-pill" id="metaProvider">Provider</span>
+                <span class="meta-pill" id="metaModel">Model</span>
+              </div>
+              <div class="workspace-meta-right">
+                <span class="meta-pill subtle" id="metaMode">Mode</span>
+              </div>
+            </div>
 
-      <section class="workspace-shell panel">
-        <div class="workspace-topline">
-          <div class="workspace-meta">
-            <span class="meta-pill" id="metaStudio">Studio</span>
-            <span class="meta-pill" id="metaProvider">Provider</span>
-            <span class="meta-pill" id="metaModel">Model</span>
+            <div id="workspaceBody" class="workspace-body"></div>
+          </section>
+        </main>
+
+        <aside class="inspector panel">
+          <div class="inspector-head">
+            <div>
+              <small class="eyebrow">Inspector</small>
+              <h2>Параметры</h2>
+            </div>
+            <button id="resetStudioBtn" class="btn ghost small">Reset</button>
           </div>
-          <div class="workspace-meta-right">
-            <span class="meta-pill subtle" id="metaMode">Mode</span>
-          </div>
-        </div>
-
-        <div id="workspaceBody" class="workspace-body"></div>
-      </section>
-    </main>
-
-    <aside class="inspector panel">
-      <div class="inspector-head">
-        <div>
-          <small class="eyebrow">Inspector</small>
-          <h2>Параметры</h2>
-        </div>
-        <button id="resetStudioBtn" class="btn ghost small">Reset</button>
+          <div id="inspectorBody" class="inspector-body"></div>
+        </aside>
       </div>
-      <div id="inspectorBody" class="inspector-body"></div>
-    </aside>
-  </div>
+    </section>
+  </main>
 
   <div id="toastStack" class="toast-stack"></div>
   <script src="./app.js"></script>
