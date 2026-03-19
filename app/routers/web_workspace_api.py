@@ -464,6 +464,18 @@ _WORKSPACE_VIDEO_GENERATIONS_TABLE = "workspace_video_generations"
 
 _WORKSPACE_IMAGE_GENERATIONS_TABLE = "workspace_image_generations"
 _WORKSPACE_VOICE_GENERATIONS_TABLE = "workspace_voice_generations"
+_WORKSPACE_MUSIC_GENERATIONS_TABLE = "workspace_music_generations"
+_WORKSPACE_MUSIC_TRACKS_TABLE = "workspace_music_tracks"
+
+PIAPI_API_KEY = os.getenv("PIAPI_API_KEY", "").strip()
+PIAPI_BASE_URL = os.getenv("PIAPI_BASE_URL", "https://api.piapi.ai").rstrip("/")
+SUNOAPI_API_KEY = os.getenv("SUNOAPI_API_KEY", "").strip()
+SUNOAPI_BASE_URL = os.getenv("SUNOAPI_BASE_URL", "https://api.sunoapi.org/api/v1").rstrip("/")
+if SUNOAPI_BASE_URL.rstrip("/") == "https://api.sunoapi.org":
+    SUNOAPI_BASE_URL = "https://api.sunoapi.org/api/v1"
+SUNOAPI_POLL_TIMEOUT_SEC = int(os.getenv("SUNOAPI_POLL_TIMEOUT_SEC", "600"))
+PIAPI_POLL_TIMEOUT_SEC = int(os.getenv("PIAPI_POLL_TIMEOUT_SEC", "300"))
+WORKSPACE_MUSIC_COST_TOKENS = max(0, int(os.getenv("WORKSPACE_MUSIC_COST_TOKENS", "2") or "2"))
 
 _WORKSPACE_IMAGE_OPTIONAL_COLUMNS = {"preset_slug", "source_image_url", "before_image_url", "after_image_url", "compare_mode"}
 
@@ -1251,6 +1263,20 @@ class SongwriterPayload(BaseModel):
     genre: Optional[str] = None
     mood: Optional[str] = None
     references: Optional[str] = None
+
+
+class MusicGenerateIn(BaseModel):
+    ai: str = Field(default="suno", max_length=24)
+    backend: str = Field(default="sunoapi", max_length=24)
+    mode: str = Field(default="idea", max_length=24)
+    title: Optional[str] = Field(default="", max_length=200)
+    tags: Optional[str] = Field(default="", max_length=400)
+    language: Optional[str] = Field(default="ru", max_length=32)
+    mood: Optional[str] = Field(default="", max_length=200)
+    references: Optional[str] = Field(default="", max_length=1000)
+    instrumental: bool = False
+    idea_text: Optional[str] = Field(default="", max_length=8000)
+    lyrics_text: Optional[str] = Field(default="", max_length=12000)
 
 
 class WorkspaceVideoTrimIn(BaseModel):
@@ -2481,6 +2507,452 @@ def _workspace_tts_voice_settings(payload: TTSGenerateIn) -> Optional[Dict[str, 
     return settings or None
 
 
+
+
+def _normalize_music_ai_value(value: Any) -> str:
+    return "udio" if str(value or "").strip().lower() == "udio" else "suno"
+
+
+def _normalize_music_backend_value(ai: str, value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if ai == "udio":
+        return "piapi"
+    if raw in {"piapi", "sunoapi", "auto"}:
+        return raw
+    return "sunoapi"
+
+
+def _normalize_music_mode_value(ai: str, value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if ai == "udio":
+        return "idea"
+    return "lyrics" if raw == "lyrics" else "idea"
+
+
+def _workspace_music_prompt_text(payload: MusicGenerateIn, ai: str, mode: str) -> str:
+    if ai == "suno" and mode == "lyrics":
+        return str(payload.lyrics_text or "").strip()
+    return str(payload.idea_text or "").strip()
+
+
+def _workspace_music_cost_tokens(payload: MusicGenerateIn, ai: str, backend: str) -> int:
+    return int(WORKSPACE_MUSIC_COST_TOKENS)
+
+
+def _workspace_music_charge_reason(ai: str, backend: str) -> str:
+    return "workspace_music"
+
+
+def _serialize_workspace_music_track(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": row.get("id"),
+        "generation_id": row.get("generation_id"),
+        "track_index": row.get("track_index"),
+        "provider_track_id": row.get("provider_track_id"),
+        "title": row.get("title"),
+        "audio_url": row.get("audio_url"),
+        "video_url": row.get("video_url"),
+        "cover_url": row.get("cover_url"),
+        "lyrics": row.get("lyrics"),
+        "duration_sec": row.get("duration_sec"),
+        "payload_json": row.get("payload_json"),
+        "created_at": row.get("created_at"),
+    }
+
+
+def _serialize_workspace_music_generation(row: Dict[str, Any], tracks: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    out = {
+        "id": row.get("id"),
+        "user_id": row.get("user_id"),
+        "ai": row.get("ai"),
+        "backend": row.get("backend"),
+        "mode": row.get("mode"),
+        "title": row.get("title"),
+        "tags": row.get("tags"),
+        "language": row.get("language"),
+        "mood": row.get("mood"),
+        "references": row.get("references"),
+        "idea_text": row.get("idea_text"),
+        "lyrics_text": row.get("lyrics_text"),
+        "instrumental": bool(row.get("instrumental")),
+        "status": row.get("status"),
+        "provider_task_id": row.get("provider_task_id"),
+        "output_count": int(row.get("output_count") or 0),
+        "error_code": row.get("error_code"),
+        "error_message": row.get("error_message"),
+        "origin": row.get("origin"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "completed_at": row.get("completed_at"),
+    }
+    if tracks is not None:
+        out["tracks"] = tracks
+        out["output_count"] = len(tracks)
+        if tracks:
+            out["first_audio_url"] = tracks[0].get("audio_url")
+            out["first_cover_url"] = tracks[0].get("cover_url")
+    return out
+
+
+def _insert_workspace_music_generation(row: Dict[str, Any]) -> str:
+    generation_id = str(row.get("id") or uuid4())
+    payload = dict(row)
+    payload["id"] = generation_id
+    if supabase is None:
+        return generation_id
+    resp = supabase.table(_WORKSPACE_MUSIC_GENERATIONS_TABLE).insert(payload).execute()
+    data = getattr(resp, "data", None) or []
+    if data and isinstance(data[0], dict) and data[0].get("id"):
+        return str(data[0]["id"])
+    return generation_id
+
+
+def _update_workspace_music_generation(generation_id: Optional[str], patch: Dict[str, Any]) -> None:
+    if not generation_id or not patch or supabase is None:
+        return
+    safe_patch = dict(patch)
+    safe_patch["updated_at"] = _utc_now_iso()
+    supabase.table(_WORKSPACE_MUSIC_GENERATIONS_TABLE).update(safe_patch).eq("id", str(generation_id)).execute()
+
+
+def _replace_workspace_music_tracks(generation_id: str, tracks: List[Dict[str, Any]]) -> None:
+    if not generation_id or supabase is None:
+        return
+    try:
+        supabase.table(_WORKSPACE_MUSIC_TRACKS_TABLE).delete().eq("generation_id", str(generation_id)).execute()
+    except Exception:
+        pass
+    payload = []
+    for idx, item in enumerate(tracks, start=1):
+        payload.append({
+            "generation_id": str(generation_id),
+            "track_index": idx,
+            "provider_track_id": str(item.get("provider_track_id") or "")[:255] or None,
+            "title": str(item.get("title") or f"Track {idx}")[:200],
+            "audio_url": item.get("audio_url"),
+            "video_url": item.get("video_url"),
+            "cover_url": item.get("cover_url"),
+            "lyrics": item.get("lyrics"),
+            "duration_sec": item.get("duration_sec"),
+            "payload_json": item.get("payload_json"),
+        })
+    if payload:
+        supabase.table(_WORKSPACE_MUSIC_TRACKS_TABLE).insert(payload).execute()
+
+
+def _load_workspace_music_tracks(generation_ids: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    ids = [str(x).strip() for x in generation_ids if str(x).strip()]
+    if not ids or supabase is None:
+        return out
+    resp = (
+        supabase.table(_WORKSPACE_MUSIC_TRACKS_TABLE)
+        .select("*")
+        .in_("generation_id", ids)
+        .order("track_index")
+        .execute()
+    )
+    for row in (getattr(resp, "data", None) or []):
+        if not isinstance(row, dict):
+            continue
+        gid = str(row.get("generation_id") or "").strip()
+        if not gid:
+            continue
+        out.setdefault(gid, []).append(_serialize_workspace_music_track(row))
+    return out
+
+
+def _mark_workspace_music_failed(generation_id: Optional[str], error_message: str, error_code: Optional[str] = None) -> None:
+    if not generation_id:
+        return
+    patch: Dict[str, Any] = {
+        "status": "failed",
+        "error_message": (error_message or "").strip()[:4000] or "Unknown error",
+        "completed_at": _utc_now_iso(),
+    }
+    if error_code:
+        patch["error_code"] = str(error_code)[:255]
+    try:
+        _update_workspace_music_generation(generation_id, patch)
+    except Exception:
+        pass
+
+
+async def _workspace_piapi_create_task(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not PIAPI_API_KEY:
+        raise RuntimeError("PIAPI_API_KEY is empty")
+    url = f"{PIAPI_BASE_URL}/api/v1/task"
+    headers = {"X-API-Key": PIAPI_API_KEY, "Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(url, headers=headers, json=payload)
+    response.raise_for_status()
+    return response.json()
+
+
+async def _workspace_piapi_get_task(task_id: str) -> Dict[str, Any]:
+    if not PIAPI_API_KEY:
+        raise RuntimeError("PIAPI_API_KEY is empty")
+    url = f"{PIAPI_BASE_URL}/api/v1/task/{task_id}"
+    headers = {"X-API-Key": PIAPI_API_KEY}
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.get(url, headers=headers)
+    response.raise_for_status()
+    return response.json()
+
+
+async def _workspace_piapi_poll_task(task_id: str, *, timeout_sec: int = 240, sleep_sec: float = 2.0) -> Dict[str, Any]:
+    t0 = time.time()
+    while True:
+        last = await _workspace_piapi_get_task(task_id)
+        status = str(((last.get("data") or {}).get("status") or "")).lower()
+        if status in {"completed", "failed"}:
+            return last
+        if time.time() - t0 > timeout_sec:
+            raise TimeoutError(f"PiAPI task timeout after {timeout_sec}s")
+        await asyncio.sleep(sleep_sec)
+
+
+async def _workspace_sunoapi_generate_task(*, prompt: str, custom_mode: bool, instrumental: bool, model: str, title: str = "", style: str = "") -> str:
+    if not SUNOAPI_API_KEY:
+        raise RuntimeError("SUNOAPI_API_KEY is empty")
+    url = f"{SUNOAPI_BASE_URL}/generate"
+    payload: Dict[str, Any] = {
+        "prompt": prompt,
+        "customMode": bool(custom_mode),
+        "instrumental": bool(instrumental),
+        "model": model,
+    }
+    if title:
+        payload["title"] = title
+    if style:
+        payload["style"] = style
+    headers = {"Authorization": f"Bearer {SUNOAPI_API_KEY}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(url, headers=headers, json=payload)
+    response.raise_for_status()
+    js = response.json()
+    if js.get("code") != 200:
+        raise RuntimeError(f"SunoAPI generate failed: {js}")
+    task_id = str(((js.get("data") or {}).get("taskId")) or "").strip()
+    if not task_id:
+        raise RuntimeError(f"SunoAPI did not return taskId: {js}")
+    return task_id
+
+
+async def _workspace_sunoapi_get_task(task_id: str) -> Dict[str, Any]:
+    if not SUNOAPI_API_KEY:
+        raise RuntimeError("SUNOAPI_API_KEY is empty")
+    url = f"{SUNOAPI_BASE_URL}/generate/record-info"
+    headers = {"Authorization": f"Bearer {SUNOAPI_API_KEY}"}
+    params = {"taskId": task_id}
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.get(url, headers=headers, params=params)
+    response.raise_for_status()
+    return response.json()
+
+
+async def _workspace_sunoapi_poll_task(task_id: str, *, timeout_sec: Optional[int] = None, sleep_sec: float = 2.0) -> Dict[str, Any]:
+    if timeout_sec is None:
+        timeout_sec = SUNOAPI_POLL_TIMEOUT_SEC
+    t0 = time.time()
+    while True:
+        last = await _workspace_sunoapi_get_task(task_id)
+        data = last.get("data") or {}
+        status = str(data.get("status") or "").upper().strip()
+        if status in {"SUCCESS", "FAILED", "ERROR"}:
+            return last
+        if time.time() - t0 > timeout_sec:
+            raise TimeoutError(f"SunoAPI task timeout after {timeout_sec}s")
+        await asyncio.sleep(sleep_sec)
+
+
+def _workspace_sunoapi_extract_tracks(task_json: Dict[str, Any]) -> List[Dict[str, Any]]:
+    data = task_json.get("data") or {}
+    resp = data.get("response") or {}
+    resp_data = resp.get("data") or []
+    if isinstance(resp_data, list):
+        return [item for item in resp_data if isinstance(item, dict)]
+    return []
+
+
+def _workspace_pick_first_url(val: Any) -> str:
+    if not val:
+        return ""
+    if isinstance(val, str):
+        s = val.strip()
+        return s if s.startswith(("http://", "https://")) else ""
+    if isinstance(val, dict):
+        for k in ("url", "audio_url", "audioUrl", "song_url", "songUrl", "song_path", "songPath", "mp3", "mp3_url", "file_url", "fileUrl", "download_url", "downloadUrl", "source_stream_audio_url", "sourceStreamAudioUrl", "video_url", "videoUrl", "image_url", "imageUrl"):
+            v = val.get(k)
+            if isinstance(v, str) and v.strip().startswith(("http://", "https://")):
+                return v.strip()
+        for value in val.values():
+            found = _workspace_pick_first_url(value)
+            if found:
+                return found
+    if isinstance(val, list):
+        for item in val:
+            found = _workspace_pick_first_url(item)
+            if found:
+                return found
+    return ""
+
+
+def _workspace_extract_audio_url(item: Dict[str, Any]) -> str:
+    if not isinstance(item, dict):
+        return ""
+    for k in ("audio_url", "audioUrl", "song_url", "songUrl", "song_path", "songPath", "mp3_url", "mp3", "file_url", "fileUrl", "url", "source_stream_audio_url", "sourceStreamAudioUrl"):
+        v = item.get(k)
+        if isinstance(v, str) and v.strip().startswith(("http://", "https://")):
+            return v.strip()
+    for k in ("audio", "audio_urls", "audios", "urls", "songs"):
+        found = _workspace_pick_first_url(item.get(k))
+        if found:
+            return found
+    return ""
+
+
+def _workspace_build_piapi_music_payload(payload: MusicGenerateIn, ai: str, mode: str) -> Dict[str, Any]:
+    if ai == "udio":
+        udio_prompt = _workspace_music_prompt_text(payload, ai, mode) or "Modern atmospheric music with emotional melody"
+        return {
+            "model": "music-u",
+            "task_type": "generate_music",
+            "input": {
+                "gpt_description_prompt": udio_prompt,
+                "lyrics_type": "instrumental" if payload.instrumental else "generate",
+            },
+            "config": {"service_mode": "public"},
+        }
+
+    input_block: Dict[str, Any] = {
+        "make_instrumental": bool(payload.instrumental),
+    }
+    if payload.title:
+        input_block["title"] = str(payload.title).strip()
+    if payload.tags:
+        input_block["tags"] = str(payload.tags).strip()
+    if mode == "lyrics":
+        input_block["prompt"] = str(payload.lyrics_text or "").strip()
+    else:
+        input_block["gpt_description_prompt"] = str(payload.idea_text or "").strip()
+
+    return {
+        "model": "suno",
+        "task_type": "music",
+        "input": input_block,
+        "config": {"service_mode": "public"},
+    }
+
+
+async def _run_workspace_music_provider(payload: MusicGenerateIn, ai: str, backend: str) -> Dict[str, Any]:
+    if backend == "sunoapi":
+        prompt_text = _workspace_music_prompt_text(payload, ai, _normalize_music_mode_value(ai, payload.mode)) or "A modern catchy song with clear structure and strong hook"
+        model_enum = "V4_5ALL"
+        task_id = await _workspace_sunoapi_generate_task(
+            prompt=prompt_text,
+            custom_mode=bool(_normalize_music_mode_value(ai, payload.mode) == "lyrics"),
+            instrumental=bool(payload.instrumental),
+            model=model_enum,
+            title=str(payload.title or "").strip(),
+            style=str(payload.tags or "").strip(),
+        )
+        done = await _workspace_sunoapi_poll_task(task_id, timeout_sec=SUNOAPI_POLL_TIMEOUT_SEC, sleep_sec=2.0)
+        data = done.get("data") or {}
+        status = str(data.get("status") or "").upper().strip()
+        if status != "SUCCESS":
+            raise RuntimeError(f"SunoAPI status: {status}")
+        tracks_raw = _workspace_sunoapi_extract_tracks(done)
+        tracks = []
+        for idx, item in enumerate(tracks_raw[:2], start=1):
+            tracks.append({
+                "provider_track_id": item.get("id") or item.get("audioId") or item.get("songId"),
+                "title": item.get("title") or payload.title or f"Track {idx}",
+                "audio_url": _workspace_extract_audio_url(item),
+                "video_url": _workspace_pick_first_url(item.get("video_url") or item.get("video") or item.get("mp4") or item.get("videoUrl")),
+                "cover_url": _workspace_pick_first_url(item.get("image_url") or item.get("image") or item.get("cover_url") or item.get("cover")),
+                "lyrics": item.get("lyrics"),
+                "payload_json": item,
+            })
+        if not tracks:
+            raise RuntimeError("SunoAPI completed but returned no tracks")
+        return {"provider_task_id": task_id, "tracks": tracks}
+
+    task_payload = _workspace_build_piapi_music_payload(payload, ai, _normalize_music_mode_value(ai, payload.mode))
+    created = await _workspace_piapi_create_task(task_payload)
+    task_id = str(((created.get("data") or {}).get("task_id")) or "").strip()
+    if not task_id:
+        raise RuntimeError(f"PiAPI did not return task_id: {created}")
+    done = await _workspace_piapi_poll_task(task_id, timeout_sec=PIAPI_POLL_TIMEOUT_SEC, sleep_sec=2.0)
+    data = done.get("data") or {}
+    status = str(data.get("status") or "").lower()
+    if status != "completed":
+        err = ((data.get("error") or {}).get("message")) or "unknown error"
+        raise RuntimeError(f"PiAPI status: {status}. {err}")
+    out = data.get("output") or []
+    if isinstance(out, dict):
+        out = [out]
+    tracks = []
+    for idx, item in enumerate(out[:2], start=1):
+        if not isinstance(item, dict):
+            continue
+        tracks.append({
+            "provider_track_id": item.get("id") or item.get("task_id") or item.get("song_id"),
+            "title": item.get("title") or payload.title or f"Track {idx}",
+            "audio_url": _workspace_extract_audio_url(item),
+            "video_url": _workspace_pick_first_url(item.get("video_url") or item.get("video") or item.get("mp4") or item.get("videoUrl")),
+            "cover_url": _workspace_pick_first_url(item.get("image_url") or item.get("cover_url") or item.get("cover")),
+            "lyrics": item.get("lyrics"),
+            "payload_json": item,
+        })
+    if not tracks:
+        raise RuntimeError("PiAPI completed but returned no tracks")
+    return {"provider_task_id": task_id, "tracks": tracks}
+
+
+async def _run_workspace_music_job(*, generation_id: str, user_id: int, payload: MusicGenerateIn, charge_tokens: int = 0, charge_ref_id: str = "") -> None:
+    ai = _normalize_music_ai_value(payload.ai)
+    backend = _normalize_music_backend_value(ai, payload.backend)
+    mode = _normalize_music_mode_value(ai, payload.mode)
+    provider_order = [backend] if backend != "auto" else ["piapi", "sunoapi"]
+    if ai == "udio":
+        provider_order = ["piapi"]
+
+    last_error: Optional[Exception] = None
+    for provider in provider_order:
+        try:
+            _update_workspace_music_generation(generation_id, {"status": "processing", "backend": provider, "mode": mode})
+            result = await _run_workspace_music_provider(payload, ai, provider)
+            tracks = result.get("tracks") or []
+            _replace_workspace_music_tracks(generation_id, tracks)
+            _update_workspace_music_generation(generation_id, {
+                "status": "completed",
+                "backend": provider,
+                "mode": mode,
+                "provider_task_id": result.get("provider_task_id"),
+                "output_count": len(tracks),
+                "completed_at": _utc_now_iso(),
+                "error_message": None,
+                "error_code": None,
+            })
+            return
+        except Exception as e:
+            last_error = e
+            _update_workspace_music_generation(generation_id, {
+                "provider_task_id": None,
+                "error_message": str(e)[:4000],
+            })
+            if provider != provider_order[-1]:
+                continue
+
+    if charge_tokens > 0:
+        try:
+            add_tokens(int(user_id), int(charge_tokens), reason="workspace_music_refund", ref_id=charge_ref_id or uuid4().hex, meta={"error": str(last_error)[:300], "origin": "workspace_music"})
+        except TypeError:
+            add_tokens(int(user_id), int(charge_tokens), reason="workspace_music_refund")
+    _mark_workspace_music_failed(generation_id, str(last_error or "Unknown music error"), error_code="provider_error")
+
+
 @router.get("/tts/voices")
 async def workspace_tts_voices(user: Dict[str, Any] = Depends(get_current_workspace_user)) -> List[Dict[str, Any]]:
     return ALLOWED_VOICES
@@ -3093,6 +3565,168 @@ async def workspace_songwriter(payload: SongwriterPayload, user: Dict[str, Any] 
         history = [{"role": t.role, "content": t.content} for t in payload.history if t.role in ("user", "assistant") and (t.content or "").strip()]
     answer = await openai_chat_answer(user_text=user_text, system_prompt=_songwriter_prompt_with_context(payload), history=history, temperature=0.6, max_tokens=900)
     return {"answer": answer}
+
+
+@router.post("/music/run")
+async def workspace_music_run(payload: MusicGenerateIn, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
+    uid = int(user["telegram_user_id"])
+    ai = _normalize_music_ai_value(payload.ai)
+    backend = _normalize_music_backend_value(ai, payload.backend)
+    mode = _normalize_music_mode_value(ai, payload.mode)
+    prompt_text = _workspace_music_prompt_text(payload, ai, mode)
+    if not prompt_text:
+        raise HTTPException(status_code=400, detail="Music prompt is empty")
+
+    ensure_user_row(uid)
+    try:
+        balance = int(get_balance(uid) or 0)
+    except Exception:
+        balance = 0
+    cost = _workspace_music_cost_tokens(payload, ai, backend)
+    if cost > 0 and balance < cost:
+        raise HTTPException(status_code=402, detail=f"Недостаточно токенов. Нужно: {cost} ток.")
+
+    charged = False
+    ref_id = uuid4().hex if cost > 0 else ""
+    if cost > 0:
+        try:
+            add_tokens(uid, -int(cost), reason=_workspace_music_charge_reason(ai, backend), ref_id=ref_id, meta={"origin": "workspace_music", "ai": ai, "backend": backend, "mode": mode})
+            charged = True
+        except TypeError:
+            add_tokens(uid, -int(cost), reason=_workspace_music_charge_reason(ai, backend))
+            charged = True
+
+    generation_id = _insert_workspace_music_generation({
+        "user_id": str(uid),
+        "ai": ai,
+        "backend": backend,
+        "mode": mode,
+        "title": str(payload.title or "").strip()[:200],
+        "tags": str(payload.tags or "").strip()[:400],
+        "language": str(payload.language or "").strip()[:32],
+        "mood": str(payload.mood or "").strip()[:200],
+        "references": str(payload.references or "").strip()[:1000],
+        "idea_text": str(payload.idea_text or "").strip(),
+        "lyrics_text": str(payload.lyrics_text or "").strip(),
+        "instrumental": bool(payload.instrumental),
+        "status": "queued",
+        "origin": "workspace",
+        "charge_tokens": int(cost if charged else 0),
+    })
+
+    asyncio.create_task(
+        _run_workspace_music_job(
+            generation_id=generation_id,
+            user_id=uid,
+            payload=payload,
+            charge_tokens=(int(cost) if charged else 0),
+            charge_ref_id=ref_id,
+        )
+    )
+
+    return {"ok": True, "generation_id": generation_id, "status": "queued", "cost_tokens": int(cost if charged else 0)}
+
+
+@router.get("/music/history")
+async def workspace_music_history(
+    limit: int = 20,
+    offset: int = 0,
+    user: Dict[str, Any] = Depends(get_current_workspace_user),
+) -> Dict[str, Any]:
+    uid = int(user["telegram_user_id"])
+    safe_limit = max(1, min(int(limit or 20), 100))
+    safe_offset = max(0, int(offset or 0))
+
+    if supabase is None:
+        return {"ok": True, "items": [], "limit": safe_limit, "offset": safe_offset}
+
+    try:
+        resp = (
+            supabase.table(_WORKSPACE_MUSIC_GENERATIONS_TABLE)
+            .select("*")
+            .eq("user_id", str(uid))
+            .is_("deleted_at", "null")
+            .order("created_at", desc=True)
+            .range(safe_offset, safe_offset + safe_limit - 1)
+            .execute()
+        )
+        rows = getattr(resp, "data", None) or []
+        ids = [str(row.get("id")) for row in rows if isinstance(row, dict) and row.get("id")]
+        tracks_map = _load_workspace_music_tracks(ids)
+        items = [_serialize_workspace_music_generation(row, tracks_map.get(str(row.get("id")), [])) for row in rows if isinstance(row, dict)]
+        return {"ok": True, "items": items, "limit": safe_limit, "offset": safe_offset, "count": len(items)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Music history load failed: {e}")
+
+
+@router.get("/music/history/{generation_id}")
+async def workspace_music_history_item(
+    generation_id: str,
+    user: Dict[str, Any] = Depends(get_current_workspace_user),
+) -> Dict[str, Any]:
+    uid = int(user["telegram_user_id"])
+    generation_id_text = str(generation_id or "").strip()
+    if not generation_id_text:
+        raise HTTPException(status_code=400, detail="Missing generation_id")
+
+    if supabase is None:
+        raise HTTPException(status_code=404, detail="Music generation not found")
+
+    try:
+        resp = (
+            supabase.table(_WORKSPACE_MUSIC_GENERATIONS_TABLE)
+            .select("*")
+            .eq("id", generation_id_text)
+            .eq("user_id", str(uid))
+            .is_("deleted_at", "null")
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(resp, "data", None) or []
+        if not rows or not isinstance(rows[0], dict):
+            raise HTTPException(status_code=404, detail="Music generation not found")
+        tracks_map = _load_workspace_music_tracks([generation_id_text])
+        item = _serialize_workspace_music_generation(rows[0], tracks_map.get(generation_id_text, []))
+        return {"ok": True, "item": item}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Music history item load failed: {e}")
+
+
+@router.delete("/music/history/{generation_id}")
+async def workspace_music_history_delete_item(
+    generation_id: str,
+    user: Dict[str, Any] = Depends(get_current_workspace_user),
+) -> Dict[str, Any]:
+    uid = int(user["telegram_user_id"])
+    generation_id_text = str(generation_id or "").strip()
+    if not generation_id_text:
+        raise HTTPException(status_code=400, detail="Missing generation_id")
+
+    if supabase is None:
+        raise HTTPException(status_code=404, detail="Music generation not found")
+
+    try:
+        resp = (
+            supabase.table(_WORKSPACE_MUSIC_GENERATIONS_TABLE)
+            .select("id,user_id,deleted_at")
+            .eq("id", generation_id_text)
+            .eq("user_id", str(uid))
+            .is_("deleted_at", "null")
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(resp, "data", None) or []
+        if not rows or not isinstance(rows[0], dict):
+            raise HTTPException(status_code=404, detail="Music generation not found")
+        supabase.table(_WORKSPACE_MUSIC_GENERATIONS_TABLE).update({"deleted_at": _utc_now_iso(), "updated_at": _utc_now_iso()}).eq("id", generation_id_text).execute()
+        return {"ok": True, "generation_id": generation_id_text}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Music history delete failed: {e}")
+
 
 
 @router.get("/prompts/categories")
