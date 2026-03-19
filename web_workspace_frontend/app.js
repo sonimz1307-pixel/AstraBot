@@ -16,7 +16,10 @@ const runtime = {
   videoPollTimer: null,
   videoEditPollTimer: null,
   musicPollTimer: null,
+  showcaseMediaObserver: null,
 };
+
+const DEFAULT_APP_VIEW = localStorage.getItem('astrabot:view') || (window.location.hash === '#workspace' ? 'workspace' : 'showcase');
 
 const FILE_INPUT_MAP = {
   chat_attachments: { key: 'chat.attachments', multiple: true },
@@ -43,6 +46,7 @@ const state = {
   me: DEFAULT_ME,
   balance: null,
   apiOnline: false,
+  view: DEFAULT_APP_VIEW,
   studio: localStorage.getItem('astrabot:studio') || 'chat',
   recentRuns: JSON.parse(localStorage.getItem('astrabot:recentRuns') || '[]'),
   workspaceNotes: localStorage.getItem('astrabot:workspaceNotes') || '',
@@ -216,17 +220,34 @@ function scrollChatToBottom() {
 }
 
 const STUDIO_META = {
-  chat: { emoji: '💬', title: 'ChatGPT Studio', subtitle: 'Центральный чат-диалог для идей, сценариев, промптов и быстрых переходов в другие студии.' },
-  video: { emoji: '🎬', title: 'Video Studio', subtitle: 'Kling / Veo / Seedance / Sora в одной рабочей зоне с динамическими полями справа.' },
-  image: { emoji: '🖼️', title: 'Image Studio', subtitle: 'Nano Banana, афиши, фотосессии и image-to-image сценарии на общей архитектуре.' },
-  voice: { emoji: '🎙️', title: 'Voice Studio', subtitle: 'TTS, выбор голоса и быстрый экспорт результата в проект.' },
-  music: { emoji: '🎼', title: 'Music Studio', subtitle: 'Songwriter, Suno, Udio и работа с идеей трека в одном пространстве.' },
-  library: { emoji: '📚', title: 'Prompt Library', subtitle: 'Категории, группы, карточки промптов и быстрый перенос в студии.' },
-  workspace: { emoji: '🧠', title: 'Workspace', subtitle: 'Планы, референсы, заметки и проектная логика поверх генераций.' },
-  history: { emoji: '🕘', title: 'History', subtitle: 'Локальная и будущая серверная история запусков, статусов и результатов.' },
-  billing: { emoji: '💳', title: 'Billing', subtitle: 'Баланс, пакеты токенов, экономика генераций и будущая касса.' },
-  profile: { emoji: '👤', title: 'Profile', subtitle: 'Связка сайта и Telegram-аккаунта, базовые настройки и состояние системы.' },
+  chat: { icon: 'spark', title: 'ChatGPT Studio', subtitle: 'Центральный AI-чат для идей, сценариев и быстрых переходов в другие студии.', eyebrow: 'Creative AI Studio' },
+  video: { icon: 'video', title: 'Video Studio', subtitle: 'Kling, Veo, Seedance и Sora в одной рабочей зоне с живыми настройками.', eyebrow: 'Video generation' },
+  image: { icon: 'image', title: 'Image Studio', subtitle: 'Nano Banana, нейрофотосессии, posters и image-to-image сценарии.', eyebrow: 'Image generation' },
+  voice: { icon: 'voice', title: 'Voice Studio', subtitle: 'Озвучка, выбор голоса и быстрый экспорт результата.', eyebrow: 'Voice workflow' },
+  music: { icon: 'music', title: 'Music Studio', subtitle: 'Songwriter, Suno, Udio и выдача треков прямо в рабочей зоне.', eyebrow: 'Music workflow' },
+  library: { icon: 'library', title: 'Prompt Library', subtitle: 'Категории, группы и карточки промптов с быстрым переносом в студии.', eyebrow: 'Prompt system' },
+  workspace: { icon: 'workspace', title: 'Workspace', subtitle: 'Планы, референсы, заметки и проектная логика поверх генераций.', eyebrow: 'Project hub' },
+  history: { icon: 'history', title: 'History', subtitle: 'История запусков, статусов и готовых результатов.', eyebrow: 'Result archive' },
+  billing: { icon: 'billing', title: 'Billing', subtitle: 'Баланс, токены и экономика генераций.', eyebrow: 'Token economy' },
+  profile: { icon: 'profile', title: 'Profile', subtitle: 'Telegram-связка, базовые настройки и состояние системы.', eyebrow: 'Account and access' },
 };
+
+const STUDIO_ICON_SVG = {
+  spark: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>',
+  video: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="6" width="12" height="12" rx="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M15.5 10l5-3v10l-5-3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>',
+  image: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="14" rx="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M7 15l3.2-3.2a1 1 0 0 1 1.4 0L14 14l2.2-2.2a1 1 0 0 1 1.4 0L20 14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><circle cx="9" cy="9" r="1.3" fill="currentColor"/></svg>',
+  voice: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4a3 3 0 0 1 3 3v4a3 3 0 1 1-6 0V7a3 3 0 0 1 3-3Z" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M6 11a6 6 0 0 0 12 0M12 17v3M9 20h6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>',
+  music: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 5v9.5a2.5 2.5 0 1 1-1.7-2.38V7.4l7-1.6v7.7a2.5 2.5 0 1 1-1.7-2.38V4.4L14 5Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>',
+  library: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6.5A2.5 2.5 0 0 1 7.5 4H20v14H7.5A2.5 2.5 0 0 0 5 20.5V6.5Zm0 0V20M8 7h8M8 11h8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  workspace: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4" width="17" height="16" rx="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M3.5 9.5h17M8.5 4v16" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>',
+  history: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.34-5.66L4 8.7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 8v4l3 2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  billing: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="6" width="17" height="12" rx="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M3.5 10.5h17M8 14h3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>',
+  profile: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M5.5 19a6.5 6.5 0 0 1 13 0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>',
+};
+
+function renderStudioIcon(iconKey) {
+  return STUDIO_ICON_SVG[iconKey] || STUDIO_ICON_SVG.spark;
+}
 
 
 const VIDEO_REGISTRY = {
@@ -1778,7 +1799,7 @@ function renderNav() {
     const meta = STUDIO_META[key];
     return `
       <button class="nav-item ${state.studio === key ? 'active' : ''}" data-action="switch-studio" data-studio="${key}">
-        <span class="nav-emoji">${meta.emoji}</span>
+        <span class="nav-icon">${renderStudioIcon(meta.icon)}</span>
         <span>
           <span class="nav-title">${escapeHtml(meta.title)}</span>
           <span class="nav-subtitle">${escapeHtml(meta.subtitle)}</span>
@@ -1818,7 +1839,7 @@ function renderHeader() {
 
   document.getElementById('headerTitle').textContent = meta.title;
   document.getElementById('headerSubtitle').textContent = meta.subtitle;
-  document.getElementById('headerEyebrow').textContent = `${meta.emoji} ${meta.title}`;
+  document.getElementById('headerEyebrow').textContent = meta.eyebrow || meta.title;
   const metaInfo = currentMeta();
   document.getElementById('metaStudio').textContent = metaInfo.studio;
   document.getElementById('metaProvider').textContent = metaInfo.provider;
@@ -1972,6 +1993,7 @@ function renderWorkspace() {
     default: el.innerHTML = `<div class="placeholder-stage"><div class="empty-copy"><strong>Студия в разработке</strong><div>Для этой студии пока нет workspace-renderer.</div></div></div>`;
   }
   attachImageCompareInteractions();
+  initShowcaseMedia();
 }
 
 function renderInspector() {
@@ -5211,21 +5233,77 @@ function handleInputChange(target) {
   }
 }
 
+
+function activateStudio(studio, options = {}) {
+  if (!studio || !STUDIO_META[studio]) return;
+  const previousStudio = state.studio;
+  state.studio = studio;
+  if (state.studio === 'video' && previousStudio !== 'video') state.video.panel = 'params';
+  if (state.studio === 'library' && !state.prompts.categories.length) loadPromptCategories();
+  if (state.studio === 'voice' && !state.voice.voices.length) loadVoices();
+  if (state.studio === 'voice' && state.authToken) loadVoiceHistory({ silent: true, keepSelection: true }).catch(() => {});
+  if (state.studio === 'music' && state.authToken) loadMusicHistory({ silent: true, keepSelection: true }).catch(() => {});
+  if (state.studio === 'history' && state.authToken) loadVideoHistory({ silent: true, keepSelection: true });
+  if (state.studio === 'video' && state.video.panel === 'library' && state.authToken) loadVideoHistory({ silent: true, keepSelection: true });
+  if (state.studio === 'image' && state.image.panel === 'library' && state.authToken) loadImageHistory({ silent: true, keepSelection: true });
+  if (!options.skipRender) render();
+  if (!options.skipSave) saveState();
+}
+
+function setAppView(view, options = {}) {
+  state.view = view === 'workspace' ? 'workspace' : 'showcase';
+  localStorage.setItem('astrabot:view', state.view);
+  renderLandingView();
+  if (options.updateHash !== false) {
+    if (state.view === 'workspace') history.replaceState(null, '', '#workspace');
+    else history.replaceState(null, '', window.location.pathname + window.location.search);
+  }
+  if (options.scroll !== false) {
+    const target = state.view === 'workspace'
+      ? document.getElementById('workspaceSection')
+      : document.getElementById('showcaseView');
+    target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+}
+
+function renderLandingView() {
+  document.body.classList.toggle('workspace-view', state.view === 'workspace');
+  document.body.classList.toggle('showcase-view', state.view !== 'workspace');
+  const status = document.getElementById('landingStatusPill');
+  if (status) {
+    if (state.authToken && state.me) status.textContent = 'Telegram connected';
+    else if (state.apiOnline) status.textContent = 'API online';
+    else status.textContent = 'AI workspace live';
+  }
+}
+
 function handleAction(action, dataset = {}) {
   switch (action) {
     case 'switch-studio': {
-      const previousStudio = state.studio;
-      state.studio = dataset.studio;
-      if (state.studio === 'video' && previousStudio !== 'video') state.video.panel = 'params';
-      if (state.studio === 'library' && !state.prompts.categories.length) loadPromptCategories();
-      if (state.studio === 'voice' && !state.voice.voices.length) loadVoices();
-      if (state.studio === 'voice' && state.authToken) loadVoiceHistory({ silent: true, keepSelection: true }).catch(() => {});
-      if (state.studio === 'music' && state.authToken) loadMusicHistory({ silent: true, keepSelection: true }).catch(() => {});
-      if (state.studio === 'history' && state.authToken) loadVideoHistory({ silent: true, keepSelection: true });
-      if (state.studio === 'video' && state.video.panel === 'library' && state.authToken) loadVideoHistory({ silent: true, keepSelection: true });
-      if (state.studio === 'image' && state.image.panel === 'library' && state.authToken) loadImageHistory({ silent: true, keepSelection: true });
+      activateStudio(dataset.studio);
+      break;
+    }
+    case 'open-workspace': {
+      if (dataset.studio) activateStudio(dataset.studio, { skipRender: true, skipSave: true });
       render();
       saveState();
+      setAppView('workspace');
+      break;
+    }
+    case 'show-showcase': {
+      setAppView('showcase');
+      break;
+    }
+    case 'show-pricing': {
+      setAppView('showcase');
+      requestAnimationFrame(() => {
+        const pricing = document.getElementById('pricingSection');
+        if (pricing) pricing.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+      break;
+    }
+    case 'login-placeholder': {
+      toast('info', 'Вход скоро появится', 'Пока это заглушка. Позже сюда подключим полноценную авторизацию.');
       break;
     }
     case 'send-chat': sendChat(); break;
@@ -5544,8 +5622,10 @@ function render() {
   renderRecentRuns();
   renderWorkspace();
   renderInspector();
+  renderLandingView();
   enhanceCustomSelects();
   attachImageCompareInteractions();
+  initShowcaseMedia();
 }
 
 document.addEventListener('click', (e) => {
@@ -5604,3 +5684,42 @@ async function init() {
 }
 
 init();
+
+
+function initShowcaseMedia() {
+  const videos = Array.from(document.querySelectorAll('[data-autoplay-observe]'));
+  if (!videos.length) return;
+
+  if (runtime.showcaseMediaObserver) {
+    runtime.showcaseMediaObserver.disconnect();
+    runtime.showcaseMediaObserver = null;
+  }
+
+  const prefersReducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const playVideo = (video) => {
+    video.muted = true;
+    video.playsInline = true;
+    if (prefersReducedMotion) return;
+    const playPromise = video.play();
+    if (playPromise && typeof playPromise.catch === 'function') playPromise.catch(() => {});
+  };
+
+  if (!('IntersectionObserver' in window) || prefersReducedMotion) {
+    videos.forEach(playVideo);
+    return;
+  }
+
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      const video = entry.target;
+      if (entry.isIntersecting && entry.intersectionRatio >= 0.35) {
+        playVideo(video);
+      } else {
+        try { video.pause(); } catch (_) {}
+      }
+    });
+  }, { threshold: [0, 0.35, 0.65] });
+
+  videos.forEach((video) => observer.observe(video));
+  runtime.showcaseMediaObserver = observer;
+}
