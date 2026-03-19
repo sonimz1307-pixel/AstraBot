@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AstraBot — Тарифы</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <style>
+    :root{
+      --bg:#06070b;
+      --panel:#121317;
+      --panel-2:#15171d;
+      --border:rgba(255,255,255,.08);
+      --muted:rgba(255,255,255,.62);
+      --muted-2:rgba(255,255,255,.44);
+      --white:#f5f7fb;
+      --lite:#39d88b;
+      --plus:#fc642d;
+      --pro:#7b67ff;
+      --ultra:#C9A84C;
+      --shadow:0 16px 50px rgba(0,0,0,.32);
+      --radius:28px;
+    }
+    *{box-sizing:border-box}
+    html,body{margin:0;padding:0;overflow-x:hidden}
+    body{
+      font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+      background:
+        radial-gradient(1100px 520px at 22% 0%, rgba(252,100,45,.16), transparent 52%),
+        radial-gradient(900px 520px at 78% 8%, rgba(123,103,255,.18), transparent 48%),
+        radial-gradient(820px 420px at 76% 64%, rgba(201,168,76,.10), transparent 45%),
+        linear-gradient(180deg,#06070b 0%,#090b11 100%);
+      color:var(--white);
+      min-height:100vh;
+    }
+    a{text-decoration:none;color:inherit}
+    .page{max-width:1380px;margin:0 auto;padding:24px 22px 64px}
+
+    .topbar{
+      display:flex;align-items:center;justify-content:space-between;gap:16px;
+      padding:14px 16px;
+      background:linear-gradient(180deg, rgba(17,19,25,.9), rgba(12,14,20,.82));
+      border:1px solid rgba(255,255,255,.07);
+      border-radius:26px;
+      box-shadow:var(--shadow);
+      backdrop-filter: blur(18px);
+      margin-bottom:34px;
+    }
+    .brand{display:flex;align-items:center;gap:14px;min-width:0}
+    .brand-mark{
+      width:52px;height:52px;border-radius:18px;position:relative;flex:0 0 auto;
+      background:
+        radial-gradient(circle at 35% 35%, rgba(255,255,255,.28), transparent 42%),
+        linear-gradient(145deg, rgba(255,255,255,.16), rgba(255,255,255,.04));
+      border:1px solid rgba(255,255,255,.10);
+      box-shadow: inset 0 1px 12px rgba(255,255,255,.06), 0 10px 26px rgba(0,0,0,.25);
+    }
+    .brand-mark::before,
+    .brand-mark::after{
+      content:"";position:absolute;top:50%;width:12px;height:12px;border-radius:50%;background:#fff;transform:translateY(-50%);
+      filter:drop-shadow(0 0 12px rgba(255,255,255,.36));opacity:.95;
+    }
+    .brand-mark::before{left:14px}
+    .brand-mark::after{right:14px}
+    .brand-title{font-size:18px;font-weight:800;line-height:1.1}
+    .brand-subtitle{font-size:13px;color:var(--muted);line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:520px}
+    .nav{display:flex;align-items:center;gap:12px;flex-wrap:wrap;justify-content:flex-end}
+    .pill,
+    .btn{
+      height:48px;padding:0 22px;border-radius:18px;border:1px solid rgba(255,255,255,.07);
+      display:inline-flex;align-items:center;justify-content:center;gap:10px;
+      font-weight:700;letter-spacing:-.01em;cursor:pointer;transition:.22s ease;
+    }
+    .pill{background:rgba(255,255,255,.04);color:rgba(255,255,255,.84)}
+    .pill.active{background:rgba(255,255,255,.09);box-shadow:inset 0 1px 0 rgba(255,255,255,.06)}
+    .btn{background:linear-gradient(180deg,#ff893f 0%, #fc642d 100%);color:#111;border-color:rgba(255,160,97,.32);box-shadow:0 10px 26px rgba(252,100,45,.28)}
+    .btn:hover{transform:translateY(-1px)}
+
+    .hero{padding:30px 0 6px;text-align:center}
+    .hero h1{
+      margin:0;
+      font-size:clamp(44px,6.4vw,84px);
+      line-height:.98;
+      letter-spacing:-.06em;
+      font-weight:900;
+    }
+    .hero p{max-width:900px;margin:18px auto 0;color:var(--muted);font-size:clamp(17px,1.8vw,24px);line-height:1.36}
+    .hero-chips{display:flex;justify-content:center;gap:14px;flex-wrap:wrap;margin-top:28px}
+    .hero-chip{
+      height:58px;padding:0 22px;border-radius:21px;
+      background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);
+      color:#f0f2f8;font-weight:800;font-size:15px;letter-spacing:-.02em;
+      display:flex;align-items:center;justify-content:center;
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.04);
+    }
+
+    .pricing-wrap{margin-top:34px}
+    .pricing-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;align-items:stretch}
+
+    .card-shell{
+      position:relative;border-radius:30px;padding:1px;
+      background:linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.03));
+      min-height:100%;
+      box-shadow:var(--shadow);
+      overflow:hidden;
+    }
+    .card-shell::before{
+      content:"";position:absolute;inset:0;pointer-events:none;opacity:.75;
+      background:radial-gradient(520px 220px at 50% -8%, rgba(255,255,255,.08), transparent 50%);
+    }
+    .card-shell.lite{box-shadow:0 22px 54px rgba(0,0,0,.28), 0 0 0 1px rgba(57,216,139,.05)}
+    .card-shell.plus{box-shadow:0 24px 58px rgba(252,100,45,.12), 0 0 0 1px rgba(252,100,45,.06)}
+    .card-shell.pro{box-shadow:0 24px 58px rgba(123,103,255,.12), 0 0 0 1px rgba(123,103,255,.06)}
+    .card-shell.ultra{box-shadow:0 24px 60px rgba(201,168,76,.14), 0 0 0 1px rgba(201,168,76,.08)}
+
+    .card-badge{
+      position:absolute;left:1px;right:1px;top:1px;height:36px;border-radius:29px 29px 0 0;
+      display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;z-index:2;
+    }
+    .card-badge.plus{background:linear-gradient(180deg,#fc7c3d 0%, #fc642d 100%);color:#120b08}
+    .card-badge.ultra{background:linear-gradient(180deg,#eed171 0%, #d7b859 100%);color:#1c1405}
+
+    .card{
+      position:relative;display:flex;flex-direction:column;height:100%;min-height:690px;
+      border-radius:29px;padding:56px 22px 22px;
+      background:
+        radial-gradient(340px 180px at 50% -8%, rgba(255,255,255,.05), transparent 55%),
+        linear-gradient(180deg, rgba(18,20,27,.98), rgba(12,14,20,.98));
+      overflow:hidden;
+    }
+    .card.has-badge{padding-top:60px}
+    .card.plus{background:linear-gradient(180deg, #161210 0%, #12141b 38%, #0f1118 100%)}
+    .card.pro{background:linear-gradient(180deg, #13141d 0%, #11131b 40%, #0d1017 100%)}
+    .card.ultra{background:linear-gradient(180deg, #141208 0%, #111218 42%, #0f1016 100%)}
+
+    .card::after{
+      content:"";position:absolute;inset:auto -12% -24% -12%;height:54%;pointer-events:none;opacity:.45;
+      background:radial-gradient(circle at 50% 0%, var(--glow), transparent 48%);
+    }
+    .lite .card{--glow:rgba(57,216,139,.10)}
+    .plus .card{--glow:rgba(252,100,45,.18)}
+    .pro .card{--glow:rgba(123,103,255,.16)}
+    .ultra .card{--glow:rgba(201,168,76,.18)}
+
+    .top{position:relative;z-index:1;display:grid;grid-template-rows:auto minmax(70px,auto) auto minmax(96px,auto);row-gap:10px}
+    .eyebrow{display:flex;align-items:center;gap:12px;font-size:19px;font-weight:800;letter-spacing:-.03em;margin-bottom:0;min-height:34px}
+    .plan-badge{
+      width:34px;height:34px;border-radius:12px;display:inline-flex;align-items:center;justify-content:center;
+      font-size:15px;font-weight:900;line-height:1;flex:0 0 auto;
+      border:1px solid rgba(255,255,255,.10);
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.10), 0 10px 24px rgba(0,0,0,.22);
+    }
+    .plan-badge.lite{background:linear-gradient(180deg, rgba(57,216,139,.32), rgba(57,216,139,.12)); color:#eafff3}
+    .plan-badge.plus{background:linear-gradient(180deg, rgba(252,100,45,.34), rgba(252,100,45,.12)); color:#fff0e8}
+    .plan-badge.pro{background:linear-gradient(180deg, rgba(123,103,255,.34), rgba(123,103,255,.12)); color:#f4efff}
+    .plan-badge.ultra{background:linear-gradient(180deg, rgba(201,168,76,.36), rgba(201,168,76,.14)); color:#fff6db}
+    .plan-name{display:inline-block;transform:translateY(1px)}
+    .eyebrow.lite{color:#f1fff8}
+    .eyebrow.plus{color:#fff4ef}
+    .eyebrow.pro{color:#f4f0ff}
+    .eyebrow.ultra{color:#fff6de}
+
+    .subtitle{font-size:16px;line-height:1.5;color:var(--muted);min-height:0;margin:0}
+
+    .price-row{display:flex;align-items:flex-end;gap:10px;margin:2px 0 0}
+    .price{font-size:66px;line-height:.9;font-weight:900;letter-spacing:-.06em}
+    .per{font-size:18px;color:var(--muted);font-weight:600;padding-bottom:8px}
+
+    .token-box{padding:16px 0 18px;border-top:1px solid rgba(255,255,255,.05);border-bottom:1px solid rgba(255,255,255,.05);margin:0}
+    .token-title{font-size:20px;font-weight:900;letter-spacing:-.03em;display:flex;align-items:center;gap:10px}
+    .token-desc{margin-top:8px;font-size:15px;line-height:1.5;color:var(--muted)}
+
+    .action{margin:18px 0}
+    .action .select{
+      width:100%;height:62px;border:none;border-radius:18px;font-size:18px;font-weight:900;letter-spacing:-.02em;cursor:pointer;transition:.22s ease;
+    }
+    .lite .select,.pro .select{
+      background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.04));
+      color:#fff;border:1px solid rgba(255,255,255,.08);
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.04);
+    }
+    .plus .select{background:linear-gradient(180deg,#ff8a40 0%, #fc642d 100%);color:#130c08;box-shadow:0 10px 26px rgba(252,100,45,.3)}
+    .ultra .select{background:linear-gradient(180deg,#e8cd77 0%, #cfaf51 100%);color:#1b1307;box-shadow:0 10px 26px rgba(201,168,76,.28)}
+    .action .select:hover{transform:translateY(-1px)}
+
+    .section-label{font-size:14px;font-weight:900;letter-spacing:.12em;text-transform:uppercase;color:var(--muted-2);margin-bottom:12px}
+    .list{list-style:none;padding:0;margin:0 0 18px;display:flex;flex-direction:column;gap:14px}
+    .list li{display:flex;gap:12px;font-size:16px;line-height:1.5;color:#e9edf7}
+    .dot{width:7px;height:7px;border-radius:50%;margin-top:10px;flex:0 0 auto;background:var(--accent)}
+    .lite{--accent:var(--lite)}
+    .plus{--accent:var(--plus)}
+    .pro{--accent:var(--pro)}
+    .ultra{--accent:var(--ultra)}
+
+    .bonus{
+      margin-top:auto;position:relative;z-index:1;
+      border-radius:18px;padding:16px 16px 14px;
+      background:rgba(9,10,14,.72);
+      border:1px solid rgba(255,255,255,.06);
+    }
+    .ultra .bonus{background:rgba(17,14,7,.78);border-color:rgba(201,168,76,.14)}
+    .plus .bonus{border-color:rgba(252,100,45,.12)}
+    .pro .bonus{border-color:rgba(123,103,255,.14)}
+    .bonus-title{display:flex;align-items:center;gap:10px;font-size:14px;font-weight:900;letter-spacing:.11em;text-transform:uppercase;color:#f1f3f7;margin-bottom:12px}
+    .bonus-items{display:flex;flex-direction:column;gap:10px}
+    .bonus-row{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:16px;color:#f0f2f8}
+    .bonus-tag{
+      flex:0 0 auto;padding:5px 10px;border-radius:10px;font-size:11px;font-weight:900;letter-spacing:.08em;
+      background:#4dff8d;color:#0b160e;
+    }
+    .ultra .bonus-tag{background:#d6ff65;color:#121704}
+    .muted-note{font-size:12px;color:var(--muted-2);margin-top:10px;line-height:1.45}
+
+    @media (max-width: 1300px){
+      .pricing-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+      .card{min-height:660px}
+    }
+    @media (max-width: 860px){
+      .page{padding:18px 14px 40px}
+      .topbar{padding:12px 12px;border-radius:22px}
+      .brand-subtitle{max-width:280px;white-space:normal}
+      .nav{width:100%;justify-content:stretch}
+      .pill,.btn{flex:1 1 auto;height:46px}
+      .hero{padding-top:22px}
+      .hero p{font-size:17px}
+      .hero-chip{height:52px;font-size:14px;padding:0 16px}
+      .pricing-grid{grid-template-columns:1fr}
+      .card{min-height:auto;padding:56px 18px 20px}
+      .top{grid-template-rows:auto auto auto auto;row-gap:10px}
+      .subtitle{min-height:0}
+      .price{font-size:58px}
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"></div>
+        <div>
+          <div class="brand-title">AstraBot</div>
+          <div class="brand-subtitle">Пакеты токенов для фото, видео, музыки, озвучки, 3D и создания сайтов</div>
+        </div>
+      </div>
+      <div class="nav">
+        <a class="pill active" href="./tariffs.html">Тарифы</a>
+        <a class="pill" href="./index.html">На главную</a>
+        <button class="btn" type="button" data-action="login-placeholder">Войти</button>
+      </div>
+    </header>
+
+    <section class="hero">
+      <h1>Выберите пакет токенов</h1>
+      <p>Токены для изображений, видео, музыки, озвучки, 3D и создания сайтов — в одной платформе. Чем больше пакет, тем выгоднее цена и сильнее бонусы.</p>
+      <div class="hero-chips">
+        <div class="hero-chip">+3 токена новым пользователям</div>
+        <div class="hero-chip">Бонусы в пакетах от 20 токенов</div>
+        <div class="hero-chip">1 баланс для всех AI-инструментов</div>
+      </div>
+    </section>
+
+    <section class="pricing-wrap">
+      <div class="pricing-grid">
+        <article class="card-shell lite">
+          <div class="card lite">
+            <div class="top">
+              <div class="eyebrow lite"><span class="plan-badge lite">✦</span><span class="plan-name">Lite</span></div>
+              <p class="subtitle">Для первого знакомства с платформой и первых тестов генераций.</p>
+              <div class="price-row">
+                <div class="price">60 ₽</div>
+                <div class="per">/ пакет</div>
+              </div>
+              <div class="token-box">
+                <div class="token-title">✦ 5 токенов</div>
+                <div class="token-desc">Небольшой пакет, чтобы спокойно попробовать фото, музыку и первые видео-сценарии.</div>
+              </div>
+            </div>
+
+            <div class="action"><button class="select" type="button" data-action="login-placeholder">Купить пакет</button></div>
+
+            <div class="section-label">Что входит</div>
+            <ul class="list">
+              <li><span class="dot"></span><span>Первые генерации без больших затрат</span></li>
+              <li><span class="dot"></span><span>Подходит для теста фото, музыки и видео</span></li>
+              <li><span class="dot"></span><span>Единый баланс для всех AI-инструментов</span></li>
+              <li><span class="dot"></span><span>Быстрый старт без лишних пополнений</span></li>
+            </ul>
+          </div>
+        </article>
+
+        <article class="card-shell plus">
+          <div class="card-badge plus">Популярный</div>
+          <div class="card plus has-badge">
+            <div class="top">
+              <div class="eyebrow plus"><span class="plan-badge plus">⚡</span><span class="plan-name">Plus</span></div>
+              <p class="subtitle">Оптимальный пакет для старта, когда хочется уже нормально поработать с платформой.</p>
+              <div class="price-row">
+                <div class="price">180 ₽</div>
+                <div class="per">/ пакет</div>
+              </div>
+              <div class="token-box">
+                <div class="token-title">✦ 20 токенов</div>
+                <div class="token-desc">Лучший баланс между ценой, количеством токенов и стартовыми бонусами.</div>
+              </div>
+            </div>
+
+            <div class="action"><button class="select" type="button" data-action="login-placeholder">Выбрать тариф</button></div>
+
+            <div class="section-label">Что входит</div>
+            <ul class="list">
+              <li><span class="dot"></span><span>Хороший запас для фото, видео и музыки</span></li>
+              <li><span class="dot"></span><span>Оптимальный пакет для знакомства с платформой</span></li>
+              <li><span class="dot"></span><span>Хватает на серию первых генераций</span></li>
+              <li><span class="dot"></span><span>Один баланс для основных AI-режимов</span></li>
+            </ul>
+
+            <div class="bonus">
+              <div class="bonus-title">☼ Бонусы</div>
+              <div class="bonus-items">
+                <div class="bonus-row"><span>3 токена новым пользователям</span><span class="bonus-tag">FREE</span></div>
+                <div class="bonus-row"><span>Бесплатный ChatGPT</span><span class="bonus-tag">FREE</span></div>
+                <div class="bonus-row"><span>Бесплатный text-to-image</span><span class="bonus-tag">FREE</span></div>
+                <div class="bonus-row"><span>Бесплатные posters</span><span class="bonus-tag">FREE</span></div>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <article class="card-shell pro">
+          <div class="card pro">
+            <div class="top">
+              <div class="eyebrow pro"><span class="plan-badge pro">◆</span><span class="plan-name">Pro</span></div>
+              <p class="subtitle">Для тех, кто генерирует регулярно и не хочет постоянно докупать баланс.</p>
+              <div class="price-row">
+                <div class="price">450 ₽</div>
+                <div class="per">/ пакет</div>
+              </div>
+              <div class="token-box">
+                <div class="token-title">✦ 50 токенов</div>
+                <div class="token-desc">Комфортный объём токенов для активной работы с несколькими режимами платформы.</div>
+              </div>
+            </div>
+
+            <div class="action"><button class="select" type="button" data-action="login-placeholder">Выбрать тариф</button></div>
+
+            <div class="section-label">Что входит</div>
+            <ul class="list">
+              <li><span class="dot"></span><span>Большой запас на регулярные генерации</span></li>
+              <li><span class="dot"></span><span>Удобно для фото, музыки и видео</span></li>
+              <li><span class="dot"></span><span>Подходит для активного использования платформы</span></li>
+              <li><span class="dot"></span><span>Меньше пополнений, больше свободы в работе</span></li>
+            </ul>
+
+            <div class="bonus">
+              <div class="bonus-title">☼ Бонусы</div>
+              <div class="bonus-items">
+                <div class="bonus-row"><span>Бесплатный ChatGPT</span><span class="bonus-tag">FREE</span></div>
+                <div class="bonus-row"><span>Бесплатный text-to-image</span><span class="bonus-tag">FREE</span></div>
+                <div class="bonus-row"><span>Бесплатные posters</span><span class="bonus-tag">FREE</span></div>
+                <div class="bonus-row"><span>Бесплатный Udio</span><span class="bonus-tag">FREE</span></div>
+                <div class="bonus-row"><span>Бесплатная озвучка текста</span><span class="bonus-tag">FREE</span></div>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <article class="card-shell ultra">
+          <div class="card-badge ultra">Максимальная выгода</div>
+          <div class="card ultra has-badge">
+            <div class="top">
+              <div class="eyebrow ultra"><span class="plan-badge ultra">✦</span><span class="plan-name">Ultra</span></div>
+              <p class="subtitle">Максимальный пакет для частой генерации, тестов и постоянной работы с контентом.</p>
+              <div class="price-row">
+                <div class="price">850 ₽</div>
+                <div class="per">/ пакет</div>
+              </div>
+              <div class="token-box">
+                <div class="token-title">✦ 100 токенов</div>
+                <div class="token-desc">Самая выгодная цена за токен и максимальный запас для сложных сценариев.</div>
+              </div>
+            </div>
+
+            <div class="action"><button class="select" type="button" data-action="login-placeholder">Выбрать тариф</button></div>
+
+            <div class="section-label">Что входит</div>
+            <ul class="list">
+              <li><span class="dot"></span><span>Максимальный запас для постоянной работы</span></li>
+              <li><span class="dot"></span><span>Подходит для сложных сценариев: фото, видео и музыка</span></li>
+              <li><span class="dot"></span><span>Удобно для создателей контента и тестов моделей</span></li>
+              <li><span class="dot"></span><span>Лучшая цена за 1 токен</span></li>
+            </ul>
+
+            <div class="bonus">
+              <div class="bonus-title">☼ Бонусы</div>
+              <div class="bonus-items">
+                <div class="bonus-row"><span>Бесплатный ChatGPT</span><span class="bonus-tag">FREE</span></div>
+                <div class="bonus-row"><span>Бесплатный text-to-image</span><span class="bonus-tag">FREE</span></div>
+                <div class="bonus-row"><span>Бесплатные posters</span><span class="bonus-tag">FREE</span></div>
+                <div class="bonus-row"><span>Бесплатный Udio</span><span class="bonus-tag">FREE</span></div>
+                <div class="bonus-row"><span>Бесплатная озвучка текста</span><span class="bonus-tag">FREE</span></div>
+                <div class="bonus-row"><span>Лучшая цена за токен</span><span class="bonus-tag">-35%</span></div>
+              </div>
+            </div>
+          </div>
+        </article>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    document.addEventListener('click', function (event) {
+      const target = event.target.closest('[data-action="login-placeholder"]');
+      if (!target) return;
+      alert('Вход и покупка пока в режиме заглушки. Дальше сюда можно подключить твою реальную логику.');
+    });
+  </script>
+</body>
+</html>
