@@ -6,6 +6,8 @@ const DEFAULT_VIDEO_STATE = JSON.parse(localStorage.getItem('astrabot:videoState
 const DEFAULT_IMAGE_STATE = JSON.parse(localStorage.getItem('astrabot:imageState') || '{}');
 const DEFAULT_VOICE_STATE = JSON.parse(localStorage.getItem('astrabot:voiceState') || '{}');
 const DEFAULT_VOICE_HISTORY_STATE = JSON.parse(localStorage.getItem('astrabot:voiceHistoryState') || '{}');
+const DEFAULT_MUSIC_STATE = JSON.parse(localStorage.getItem('astrabot:musicState') || '{}');
+const DEFAULT_MUSIC_HISTORY_STATE = JSON.parse(localStorage.getItem('astrabot:musicHistoryState') || '{}');
 const DEFAULT_VIDEO_EDITOR_STATE = JSON.parse(localStorage.getItem('astrabot:videoEditorState') || 'null');
 
 const runtime = {
@@ -13,6 +15,7 @@ const runtime = {
   lastChatBootstrapLoaded: false,
   videoPollTimer: null,
   videoEditPollTimer: null,
+  musicPollTimer: null,
 };
 
 const FILE_INPUT_MAP = {
@@ -149,16 +152,41 @@ video: {
     offset: 0,
   },
   music: {
-    provider: 'suno',
-    model: 'sunoapi',
-    mode: 'idea',
-    title: '',
-    tags: '',
-    language: 'ru',
-    mood: '',
-    references: '',
-    text: '',
-    songwriterAnswer: '',
+    ai: DEFAULT_MUSIC_STATE.ai || 'suno',
+    backend: DEFAULT_MUSIC_STATE.backend || 'sunoapi',
+    mode: DEFAULT_MUSIC_STATE.mode || 'idea',
+    activeTab: DEFAULT_MUSIC_STATE.activeTab || 'idea',
+    title: DEFAULT_MUSIC_STATE.title || '',
+    tags: DEFAULT_MUSIC_STATE.tags || '',
+    language: DEFAULT_MUSIC_STATE.language || 'ru',
+    mood: DEFAULT_MUSIC_STATE.mood || '',
+    references: DEFAULT_MUSIC_STATE.references || '',
+    instrumental: !!DEFAULT_MUSIC_STATE.instrumental,
+    ideaText: DEFAULT_MUSIC_STATE.ideaText || '',
+    lyricsText: DEFAULT_MUSIC_STATE.lyricsText || '',
+    generationId: DEFAULT_MUSIC_STATE.generationId || '',
+    isGenerating: false,
+    status: DEFAULT_MUSIC_STATE.status || 'idle',
+    statusText: DEFAULT_MUSIC_STATE.statusText || 'Собери идею, текст и параметры справа, затем запусти генерацию.',
+    errorText: '',
+    lastCompletedAt: DEFAULT_MUSIC_STATE.lastCompletedAt || '',
+    results: [],
+    songwriter: {
+      input: DEFAULT_MUSIC_STATE.songwriterInput || '',
+      loading: false,
+      messages: Array.isArray(DEFAULT_MUSIC_STATE.songwriterMessages) ? DEFAULT_MUSIC_STATE.songwriterMessages : [],
+      lastAnswer: DEFAULT_MUSIC_STATE.songwriterLastAnswer || '',
+    },
+  },
+  musicHistory: {
+    items: [],
+    loading: false,
+    loaded: false,
+    selectedId: DEFAULT_MUSIC_HISTORY_STATE.selectedId || '',
+    selectedItem: null,
+    lastError: '',
+    limit: 24,
+    offset: 0,
   },
   prompts: {
     categories: [],
@@ -902,6 +930,30 @@ function saveState() {
   localStorage.setItem('astrabot:voiceHistoryState', JSON.stringify({
     selectedId: state.voiceHistory.selectedId || '',
   }));
+  localStorage.setItem('astrabot:musicState', JSON.stringify({
+    ai: state.music.ai,
+    backend: state.music.backend,
+    mode: state.music.mode,
+    activeTab: state.music.activeTab,
+    title: state.music.title,
+    tags: state.music.tags,
+    language: state.music.language,
+    mood: state.music.mood,
+    references: state.music.references,
+    instrumental: !!state.music.instrumental,
+    ideaText: state.music.ideaText,
+    lyricsText: state.music.lyricsText,
+    generationId: state.music.generationId || '',
+    status: state.music.status || 'idle',
+    statusText: state.music.statusText || '',
+    lastCompletedAt: state.music.lastCompletedAt || '',
+    songwriterInput: state.music.songwriter.input || '',
+    songwriterLastAnswer: state.music.songwriter.lastAnswer || '',
+    songwriterMessages: Array.isArray(state.music.songwriter.messages) ? state.music.songwriter.messages.slice(-20) : [],
+  }));
+  localStorage.setItem('astrabot:musicHistoryState', JSON.stringify({
+    selectedId: state.musicHistory.selectedId || '',
+  }));
 }
 
 function escapeHtml(str = '') {
@@ -1326,7 +1378,7 @@ function currentMeta() {
       return { studio: 'Image', provider: provider?.name || '—', model: model?.name || '—', mode: mode?.name || '—' };
     }
     case 'voice': return { studio: 'Voice', provider: 'ElevenLabs', model: state.voice.modelId, mode: 'Text to Speech' };
-    case 'music': return { studio: 'Music', provider: state.music.provider === 'udio' ? 'Udio' : 'Suno', model: state.music.model, mode: state.music.mode === 'lyrics' ? 'Lyrics' : 'Idea' };
+    case 'music': return { studio: 'Music', provider: state.music.ai === 'udio' ? 'Udio' : 'Suno', model: state.music.backend || 'auto', mode: state.music.mode === 'lyrics' ? 'Lyrics' : 'Idea' };
     case 'library': return { studio: 'Library', provider: 'Prompt Library', model: state.prompts.selectedCategory || 'categories', mode: state.prompts.selectedGroupId || 'browse' };
     case 'workspace': return { studio: 'Workspace', provider: 'Project Board', model: 'Internal', mode: 'Planning' };
     case 'history': return { studio: 'History', provider: 'Local timeline', model: 'Runs', mode: 'Audit' };
@@ -2599,30 +2651,314 @@ function renderVoiceInspector() {
   `;
 }
 
-function renderMusicWorkspace() {
-  return `
-    <div class="workspace-grid">
-      <div class="workspace-main scroll">
-        <div class="placeholder-stage">
-          <div class="empty-copy">
-            <strong>Music workspace</strong>
-            <div>Справа выбираются Suno / Udio, режим idea / lyrics, теги, вайб и язык. В центре держим идею трека, текст, ответы Songwriter и будущие аудио-результаты.</div>
+
+function musicSelectedItem() {
+  return state.musicHistory.selectedItem || state.musicHistory.items.find((item) => item.id === state.musicHistory.selectedId) || null;
+}
+
+function musicCurrentTracks() {
+  const selected = musicSelectedItem();
+  if (selected && Array.isArray(selected.tracks) && selected.tracks.length) return selected.tracks;
+  return Array.isArray(state.music.results) ? state.music.results : [];
+}
+
+function musicLastAnswerText() {
+  const messages = Array.isArray(state.music.songwriter.messages) ? state.music.songwriter.messages : [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const item = messages[i];
+    if (item && item.role === 'assistant' && String(item.content || '').trim()) return String(item.content || '').trim();
+  }
+  return String(state.music.songwriter.lastAnswer || '').trim();
+}
+
+function musicSourceTextForSongwriter() {
+  const mode = state.music.mode === 'lyrics' ? 'lyrics' : 'idea';
+  const source = mode === 'lyrics' ? state.music.lyricsText : state.music.ideaText;
+  return String(source || '').trim();
+}
+
+function ensureMusicCompatibility(options = {}) {
+  const { preserveLyricsTab = true } = options;
+  if (state.music.ai !== 'udio' && state.music.ai !== 'suno') state.music.ai = 'suno';
+  if (state.music.ai === 'udio') {
+    state.music.backend = 'piapi';
+    state.music.mode = 'idea';
+    if (!preserveLyricsTab && state.music.activeTab === 'lyrics') state.music.activeTab = 'idea';
+  } else if (!['sunoapi', 'piapi', 'auto'].includes(state.music.backend)) {
+    state.music.backend = 'sunoapi';
+  }
+  if (!['idea', 'lyrics', 'songwriter', 'results'].includes(state.music.activeTab)) state.music.activeTab = 'idea';
+}
+
+function setMusicTab(tab) {
+  if (!['idea', 'lyrics', 'songwriter', 'results'].includes(String(tab || ''))) return;
+  if (tab === 'idea') state.music.mode = 'idea';
+  if (tab === 'lyrics' && state.music.ai === 'suno') state.music.mode = 'lyrics';
+  if (tab === 'lyrics' && state.music.ai === 'udio') {
+    state.music.mode = 'idea';
+    toast('info', 'Udio работает через Idea', 'Текст песни можно хранить в Lyrics, но генерация Udio всё равно запускается через идею.');
+  }
+  state.music.activeTab = tab;
+  saveState();
+  render();
+}
+
+function renderMusicTrackCards(tracks = [], options = {}) {
+  const emptyText = options.emptyText || 'После первой успешной генерации здесь появятся карточки треков.';
+  if (!Array.isArray(tracks) || !tracks.length) {
+    return `<div class="music-empty-card">${escapeHtml(emptyText)}</div>`;
+  }
+  return tracks.map((track, index) => {
+    const title = track.title || `Track ${index + 1}`;
+    const audioUrl = track.audio_url || track.download_url || '';
+    const videoUrl = track.video_url || '';
+    const coverUrl = track.cover_url || '';
+    return `
+      <div class="music-track-card">
+        <div class="music-track-top">
+          <div>
+            <strong>${escapeHtml(title)}</strong>
+            <div class="help-text">Трек #${index + 1}${track.provider_track_id ? ` · ${escapeHtml(track.provider_track_id)}` : ''}</div>
           </div>
+          ${coverUrl ? `<img class="music-track-cover" src="${escapeHtml(coverUrl)}" alt="${escapeHtml(title)}">` : `<div class="music-track-cover placeholder">♪</div>`}
         </div>
-        <div class="planner-card" style="margin-top:16px;">
-          <h4>Songwriter output</h4>
-          <div class="help-text">${escapeHtml(state.music.songwriterAnswer || 'Пока пусто. Нажми Generate songwriter response.')}</div>
+        ${audioUrl ? `<audio controls preload="none" src="${escapeHtml(audioUrl)}"></audio>` : `<div class="help-text">У этого результата пока нет audio_url.</div>`}
+        <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;">
+          ${audioUrl ? `<a class="btn ghost small" href="${escapeHtml(audioUrl)}" target="_blank" rel="noopener">Открыть MP3</a>` : ''}
+          ${videoUrl ? `<a class="btn ghost small" href="${escapeHtml(videoUrl)}" target="_blank" rel="noopener">Открыть MP4</a>` : ''}
+          <button class="btn outline small" data-action="send-music-to-chat" data-text="${encodeURIComponent(track.title || '')}">В ChatGPT</button>
         </div>
       </div>
+    `;
+  }).join('');
+}
+
+function renderMusicWorkspace() {
+  ensureMusicCompatibility({ preserveLyricsTab: true });
+  const tab = state.music.activeTab || 'idea';
+  const selected = musicSelectedItem();
+  const historyItems = Array.isArray(state.musicHistory.items) ? state.musicHistory.items : [];
+  const currentTracks = musicCurrentTracks();
+  const isLyricsLocked = state.music.ai === 'udio';
+  const songwriterMessages = Array.isArray(state.music.songwriter.messages) ? state.music.songwriter.messages : [];
+  const songThread = songwriterMessages.length ? songwriterMessages.map((msg) => `
+    <div class="music-chat-bubble ${msg.role === 'user' ? 'user' : 'assistant'}">
+      <div>${escapeHtml(msg.content || '')}</div>
+    </div>
+  `).join('') : `<div class="music-empty-card">Пока пусто. Напиши задачу вроде: «сделай цепкий припев для танцевальной школы, 2 куплета и припев».</div>`;
+
+  return `
+    <div class="workspace-grid music-workspace-grid">
+      <div class="workspace-main scroll">
+        <div class="music-tabs">
+          <button class="music-tab ${tab === 'idea' ? 'active' : ''}" data-action="music-set-tab" data-tab="idea">Idea</button>
+          <button class="music-tab ${tab === 'lyrics' ? 'active' : ''}" data-action="music-set-tab" data-tab="lyrics">Lyrics</button>
+          <button class="music-tab ${tab === 'songwriter' ? 'active' : ''}" data-action="music-set-tab" data-tab="songwriter">Songwriter</button>
+          <button class="music-tab ${tab === 'results' ? 'active' : ''}" data-action="music-set-tab" data-tab="results">Results</button>
+        </div>
+
+        ${tab === 'idea' ? `
+          <div class="music-panel">
+            <div class="field-head">
+              <h4>Идея трека</h4>
+              <div class="actions compact-gap">
+                <button class="btn ghost small" data-action="music-fill-template">Шаблон</button>
+                <button class="btn outline small" data-action="music-open-songwriter">Открыть Songwriter</button>
+              </div>
+            </div>
+            <div class="help-text">Здесь держим задачу для генератора: для чего нужен трек, какой вайб, кому адресован, какой нужен хук, темп, под что музыка будет использоваться.</div>
+            <textarea id="music_ideaText" rows="16" placeholder="Например: современный вдохновляющий трек для рекламы школы танцев, female vocal, эмоциональный припев, уверенный рост к финалу, ощущение большого города, premium, catchy hook...">${escapeHtml(state.music.ideaText)}</textarea>
+            <div class="music-helper-row">
+              <div class="music-mini-card">
+                <strong>Что писать здесь</strong>
+                <small>Задача, настроение, назначение трека, референсы, pacing, CTA, образ бренда.</small>
+              </div>
+              <div class="music-mini-card">
+                <strong>Что не писать здесь</strong>
+                <small>Подробный финальный текст песни. Для этого есть Lyrics и Songwriter.</small>
+              </div>
+            </div>
+          </div>
+        ` : ''}
+
+        ${tab === 'lyrics' ? `
+          <div class="music-panel">
+            <div class="field-head">
+              <h4>Текст песни</h4>
+              <div class="actions compact-gap">
+                <button class="btn ghost small" data-action="music-open-songwriter">Написать через GPT</button>
+                <button class="btn outline small" data-action="music-apply-last-answer" data-target="lyrics">Вставить ответ GPT</button>
+              </div>
+            </div>
+            ${isLyricsLocked ? `<div class="music-warning">Udio не запускается напрямую из текста. Но этот блок всё равно полезен как редактор черновика: можно собрать lyrics через GPT, потом превратить их в idea.</div>` : `<div class="help-text">Для Suno здесь можно держать уже готовые куплеты, припев, bridge и структуру.</div>`}
+            <textarea id="music_lyricsText" rows="18" placeholder="[Verse]
+...
+
+[Chorus]
+...">${escapeHtml(state.music.lyricsText)}</textarea>
+          </div>
+        ` : ''}
+
+        ${tab === 'songwriter' ? `
+          <div class="music-panel">
+            <div class="field-head">
+              <h4>GPT Songwriter</h4>
+              <div class="actions compact-gap">
+                <button class="btn ghost small" data-action="songwriter-reset">Сбросить</button>
+                <button class="btn outline small" data-action="songwriter-seed">Стартовые вопросы</button>
+              </div>
+            </div>
+            <div class="help-text">Это не правая настройка, а полноценный рабочий инструмент. Сюда выносим написание текста песни, правки, варианты припева и переписывание под нужный жанр.</div>
+            <div class="music-chat-thread">${songThread}</div>
+            <div class="music-chat-composer">
+              <textarea id="music_songwriterInput" rows="5" placeholder="Напиши задачу GPT: например «сделай русский коммерческий припев, чтобы легко запоминался, 2 куплета + припев, тема — школа танцев»">${escapeHtml(state.music.songwriter.input || '')}</textarea>
+              <div class="actions compact-gap" style="flex-wrap:wrap;">
+                <button class="btn primary ${state.music.songwriter.loading ? 'loading' : ''}" data-action="songwriter-send" ${state.music.songwriter.loading ? 'disabled' : ''}>${state.music.songwriter.loading ? 'Генерация...' : 'Сгенерировать текст'}</button>
+                <button class="btn ghost" data-action="music-apply-last-answer" data-target="lyrics">Вставить в Lyrics</button>
+                <button class="btn outline" data-action="music-apply-last-answer" data-target="idea">Вставить в Idea</button>
+              </div>
+            </div>
+          </div>
+        ` : ''}
+
+        ${tab === 'results' ? `
+          <div class="music-panel">
+            <div class="field-head">
+              <h4>Результаты и история</h4>
+              <div class="actions compact-gap">
+                <button class="btn ghost small" data-action="refresh-music-history">Обновить</button>
+                <button class="btn outline small" data-action="music-open-history">Показать последний</button>
+              </div>
+            </div>
+            <div class="music-status-strip">
+              <div class="music-status-copy">
+                <strong>${escapeHtml(state.music.statusText || 'Нет активной генерации')}</strong>
+                <small>Статус: ${escapeHtml(state.music.status || 'idle')}${state.music.generationId ? ` · id ${escapeHtml(state.music.generationId)}` : ''}</small>
+              </div>
+              <span class="badge ${state.music.status === 'completed' ? 'ok' : state.music.status === 'failed' ? 'warn' : 'muted'}">${escapeHtml(state.music.status || 'idle')}</span>
+            </div>
+            ${state.music.errorText ? `<div class="music-warning">${escapeHtml(state.music.errorText)}</div>` : ''}
+            <div class="music-result-grid">
+              <div>
+                <h4 style="margin:0 0 10px;">Текущий результат</h4>
+                ${renderMusicTrackCards(currentTracks, { emptyText: 'Запусти генерацию справа — сюда вернутся готовые треки и плееры.' })}
+              </div>
+              <div>
+                <h4 style="margin:0 0 10px;">История</h4>
+                <div class="music-history-list">
+                  ${historyItems.length ? historyItems.map((item) => `
+                    <div class="music-history-item ${state.musicHistory.selectedId === item.id ? 'active' : ''}">
+                      <div class="music-history-head">
+                        <strong>${escapeHtml(item.title || item.ai || 'Music run')}</strong>
+                        <span class="badge ${item.status === 'completed' ? 'ok' : item.status === 'failed' ? 'warn' : 'muted'}">${escapeHtml(item.status || 'queued')}</span>
+                      </div>
+                      <small>${escapeHtml(trimText(item.mode === 'lyrics' ? item.lyrics_text : item.idea_text, 92) || 'Без текста')}</small>
+                      <div class="help-text">${escapeHtml(formatDate(item.completed_at || item.created_at || ''))}</div>
+                      <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;">
+                        <button class="btn ghost small" data-action="use-music-history-item" data-generation-id="${escapeHtml(item.id || '')}">Открыть</button>
+                        <button class="btn ghost small danger" data-action="delete-music-history-item" data-generation-id="${escapeHtml(item.id || '')}">Удалить</button>
+                      </div>
+                    </div>
+                  `).join('') : `<div class="music-empty-card">История пока пуста. После первой генерации здесь появятся сохранённые треки.</div>`}
+                </div>
+              </div>
+            </div>
+            ${selected ? `
+              <div class="music-selected-meta">
+                <div class="music-mini-card">
+                  <strong>Выбранный запуск</strong>
+                  <small>AI: ${escapeHtml(selected.ai || '—')} · backend: ${escapeHtml(selected.backend || '—')} · mode: ${escapeHtml(selected.mode || '—')}</small>
+                </div>
+                <div class="music-mini-card">
+                  <strong>Поля</strong>
+                  <small>Title: ${escapeHtml(selected.title || '—')} · Tags: ${escapeHtml(selected.tags || '—')} · Language: ${escapeHtml(selected.language || '—')}</small>
+                </div>
+              </div>
+            ` : ''}
+          </div>
+        ` : ''}
+      </div>
+
       <div class="workspace-side scroll">
         <div class="result-card">
-          <h4>Идея / текст</h4>
-          <small>${escapeHtml(state.music.text || 'Нет текста')}</small>
+          <h4>Коротко о раскладке</h4>
+          <small>Правая колонка — быстрые параметры и запуск. Центр — работа с идеей, lyrics, GPT Songwriter и результатами. Это и есть правильная архитектура Music Studio.</small>
         </div>
         <div class="result-card">
-          <h4>Метаданные</h4>
-          <small>Provider: ${escapeHtml(currentMeta().provider)}<br>Mode: ${escapeHtml(currentMeta().mode)}<br>Tags: ${escapeHtml(state.music.tags || '—')}</small>
+          <h4>Текущий режим</h4>
+          <small>AI: ${escapeHtml(state.music.ai === 'udio' ? 'Udio' : 'Suno')}<br>Backend: ${escapeHtml(state.music.backend)}<br>Generation mode: ${escapeHtml(state.music.mode)}<br>Workspace tab: ${escapeHtml(state.music.activeTab)}</small>
         </div>
+        <div class="result-card">
+          <h4>Songwriter</h4>
+          <small>${escapeHtml(trimText(musicLastAnswerText() || 'Пока нет ответа GPT.', 180))}</small>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderMusicInspector() {
+  ensureMusicCompatibility({ preserveLyricsTab: true });
+  const currentTracks = musicCurrentTracks();
+  return `
+    <div class="music-inspector">
+      <div class="inspector-card">
+        <div class="field-head"><h4>AI и backend</h4><span class="badge muted">Music</span></div>
+        <div class="seg" style="margin-top:8px;">
+          <button class="segbtn ${state.music.ai === 'suno' ? 'active' : ''}" data-action="music-set-ai" data-value="suno" type="button">Suno</button>
+          <button class="segbtn ${state.music.ai === 'udio' ? 'active' : ''}" data-action="music-set-ai" data-value="udio" type="button">Udio</button>
+        </div>
+        <label>Backend
+          <select id="music_backend">
+            ${state.music.ai === 'udio'
+              ? `<option value="piapi" selected>PiAPI</option>`
+              : `
+                <option value="sunoapi" ${state.music.backend === 'sunoapi' ? 'selected' : ''}>SunoAPI</option>
+                <option value="piapi" ${state.music.backend === 'piapi' ? 'selected' : ''}>PiAPI</option>
+                <option value="auto" ${state.music.backend === 'auto' ? 'selected' : ''}>Auto</option>
+              `}
+          </select>
+        </label>
+        <label>Generation mode
+          <select id="music_mode">
+            <option value="idea" ${state.music.mode === 'idea' ? 'selected' : ''}>Idea</option>
+            <option value="lyrics" ${(state.music.mode === 'lyrics' && state.music.ai === 'suno') ? 'selected' : ''} ${state.music.ai === 'udio' ? 'disabled' : ''}>Lyrics</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="inspector-card">
+        <div class="field-head"><h4>Метаданные</h4><button class="btn ghost small" data-action="music-use-idea-as-title">Из идеи</button></div>
+        <label>Title<input id="music_title" value="${escapeHtml(state.music.title)}" placeholder="Название трека"></label>
+        <label>Tags / genre<input id="music_tags" value="${escapeHtml(state.music.tags)}" placeholder="dance-pop, cinematic, female vocal"></label>
+        <label>Language
+          <select id="music_language">
+            <option value="ru" ${state.music.language === 'ru' ? 'selected' : ''}>Русский</option>
+            <option value="en" ${state.music.language === 'en' ? 'selected' : ''}>English</option>
+            <option value="auto" ${state.music.language === 'auto' ? 'selected' : ''}>Auto</option>
+          </select>
+        </label>
+        <label>Mood<input id="music_mood" value="${escapeHtml(state.music.mood)}" placeholder="uplifting, premium, energetic"></label>
+        <label>References<textarea id="music_references" rows="4" placeholder="Референсы, бренды, артисты, вайб">${escapeHtml(state.music.references)}</textarea></label>
+        <label class="toggle-pill">
+          <input id="music_instrumental" type="checkbox" ${state.music.instrumental ? 'checked' : ''}>
+          <span>Инструментал без вокала</span>
+        </label>
+      </div>
+
+      <div class="inspector-card">
+        <div class="field-head"><h4>Запуск</h4><span class="badge ${state.music.status === 'completed' ? 'ok' : state.music.status === 'failed' ? 'warn' : 'muted'}">${escapeHtml(state.music.status || 'idle')}</span></div>
+        <button class="btn primary full ${state.music.isGenerating ? 'loading' : ''}" data-action="run-music" ${state.music.isGenerating ? 'disabled' : ''}>${state.music.isGenerating ? 'Генерация...' : 'Сгенерировать музыку'}</button>
+        <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;">
+          <button class="btn ghost small" data-action="music-open-songwriter">GPT songwriter</button>
+          <button class="btn outline small" data-action="refresh-music-history">Обновить history</button>
+        </div>
+        <div class="help-text" style="margin-top:10px;">Стоимость сейчас заложена как 2 токена за запуск. Songwriter отдельно токены не списывает — это помощь по тексту песни внутри студии.</div>
+      </div>
+
+      <div class="inspector-card">
+        <h4>Последний результат</h4>
+        ${currentTracks.length ? renderMusicTrackCards(currentTracks.slice(0, 1), { emptyText: 'Нет готовых треков.' }) : `<div class="music-empty-card">Пока нет готовых треков.</div>`}
       </div>
     </div>
   `;
@@ -4223,18 +4559,285 @@ async function runVoice() {
   }
 }
 
-async function runSongwriter() {
-  if (!state.music.text.trim()) {
-    toast('error', 'Нужен текст', 'Опиши идею трека или вставь текст песни.');
+
+async function loadMusicHistory(options = {}) {
+  const { silent = false, selectId = '', keepSelection = true } = options;
+  if (!state.authToken) {
+    state.musicHistory.items = [];
+    state.musicHistory.selectedId = '';
+    state.musicHistory.selectedItem = null;
+    state.musicHistory.loaded = false;
+    state.musicHistory.loading = false;
+    state.musicHistory.lastError = '';
+    if (!silent) render();
+    return [];
+  }
+
+  state.musicHistory.loading = true;
+  state.musicHistory.lastError = '';
+  if (!silent) render();
+
+  try {
+    const qs = new URLSearchParams({ limit: String(state.musicHistory.limit || 24), offset: String(state.musicHistory.offset || 0) });
+    const res = await apiFetch(`/api/workspace/music/history?${qs.toString()}`);
+    const data = await res.json();
+    const items = Array.isArray(data.items) ? data.items : [];
+    state.musicHistory.items = items;
+    state.musicHistory.loaded = true;
+
+    const preferredId = String(selectId || '').trim() || (keepSelection ? String(state.musicHistory.selectedId || '').trim() : '');
+    if (preferredId && items.some((item) => item.id === preferredId)) {
+      state.musicHistory.selectedId = preferredId;
+      state.musicHistory.selectedItem = items.find((item) => item.id === preferredId) || null;
+    } else if (!keepSelection) {
+      state.musicHistory.selectedId = '';
+      state.musicHistory.selectedItem = null;
+    }
+
+    if (!silent) render();
+    return items;
+  } catch (e) {
+    state.musicHistory.lastError = String(e.message || e);
+    if (!silent) {
+      render();
+      toast('error', 'Не удалось загрузить музыку', state.musicHistory.lastError);
+    }
+    return [];
+  } finally {
+    state.musicHistory.loading = false;
+    if (!silent) render();
+  }
+}
+
+async function loadMusicHistoryItem(generationId, options = {}) {
+  const { silent = false, startPolling = false } = options;
+  const generationIdText = String(generationId || '').trim();
+  if (!generationIdText) return null;
+  if (!state.authToken) {
+    if (!silent) toast('error', 'Нужна авторизация', 'Сначала войди через Telegram, чтобы открыть историю музыки.');
+    return null;
+  }
+
+  try {
+    const res = await apiFetch(`/api/workspace/music/history/${encodeURIComponent(generationIdText)}`);
+    const data = await res.json();
+    const item = data.item || null;
+    if (!item) throw new Error('Пустой ответ истории музыки');
+
+    state.musicHistory.selectedId = item.id || generationIdText;
+    state.musicHistory.selectedItem = item;
+    const idx = state.musicHistory.items.findIndex((entry) => entry.id === item.id);
+    if (idx >= 0) state.musicHistory.items[idx] = { ...state.musicHistory.items[idx], ...item };
+    else state.musicHistory.items.unshift(item);
+
+    state.music.generationId = item.id || '';
+    state.music.results = Array.isArray(item.tracks) ? item.tracks : [];
+    state.music.status = item.status || state.music.status;
+    state.music.statusText = item.status === 'completed'
+      ? 'Музыка готова. Проверь карточки треков.'
+      : item.status === 'failed'
+        ? 'Генерация завершилась ошибкой.'
+        : 'Музыка в процессе генерации...';
+    state.music.errorText = item.error_message || '';
+    state.music.lastCompletedAt = item.completed_at || state.music.lastCompletedAt || '';
+
+    saveState();
+    render();
+
+    if (startPolling && ['queued', 'processing', 'running'].includes(String(item.status || '').toLowerCase())) startMusicPolling(item.id);
+    return item;
+  } catch (e) {
+    if (!silent) toast('error', 'Не удалось открыть генерацию', String(e.message || e));
+    return null;
+  }
+}
+
+function stopMusicPolling() {
+  if (runtime.musicPollTimer) {
+    clearTimeout(runtime.musicPollTimer);
+    runtime.musicPollTimer = null;
+  }
+}
+
+function startMusicPolling(generationId) {
+  stopMusicPolling();
+  const generationIdText = String(generationId || '').trim();
+  if (!generationIdText) return;
+
+  const tick = async () => {
+    const item = await loadMusicHistoryItem(generationIdText, { silent: true });
+    const status = String(item?.status || '').toLowerCase();
+    if (!item || ['completed', 'failed', 'error', 'cancelled', 'canceled'].includes(status)) {
+      state.music.isGenerating = false;
+      saveState();
+      render();
+      if (item?.status === 'completed') {
+        loadMusicHistory({ silent: true, keepSelection: true, selectId: generationIdText }).catch(() => {});
+        toast('success', 'Музыка готова', 'Треки и история обновлены.');
+      } else if (item?.status === 'failed') {
+        toast('error', 'Music error', item.error_message || 'Генерация завершилась ошибкой.');
+      }
+      stopMusicPolling();
+      return;
+    }
+    runtime.musicPollTimer = setTimeout(tick, 5000);
+  };
+
+  runtime.musicPollTimer = setTimeout(tick, 3500);
+}
+
+function applyMusicHistoryItemToWorkspace(item) {
+  const selected = item || musicSelectedItem();
+  if (!selected) {
+    toast('info', 'История пуста', 'Сначала запусти хотя бы одну генерацию музыки.');
     return;
   }
+  state.music.generationId = selected.id || '';
+  state.music.ai = selected.ai || state.music.ai;
+  state.music.backend = selected.backend || state.music.backend;
+  state.music.mode = selected.mode || state.music.mode;
+  state.music.title = selected.title || state.music.title;
+  state.music.tags = selected.tags || state.music.tags;
+  state.music.language = selected.language || state.music.language;
+  state.music.mood = selected.mood || state.music.mood;
+  state.music.references = selected.references || state.music.references;
+  state.music.ideaText = selected.idea_text || state.music.ideaText;
+  state.music.lyricsText = selected.lyrics_text || state.music.lyricsText;
+  state.music.instrumental = !!selected.instrumental;
+  state.music.results = Array.isArray(selected.tracks) ? selected.tracks : [];
+  state.music.status = selected.status || state.music.status;
+  state.music.statusText = selected.status === 'completed' ? 'Открыт сохранённый результат музыки.' : 'Открыт запуск из истории.';
+  state.music.errorText = selected.error_message || '';
+  state.music.activeTab = 'results';
+  state.studio = 'music';
+  saveState();
+  render();
+  toast('success', 'Музыка открыта', 'Запуск возвращён в Music Studio.');
+}
+
+async function deleteMusicHistoryItem(generationId) {
+  const generationIdText = String(generationId || '').trim();
+  if (!generationIdText) return;
+  if (!state.authToken) {
+    toast('error', 'Нужна авторизация', 'Сначала войди через Telegram, чтобы управлять историей музыки.');
+    return;
+  }
+  const target = state.musicHistory.items.find((item) => item.id === generationIdText) || state.musicHistory.selectedItem || null;
+  const title = trimText(target?.title || target?.idea_text || 'эту генерацию', 56);
+  if (!window.confirm(`Удалить из истории ${title}?`)) return;
+
+  try {
+    const res = await apiFetch(`/api/workspace/music/history/${encodeURIComponent(generationIdText)}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error('delete_failed');
+    state.musicHistory.items = state.musicHistory.items.filter((item) => item.id !== generationIdText);
+    if (state.musicHistory.selectedId === generationIdText) {
+      state.musicHistory.selectedId = '';
+      state.musicHistory.selectedItem = null;
+    }
+    saveState();
+    render();
+    toast('success', 'Удалено', 'Запуск удалён из истории музыки.');
+  } catch (e) {
+    toast('error', 'Не удалось удалить', String(e.message || e));
+  }
+}
+
+async function runMusic() {
+  ensureMusicCompatibility({ preserveLyricsTab: true });
+  const ideaText = String(state.music.ideaText || '').trim();
+  const lyricsText = String(state.music.lyricsText || '').trim();
+  const mode = state.music.ai === 'udio' ? 'idea' : state.music.mode;
+
+  if (mode === 'idea' && !ideaText) {
+    toast('error', 'Нужна идея', 'Заполни центральный блок Idea перед генерацией.');
+    setMusicTab('idea');
+    return;
+  }
+  if (mode === 'lyrics' && !lyricsText) {
+    toast('error', 'Нужен текст песни', 'Заполни Lyrics или сгенерируй его через Songwriter.');
+    setMusicTab('lyrics');
+    return;
+  }
+  if (!state.authToken) {
+    toast('error', 'Нужна авторизация', 'Сначала войди через Telegram, чтобы сайт мог работать с историей и токенами.');
+    return;
+  }
+
+  state.music.isGenerating = true;
+  state.music.status = 'processing';
+  state.music.statusText = 'Запуск генерации музыки...';
+  state.music.errorText = '';
+  saveState();
+  render();
+
+  try {
+    const res = await apiFetch('/api/workspace/music/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ai: state.music.ai,
+        backend: state.music.backend,
+        mode,
+        title: state.music.title,
+        tags: state.music.tags,
+        language: state.music.language,
+        mood: state.music.mood,
+        references: state.music.references,
+        instrumental: !!state.music.instrumental,
+        idea_text: ideaText,
+        lyrics_text: lyricsText,
+      }),
+    });
+    const data = await res.json();
+    state.music.generationId = data.generation_id || '';
+    state.music.status = data.status || 'queued';
+    state.music.statusText = 'Музыка поставлена в обработку. Ждём результат от провайдера.';
+    state.music.activeTab = 'results';
+    pushRun({ studio: 'Music', title: 'Music generate', summary: (mode === 'lyrics' ? lyricsText : ideaText).slice(0, 100) });
+    saveState();
+    render();
+    if (state.music.generationId) {
+      startMusicPolling(state.music.generationId);
+      loadMusicHistory({ silent: true, keepSelection: true, selectId: state.music.generationId }).catch(() => {});
+    }
+  } catch (e) {
+    state.music.isGenerating = false;
+    state.music.status = 'failed';
+    state.music.statusText = 'Не удалось запустить генерацию.';
+    state.music.errorText = String(e.message || e);
+    saveState();
+    render();
+    toast('error', 'Music run error', state.music.errorText);
+  }
+}
+
+async function runSongwriter() {
+  ensureMusicCompatibility({ preserveLyricsTab: true });
+  const userText = String(state.music.songwriter.input || '').trim() || musicSourceTextForSongwriter();
+  if (!userText) {
+    toast('error', 'Нужен текст', 'Опиши идею трека или задачу для GPT Songwriter.');
+    return;
+  }
+
+  const history = Array.isArray(state.music.songwriter.messages)
+    ? state.music.songwriter.messages.filter((item) => ['user', 'assistant'].includes(item.role)).slice(-16)
+    : [];
+
+  state.music.songwriter.loading = true;
+  if (String(state.music.songwriter.input || '').trim()) {
+    history.push({ role: 'user', content: state.music.songwriter.input.trim() });
+    state.music.songwriter.messages = history;
+  }
+  saveState();
+  render();
+
   try {
     const res = await apiFetch('/api/workspace/songwriter', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        text: state.music.text,
-        history: [],
+        text: userText,
+        history,
         language: state.music.language,
         genre: state.music.tags,
         mood: state.music.mood,
@@ -4242,13 +4845,56 @@ async function runSongwriter() {
       }),
     });
     const data = await res.json();
-    state.music.songwriterAnswer = data.answer || '';
-    pushRun({ studio: 'Music', title: 'Songwriter', summary: state.music.text.slice(0, 100) });
-    toast('success', 'Songwriter ответил', 'Ответ добавлен в центр рабочей зоны.');
+    const answer = data.answer || '';
+    state.music.songwriter.lastAnswer = answer;
+    state.music.songwriter.messages = [...history, { role: 'assistant', content: answer }].slice(-20);
+    state.music.songwriter.input = '';
+    state.music.songwriter.loading = false;
+    state.music.activeTab = 'songwriter';
+    pushRun({ studio: 'Music', title: 'Songwriter', summary: userText.slice(0, 100) });
+    saveState();
     render();
+    toast('success', 'Songwriter ответил', 'Ответ добавлен в центральный блок Songwriter.');
   } catch (e) {
+    state.music.songwriter.loading = false;
+    saveState();
+    render();
     toast('error', 'Songwriter error', String(e.message || e));
   }
+}
+
+function seedMusicSongwriter() {
+  const seed = [
+    { role: 'assistant', content: 'Давай быстро соберём вводные: 1) жанр/стиль 2) настроение 3) язык 4) о чём песня 5) нужен ли припев с хук-фразой.' }
+  ];
+  state.music.songwriter.messages = seed;
+  state.music.songwriter.lastAnswer = seed[0].content;
+  state.music.songwriter.input = 'Нужен русский коммерческий текст песни для рекламы танцевальной школы.';
+  state.music.activeTab = 'songwriter';
+  saveState();
+  render();
+}
+
+function applyLastSongwriterAnswer(target) {
+  const answer = musicLastAnswerText();
+  if (!answer) {
+    toast('info', 'Пока пусто', 'Сначала получи ответ от GPT Songwriter.');
+    return;
+  }
+  if (target === 'lyrics') {
+    state.music.lyricsText = state.music.lyricsText ? `${state.music.lyricsText.trim()}
+
+${answer}` : answer;
+    state.music.activeTab = 'lyrics';
+  } else {
+    state.music.ideaText = state.music.ideaText ? `${state.music.ideaText.trim()}
+
+${answer}` : answer;
+    state.music.activeTab = 'idea';
+  }
+  saveState();
+  render();
+  toast('success', 'Ответ вставлен', target === 'lyrics' ? 'Ответ GPT добавлен в Lyrics.' : 'Ответ GPT добавлен в Idea.');
 }
 
 function seedDemo() {
@@ -4258,7 +4904,7 @@ function seedDemo() {
     { role: 'assistant', content: 'Можно построить ролик на контрасте: пустой зал → свет включается → динамика группы → call to action. Дальше отдельно выдам prompt для Kling и текст для озвучки.' },
   ];
   state.video.prompt = 'Dynamic cinematic commercial for a dance school, golden rim light, confident young dancers, sweeping camera movement, premium branded ending.';
-  state.music.text = 'Нужна идея вдохновляющей песни для рекламы танцевальной школы.';
+  state.music.ideaText = 'Нужна идея вдохновляющей песни для рекламы танцевальной школы.';
   state.workspaceNotes = '1) В ChatGPT собрать концепцию\n2) В Video Studio подготовить prompt для Kling 3\n3) В Voice Studio сделать voice-over\n4) В Music Studio подобрать идею трека';
   render();
   saveState();
@@ -4283,8 +4929,17 @@ function resetCurrentStudio() {
       clearVoiceRunState({ keepText: false });
       break;
     case 'music':
-      state.music.text = '';
-      state.music.songwriterAnswer = '';
+      stopMusicPolling();
+      state.music.ideaText = '';
+      state.music.lyricsText = '';
+      state.music.songwriter.input = '';
+      state.music.songwriter.messages = [];
+      state.music.songwriter.lastAnswer = '';
+      state.music.results = [];
+      state.music.generationId = '';
+      state.music.status = 'idle';
+      state.music.statusText = 'Собери идею, текст и параметры справа, затем запусти генерацию.';
+      state.music.errorText = '';
       break;
     case 'workspace':
       state.workspaceNotes = '';
@@ -4435,15 +5090,27 @@ function handleInputChange(target) {
     case 'voice_useSpeakerBoost': state.voice.useSpeakerBoost = !!target.checked; break;
     case 'voice_text': state.voice.text = value; break;
 
-    case 'music_provider': state.music.provider = value; break;
-    case 'music_mode': state.music.mode = value; break;
-    case 'music_model': state.music.model = value; break;
+    case 'music_ai':
+      state.music.ai = value;
+      ensureMusicCompatibility({ preserveLyricsTab: true });
+      break;
+    case 'music_backend':
+      state.music.backend = value;
+      ensureMusicCompatibility({ preserveLyricsTab: true });
+      break;
+    case 'music_mode':
+      state.music.mode = value;
+      ensureMusicCompatibility({ preserveLyricsTab: true });
+      break;
     case 'music_language': state.music.language = value; break;
     case 'music_title': state.music.title = value; break;
     case 'music_tags': state.music.tags = value; break;
     case 'music_mood': state.music.mood = value; break;
     case 'music_references': state.music.references = value; break;
-    case 'music_text': state.music.text = value; break;
+    case 'music_instrumental': state.music.instrumental = checked; break;
+    case 'music_ideaText': state.music.ideaText = value; break;
+    case 'music_lyricsText': state.music.lyricsText = value; break;
+    case 'music_songwriterInput': state.music.songwriter.input = value; break;
     case 'workspaceNotes': state.workspaceNotes = value; break;
     default: return;
   }
@@ -4452,7 +5119,7 @@ function handleInputChange(target) {
     'chat_mode',
     'video_provider', 'video_model', 'video_mode',
     'image_provider', 'image_model', 'image_mode',
-    'music_provider', 'music_mode', 'music_model',
+    'music_ai', 'music_backend', 'music_mode',
     'voice_voiceId', 'voice_modelId', 'voice_outputFormat', 'voice_languageCode'
   ]);
   const workspaceRerenderIds = new Set([]);
@@ -4487,6 +5154,7 @@ function handleAction(action, dataset = {}) {
       if (state.studio === 'library' && !state.prompts.categories.length) loadPromptCategories();
       if (state.studio === 'voice' && !state.voice.voices.length) loadVoices();
       if (state.studio === 'voice' && state.authToken) loadVoiceHistory({ silent: true, keepSelection: true }).catch(() => {});
+      if (state.studio === 'music' && state.authToken) loadMusicHistory({ silent: true, keepSelection: true }).catch(() => {});
       if (state.studio === 'history' && state.authToken) loadVideoHistory({ silent: true, keepSelection: true });
       if (state.studio === 'video' && state.video.panel === 'library' && state.authToken) loadVideoHistory({ silent: true, keepSelection: true });
       if (state.studio === 'image' && state.image.panel === 'library' && state.authToken) loadImageHistory({ silent: true, keepSelection: true });
@@ -4682,12 +5350,79 @@ function handleAction(action, dataset = {}) {
       render();
       break;
     case 'run-voice': runVoice(); break;
+    case 'run-music': runMusic(); break;
     case 'run-songwriter': runSongwriter(); break;
-    case 'send-music-to-chat':
-      state.studio = 'chat';
-      state.chat.input = `Помоги доработать идею песни. Черновик: ${state.music.text}`;
+    case 'songwriter-send': runSongwriter(); break;
+    case 'songwriter-reset':
+      state.music.songwriter.messages = [];
+      state.music.songwriter.lastAnswer = '';
+      state.music.songwriter.input = '';
+      saveState();
       render();
       break;
+    case 'songwriter-seed':
+      seedMusicSongwriter();
+      break;
+    case 'music-set-tab':
+      setMusicTab(dataset.tab);
+      break;
+    case 'music-open-songwriter':
+      state.music.activeTab = 'songwriter';
+      if (!state.music.songwriter.messages.length) seedMusicSongwriter();
+      else {
+        saveState();
+        render();
+      }
+      break;
+    case 'music-set-ai':
+      state.music.ai = dataset.value || 'suno';
+      ensureMusicCompatibility({ preserveLyricsTab: true });
+      saveState();
+      render();
+      break;
+    case 'music-apply-last-answer':
+      applyLastSongwriterAnswer(dataset.target || 'lyrics');
+      break;
+    case 'music-fill-template':
+      state.music.activeTab = 'idea';
+      state.music.ideaText = 'Современный эмоциональный трек для рекламы школы танцев. Начало — лёгкое и интригующее, дальше рост энергии, в припеве мощный хук и ощущение большой сцены. Нужен premium вайб, urban lighting, мотивация, уверенность, движение вперёд, финал с сильным call-to-action.';
+      saveState();
+      render();
+      break;
+    case 'music-use-idea-as-title': {
+      const source = trimText((state.music.ideaText || '').split(/[\n\.]/).find(Boolean) || '', 60).trim();
+      if (source) state.music.title = source;
+      saveState();
+      render();
+      break;
+    }
+    case 'refresh-music-history':
+      loadMusicHistory({ silent: false, keepSelection: true });
+      break;
+    case 'music-open-history':
+      if (state.musicHistory.selectedId) {
+        loadMusicHistoryItem(state.musicHistory.selectedId, { silent: false });
+      } else if (state.musicHistory.items.length) {
+        loadMusicHistoryItem(state.musicHistory.items[0].id, { silent: false });
+      } else {
+        loadMusicHistory({ silent: false, keepSelection: true });
+      }
+      break;
+    case 'use-music-history-item':
+      loadMusicHistoryItem(dataset.generationId, { silent: false }).then((item) => {
+        if (item) applyMusicHistoryItemToWorkspace(item);
+      });
+      break;
+    case 'delete-music-history-item':
+      deleteMusicHistoryItem(dataset.generationId);
+      break;
+    case 'send-music-to-chat': {
+      const sourceText = decodeURIComponent(dataset.text || '') || state.music.ideaText || state.music.lyricsText || '';
+      state.studio = 'chat';
+      state.chat.input = `Помоги доработать музыкальную идею. Черновик: ${sourceText}`;
+      render();
+      break;
+    }
     case 'refresh-prompts': loadPromptCategories(); break;
     case 'select-category': loadPromptGroups(dataset.category); break;
     case 'select-group': loadPromptItems(dataset.groupId); break;
@@ -4728,7 +5463,7 @@ function runCurrentStudio() {
     case 'video': runVideo(); break;
     case 'image': runImage(); break;
     case 'voice': runVoice(); break;
-    case 'music': runSongwriter(); break;
+    case 'music': runMusic(); break;
     case 'library': loadPromptCategories(); break;
     case 'workspace': saveState(); toast('success', 'Workspace сохранён', 'Заметки сохранены локально.'); break;
     case 'billing': loadBalance(); break;
