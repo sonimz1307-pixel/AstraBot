@@ -171,7 +171,7 @@ video: {
     generationId: DEFAULT_MUSIC_STATE.generationId || '',
     isGenerating: false,
     status: DEFAULT_MUSIC_STATE.status || 'idle',
-    statusText: DEFAULT_MUSIC_STATE.statusText || 'Собери идею, текст и параметры справа, затем запусти генерацию.',
+    statusText: DEFAULT_MUSIC_STATE.statusText || 'Выбери модель, заполни идею или текст песни и запусти генерацию.',
     errorText: '',
     lastCompletedAt: DEFAULT_MUSIC_STATE.lastCompletedAt || '',
     results: [],
@@ -224,7 +224,7 @@ const STUDIO_META = {
   video: { icon: 'video', title: 'Video Studio', subtitle: 'Kling, Veo, Seedance и Sora в одной рабочей зоне с живыми настройками.', eyebrow: 'Video generation' },
   image: { icon: 'image', title: 'Image Studio', subtitle: 'Nano Banana, нейрофотосессии, posters и image-to-image сценарии.', eyebrow: 'Image generation' },
   voice: { icon: 'voice', title: 'Voice Studio', subtitle: 'Озвучка, выбор голоса и быстрый экспорт результата.', eyebrow: 'Voice workflow' },
-  music: { icon: 'music', title: 'Music Studio', subtitle: 'Songwriter, Suno, Udio и выдача треков прямо в рабочей зоне.', eyebrow: 'Music workflow' },
+  music: { icon: 'music', title: 'Music Studio', subtitle: 'Suno, Udio, GPT-помощник и понятная рабочая зона для генерации треков.', eyebrow: 'Музыкальная студия' },
   library: { icon: 'library', title: 'Prompt Library', subtitle: 'Категории, группы и карточки промптов с быстрым переносом в студии.', eyebrow: 'Prompt system' },
   workspace: { icon: 'workspace', title: 'Workspace', subtitle: 'Планы, референсы, заметки и проектная логика поверх генераций.', eyebrow: 'Project hub' },
   history: { icon: 'history', title: 'History', subtitle: 'История запусков, статусов и готовых результатов.', eyebrow: 'Result archive' },
@@ -1399,7 +1399,7 @@ function currentMeta() {
       return { studio: 'Image', provider: provider?.name || '—', model: model?.name || '—', mode: mode?.name || '—' };
     }
     case 'voice': return { studio: 'Voice', provider: 'ElevenLabs', model: state.voice.modelId, mode: 'Text to Speech' };
-    case 'music': return { studio: 'Music', provider: state.music.ai === 'udio' ? 'Udio' : 'Suno', model: state.music.backend || 'auto', mode: state.music.mode === 'lyrics' ? 'Lyrics' : 'Idea' };
+    case 'music': return { studio: 'Music', provider: state.music.ai === 'udio' ? 'Udio' : 'Suno', model: state.music.ai === 'udio' ? 'PiAPI' : 'SunoAPI', mode: state.music.mode === 'lyrics' ? 'Текст' : 'Идея' };
     case 'library': return { studio: 'Library', provider: 'Prompt Library', model: state.prompts.selectedCategory || 'categories', mode: state.prompts.selectedGroupId || 'browse' };
     case 'workspace': return { studio: 'Workspace', provider: 'Project Board', model: 'Internal', mode: 'Planning' };
     case 'history': return { studio: 'History', provider: 'Local timeline', model: 'Runs', mode: 'Audit' };
@@ -1820,8 +1820,10 @@ function renderHeader() {
   const resetStudioBtn = document.getElementById('resetStudioBtn');
   const inspectorTitle = document.querySelector('.inspector-head h2');
   const inspectorEyebrow = document.querySelector('.inspector-head .eyebrow');
+  const hideInspector = ['chat', 'music'].includes(state.studio);
   shell?.classList.toggle('chat-no-inspector', false);
-  if (inspector) inspector.setAttribute('aria-hidden', state.studio === 'chat' ? 'true' : 'false');
+  shell?.classList.toggle('music-no-inspector', state.studio === 'music');
+  if (inspector) inspector.setAttribute('aria-hidden', hideInspector ? 'true' : 'false');
   if (workspaceTopline) workspaceTopline.style.display = state.studio === 'chat' ? 'none' : '';
 
   const hideTopActions = ['chat', 'video', 'image', 'voice', 'music'].includes(state.studio);
@@ -2699,27 +2701,32 @@ function musicSourceTextForSongwriter() {
   return String(source || '').trim();
 }
 
+
 function ensureMusicCompatibility(options = {}) {
   const { preserveLyricsTab = true } = options;
   if (state.music.ai !== 'udio' && state.music.ai !== 'suno') state.music.ai = 'suno';
+
   if (state.music.ai === 'udio') {
     state.music.backend = 'piapi';
     state.music.mode = 'idea';
     if (!preserveLyricsTab && state.music.activeTab === 'lyrics') state.music.activeTab = 'idea';
-  } else if (!['sunoapi', 'piapi', 'auto'].includes(state.music.backend)) {
+  } else {
     state.music.backend = 'sunoapi';
   }
+
   if (!['idea', 'lyrics', 'songwriter', 'results'].includes(state.music.activeTab)) state.music.activeTab = 'idea';
 }
 
 function setMusicTab(tab) {
   if (!['idea', 'lyrics', 'songwriter', 'results'].includes(String(tab || ''))) return;
+
   if (tab === 'idea') state.music.mode = 'idea';
   if (tab === 'lyrics' && state.music.ai === 'suno') state.music.mode = 'lyrics';
   if (tab === 'lyrics' && state.music.ai === 'udio') {
     state.music.mode = 'idea';
-    toast('info', 'Udio работает через Idea', 'Текст песни можно хранить в Lyrics, но генерация Udio всё равно запускается через идею.');
+    toast('info', 'Udio работает через описание', 'Для Udio генерация всегда идёт из блока «Идея». Текст песни можно хранить как черновик.');
   }
+
   state.music.activeTab = tab;
   saveState();
   render();
@@ -2778,9 +2785,9 @@ function musicRunButtonLabel() {
 
 function musicRunHelperText() {
   if (state.music.ai === 'suno') {
-    return 'Suno за один запуск возвращает сразу 2 трека. Backend скрыт и по умолчанию используется SunoAPI.';
+    return 'Suno возвращает 2 трека за один запуск. На сайте backend не выбирается: по умолчанию используется SunoAPI.';
   }
-  return 'Udio работает через PiAPI и запускается через режим Idea. Lyrics можно держать как черновик для GPT и ручной правки.';
+  return 'Udio запускается только из блока «Идея» и использует PiAPI. Текст песни можно держать как черновик или собрать через GPT-помощника.';
 }
 
 function musicLiveStatusText() {
@@ -2794,10 +2801,10 @@ function musicLiveStatusText() {
   }
   if (['queued', 'processing', 'running', 'in_progress'].includes(status) || state.music.isGenerating) {
     return state.music.ai === 'suno'
-      ? 'Генерирую музыку. После завершения Suno должен вернуть 2 трека.'
-      : 'Генерирую музыку. После завершения результат появится в этой рабочей зоне.';
+      ? 'Генерирую музыку. После завершения появятся 2 готовых трека.'
+      : 'Генерирую музыку. После завершения результат появится ниже.';
   }
-  return state.music.statusText || 'Собери идею или lyrics, настрой параметры справа и запускай генерацию.';
+  return state.music.statusText || 'Выбери модель, заполни идею или текст песни и запусти генерацию.';
 }
 
 function renderMusicLiveBoard() {
@@ -2851,11 +2858,15 @@ function renderMusicLiveBoard() {
 }
 
 
+
 function renderMusicWorkspace() {
   ensureMusicCompatibility({ preserveLyricsTab: true });
-  const tab = state.music.activeTab || 'idea';
+  const tab = ['idea', 'lyrics', 'songwriter', 'results'].includes(state.music.activeTab) ? state.music.activeTab : 'idea';
   const selected = musicSelectedItem();
   const historyItems = Array.isArray(state.musicHistory.items) ? state.musicHistory.items : [];
+  const currentTracks = musicCurrentTracks();
+  const expectedCount = musicExpectedTrackCount();
+  const statusTone = state.music.status === 'completed' ? 'ok' : state.music.status === 'failed' ? 'warn' : 'muted';
   const isLyricsLocked = state.music.ai === 'udio';
   const songwriterMessages = Array.isArray(state.music.songwriter.messages) ? state.music.songwriter.messages : [];
   const songThread = songwriterMessages.length ? songwriterMessages.map((msg) => `
@@ -2866,84 +2877,171 @@ function renderMusicWorkspace() {
 
   return `
     <div class="workspace-grid single music-workspace-grid">
-      <div class="workspace-main scroll">
-        <div class="music-stage-grid">
-          <div class="music-stage-main">
-            <div class="music-tabs">
-              <button class="music-tab ${tab === 'idea' ? 'active' : ''}" data-action="music-set-tab" data-tab="idea">Idea</button>
-              <button class="music-tab ${tab === 'lyrics' ? 'active' : ''}" data-action="music-set-tab" data-tab="lyrics">Lyrics</button>
-              <button class="music-tab ${tab === 'songwriter' ? 'active' : ''}" data-action="music-set-tab" data-tab="songwriter">Songwriter</button>
-              <button class="music-tab ${tab === 'results' ? 'active' : ''}" data-action="music-set-tab" data-tab="results">Results</button>
+      <div class="workspace-main scroll music-workspace-main">
+        <div class="music-clean-shell">
+          <div class="music-panel music-setup-card">
+            <div class="field-head">
+              <div>
+                <h4>Настройки генерации</h4>
+                <div class="help-text">Собрал логику как в web app: всё основное в одной зоне, без отдельного правого блока.</div>
+              </div>
+              <span class="badge muted">${state.music.ai === 'udio' ? 'PiAPI' : 'SunoAPI по умолчанию'}</span>
             </div>
 
-            ${tab === 'idea' ? `
-              <div class="music-panel">
-                <div class="field-head">
-                  <h4>Идея трека</h4>
-                  <div class="actions compact-gap">
-                    <button class="btn ghost small" data-action="music-fill-template">Шаблон</button>
-                    <button class="btn outline small" data-action="music-open-songwriter">Открыть Songwriter</button>
-                  </div>
+            <div class="music-ai-switch">
+              <button class="music-ai-pill ${state.music.ai === 'suno' ? 'active' : ''}" data-action="music-set-ai" data-value="suno" type="button">
+                <span class="music-ai-title">Suno</span>
+                <small>2 трека за запуск · backend скрыт</small>
+              </button>
+              <button class="music-ai-pill ${state.music.ai === 'udio' ? 'active' : ''}" data-action="music-set-ai" data-value="udio" type="button">
+                <span class="music-ai-title">Udio</span>
+                <small>1 трек за запуск · работа через идею</small>
+              </button>
+            </div>
+
+            <div class="music-top-grid">
+              <div class="music-mini-card">
+                <strong>Режим генерации</strong>
+                <div class="seg music-mode-switch">
+                  <button class="segbtn ${state.music.mode === 'idea' ? 'active' : ''}" data-action="music-set-tab" data-tab="idea" type="button">Идея</button>
+                  <button class="segbtn ${(state.music.mode === 'lyrics' && state.music.ai === 'suno') ? 'active' : ''}" data-action="music-set-tab" data-tab="lyrics" type="button" ${state.music.ai === 'udio' ? 'disabled' : ''}>Текст песни</button>
                 </div>
-                <div class="help-text">Здесь держим задачу для генератора: для чего нужен трек, какой вайб, кому адресован, какой нужен хук, темп, под что музыка будет использоваться.</div>
-                <textarea id="music_ideaText" rows="16" placeholder="Например: современный вдохновляющий трек для рекламы школы танцев, female vocal, эмоциональный припев, уверенный рост к финалу, ощущение большого города, premium, catchy hook...">${escapeHtml(state.music.ideaText)}</textarea>
-                <div class="music-helper-row">
-                  <div class="music-mini-card">
-                    <strong>Что писать здесь</strong>
-                    <small>Задача, настроение, назначение трека, референсы, pacing, CTA, образ бренда.</small>
-                  </div>
-                  <div class="music-mini-card">
-                    <strong>Что не писать здесь</strong>
-                    <small>Подробный финальный текст песни. Для этого есть Lyrics и Songwriter.</small>
-                  </div>
+                <small>${escapeHtml(musicRunHelperText())}</small>
+              </div>
+
+              <div class="music-mini-card">
+                <strong>Как это работает</strong>
+                <small>Сначала опиши трек или вставь готовый текст песни. Потом нажми запуск. Готовые треки и история появятся ниже в этой же рабочей зоне.</small>
+              </div>
+            </div>
+
+            <div class="music-form-grid">
+              <label>Название трека
+                <input id="music_title" value="${escapeHtml(state.music.title)}" placeholder="Например: Музыка будущего">
+              </label>
+              <label>Теги / стиль
+                <input id="music_tags" value="${escapeHtml(state.music.tags)}" placeholder="dance-pop, cinematic, female vocal">
+              </label>
+              <label>Язык
+                <select id="music_language">
+                  <option value="ru" ${state.music.language === 'ru' ? 'selected' : ''}>Русский</option>
+                  <option value="en" ${state.music.language === 'en' ? 'selected' : ''}>English</option>
+                  <option value="auto" ${state.music.language === 'auto' ? 'selected' : ''}>Авто</option>
+                </select>
+              </label>
+              <label>Настроение
+                <input id="music_mood" value="${escapeHtml(state.music.mood)}" placeholder="uplifting, premium, energetic">
+              </label>
+            </div>
+
+            <label>Референсы и комментарии
+              <textarea id="music_references" rows="4" placeholder="Кому нужен трек, какой вайб, где будет использоваться, на что должен быть похож результат">${escapeHtml(state.music.references)}</textarea>
+            </label>
+
+            <label class="toggle-pill">
+              <input id="music_instrumental" type="checkbox" ${state.music.instrumental ? 'checked' : ''}>
+              <span>Инструментал без вокала</span>
+            </label>
+
+            <div class="music-run-strip">
+              <div class="music-live-status">
+                <strong>${escapeHtml(musicLiveStatusText())}</strong>
+                <small>${state.music.ai === 'udio' ? 'Udio · режим «Идея»' : `Suno · ${state.music.mode === 'lyrics' ? 'режим «Текст песни»' : 'режим «Идея»'}`}${state.music.generationId ? ` · id ${escapeHtml(state.music.generationId)}` : ''}</small>
+              </div>
+              <button class="btn primary music-run-btn ${state.music.isGenerating ? 'loading' : ''}" data-action="run-music" ${state.music.isGenerating ? 'disabled' : ''}>${escapeHtml(musicRunButtonLabel())}</button>
+            </div>
+
+            ${state.music.errorText ? `<div class="music-warning">${escapeHtml(state.music.errorText)}</div>` : ''}
+          </div>
+
+          <div class="music-tabs music-tabs--clean">
+            <button class="music-tab ${tab === 'idea' ? 'active' : ''}" data-action="music-set-tab" data-tab="idea">Идея</button>
+            <button class="music-tab ${(tab === 'lyrics' && state.music.ai === 'suno') ? 'active' : ''}" data-action="music-set-tab" data-tab="lyrics" ${state.music.ai === 'udio' ? 'disabled' : ''}>Текст песни</button>
+            <button class="music-tab ${tab === 'songwriter' ? 'active' : ''}" data-action="music-open-songwriter" data-tab="songwriter">GPT-помощник</button>
+            <button class="music-tab ${tab === 'results' ? 'active' : ''}" data-action="music-set-tab" data-tab="results">Результаты</button>
+          </div>
+
+          ${tab === 'idea' ? `
+            <div class="music-panel">
+              <div class="field-head">
+                <h4>Идея трека</h4>
+                <div class="actions compact-gap">
+                  <button class="btn ghost small" data-action="music-fill-template">Шаблон</button>
+                  <button class="btn outline small" data-action="music-open-songwriter">Открыть GPT-помощник</button>
                 </div>
               </div>
-            ` : ''}
-
-            ${tab === 'lyrics' ? `
-              <div class="music-panel">
-                <div class="field-head">
-                  <h4>Текст песни</h4>
-                  <div class="actions compact-gap">
-                    <button class="btn ghost small" data-action="music-open-songwriter">Написать через GPT</button>
-                    <button class="btn outline small" data-action="music-apply-last-answer" data-target="lyrics">Вставить ответ GPT</button>
-                  </div>
+              <div class="help-text">Напиши коротко и понятно: жанр, настроение, кому нужен трек, где он будет использоваться, какой нужен припев и какой должен быть общий вайб.</div>
+              <textarea id="music_ideaText" rows="15" placeholder="Например: современный вдохновляющий трек для рекламы школы танцев, female vocal, эмоциональный припев, уверенный рост к финалу, ощущение большого города, premium, catchy hook...">${escapeHtml(state.music.ideaText)}</textarea>
+              <div class="music-helper-row">
+                <div class="music-mini-card">
+                  <strong>Что писать здесь</strong>
+                  <small>Смысл трека, настроение, задача, референсы, темп и ощущение от результата.</small>
                 </div>
-                ${isLyricsLocked ? `<div class="music-warning">Udio не запускается напрямую из текста. Но этот блок всё равно полезен как редактор черновика: можно собрать lyrics через GPT, потом превратить их в idea.</div>` : `<div class="help-text">Для Suno здесь можно держать уже готовые куплеты, припев, bridge и структуру.</div>`}
-                <textarea id="music_lyricsText" rows="18" placeholder="[Verse]
-...
+                <div class="music-mini-card">
+                  <strong>Что лучше не писать</strong>
+                  <small>Полный финальный текст песни. Для этого есть блок «Текст песни» и GPT-помощник.</small>
+                </div>
+              </div>
+            </div>
+          ` : ''}
+
+          ${tab === 'lyrics' ? `
+            <div class="music-panel">
+              <div class="field-head">
+                <h4>Текст песни</h4>
+                <div class="actions compact-gap">
+                  <button class="btn ghost small" data-action="music-open-songwriter">Написать через GPT</button>
+                  <button class="btn outline small" data-action="music-apply-last-answer" data-target="lyrics">Вставить ответ GPT</button>
+                </div>
+              </div>
+              ${isLyricsLocked ? `<div class="music-warning">Udio не запускается напрямую из текста. Этот блок можно использовать как черновик, но генерация всё равно пойдёт из «Идеи».</div>` : `<div class="help-text">Здесь держим готовые куплеты, припев, bridge и структуру. Лучше пометки писать так: [Verse], [Chorus], [Bridge].</div>`}
+              <textarea id="music_lyricsText" rows="18" placeholder="[Verse]
 
 [Chorus]
-...">${escapeHtml(state.music.lyricsText)}</textarea>
-              </div>
-            ` : ''}
 
-            ${tab === 'songwriter' ? `
-              <div class="music-panel">
-                <div class="field-head">
-                  <h4>GPT Songwriter</h4>
-                  <div class="actions compact-gap">
-                    <button class="btn ghost small" data-action="songwriter-reset">Сбросить</button>
-                    <button class="btn outline small" data-action="songwriter-seed">Стартовые вопросы</button>
-                  </div>
-                </div>
-                <div class="help-text">Это рабочий инструмент для текста песни: варианты припева, правки, структуры и переписывание под нужный жанр.</div>
-                <div class="music-chat-thread">${songThread}</div>
-                <div class="music-chat-composer">
-                  <textarea id="music_songwriterInput" rows="5" placeholder="Напиши задачу GPT: например «сделай русский коммерческий припев, чтобы легко запоминался, 2 куплета + припев, тема — школа танцев»">${escapeHtml(state.music.songwriter.input || '')}</textarea>
-                  <div class="actions compact-gap" style="flex-wrap:wrap;">
-                    <button class="btn primary ${state.music.songwriter.loading ? 'loading' : ''}" data-action="songwriter-send" ${state.music.songwriter.loading ? 'disabled' : ''}>${state.music.songwriter.loading ? 'Генерация...' : 'Сгенерировать текст'}</button>
-                    <button class="btn ghost" data-action="music-apply-last-answer" data-target="lyrics">Вставить в Lyrics</button>
-                    <button class="btn outline" data-action="music-apply-last-answer" data-target="idea">Вставить в Idea</button>
-                  </div>
+[Bridge]">${escapeHtml(state.music.lyricsText)}</textarea>
+            </div>
+          ` : ''}
+
+          ${tab === 'songwriter' ? `
+            <div class="music-panel">
+              <div class="field-head">
+                <h4>GPT-помощник по тексту песни</h4>
+                <div class="actions compact-gap">
+                  <button class="btn ghost small" data-action="songwriter-reset">Сбросить</button>
+                  <button class="btn outline small" data-action="songwriter-seed">Стартовые вопросы</button>
                 </div>
               </div>
-            ` : ''}
+              <div class="help-text">Здесь можно собрать припев, куплеты, правки и несколько вариантов текста без перехода в отдельный экран.</div>
+              <div class="music-chat-thread">${songThread}</div>
+              <div class="music-chat-composer">
+                <textarea id="music_songwriterInput" rows="5" placeholder="Напиши задачу, например: «сделай цепкий русский припев для рекламы школы танцев, 2 куплета и припев»">${escapeHtml(state.music.songwriter.input || '')}</textarea>
+                <div class="actions compact-gap" style="flex-wrap:wrap;">
+                  <button class="btn primary ${state.music.songwriter.loading ? 'loading' : ''}" data-action="songwriter-send" ${state.music.songwriter.loading ? 'disabled' : ''}>${state.music.songwriter.loading ? 'Генерация...' : 'Сгенерировать текст'}</button>
+                  <button class="btn ghost" data-action="music-apply-last-answer" data-target="lyrics">Вставить в текст песни</button>
+                  <button class="btn outline" data-action="music-apply-last-answer" data-target="idea">Вставить в идею</button>
+                </div>
+              </div>
+            </div>
+          ` : ''}
 
-            ${tab === 'results' ? `
+          ${tab === 'results' ? `
+            <div class="music-results-grid">
               <div class="music-panel">
                 <div class="field-head">
-                  <h4>История и сохранённые запуски</h4>
+                  <h4>Треки текущего запуска</h4>
+                  <span class="badge ${statusTone}">${currentTracks.length}/${expectedCount}</span>
+                </div>
+                ${renderMusicTrackCards(currentTracks, {
+                  emptyText: state.music.ai === 'suno'
+                    ? 'После запуска здесь появятся 2 готовых трека Suno.'
+                    : 'После запуска здесь появится готовый трек.'
+                })}
+              </div>
+
+              <div class="music-panel">
+                <div class="field-head">
+                  <h4>История запусков</h4>
                   <div class="actions compact-gap">
                     <button class="btn ghost small" data-action="refresh-music-history">Обновить</button>
                     <button class="btn outline small" data-action="music-open-history">Открыть последний</button>
@@ -2953,10 +3051,10 @@ function renderMusicWorkspace() {
                   ${historyItems.length ? historyItems.map((item) => `
                     <div class="music-history-item ${state.musicHistory.selectedId === item.id ? 'active' : ''}">
                       <div class="music-history-head">
-                        <strong>${escapeHtml(item.title || item.ai || 'Music run')}</strong>
+                        <strong>${escapeHtml(item.title || (item.ai === 'udio' ? 'Udio запуск' : 'Suno запуск'))}</strong>
                         <span class="badge ${item.status === 'completed' ? 'ok' : item.status === 'failed' ? 'warn' : 'muted'}">${escapeHtml(item.status || 'queued')}</span>
                       </div>
-                      <small>${escapeHtml(trimText(item.mode === 'lyrics' ? item.lyrics_text : item.idea_text, 92) || 'Без текста')}</small>
+                      <small>${escapeHtml(trimText(item.mode === 'lyrics' ? item.lyrics_text : item.idea_text, 120) || 'Без текста')}</small>
                       <div class="help-text">${escapeHtml(formatDate(item.completed_at || item.created_at || ''))}</div>
                       <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;">
                         <button class="btn ghost small" data-action="use-music-history-item" data-generation-id="${escapeHtml(item.id || '')}">Открыть</button>
@@ -2965,23 +3063,22 @@ function renderMusicWorkspace() {
                     </div>
                   `).join('') : `<div class="music-empty-card">История пока пуста. После первой генерации здесь появятся сохранённые запуски.</div>`}
                 </div>
+
                 ${selected ? `
                   <div class="music-selected-meta">
                     <div class="music-mini-card">
                       <strong>Выбранный запуск</strong>
-                      <small>AI: ${escapeHtml(selected.ai || '—')} · mode: ${escapeHtml(selected.mode || '—')} · tracks: ${escapeHtml(String((selected.tracks || []).length || 0))}</small>
+                      <small>AI: ${escapeHtml(selected.ai || '—')} · режим: ${escapeHtml(selected.mode || '—')} · треков: ${escapeHtml(String((selected.tracks || []).length || 0))}</small>
                     </div>
                     <div class="music-mini-card">
-                      <strong>Поля</strong>
-                      <small>Title: ${escapeHtml(selected.title || '—')} · Tags: ${escapeHtml(selected.tags || '—')} · Language: ${escapeHtml(selected.language || '—')}</small>
+                      <strong>Параметры</strong>
+                      <small>Название: ${escapeHtml(selected.title || '—')} · Теги: ${escapeHtml(selected.tags || '—')} · Язык: ${escapeHtml(selected.language || '—')}</small>
                     </div>
                   </div>
                 ` : ''}
               </div>
-            ` : ''}
-          </div>
-
-          ${renderMusicLiveBoard()}
+            </div>
+          ` : ''}
         </div>
       </div>
     </div>
@@ -2989,64 +3086,11 @@ function renderMusicWorkspace() {
 }
 
 function renderMusicInspector() {
-  ensureMusicCompatibility({ preserveLyricsTab: true });
-  return `
-    <div class="music-inspector">
-      <div class="inspector-card">
-        <div class="field-head"><h4>AI модель</h4><span class="badge muted">${state.music.ai === 'suno' ? '2 трека' : 'PiAPI'}</span></div>
-        <div class="music-ai-switch">
-          <button class="music-ai-pill ${state.music.ai === 'suno' ? 'active' : ''}" data-action="music-set-ai" data-value="suno" type="button">
-            <span class="music-ai-title">Suno</span>
-            <small>2 трека за запуск · SunoAPI</small>
-          </button>
-          <button class="music-ai-pill ${state.music.ai === 'udio' ? 'active' : ''}" data-action="music-set-ai" data-value="udio" type="button">
-            <span class="music-ai-title">Udio</span>
-            <small>Idea mode · PiAPI</small>
-          </button>
-        </div>
-      </div>
-
-      <div class="inspector-card">
-        <div class="field-head"><h4>Режим генерации</h4><span class="badge muted">${state.music.mode}</span></div>
-        <div class="seg music-mode-switch">
-          <button class="segbtn ${state.music.mode === 'idea' ? 'active' : ''}" data-action="music-set-tab" data-tab="idea" type="button">Idea</button>
-          <button class="segbtn ${(state.music.mode === 'lyrics' && state.music.ai === 'suno') ? 'active' : ''}" data-action="music-set-tab" data-tab="lyrics" type="button" ${state.music.ai === 'udio' ? 'disabled' : ''}>Lyrics</button>
-        </div>
-        <div class="help-text" style="margin-top:10px;">${escapeHtml(musicRunHelperText())}</div>
-      </div>
-
-      <div class="inspector-card">
-        <div class="field-head"><h4>Метаданные</h4><button class="btn ghost small" data-action="music-use-idea-as-title">Из идеи</button></div>
-        <label>Title<input id="music_title" value="${escapeHtml(state.music.title)}" placeholder="Название трека"></label>
-        <label>Tags / genre<input id="music_tags" value="${escapeHtml(state.music.tags)}" placeholder="dance-pop, cinematic, female vocal"></label>
-        <label>Language
-          <select id="music_language">
-            <option value="ru" ${state.music.language === 'ru' ? 'selected' : ''}>Русский</option>
-            <option value="en" ${state.music.language === 'en' ? 'selected' : ''}>English</option>
-            <option value="auto" ${state.music.language === 'auto' ? 'selected' : ''}>Auto</option>
-          </select>
-        </label>
-        <label>Mood<input id="music_mood" value="${escapeHtml(state.music.mood)}" placeholder="uplifting, premium, energetic"></label>
-        <label>References<textarea id="music_references" rows="4" placeholder="Референсы, бренды, артисты, вайб">${escapeHtml(state.music.references)}</textarea></label>
-        <label class="toggle-pill">
-          <input id="music_instrumental" type="checkbox" ${state.music.instrumental ? 'checked' : ''}>
-          <span>Инструментал без вокала</span>
-        </label>
-      </div>
-
-      <div class="inspector-card">
-        <div class="field-head"><h4>Запуск</h4><span class="badge ${state.music.status === 'completed' ? 'ok' : state.music.status === 'failed' ? 'warn' : 'muted'}">${escapeHtml(state.music.status || 'idle')}</span></div>
-        <button class="btn primary full music-run-btn ${state.music.isGenerating ? 'loading' : ''}" data-action="run-music" ${state.music.isGenerating ? 'disabled' : ''}>${escapeHtml(musicRunButtonLabel())}</button>
-        <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;">
-          <button class="btn ghost small" data-action="music-open-songwriter">GPT songwriter</button>
-          <button class="btn outline small" data-action="refresh-music-history">Обновить history</button>
-        </div>
-      </div>
-    </div>
-  `;
+  return '';
 }
 
 function renderLibraryWorkspace() {
+
   const categories = state.prompts.categories.map((c) => `
     <button class="chip ${state.prompts.selectedCategory === c.slug ? 'active' : ''}" data-action="select-category" data-category="${escapeHtml(c.slug)}">${escapeHtml(c.title || c.slug)}</button>
   `).join('');
@@ -4832,14 +4876,15 @@ async function runMusic() {
   const ideaText = String(state.music.ideaText || '').trim();
   const lyricsText = String(state.music.lyricsText || '').trim();
   const mode = state.music.ai === 'udio' ? 'idea' : state.music.mode;
+  state.music.backend = state.music.ai === 'udio' ? 'piapi' : 'sunoapi';
 
   if (mode === 'idea' && !ideaText) {
-    toast('error', 'Нужна идея', 'Заполни центральный блок Idea перед генерацией.');
+    toast('error', 'Нужна идея', 'Заполни блок «Идея» перед генерацией.');
     setMusicTab('idea');
     return;
   }
   if (mode === 'lyrics' && !lyricsText) {
-    toast('error', 'Нужен текст песни', 'Заполни Lyrics или сгенерируй его через Songwriter.');
+    toast('error', 'Нужен текст песни', 'Заполни «Текст песни» или собери его через GPT-помощника.');
     setMusicTab('lyrics');
     return;
   }
