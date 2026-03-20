@@ -17,7 +17,7 @@ from uuid import uuid4
 
 import httpx
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile, File, Form
 from pydantic import BaseModel, Field
 
 from ai_chat import openai_chat_answer
@@ -476,6 +476,75 @@ if SUNOAPI_BASE_URL.rstrip("/") == "https://api.sunoapi.org":
 SUNOAPI_POLL_TIMEOUT_SEC = int(os.getenv("SUNOAPI_POLL_TIMEOUT_SEC", "600"))
 PIAPI_POLL_TIMEOUT_SEC = int(os.getenv("PIAPI_POLL_TIMEOUT_SEC", "300"))
 WORKSPACE_MUSIC_COST_TOKENS = max(0, int(os.getenv("WORKSPACE_MUSIC_COST_TOKENS", "2") or "2"))
+WORKSPACE_MUSIC_UPLOAD_SIGNED_TTL_SEC = max(3600, int(os.getenv("WORKSPACE_MUSIC_UPLOAD_SIGNED_TTL_SEC", "86400") or "86400"))
+_MUSIC_ALLOWED_SUNO_MODELS = {"V4", "V4_5", "V4_5PLUS", "V4_5ALL", "V5"}
+_MUSIC_ALLOWED_PERSONA_MODELS = {"style_persona", "voice_persona"}
+
+
+def _normalize_suno_model(value: Any, *, fallback: str = "V4_5") -> str:
+    raw = str(value or "").strip().upper().replace(".", "_")
+    if raw == "V4_5PLUS":
+        return raw
+    if raw in _MUSIC_ALLOWED_SUNO_MODELS:
+        return raw
+    return fallback if fallback in _MUSIC_ALLOWED_SUNO_MODELS else "V4_5"
+
+
+def _normalize_persona_model(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    return raw if raw in _MUSIC_ALLOWED_PERSONA_MODELS else "style_persona"
+
+
+def _normalize_vocal_gender(value: Any) -> Optional[str]:
+    raw = str(value or "").strip().lower()
+    return raw if raw in {"m", "f"} else None
+
+
+def _music_optional_float(value: Any, default: float = 0.65) -> float:
+    try:
+        out = round(float(value), 2)
+    except Exception:
+        out = default
+    if out < 0:
+        out = 0.0
+    if out > 1:
+        out = 1.0
+    return out
+
+
+def _workspace_music_source_audio_path(*, user_id: int, slot: str, filename: str = "audio.bin") -> str:
+    dt = datetime.now(timezone.utc)
+    safe_slot = re.sub(r"[^a-z0-9_-]+", "_", str(slot or "audio").strip().lower()).strip("_") or "audio"
+    suffix = Path(str(filename or "audio.bin")).suffix.lower() or ".bin"
+    return f"workspace_music_inputs/{int(user_id)}/{dt:%Y/%m/%d}/{safe_slot}_{uuid4().hex}{suffix}"
+
+
+def _upload_workspace_music_source_file(*, file_bytes: bytes, filename: str, content_type: str, user_id: int, slot: str = "audio") -> Dict[str, Any]:
+    if supabase is None:
+        raise RuntimeError("Supabase client is not configured")
+    if not file_bytes:
+        raise RuntimeError("Audio file is empty")
+    storage_path = _workspace_music_source_audio_path(user_id=user_id, slot=slot, filename=filename)
+    supabase.storage.from_(_WORKSPACE_VIDEOS_BUCKET).upload(
+        path=storage_path,
+        file=file_bytes,
+        file_options={"content-type": content_type or "application/octet-stream", "upsert": "true"},
+    )
+    signed_url = None
+    try:
+        signed_result = supabase.storage.from_(_WORKSPACE_VIDEOS_BUCKET).create_signed_url(storage_path, WORKSPACE_MUSIC_UPLOAD_SIGNED_TTL_SEC)
+        signed_url = _absolutize_supabase_url(_extract_storage_signed_url(signed_result))
+    except Exception:
+        signed_url = None
+    if not signed_url:
+        try:
+            public_result = supabase.storage.from_(_WORKSPACE_VIDEOS_BUCKET).get_public_url(storage_path)
+            signed_url = _absolutize_supabase_url(_extract_storage_public_url(public_result))
+        except Exception:
+            signed_url = None
+    if not signed_url:
+        raise RuntimeError("Could not build public URL for uploaded audio")
+    return {"storage_path": storage_path, "upload_url": signed_url, "mime_type": content_type or "application/octet-stream", "size_bytes": len(file_bytes)}
 
 _WORKSPACE_IMAGE_OPTIONAL_COLUMNS = {"preset_slug", "source_image_url", "before_image_url", "after_image_url", "compare_mode"}
 
@@ -1269,14 +1338,58 @@ class MusicGenerateIn(BaseModel):
     ai: str = Field(default="suno", max_length=24)
     backend: str = Field(default="sunoapi", max_length=24)
     mode: str = Field(default="idea", max_length=24)
+    model: str = Field(default="V4_5", max_length=24)
     title: Optional[str] = Field(default="", max_length=200)
-    tags: Optional[str] = Field(default="", max_length=400)
+    tags: Optional[str] = Field(default="", max_length=1000)
     language: Optional[str] = Field(default="ru", max_length=32)
     mood: Optional[str] = Field(default="", max_length=200)
     references: Optional[str] = Field(default="", max_length=1000)
+    negative_tags: Optional[str] = Field(default="", max_length=1000)
+    vocal_gender: Optional[str] = Field(default="", max_length=8)
+    style_weight: Optional[float] = Field(default=0.65, ge=0.0, le=1.0)
+    weirdness_constraint: Optional[float] = Field(default=0.65, ge=0.0, le=1.0)
+    audio_weight: Optional[float] = Field(default=0.65, ge=0.0, le=1.0)
+    persona_id: Optional[str] = Field(default="", max_length=200)
+    persona_model: Optional[str] = Field(default="style_persona", max_length=32)
     instrumental: bool = False
     idea_text: Optional[str] = Field(default="", max_length=8000)
     lyrics_text: Optional[str] = Field(default="", max_length=12000)
+
+
+class MusicLyricsGenerateIn(BaseModel):
+    prompt: str = Field(..., min_length=1, max_length=200)
+
+
+class MusicTimestampLyricsIn(BaseModel):
+    task_id: str = Field(..., min_length=1, max_length=255)
+    audio_id: str = Field(..., min_length=1, max_length=255)
+
+
+class MusicPersonaGenerateIn(BaseModel):
+    task_id: str = Field(..., min_length=1, max_length=255)
+    audio_id: str = Field(..., min_length=1, max_length=255)
+    name: str = Field(..., min_length=1, max_length=120)
+    description: str = Field(..., min_length=1, max_length=1000)
+    vocal_start: float = Field(default=0.0, ge=0.0)
+    vocal_end: float = Field(default=30.0, ge=0.0)
+    style: Optional[str] = Field(default="", max_length=300)
+
+
+class MusicExtendIn(BaseModel):
+    audio_id: str = Field(..., min_length=1, max_length=255)
+    model: str = Field(default="V4_5", max_length=24)
+    use_custom_params: bool = True
+    continue_at: Optional[float] = Field(default=60.0, ge=0.0)
+    prompt: Optional[str] = Field(default="", max_length=5000)
+    title: Optional[str] = Field(default="", max_length=200)
+    style: Optional[str] = Field(default="", max_length=1000)
+    negative_tags: Optional[str] = Field(default="", max_length=1000)
+    vocal_gender: Optional[str] = Field(default="", max_length=8)
+    style_weight: Optional[float] = Field(default=0.65, ge=0.0, le=1.0)
+    weirdness_constraint: Optional[float] = Field(default=0.65, ge=0.0, le=1.0)
+    audio_weight: Optional[float] = Field(default=0.65, ge=0.0, le=1.0)
+    persona_id: Optional[str] = Field(default="", max_length=200)
+    persona_model: Optional[str] = Field(default="style_persona", max_length=32)
 
 
 class WorkspaceVideoTrimIn(BaseModel):
@@ -2712,43 +2825,71 @@ async def _workspace_piapi_poll_task(task_id: str, *, timeout_sec: int = 240, sl
         await asyncio.sleep(sleep_sec)
 
 
-async def _workspace_sunoapi_generate_task(*, prompt: str, custom_mode: bool, instrumental: bool, model: str, title: str = "", style: str = "") -> str:
+async def _workspace_sunoapi_post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     if not SUNOAPI_API_KEY:
         raise RuntimeError("SUNOAPI_API_KEY is empty")
-    url = f"{SUNOAPI_BASE_URL}/generate"
-    payload: Dict[str, Any] = {
-        "prompt": prompt,
-        "customMode": bool(custom_mode),
-        "instrumental": bool(instrumental),
-        "model": model,
-    }
-    if title:
-        payload["title"] = title
-    if style:
-        payload["style"] = style
+    url = f"{SUNOAPI_BASE_URL}/{str(path or '').lstrip('/')}"
     headers = {"Authorization": f"Bearer {SUNOAPI_API_KEY}", "Content-Type": "application/json"}
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=120.0) as client:
         response = await client.post(url, headers=headers, json=payload)
     response.raise_for_status()
     js = response.json()
     if js.get("code") != 200:
-        raise RuntimeError(f"SunoAPI generate failed: {js}")
+        raise RuntimeError(f"SunoAPI request failed: {js}")
+    return js
+
+
+async def _workspace_sunoapi_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if not SUNOAPI_API_KEY:
+        raise RuntimeError("SUNOAPI_API_KEY is empty")
+    url = f"{SUNOAPI_BASE_URL}/{str(path or '').lstrip('/')}"
+    headers = {"Authorization": f"Bearer {SUNOAPI_API_KEY}"}
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        response = await client.get(url, headers=headers, params=params or None)
+    response.raise_for_status()
+    js = response.json()
+    if js.get("code") != 200:
+        raise RuntimeError(f"SunoAPI request failed: {js}")
+    return js
+
+
+async def _workspace_sunoapi_create_task(path: str, payload: Dict[str, Any]) -> str:
+    js = await _workspace_sunoapi_post(path, payload)
     task_id = str(((js.get("data") or {}).get("taskId")) or "").strip()
     if not task_id:
         raise RuntimeError(f"SunoAPI did not return taskId: {js}")
     return task_id
 
 
+async def _workspace_sunoapi_generate_task(*, prompt: str, custom_mode: bool, instrumental: bool, model: str, title: str = "", style: str = "", negative_tags: str = "", vocal_gender: Optional[str] = None, style_weight: Optional[float] = None, weirdness_constraint: Optional[float] = None, audio_weight: Optional[float] = None, persona_id: str = "", persona_model: str = "style_persona") -> str:
+    payload: Dict[str, Any] = {
+        "prompt": prompt,
+        "customMode": bool(custom_mode),
+        "instrumental": bool(instrumental),
+        "model": _normalize_suno_model(model),
+    }
+    if title:
+        payload["title"] = title
+    if style:
+        payload["style"] = style
+    if negative_tags:
+        payload["negativeTags"] = negative_tags
+    if vocal_gender:
+        payload["vocalGender"] = vocal_gender
+    if style_weight is not None:
+        payload["styleWeight"] = _music_optional_float(style_weight)
+    if weirdness_constraint is not None:
+        payload["weirdnessConstraint"] = _music_optional_float(weirdness_constraint)
+    if audio_weight is not None:
+        payload["audioWeight"] = _music_optional_float(audio_weight)
+    if persona_id:
+        payload["personaId"] = persona_id
+        payload["personaModel"] = _normalize_persona_model(persona_model)
+    return await _workspace_sunoapi_create_task("generate", payload)
+
+
 async def _workspace_sunoapi_get_task(task_id: str) -> Dict[str, Any]:
-    if not SUNOAPI_API_KEY:
-        raise RuntimeError("SUNOAPI_API_KEY is empty")
-    url = f"{SUNOAPI_BASE_URL}/generate/record-info"
-    headers = {"Authorization": f"Bearer {SUNOAPI_API_KEY}"}
-    params = {"taskId": task_id}
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.get(url, headers=headers, params=params)
-    response.raise_for_status()
-    return response.json()
+    return await _workspace_sunoapi_get("generate/record-info", {"taskId": task_id})
 
 
 async def _workspace_sunoapi_poll_task(task_id: str, *, timeout_sec: Optional[int] = None, sleep_sec: float = 2.0) -> Dict[str, Any]:
@@ -2759,11 +2900,51 @@ async def _workspace_sunoapi_poll_task(task_id: str, *, timeout_sec: Optional[in
         last = await _workspace_sunoapi_get_task(task_id)
         data = last.get("data") or {}
         status = str(data.get("status") or "").upper().strip()
-        if status in {"SUCCESS", "FAILED", "ERROR"}:
+        if status in {"SUCCESS", "FAILED", "ERROR", "CREATE_TASK_FAILED", "GENERATE_LYRICS_FAILED", "CALLBACK_EXCEPTION", "SENSITIVE_WORD_ERROR"}:
             return last
         if time.time() - t0 > timeout_sec:
             raise TimeoutError(f"SunoAPI task timeout after {timeout_sec}s")
         await asyncio.sleep(sleep_sec)
+
+
+async def _workspace_sunoapi_create_lyrics_task(prompt: str) -> str:
+    return await _workspace_sunoapi_create_task("lyrics", {"prompt": prompt})
+
+
+async def _workspace_sunoapi_get_lyrics_task(task_id: str) -> Dict[str, Any]:
+    return await _workspace_sunoapi_get("lyrics/record-info", {"taskId": task_id})
+
+
+async def _workspace_sunoapi_poll_lyrics_task(task_id: str, *, timeout_sec: int = 180, sleep_sec: float = 3.0) -> Dict[str, Any]:
+    t0 = time.time()
+    while True:
+        last = await _workspace_sunoapi_get_lyrics_task(task_id)
+        status = str(((last.get("data") or {}).get("status") or "")).upper().strip()
+        if status in {"SUCCESS", "FAILED", "ERROR", "CREATE_TASK_FAILED", "GENERATE_LYRICS_FAILED", "CALLBACK_EXCEPTION", "SENSITIVE_WORD_ERROR"}:
+            return last
+        if time.time() - t0 > timeout_sec:
+            raise TimeoutError(f"SunoAPI lyrics timeout after {timeout_sec}s")
+        await asyncio.sleep(sleep_sec)
+
+
+def _workspace_sunoapi_extract_lyrics_variants(task_json: Dict[str, Any]) -> List[Dict[str, Any]]:
+    data = task_json.get("data") or {}
+    resp = data.get("response") or {}
+    resp_data = resp.get("data") or []
+    out: List[Dict[str, Any]] = []
+    if isinstance(resp_data, list):
+        for idx, item in enumerate(resp_data, start=1):
+            if not isinstance(item, dict):
+                continue
+            out.append({
+                "index": idx,
+                "title": item.get("title") or f"Lyrics {idx}",
+                "text": item.get("text") or "",
+                "status": item.get("status") or "",
+                "error_message": item.get("errorMessage") or "",
+                "payload_json": item,
+            })
+    return out
 
 
 def _workspace_sunoapi_extract_tracks(task_json: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -2773,8 +2954,6 @@ def _workspace_sunoapi_extract_tracks(task_json: Dict[str, Any]) -> List[Dict[st
     if isinstance(resp_data, list):
         return [item for item in resp_data if isinstance(item, dict)]
     return []
-
-
 def _workspace_pick_first_url(val: Any) -> str:
     if not val:
         return ""
@@ -2846,16 +3025,23 @@ def _workspace_build_piapi_music_payload(payload: MusicGenerateIn, ai: str, mode
 
 
 async def _run_workspace_music_provider(payload: MusicGenerateIn, ai: str, backend: str) -> Dict[str, Any]:
+    mode_value = _normalize_music_mode_value(ai, payload.mode)
     if backend == "sunoapi":
-        prompt_text = _workspace_music_prompt_text(payload, ai, _normalize_music_mode_value(ai, payload.mode)) or "A modern catchy song with clear structure and strong hook"
-        model_enum = "V4_5ALL"
+        prompt_text = _workspace_music_prompt_text(payload, ai, mode_value) or "A modern catchy song with clear structure and strong hook"
         task_id = await _workspace_sunoapi_generate_task(
             prompt=prompt_text,
-            custom_mode=bool(_normalize_music_mode_value(ai, payload.mode) == "lyrics"),
+            custom_mode=bool(mode_value == "lyrics"),
             instrumental=bool(payload.instrumental),
-            model=model_enum,
+            model=_normalize_suno_model(getattr(payload, "model", "V4_5")),
             title=str(payload.title or "").strip(),
             style=str(payload.tags or "").strip(),
+            negative_tags=str(getattr(payload, "negative_tags", "") or "").strip(),
+            vocal_gender=_normalize_vocal_gender(getattr(payload, "vocal_gender", None)),
+            style_weight=getattr(payload, "style_weight", 0.65),
+            weirdness_constraint=getattr(payload, "weirdness_constraint", 0.65),
+            audio_weight=getattr(payload, "audio_weight", 0.65),
+            persona_id=str(getattr(payload, "persona_id", "") or "").strip(),
+            persona_model=str(getattr(payload, "persona_model", "style_persona") or "style_persona").strip(),
         )
         done = await _workspace_sunoapi_poll_task(task_id, timeout_sec=SUNOAPI_POLL_TIMEOUT_SEC, sleep_sec=2.0)
         data = done.get("data") or {}
@@ -2878,7 +3064,7 @@ async def _run_workspace_music_provider(payload: MusicGenerateIn, ai: str, backe
             raise RuntimeError("SunoAPI completed but returned no tracks")
         return {"provider_task_id": task_id, "tracks": tracks}
 
-    task_payload = _workspace_build_piapi_music_payload(payload, ai, _normalize_music_mode_value(ai, payload.mode))
+    task_payload = _workspace_build_piapi_music_payload(payload, ai, mode_value)
     created = await _workspace_piapi_create_task(task_payload)
     task_id = str(((created.get("data") or {}).get("task_id")) or "").strip()
     if not task_id:
@@ -2910,6 +3096,165 @@ async def _run_workspace_music_provider(payload: MusicGenerateIn, ai: str, backe
     return {"provider_task_id": task_id, "tracks": tracks}
 
 
+async def _workspace_sunoapi_start_extend_task(payload: MusicExtendIn) -> str:
+    body: Dict[str, Any] = {
+        "audioId": str(payload.audio_id or "").strip(),
+        "defaultParamFlag": bool(payload.use_custom_params),
+        "model": _normalize_suno_model(payload.model),
+    }
+    if payload.use_custom_params:
+        body["continueAt"] = float(payload.continue_at or 0)
+        if payload.prompt:
+            body["prompt"] = str(payload.prompt).strip()
+        if payload.title:
+            body["title"] = str(payload.title).strip()
+        if payload.style:
+            body["style"] = str(payload.style).strip()
+        if payload.negative_tags:
+            body["negativeTags"] = str(payload.negative_tags).strip()
+        vg = _normalize_vocal_gender(payload.vocal_gender)
+        if vg:
+            body["vocalGender"] = vg
+        body["styleWeight"] = _music_optional_float(payload.style_weight)
+        body["weirdnessConstraint"] = _music_optional_float(payload.weirdness_constraint)
+        body["audioWeight"] = _music_optional_float(payload.audio_weight)
+        if payload.persona_id:
+            body["personaId"] = str(payload.persona_id).strip()
+            body["personaModel"] = _normalize_persona_model(payload.persona_model)
+    return await _workspace_sunoapi_create_task("generate/extend", body)
+
+
+async def _workspace_sunoapi_start_upload_cover_task(*, upload_url: str, prompt: str, title: str, style: str, model: str, custom_mode: bool, instrumental: bool, negative_tags: str = "", vocal_gender: Optional[str] = None, style_weight: Optional[float] = None, weirdness_constraint: Optional[float] = None, audio_weight: Optional[float] = None, persona_id: str = "", persona_model: str = "style_persona") -> str:
+    body: Dict[str, Any] = {
+        "uploadUrl": upload_url,
+        "customMode": bool(custom_mode),
+        "instrumental": bool(instrumental),
+        "model": _normalize_suno_model(model),
+        "prompt": prompt,
+    }
+    if title:
+        body["title"] = title
+    if style:
+        body["style"] = style
+    if negative_tags:
+        body["negativeTags"] = negative_tags
+    if vocal_gender:
+        body["vocalGender"] = vocal_gender
+    if style_weight is not None:
+        body["styleWeight"] = _music_optional_float(style_weight)
+    if weirdness_constraint is not None:
+        body["weirdnessConstraint"] = _music_optional_float(weirdness_constraint)
+    if audio_weight is not None:
+        body["audioWeight"] = _music_optional_float(audio_weight)
+    if persona_id:
+        body["personaId"] = persona_id
+        body["personaModel"] = _normalize_persona_model(persona_model)
+    return await _workspace_sunoapi_create_task("generate/upload-cover", body)
+
+
+async def _workspace_sunoapi_start_upload_extend_task(*, upload_url: str, prompt: str, title: str, style: str, model: str, use_custom_params: bool, instrumental: bool, continue_at: Optional[float] = None, negative_tags: str = "", vocal_gender: Optional[str] = None, style_weight: Optional[float] = None, weirdness_constraint: Optional[float] = None, audio_weight: Optional[float] = None, persona_id: str = "", persona_model: str = "style_persona") -> str:
+    body: Dict[str, Any] = {
+        "uploadUrl": upload_url,
+        "defaultParamFlag": bool(use_custom_params),
+        "instrumental": bool(instrumental),
+        "model": _normalize_suno_model(model),
+    }
+    if prompt:
+        body["prompt"] = prompt
+    if use_custom_params:
+        if title:
+            body["title"] = title
+        if style:
+            body["style"] = style
+        if continue_at is not None:
+            body["continueAt"] = float(continue_at)
+        if negative_tags:
+            body["negativeTags"] = negative_tags
+        if vocal_gender:
+            body["vocalGender"] = vocal_gender
+        if style_weight is not None:
+            body["styleWeight"] = _music_optional_float(style_weight)
+        if weirdness_constraint is not None:
+            body["weirdnessConstraint"] = _music_optional_float(weirdness_constraint)
+        if audio_weight is not None:
+            body["audioWeight"] = _music_optional_float(audio_weight)
+        if persona_id:
+            body["personaId"] = persona_id
+            body["personaModel"] = _normalize_persona_model(persona_model)
+    return await _workspace_sunoapi_create_task("generate/upload-extend", body)
+
+
+async def _workspace_sunoapi_start_add_vocals_task(*, upload_url: str, prompt: str, title: str, style: str, model: str, negative_tags: str = "", vocal_gender: Optional[str] = None, style_weight: Optional[float] = None, weirdness_constraint: Optional[float] = None, audio_weight: Optional[float] = None) -> str:
+    body: Dict[str, Any] = {
+        "uploadUrl": upload_url,
+        "prompt": prompt,
+        "title": title,
+        "style": style,
+        "model": _normalize_suno_model(model),
+    }
+    if negative_tags:
+        body["negativeTags"] = negative_tags
+    if vocal_gender:
+        body["vocalGender"] = vocal_gender
+    if style_weight is not None:
+        body["styleWeight"] = _music_optional_float(style_weight)
+    if weirdness_constraint is not None:
+        body["weirdnessConstraint"] = _music_optional_float(weirdness_constraint)
+    if audio_weight is not None:
+        body["audioWeight"] = _music_optional_float(audio_weight)
+    return await _workspace_sunoapi_create_task("generate/add-vocals", body)
+
+
+async def _workspace_sunoapi_get_timestamped_lyrics(task_id: str, audio_id: str) -> Dict[str, Any]:
+    js = await _workspace_sunoapi_post("generate/get-timestamped-lyrics", {"taskId": task_id, "audioId": audio_id})
+    return js.get("data") or {}
+
+
+async def _workspace_sunoapi_generate_persona(payload: MusicPersonaGenerateIn) -> Dict[str, Any]:
+    body: Dict[str, Any] = {
+        "taskId": payload.task_id,
+        "audioId": payload.audio_id,
+        "name": payload.name,
+        "description": payload.description,
+        "vocalStart": payload.vocal_start,
+        "vocalEnd": payload.vocal_end,
+    }
+    if payload.style:
+        body["style"] = payload.style
+    js = await _workspace_sunoapi_post("generate/generate-persona", body)
+    return js.get("data") or {}
+
+
+def _workspace_normalize_suno_task_status(task_json: Dict[str, Any]) -> Dict[str, Any]:
+    data = task_json.get("data") or {}
+    provider_status = str(data.get("status") or "").upper().strip()
+    if provider_status == "SUCCESS":
+        status = "completed"
+    elif provider_status in {"FAILED", "ERROR", "CREATE_TASK_FAILED", "GENERATE_LYRICS_FAILED", "CALLBACK_EXCEPTION", "SENSITIVE_WORD_ERROR"}:
+        status = "failed"
+    else:
+        status = "processing"
+    tracks_raw = _workspace_sunoapi_extract_tracks(task_json)
+    tracks: List[Dict[str, Any]] = []
+    for idx, item in enumerate(tracks_raw[:8], start=1):
+        tracks.append({
+            "provider_track_id": item.get("id") or item.get("audioId") or item.get("songId"),
+            "title": item.get("title") or f"Track {idx}",
+            "audio_url": _workspace_extract_audio_url(item),
+            "video_url": _workspace_pick_first_url(item.get("video_url") or item.get("video") or item.get("mp4") or item.get("videoUrl")),
+            "cover_url": _workspace_pick_first_url(item.get("image_url") or item.get("image") or item.get("cover_url") or item.get("cover")),
+            "lyrics": item.get("lyrics"),
+            "payload_json": item,
+        })
+    return {
+        "task_id": str(data.get("taskId") or "").strip(),
+        "status": status,
+        "provider_status": provider_status or "PENDING",
+        "error_code": data.get("errorCode"),
+        "error_message": data.get("errorMessage"),
+        "tracks": tracks,
+        "raw": data,
+    }
 async def _run_workspace_music_job(*, generation_id: str, user_id: int, payload: MusicGenerateIn, charge_tokens: int = 0, charge_ref_id: str = "") -> None:
     ai = _normalize_music_ai_value(payload.ai)
     backend = _normalize_music_backend_value(ai, payload.backend)
@@ -3625,6 +3970,165 @@ async def workspace_music_run(payload: MusicGenerateIn, user: Dict[str, Any] = D
     )
 
     return {"ok": True, "generation_id": generation_id, "status": "queued", "cost_tokens": int(cost if charged else 0)}
+
+
+@router.post("/music/lyrics/generate")
+async def workspace_music_generate_lyrics(payload: MusicLyricsGenerateIn, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
+    _ = int(user["telegram_user_id"])
+    task_id = await _workspace_sunoapi_create_lyrics_task(str(payload.prompt or "").strip())
+    done = await _workspace_sunoapi_poll_lyrics_task(task_id)
+    data = done.get("data") or {}
+    status = str(data.get("status") or "").upper().strip()
+    if status != "SUCCESS":
+        raise HTTPException(status_code=400, detail=data.get("errorMessage") or f"Lyrics generation failed: {status}")
+    items = _workspace_sunoapi_extract_lyrics_variants(done)
+    return {"ok": True, "task_id": task_id, "items": items, "text": (items[0].get("text") if items else "")}
+
+
+@router.post("/music/timestamped-lyrics")
+async def workspace_music_timestamped_lyrics(payload: MusicTimestampLyricsIn, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
+    _ = int(user["telegram_user_id"])
+    data = await _workspace_sunoapi_get_timestamped_lyrics(str(payload.task_id).strip(), str(payload.audio_id).strip())
+    return {"ok": True, "data": data}
+
+
+@router.post("/music/persona/generate")
+async def workspace_music_generate_persona(payload: MusicPersonaGenerateIn, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
+    _ = int(user["telegram_user_id"])
+    data = await _workspace_sunoapi_generate_persona(payload)
+    return {"ok": True, "data": data}
+
+
+@router.post("/music/extend/start")
+async def workspace_music_extend_start(payload: MusicExtendIn, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
+    _ = int(user["telegram_user_id"])
+    task_id = await _workspace_sunoapi_start_extend_task(payload)
+    return {"ok": True, "task_id": task_id, "status": "queued"}
+
+
+@router.get("/music/task-status")
+async def workspace_music_task_status(task_id: str, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
+    _ = int(user["telegram_user_id"])
+    task_id_text = str(task_id or "").strip()
+    if not task_id_text:
+        raise HTTPException(status_code=400, detail="Missing task_id")
+    task = await _workspace_sunoapi_get_task(task_id_text)
+    item = _workspace_normalize_suno_task_status(task)
+    return {"ok": True, "item": item}
+
+
+@router.post("/music/upload-cover/start")
+async def workspace_music_upload_cover_start(
+    file: UploadFile = File(...),
+    prompt: str = Form(""),
+    title: str = Form(""),
+    style: str = Form(""),
+    model: str = Form("V4_5"),
+    custom_mode: bool = Form(True),
+    instrumental: bool = Form(False),
+    negative_tags: str = Form(""),
+    vocal_gender: str = Form(""),
+    style_weight: float = Form(0.65),
+    weirdness_constraint: float = Form(0.65),
+    audio_weight: float = Form(0.65),
+    persona_id: str = Form(""),
+    persona_model: str = Form("style_persona"),
+    user: Dict[str, Any] = Depends(get_current_workspace_user),
+) -> Dict[str, Any]:
+    uid = int(user["telegram_user_id"])
+    raw = await file.read()
+    uploaded = _upload_workspace_music_source_file(file_bytes=raw, filename=file.filename or "audio.bin", content_type=(file.content_type or "audio/mpeg"), user_id=uid, slot="cover")
+    task_id = await _workspace_sunoapi_start_upload_cover_task(
+        upload_url=uploaded["upload_url"],
+        prompt=str(prompt or "").strip(),
+        title=str(title or "").strip(),
+        style=str(style or "").strip(),
+        model=model,
+        custom_mode=bool(custom_mode),
+        instrumental=bool(instrumental),
+        negative_tags=str(negative_tags or "").strip(),
+        vocal_gender=_normalize_vocal_gender(vocal_gender),
+        style_weight=style_weight,
+        weirdness_constraint=weirdness_constraint,
+        audio_weight=audio_weight,
+        persona_id=str(persona_id or "").strip(),
+        persona_model=str(persona_model or "style_persona").strip(),
+    )
+    return {"ok": True, "task_id": task_id, "status": "queued", "upload_url": uploaded["upload_url"]}
+
+
+@router.post("/music/upload-extend/start")
+async def workspace_music_upload_extend_start(
+    file: UploadFile = File(...),
+    prompt: str = Form(""),
+    title: str = Form(""),
+    style: str = Form(""),
+    model: str = Form("V4_5"),
+    use_custom_params: bool = Form(True),
+    instrumental: bool = Form(False),
+    continue_at: float = Form(60.0),
+    negative_tags: str = Form(""),
+    vocal_gender: str = Form(""),
+    style_weight: float = Form(0.65),
+    weirdness_constraint: float = Form(0.65),
+    audio_weight: float = Form(0.65),
+    persona_id: str = Form(""),
+    persona_model: str = Form("style_persona"),
+    user: Dict[str, Any] = Depends(get_current_workspace_user),
+) -> Dict[str, Any]:
+    uid = int(user["telegram_user_id"])
+    raw = await file.read()
+    uploaded = _upload_workspace_music_source_file(file_bytes=raw, filename=file.filename or "audio.bin", content_type=(file.content_type or "audio/mpeg"), user_id=uid, slot="extend")
+    task_id = await _workspace_sunoapi_start_upload_extend_task(
+        upload_url=uploaded["upload_url"],
+        prompt=str(prompt or "").strip(),
+        title=str(title or "").strip(),
+        style=str(style or "").strip(),
+        model=model,
+        use_custom_params=bool(use_custom_params),
+        instrumental=bool(instrumental),
+        continue_at=continue_at,
+        negative_tags=str(negative_tags or "").strip(),
+        vocal_gender=_normalize_vocal_gender(vocal_gender),
+        style_weight=style_weight,
+        weirdness_constraint=weirdness_constraint,
+        audio_weight=audio_weight,
+        persona_id=str(persona_id or "").strip(),
+        persona_model=str(persona_model or "style_persona").strip(),
+    )
+    return {"ok": True, "task_id": task_id, "status": "queued", "upload_url": uploaded["upload_url"]}
+
+
+@router.post("/music/add-vocals/start")
+async def workspace_music_add_vocals_start(
+    file: UploadFile = File(...),
+    prompt: str = Form(...),
+    title: str = Form(...),
+    style: str = Form(...),
+    model: str = Form("V4_5"),
+    negative_tags: str = Form(""),
+    vocal_gender: str = Form(""),
+    style_weight: float = Form(0.65),
+    weirdness_constraint: float = Form(0.65),
+    audio_weight: float = Form(0.65),
+    user: Dict[str, Any] = Depends(get_current_workspace_user),
+) -> Dict[str, Any]:
+    uid = int(user["telegram_user_id"])
+    raw = await file.read()
+    uploaded = _upload_workspace_music_source_file(file_bytes=raw, filename=file.filename or "audio.bin", content_type=(file.content_type or "audio/mpeg"), user_id=uid, slot="add_vocals")
+    task_id = await _workspace_sunoapi_start_add_vocals_task(
+        upload_url=uploaded["upload_url"],
+        prompt=str(prompt or "").strip(),
+        title=str(title or "").strip(),
+        style=str(style or "").strip(),
+        model=model,
+        negative_tags=str(negative_tags or "").strip(),
+        vocal_gender=_normalize_vocal_gender(vocal_gender),
+        style_weight=style_weight,
+        weirdness_constraint=weirdness_constraint,
+        audio_weight=audio_weight,
+    )
+    return {"ok": True, "task_id": task_id, "status": "queued", "upload_url": uploaded["upload_url"]}
 
 
 @router.get("/music/history")
