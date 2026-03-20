@@ -473,12 +473,29 @@ SUNOAPI_API_KEY = os.getenv("SUNOAPI_API_KEY", "").strip()
 SUNOAPI_BASE_URL = os.getenv("SUNOAPI_BASE_URL", "https://api.sunoapi.org/api/v1").rstrip("/")
 if SUNOAPI_BASE_URL.rstrip("/") == "https://api.sunoapi.org":
     SUNOAPI_BASE_URL = "https://api.sunoapi.org/api/v1"
+SUNOAPI_CALLBACK_URL = os.getenv("SUNOAPI_CALLBACK_URL", "").strip()
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+SUNOAPI_CALLBACK_SECRET = os.getenv("SUNOAPI_CALLBACK_SECRET", "").strip()
 SUNOAPI_POLL_TIMEOUT_SEC = int(os.getenv("SUNOAPI_POLL_TIMEOUT_SEC", "600"))
 PIAPI_POLL_TIMEOUT_SEC = int(os.getenv("PIAPI_POLL_TIMEOUT_SEC", "300"))
 WORKSPACE_MUSIC_COST_TOKENS = max(0, int(os.getenv("WORKSPACE_MUSIC_COST_TOKENS", "2") or "2"))
 WORKSPACE_MUSIC_UPLOAD_SIGNED_TTL_SEC = max(3600, int(os.getenv("WORKSPACE_MUSIC_UPLOAD_SIGNED_TTL_SEC", "86400") or "86400"))
 _MUSIC_ALLOWED_SUNO_MODELS = {"V4", "V4_5", "V4_5PLUS", "V4_5ALL", "V5"}
 _MUSIC_ALLOWED_PERSONA_MODELS = {"style_persona", "voice_persona"}
+
+
+
+
+def _workspace_suno_callback_url() -> str:
+    if SUNOAPI_CALLBACK_URL:
+        return SUNOAPI_CALLBACK_URL
+    if not PUBLIC_BASE_URL:
+        raise RuntimeError("Set SUNOAPI_CALLBACK_URL or PUBLIC_BASE_URL for Suno callBackUrl")
+    url = f"{PUBLIC_BASE_URL}/sunoapi/callback"
+    if SUNOAPI_CALLBACK_SECRET:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}secret={SUNOAPI_CALLBACK_SECRET}"
+    return url
 
 
 def _normalize_suno_model(value: Any, *, fallback: str = "V4_5") -> str:
@@ -2854,6 +2871,8 @@ async def _workspace_sunoapi_get(path: str, params: Optional[Dict[str, Any]] = N
 
 
 async def _workspace_sunoapi_create_task(path: str, payload: Dict[str, Any]) -> str:
+    payload = dict(payload or {})
+    payload["callBackUrl"] = _workspace_suno_callback_url()
     js = await _workspace_sunoapi_post(path, payload)
     task_id = str(((js.get("data") or {}).get("taskId")) or "").strip()
     if not task_id:
