@@ -1375,6 +1375,75 @@ textarea { resize: vertical; min-height: 110px; }
   .music-tab { flex: 1 1 calc(50% - 8px); text-align: center; }
 }
 
+
+.shell.music-no-inspector {
+  grid-template-columns: 310px minmax(0, 1fr);
+}
+.shell.music-no-inspector .inspector {
+  display: none;
+}
+
+.music-workspace-main {
+  display: block;
+}
+.music-clean-shell {
+  display: grid;
+  gap: 16px;
+}
+.music-setup-card {
+  gap: 16px;
+}
+.music-top-grid,
+.music-form-grid,
+.music-results-grid {
+  display: grid;
+  gap: 12px;
+}
+.music-top-grid {
+  grid-template-columns: minmax(0, 1.05fr) minmax(260px, 0.95fr);
+}
+.music-form-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.music-run-strip {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 340px);
+  gap: 12px;
+  align-items: center;
+}
+.music-results-grid {
+  grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.9fr);
+}
+.music-tabs--clean {
+  margin-bottom: 0;
+}
+.music-panel > .help-text {
+  margin-top: -4px;
+}
+.music-panel textarea {
+  min-height: 140px;
+}
+.music-setup-card textarea {
+  min-height: 96px;
+}
+
+@media (max-width: 1380px) {
+  .shell.music-no-inspector {
+    grid-template-columns: 286px minmax(0, 1fr);
+  }
+}
+@media (max-width: 1180px) {
+  .shell.music-no-inspector {
+    grid-template-columns: 1fr;
+  }
+  .music-top-grid,
+  .music-form-grid,
+  .music-results-grid,
+  .music-run-strip {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* ===== AstraBot visual refresh ===== */
 :root {
   --bg: #0b0b0c;
