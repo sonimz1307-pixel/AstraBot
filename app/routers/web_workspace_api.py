@@ -473,29 +473,12 @@ SUNOAPI_API_KEY = os.getenv("SUNOAPI_API_KEY", "").strip()
 SUNOAPI_BASE_URL = os.getenv("SUNOAPI_BASE_URL", "https://api.sunoapi.org/api/v1").rstrip("/")
 if SUNOAPI_BASE_URL.rstrip("/") == "https://api.sunoapi.org":
     SUNOAPI_BASE_URL = "https://api.sunoapi.org/api/v1"
-SUNOAPI_CALLBACK_URL = os.getenv("SUNOAPI_CALLBACK_URL", "").strip()
-PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
-SUNOAPI_CALLBACK_SECRET = os.getenv("SUNOAPI_CALLBACK_SECRET", "").strip()
 SUNOAPI_POLL_TIMEOUT_SEC = int(os.getenv("SUNOAPI_POLL_TIMEOUT_SEC", "600"))
 PIAPI_POLL_TIMEOUT_SEC = int(os.getenv("PIAPI_POLL_TIMEOUT_SEC", "300"))
 WORKSPACE_MUSIC_COST_TOKENS = max(0, int(os.getenv("WORKSPACE_MUSIC_COST_TOKENS", "2") or "2"))
 WORKSPACE_MUSIC_UPLOAD_SIGNED_TTL_SEC = max(3600, int(os.getenv("WORKSPACE_MUSIC_UPLOAD_SIGNED_TTL_SEC", "86400") or "86400"))
 _MUSIC_ALLOWED_SUNO_MODELS = {"V4", "V4_5", "V4_5PLUS", "V4_5ALL", "V5"}
 _MUSIC_ALLOWED_PERSONA_MODELS = {"style_persona", "voice_persona"}
-
-
-
-
-def _workspace_suno_callback_url() -> str:
-    if SUNOAPI_CALLBACK_URL:
-        return SUNOAPI_CALLBACK_URL
-    if not PUBLIC_BASE_URL:
-        raise RuntimeError("Set SUNOAPI_CALLBACK_URL or PUBLIC_BASE_URL for Suno callBackUrl")
-    url = f"{PUBLIC_BASE_URL}/sunoapi/callback"
-    if SUNOAPI_CALLBACK_SECRET:
-        sep = "&" if "?" in url else "?"
-        url = f"{url}{sep}secret={SUNOAPI_CALLBACK_SECRET}"
-    return url
 
 
 def _normalize_suno_model(value: Any, *, fallback: str = "V4_5") -> str:
@@ -2871,8 +2854,6 @@ async def _workspace_sunoapi_get(path: str, params: Optional[Dict[str, Any]] = N
 
 
 async def _workspace_sunoapi_create_task(path: str, payload: Dict[str, Any]) -> str:
-    payload = dict(payload or {})
-    payload["callBackUrl"] = _workspace_suno_callback_url()
     js = await _workspace_sunoapi_post(path, payload)
     task_id = str(((js.get("data") or {}).get("taskId")) or "").strip()
     if not task_id:
@@ -2969,10 +2950,48 @@ def _workspace_sunoapi_extract_lyrics_variants(task_json: Dict[str, Any]) -> Lis
 def _workspace_sunoapi_extract_tracks(task_json: Dict[str, Any]) -> List[Dict[str, Any]]:
     data = task_json.get("data") or {}
     resp = data.get("response") or {}
-    resp_data = resp.get("data") or []
-    if isinstance(resp_data, list):
-        return [item for item in resp_data if isinstance(item, dict)]
-    return []
+
+    candidates: List[Any] = [
+        data.get("data"),
+        resp.get("data"),
+        ((resp.get("data") or {}).get("data") if isinstance(resp.get("data"), dict) else None),
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, list):
+            items = [item for item in candidate if isinstance(item, dict)]
+            if items:
+                return items
+
+    audioish_keys = {
+        "audio_url", "audioUrl", "stream_audio_url", "streamAudioUrl",
+        "source_audio_url", "sourceAudioUrl", "source_stream_audio_url", "sourceStreamAudioUrl",
+        "song_url", "songUrl", "mp3_url", "mp3", "file_url", "fileUrl", "url",
+        "video_url", "videoUrl", "image_url", "imageUrl", "cover_url", "coverUrl",
+    }
+    identity_keys = {"id", "audioId", "songId", "title", "lyrics"}
+
+    def _scan(node: Any) -> Optional[List[Dict[str, Any]]]:
+        if isinstance(node, list):
+            dict_items = [item for item in node if isinstance(item, dict)]
+            if dict_items:
+                for item in dict_items:
+                    keys = set(item.keys())
+                    if keys & audioish_keys or keys & identity_keys:
+                        return dict_items
+            for item in node:
+                found = _scan(item)
+                if found:
+                    return found
+        elif isinstance(node, dict):
+            for value in node.values():
+                found = _scan(value)
+                if found:
+                    return found
+        return None
+
+    return _scan(task_json) or []
+
+
 def _workspace_pick_first_url(val: Any) -> str:
     if not val:
         return ""
@@ -2999,15 +3018,44 @@ def _workspace_pick_first_url(val: Any) -> str:
 def _workspace_extract_audio_url(item: Dict[str, Any]) -> str:
     if not isinstance(item, dict):
         return ""
-    for k in ("audio_url", "audioUrl", "song_url", "songUrl", "song_path", "songPath", "mp3_url", "mp3", "file_url", "fileUrl", "url", "source_stream_audio_url", "sourceStreamAudioUrl"):
+    for k in (
+        "audio_url", "audioUrl", "stream_audio_url", "streamAudioUrl",
+        "source_audio_url", "sourceAudioUrl", "source_stream_audio_url", "sourceStreamAudioUrl",
+        "song_url", "songUrl", "song_path", "songPath", "mp3_url", "mp3", "file_url", "fileUrl", "url",
+    ):
         v = item.get(k)
         if isinstance(v, str) and v.strip().startswith(("http://", "https://")):
             return v.strip()
-    for k in ("audio", "audio_urls", "audios", "urls", "songs"):
+    for k in ("audio", "audio_urls", "audios", "urls", "songs", "files", "outputs"):
         found = _workspace_pick_first_url(item.get(k))
         if found:
             return found
     return ""
+
+
+def _workspace_sunoapi_tracks_ready(task_json: Dict[str, Any]) -> bool:
+    tracks_raw = _workspace_sunoapi_extract_tracks(task_json)
+    return any(_workspace_extract_audio_url(item) for item in tracks_raw if isinstance(item, dict))
+
+
+async def _workspace_sunoapi_wait_for_ready_tracks(task_id: str, initial_task_json: Dict[str, Any], *, extra_wait_sec: Optional[int] = None, sleep_sec: float = 3.0) -> Dict[str, Any]:
+    if _workspace_sunoapi_tracks_ready(initial_task_json):
+        return initial_task_json
+
+    if extra_wait_sec is None:
+        extra_wait_sec = int(os.getenv("SUNOAPI_TRACK_READY_EXTRA_WAIT_SEC", "60"))
+
+    last = initial_task_json
+    t0 = time.time()
+    while time.time() - t0 <= max(0, int(extra_wait_sec)):
+        await asyncio.sleep(sleep_sec)
+        last = await _workspace_sunoapi_get_task(task_id)
+        status = str(((last.get("data") or {}).get("status") or "")).upper().strip()
+        if status in {"FAILED", "ERROR", "CREATE_TASK_FAILED", "GENERATE_LYRICS_FAILED", "CALLBACK_EXCEPTION", "SENSITIVE_WORD_ERROR"}:
+            return last
+        if _workspace_sunoapi_tracks_ready(last):
+            return last
+    return last
 
 
 def _workspace_build_piapi_music_payload(payload: MusicGenerateIn, ai: str, mode: str) -> Dict[str, Any]:
@@ -3067,6 +3115,12 @@ async def _run_workspace_music_provider(payload: MusicGenerateIn, ai: str, backe
         status = str(data.get("status") or "").upper().strip()
         if status != "SUCCESS":
             raise RuntimeError(f"SunoAPI status: {status}")
+        if not _workspace_sunoapi_tracks_ready(done):
+            done = await _workspace_sunoapi_wait_for_ready_tracks(task_id, done, sleep_sec=3.0)
+            data = done.get("data") or {}
+            status = str(data.get("status") or "").upper().strip()
+            if status != "SUCCESS":
+                raise RuntimeError(f"SunoAPI status: {status}")
         tracks_raw = _workspace_sunoapi_extract_tracks(done)
         tracks = []
         for idx, item in enumerate(tracks_raw[:2], start=1):
@@ -3079,6 +3133,7 @@ async def _run_workspace_music_provider(payload: MusicGenerateIn, ai: str, backe
                 "lyrics": item.get("lyrics"),
                 "payload_json": item,
             })
+        tracks = [track for track in tracks if track.get("audio_url")]
         if not tracks:
             raise RuntimeError("SunoAPI completed but returned no tracks")
         return {"provider_task_id": task_id, "tracks": tracks}
@@ -3247,13 +3302,14 @@ async def _workspace_sunoapi_generate_persona(payload: MusicPersonaGenerateIn) -
 def _workspace_normalize_suno_task_status(task_json: Dict[str, Any]) -> Dict[str, Any]:
     data = task_json.get("data") or {}
     provider_status = str(data.get("status") or "").upper().strip()
+    tracks_raw = _workspace_sunoapi_extract_tracks(task_json)
+    has_ready_audio = any(_workspace_extract_audio_url(item) for item in tracks_raw if isinstance(item, dict))
     if provider_status == "SUCCESS":
-        status = "completed"
+        status = "completed" if has_ready_audio else "processing"
     elif provider_status in {"FAILED", "ERROR", "CREATE_TASK_FAILED", "GENERATE_LYRICS_FAILED", "CALLBACK_EXCEPTION", "SENSITIVE_WORD_ERROR"}:
         status = "failed"
     else:
         status = "processing"
-    tracks_raw = _workspace_sunoapi_extract_tracks(task_json)
     tracks: List[Dict[str, Any]] = []
     for idx, item in enumerate(tracks_raw[:8], start=1):
         tracks.append({
