@@ -2842,6 +2842,147 @@ async def _workspace_piapi_poll_task(task_id: str, *, timeout_sec: int = 240, sl
         await asyncio.sleep(sleep_sec)
 
 
+def _workspace_piapi_extract_output_urls(task_json: Dict[str, Any]) -> List[str]:
+    data = task_json.get("data") if isinstance(task_json, dict) else None
+    if not isinstance(data, dict):
+        return []
+    out = data.get("output")
+    if not isinstance(out, dict):
+        return []
+    urls: List[str] = []
+    one = out.get("image_url")
+    many = out.get("image_urls")
+    if isinstance(one, str) and one.strip():
+        urls.append(one.strip())
+    if isinstance(many, list):
+        for item in many:
+            if isinstance(item, str) and item.strip():
+                urls.append(item.strip())
+    uniq: List[str] = []
+    seen = set()
+    for item in urls:
+        if item not in seen:
+            uniq.append(item)
+            seen.add(item)
+    return uniq
+
+
+def _workspace_piapi_error_text(task_json: Dict[str, Any]) -> str:
+    data = task_json.get("data") if isinstance(task_json, dict) else None
+    if not isinstance(data, dict):
+        return ""
+    err = data.get("error")
+    detail = data.get("detail")
+    parts: List[str] = []
+    if isinstance(err, dict):
+        for key in ("message", "raw_message", "detail"):
+            value = err.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(value.strip())
+    if isinstance(detail, str) and detail.strip():
+        parts.append(detail.strip())
+    logs = data.get("logs")
+    if isinstance(logs, list):
+        for item in logs:
+            if isinstance(item, str) and item.strip():
+                parts.append(item.strip())
+    seen = set()
+    uniq: List[str] = []
+    for item in parts:
+        if item not in seen:
+            uniq.append(item)
+            seen.add(item)
+    return " | ".join(uniq)[:2000]
+
+
+def _workspace_nano_banana_pro_resolution(value: Any) -> str:
+    resolution = str(value or "2K").strip().upper()
+    if resolution not in {"1K", "2K", "4K"}:
+        resolution = "2K"
+    return resolution
+
+
+def _workspace_nano_banana_pro_safety(value: Any) -> str:
+    level = str(value or "high").strip().lower()
+    if level not in {"low", "medium", "high"}:
+        level = "high"
+    return level
+
+
+async def _workspace_run_nano_banana_pro_site(
+    *,
+    user_id: int,
+    prompt: str,
+    source_image_bytes: Optional[bytes],
+    source_filename: Optional[str],
+    resolution: str,
+    aspect_ratio: Optional[str],
+    safety_level: str,
+) -> tuple[bytes, str]:
+    clean_prompt = str(prompt or "").strip()
+    if not clean_prompt:
+        raise RuntimeError("Empty prompt")
+
+    input_payload: Dict[str, Any] = {
+        "prompt": clean_prompt,
+        # Site-only normalization: current PiAPI Nano Banana Pro expects png reliably.
+        "output_format": "png",
+        "resolution": _workspace_nano_banana_pro_resolution(resolution),
+        "safety_level": _workspace_nano_banana_pro_safety(safety_level),
+    }
+
+    if source_image_bytes:
+        source_url = _upload_workspace_input_image(
+            int(user_id),
+            source_image_bytes,
+            filename=source_filename,
+            slot="nano_banana_pro_source",
+        )
+        # For i2i the bot succeeds because PiAPI receives a fetchable public URL.
+        # The site must avoid data: URLs and avoid forcing aspect_ratio here.
+        input_payload["image_urls"] = [source_url]
+    else:
+        ar = str(aspect_ratio or "").strip()
+        if not ar or ar == "match_input_image":
+            ar = "16:9"
+        input_payload["aspect_ratio"] = ar
+
+    payload: Dict[str, Any] = {
+        "model": "gemini",
+        "task_type": "nano-banana-pro",
+        "input": input_payload,
+    }
+
+    if not PIAPI_API_KEY:
+        raise RuntimeError("PIAPI_API_KEY is empty")
+    url = f"{PIAPI_BASE_URL}/api/v1/task"
+    headers = {"X-API-Key": PIAPI_API_KEY, "Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        created_response = await client.post(url, headers=headers, json=payload)
+    try:
+        created_json = created_response.json()
+    except Exception:
+        created_json = {"raw": created_response.text}
+    if created_response.status_code >= 400:
+        raise RuntimeError(f"PiAPI HTTP {created_response.status_code}: {json.dumps(created_json, ensure_ascii=False)[:2000]}")
+    task_id = str((((created_json.get("data") or {}) if isinstance(created_json, dict) else {}).get("task_id") or "")).strip()
+    if not task_id:
+        raise RuntimeError(f"PiAPI did not return task_id: {json.dumps(created_json, ensure_ascii=False)[:1200]}")
+
+    done = await _workspace_piapi_poll_task(task_id, timeout_sec=600, sleep_sec=5.0)
+    status = str((((done.get("data") or {}) if isinstance(done, dict) else {}).get("status") or "")).strip().lower()
+    if status != "completed":
+        err = _workspace_piapi_error_text(done)
+        raise RuntimeError(f"PiAPI status: {status or 'unknown'}. {err}".strip())
+
+    output_urls = _workspace_piapi_extract_output_urls(done)
+    if not output_urls:
+        err = _workspace_piapi_error_text(done)
+        raise RuntimeError(f"PiAPI completed but returned no images. {err}".strip())
+
+    return await _download_workspace_image_bytes(output_urls[0])
+
+
 async def _workspace_sunoapi_post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     if not SUNOAPI_API_KEY:
         raise RuntimeError("SUNOAPI_API_KEY is empty")
@@ -2969,48 +3110,10 @@ def _workspace_sunoapi_extract_lyrics_variants(task_json: Dict[str, Any]) -> Lis
 def _workspace_sunoapi_extract_tracks(task_json: Dict[str, Any]) -> List[Dict[str, Any]]:
     data = task_json.get("data") or {}
     resp = data.get("response") or {}
-
-    candidates: List[Any] = [
-        data.get("data"),
-        resp.get("data"),
-        ((resp.get("data") or {}).get("data") if isinstance(resp.get("data"), dict) else None),
-    ]
-    for candidate in candidates:
-        if isinstance(candidate, list):
-            items = [item for item in candidate if isinstance(item, dict)]
-            if items:
-                return items
-
-    audioish_keys = {
-        "audio_url", "audioUrl", "stream_audio_url", "streamAudioUrl",
-        "source_audio_url", "sourceAudioUrl", "source_stream_audio_url", "sourceStreamAudioUrl",
-        "song_url", "songUrl", "mp3_url", "mp3", "file_url", "fileUrl", "url",
-        "video_url", "videoUrl", "image_url", "imageUrl", "cover_url", "coverUrl",
-    }
-    identity_keys = {"id", "audioId", "songId", "title", "lyrics"}
-
-    def _scan(node: Any) -> Optional[List[Dict[str, Any]]]:
-        if isinstance(node, list):
-            dict_items = [item for item in node if isinstance(item, dict)]
-            if dict_items:
-                for item in dict_items:
-                    keys = set(item.keys())
-                    if keys & audioish_keys or keys & identity_keys:
-                        return dict_items
-            for item in node:
-                found = _scan(item)
-                if found:
-                    return found
-        elif isinstance(node, dict):
-            for value in node.values():
-                found = _scan(value)
-                if found:
-                    return found
-        return None
-
-    return _scan(task_json) or []
-
-
+    resp_data = resp.get("data") or []
+    if isinstance(resp_data, list):
+        return [item for item in resp_data if isinstance(item, dict)]
+    return []
 def _workspace_pick_first_url(val: Any) -> str:
     if not val:
         return ""
@@ -3037,44 +3140,15 @@ def _workspace_pick_first_url(val: Any) -> str:
 def _workspace_extract_audio_url(item: Dict[str, Any]) -> str:
     if not isinstance(item, dict):
         return ""
-    for k in (
-        "audio_url", "audioUrl", "stream_audio_url", "streamAudioUrl",
-        "source_audio_url", "sourceAudioUrl", "source_stream_audio_url", "sourceStreamAudioUrl",
-        "song_url", "songUrl", "song_path", "songPath", "mp3_url", "mp3", "file_url", "fileUrl", "url",
-    ):
+    for k in ("audio_url", "audioUrl", "song_url", "songUrl", "song_path", "songPath", "mp3_url", "mp3", "file_url", "fileUrl", "url", "source_stream_audio_url", "sourceStreamAudioUrl"):
         v = item.get(k)
         if isinstance(v, str) and v.strip().startswith(("http://", "https://")):
             return v.strip()
-    for k in ("audio", "audio_urls", "audios", "urls", "songs", "files", "outputs"):
+    for k in ("audio", "audio_urls", "audios", "urls", "songs"):
         found = _workspace_pick_first_url(item.get(k))
         if found:
             return found
     return ""
-
-
-def _workspace_sunoapi_tracks_ready(task_json: Dict[str, Any]) -> bool:
-    tracks_raw = _workspace_sunoapi_extract_tracks(task_json)
-    return any(_workspace_extract_audio_url(item) for item in tracks_raw if isinstance(item, dict))
-
-
-async def _workspace_sunoapi_wait_for_ready_tracks(task_id: str, initial_task_json: Dict[str, Any], *, extra_wait_sec: Optional[int] = None, sleep_sec: float = 3.0) -> Dict[str, Any]:
-    if _workspace_sunoapi_tracks_ready(initial_task_json):
-        return initial_task_json
-
-    if extra_wait_sec is None:
-        extra_wait_sec = int(os.getenv("SUNOAPI_TRACK_READY_EXTRA_WAIT_SEC", "60"))
-
-    last = initial_task_json
-    t0 = time.time()
-    while time.time() - t0 <= max(0, int(extra_wait_sec)):
-        await asyncio.sleep(sleep_sec)
-        last = await _workspace_sunoapi_get_task(task_id)
-        status = str(((last.get("data") or {}).get("status") or "")).upper().strip()
-        if status in {"FAILED", "ERROR", "CREATE_TASK_FAILED", "GENERATE_LYRICS_FAILED", "CALLBACK_EXCEPTION", "SENSITIVE_WORD_ERROR"}:
-            return last
-        if _workspace_sunoapi_tracks_ready(last):
-            return last
-    return last
 
 
 def _workspace_build_piapi_music_payload(payload: MusicGenerateIn, ai: str, mode: str) -> Dict[str, Any]:
@@ -3134,12 +3208,6 @@ async def _run_workspace_music_provider(payload: MusicGenerateIn, ai: str, backe
         status = str(data.get("status") or "").upper().strip()
         if status != "SUCCESS":
             raise RuntimeError(f"SunoAPI status: {status}")
-        if not _workspace_sunoapi_tracks_ready(done):
-            done = await _workspace_sunoapi_wait_for_ready_tracks(task_id, done, sleep_sec=3.0)
-            data = done.get("data") or {}
-            status = str(data.get("status") or "").upper().strip()
-            if status != "SUCCESS":
-                raise RuntimeError(f"SunoAPI status: {status}")
         tracks_raw = _workspace_sunoapi_extract_tracks(done)
         tracks = []
         for idx, item in enumerate(tracks_raw[:2], start=1):
@@ -3152,7 +3220,6 @@ async def _run_workspace_music_provider(payload: MusicGenerateIn, ai: str, backe
                 "lyrics": item.get("lyrics"),
                 "payload_json": item,
             })
-        tracks = [track for track in tracks if track.get("audio_url")]
         if not tracks:
             raise RuntimeError("SunoAPI completed but returned no tracks")
         return {"provider_task_id": task_id, "tracks": tracks}
@@ -3321,14 +3388,13 @@ async def _workspace_sunoapi_generate_persona(payload: MusicPersonaGenerateIn) -
 def _workspace_normalize_suno_task_status(task_json: Dict[str, Any]) -> Dict[str, Any]:
     data = task_json.get("data") or {}
     provider_status = str(data.get("status") or "").upper().strip()
-    tracks_raw = _workspace_sunoapi_extract_tracks(task_json)
-    has_ready_audio = any(_workspace_extract_audio_url(item) for item in tracks_raw if isinstance(item, dict))
     if provider_status == "SUCCESS":
-        status = "completed" if has_ready_audio else "processing"
+        status = "completed"
     elif provider_status in {"FAILED", "ERROR", "CREATE_TASK_FAILED", "GENERATE_LYRICS_FAILED", "CALLBACK_EXCEPTION", "SENSITIVE_WORD_ERROR"}:
         status = "failed"
     else:
         status = "processing"
+    tracks_raw = _workspace_sunoapi_extract_tracks(task_json)
     tracks: List[Dict[str, Any]] = []
     for idx, item in enumerate(tracks_raw[:8], start=1):
         tracks.append({
@@ -3889,12 +3955,12 @@ async def workspace_image_run(
             if provider == "two_images":
                 input_image = _compose_workspace_pair_image(base_image, source_image)
                 aspect_ratio = "match_input_image"
-            output_format = "png" if provider == "text_to_image" or mode in {"text_to_image", "t2i"} else "jpg"
-            out_bytes, ext = await handle_nano_banana_pro(
-                input_image,
-                run_prompt,
+            out_bytes, ext = await _workspace_run_nano_banana_pro_site(
+                user_id=uid,
+                prompt=run_prompt,
+                source_image_bytes=input_image,
+                source_filename=getattr(source_upload, "filename", None),
                 resolution=resolution,
-                output_format=output_format,
                 aspect_ratio=aspect_ratio,
                 safety_level=safety_level,
             )
