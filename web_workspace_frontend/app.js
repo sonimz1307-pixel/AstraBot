@@ -1903,17 +1903,24 @@ function renderHeader() {
   const shell = document.querySelector('.shell');
   const inspector = document.querySelector('.inspector');
   const workspaceTopline = document.querySelector('.workspace-topline');
+  const workspaceShell = document.querySelector('.workspace-shell');
   const globalRunBtn = document.getElementById('globalRunBtn');
   const seedDemoBtn = document.getElementById('seedDemoBtn');
   const topbarActions = document.querySelector('.topbar-actions');
   const resetStudioBtn = document.getElementById('resetStudioBtn');
   const inspectorTitle = document.querySelector('.inspector-head h2');
   const inspectorEyebrow = document.querySelector('.inspector-head .eyebrow');
-  const hideInspector = ['chat', 'history'].includes(state.studio);
-  shell?.classList.toggle('chat-no-inspector', state.studio === 'chat');
-  shell?.classList.toggle('site-no-inspector', state.studio === 'history');
+  const isSiteCreator = state.studio === 'history';
+
+  shell?.classList.toggle('chat-no-inspector', false);
   shell?.classList.toggle('music-no-inspector', false);
-  if (inspector) inspector.setAttribute('aria-hidden', hideInspector ? 'true' : 'false');
+  shell?.classList.toggle('history-no-inspector', isSiteCreator);
+  workspaceShell?.classList.toggle('workspace-shell--site-creator', isSiteCreator);
+
+  if (inspector) {
+    inspector.hidden = isSiteCreator;
+    inspector.setAttribute('aria-hidden', isSiteCreator ? 'true' : 'false');
+  }
   if (workspaceTopline) workspaceTopline.style.display = state.studio === 'chat' ? 'none' : '';
 
   const hideTopActions = ['chat', 'video', 'image', 'voice', 'music', 'history'].includes(state.studio);
@@ -2107,7 +2114,7 @@ function renderInspector() {
     case 'music': el.innerHTML = renderMusicInspector(); break;
     case 'library': el.innerHTML = renderLibraryInspector(); break;
     case 'workspace': el.innerHTML = renderPlanningInspector(); break;
-    case 'history': el.innerHTML = ''; break;
+    case 'history': el.innerHTML = renderHistoryInspector(); break;
     case 'billing': el.innerHTML = renderBillingInspector(); break;
     case 'profile': el.innerHTML = renderProfileInspector(); break;
     default: el.innerHTML = '';
@@ -3778,28 +3785,6 @@ function siteBuilderStatusLabel(status) {
   return value || '—';
 }
 
-function siteBuilderHasBusyJob(jobs = []) {
-  return (Array.isArray(jobs) ? jobs : []).some((job) => ['queued', 'generating', 'payment_pending'].includes(String(job?.status || '').trim().toLowerCase()));
-}
-
-function siteBuilderProjectSummary(project) {
-  if (!project) return 'Создай новый проект или открой существующий, чтобы запустить сборку сайта.';
-  if (Number(project.current_version || 0) > 0) {
-    return `Проект уже имеет версию v${Number(project.current_version || 0)}. Можно скачать ZIP или отправить новый пакет правок.`;
-  }
-  if (['queued', 'generating', 'payment_pending'].includes(String(project.status || '').trim().toLowerCase())) {
-    return 'Сайт уже находится в обработке. Дождись завершения текущего запуска и затем скачай новую версию.';
-  }
-  return 'Проект готов к первой сборке. Проверь бриф и нажми запуск — сайт уйдёт в worker_site и вернётся в ZIP-версии.';
-}
-
-function siteBuilderJobTypeLabel(jobType) {
-  const value = String(jobType || '').trim().toLowerCase();
-  if (value === 'build') return 'Создание сайта';
-  if (value === 'revision') return 'Правка сайта';
-  return value || 'job';
-}
-
 async function loadSiteBuilderMeta(options = {}) {
   if (!state.authToken) return null;
   try {
@@ -3997,38 +3982,21 @@ function renderHistoryWorkspace() {
   const projects = Array.isArray(state.siteBuilder.projects) ? state.siteBuilder.projects : [];
   const versions = Array.isArray(state.siteBuilder.versions) ? state.siteBuilder.versions : [];
   const jobs = Array.isArray(state.siteBuilder.jobs) ? state.siteBuilder.jobs : [];
-  const buildPrice = Number(state.siteBuilder.prices?.create || 30);
+  const canBuild = !!selected && Number(selected.current_version || 0) <= 0 && !['queued', 'payment_pending', 'generating'].includes(String(selected.status || ''));
   const revisionPrice = selected && !selected.free_revision_used ? 0 : Number(state.siteBuilder.prices?.revision || 10);
-  const hasBusyJob = siteBuilderHasBusyJob(jobs);
-  const canBuild = !!selected && !hasBusyJob;
-  const canRunRevision = !!selected && Number(selected.current_version || 0) > 0 && !hasBusyJob;
+  const buildPrice = Number(state.siteBuilder.prices?.create || 30);
 
   if (!state.authToken || !state.me) {
     return `
       <div class="workspace-grid single">
         <div class="workspace-main scroll">
-          <div class="site-builder-shell">
-            <section class="site-builder-hero">
-              <div class="site-builder-hero-copy">
-                <span class="site-builder-kicker">Website Builder</span>
-                <h3>Site Creator</h3>
-                <p>Отдельный конструктор внутри workspace: создаёшь проект, отправляешь бриф, запускаешь сборку и потом скачиваешь готовый ZIP с версией сайта.</p>
-                <div class="site-builder-chip-row">
-                  <span class="site-builder-chip">Создание · ${escapeHtml(buildPrice)} ток.</span>
-                  <span class="site-builder-chip">1 правка включена</span>
-                  <span class="site-builder-chip">ZIP после сборки</span>
-                </div>
-              </div>
-            </section>
-            <section class="site-builder-login-card">
-              <div>
-                <h4>Нужен вход через Telegram</h4>
-                <p>Site Creator работает только с пользовательской сессией: без неё нельзя увидеть баланс, проекты и версии сайтов.</p>
-              </div>
-              <div class="actions compact-gap">
-                <button class="btn primary" data-action="switch-studio" data-studio="profile">Перейти ко входу</button>
-              </div>
-            </section>
+          <div class="profile-card">
+            <h4>Site Creator</h4>
+            <small>Чтобы создавать сайты, нужен вход через Telegram. После входа здесь появятся проекты, версии и запуск сборки через воркер.</small>
+            <div class="actions compact-gap" style="margin-top:14px; flex-wrap:wrap;">
+              <button class="btn primary" data-action="switch-studio" data-studio="profile">Перейти ко входу</button>
+              <button class="btn ghost" data-action="show-showcase">Назад к витрине</button>
+            </div>
           </div>
         </div>
       </div>
@@ -4036,195 +4004,113 @@ function renderHistoryWorkspace() {
   }
 
   return `
-    <div class="workspace-grid single">
+    <div class="workspace-grid site-creator-grid">
       <div class="workspace-main scroll">
-        <div class="site-builder-shell">
-          <section class="site-builder-hero">
-            <div class="site-builder-hero-copy">
-              <span class="site-builder-kicker">Website Builder</span>
-              <h3>Site Creator</h3>
-              <p>Полноценный экран для сайтов внутри workspace. Здесь не нужен отдельный inspector: бриф, запуск, проекты, версии и статусы уже собраны в одной рабочей зоне.</p>
-              <div class="site-builder-chip-row">
-                <span class="site-builder-chip">Создание · ${escapeHtml(buildPrice)} ток.</span>
-                <span class="site-builder-chip">Следующая правка · ${escapeHtml(revisionPrice)} ток.</span>
-                <span class="site-builder-chip">Баланс · ${escapeHtml(state.balance == null ? '—' : `${state.balance} ток.`)}</span>
-              </div>
+        <div class="profile-card site-builder-card site-builder-hero-card">
+          <div class="field-head" style="align-items:flex-start; flex-wrap:wrap; gap:12px;">
+            <div>
+              <h4>Новый проект сайта</h4>
+              <small>Собирается лендинг в ZIP: index.html, styles.css, script.js и README.txt.</small>
             </div>
-            <div class="site-builder-hero-stats">
-              <div class="site-builder-stat">
-                <strong>${projects.length}</strong>
-                <span>проектов</span>
-              </div>
-              <div class="site-builder-stat">
-                <strong>${versions.length}</strong>
-                <span>версий</span>
-              </div>
-              <div class="site-builder-stat">
-                <strong>${jobs.length}</strong>
-                <span>запусков</span>
-              </div>
+            <span class="badge muted">${buildPrice} ток.</span>
+          </div>
+          <div class="field-grid two" style="margin-top:12px;">
+            <div class="input-group">
+              <label class="label">Название проекта</label>
+              <input id="site_project_title" type="text" placeholder="Например: NeiroAstra Dance School" value="${escapeHtml(state.siteBuilder.create.title || '')}">
             </div>
-          </section>
-
-          <div class="site-builder-layout">
-            <div class="site-builder-primary">
-              <section class="site-builder-panel site-builder-editor-panel">
-                <div class="site-builder-panel-head">
-                  <div>
-                    <h4>Новый проект сайта</h4>
-                    <p>Собирается лендинг в ZIP: index.html, styles.css, script.js и README.txt.</p>
-                  </div>
-                  <span class="site-builder-price-pill">${escapeHtml(buildPrice)} ток.</span>
-                </div>
-
-                <div class="site-builder-inline-grid">
-                  <div class="input-group">
-                    <label class="label">Название проекта</label>
-                    <input id="site_project_title" type="text" placeholder="Например: NeiroAstra Dance School" value="${escapeHtml(state.siteBuilder.create.title || '')}">
-                  </div>
-                  <div class="site-builder-helper-card">
-                    <strong>Что лучше указать в брифе</strong>
-                    <small>Ниша, целевая аудитория, основной оффер, блоки на странице, стиль, CTA, контакты, отзывы, тарифы и любые обязательные тексты.</small>
-                  </div>
-                </div>
-
-                <div class="input-group">
-                  <label class="label">Бриф сайта</label>
-                  <textarea id="site_project_brief" placeholder="Кто вы, что продаёте, для кого сайт, какие блоки нужны, какой стиль, какие офферы и контакты должны быть на странице.">${escapeHtml(state.siteBuilder.create.briefRaw || '')}</textarea>
-                </div>
-
-                <div class="input-group">
-                  <label class="label">Готовые тексты и доп. материалы</label>
-                  <textarea id="site_project_extraTexts" placeholder="Сюда можно вставить описание компании, преимущества, тарифы, FAQ, блоки услуг, адрес, телефон, CTA и любые обязательные формулировки.">${escapeHtml(state.siteBuilder.create.extraTextsRaw || '')}</textarea>
-                </div>
-
-                <div class="actions compact-gap site-builder-actions-row">
-                  <button class="btn primary" data-action="site-create-project">Создать проект</button>
-                  <button class="btn ghost" data-action="site-clear-draft">Очистить поля</button>
-                  <button class="btn outline" data-action="refresh-site-projects">Обновить список</button>
-                </div>
-
-                ${state.siteBuilder.lastError ? `<div class="site-builder-inline-note site-builder-inline-note--error">${escapeHtml(state.siteBuilder.lastError)}</div>` : `<div class="site-builder-inline-note">После создания проект появится справа. Дальше можно открыть его, запустить сборку или отправить пакет правок.</div>`}
-              </section>
-
-              <section class="site-builder-panel site-builder-focus-panel">
-                <div class="site-builder-panel-head">
-                  <div>
-                    <h4>${escapeHtml(selected?.title || 'Текущий проект')}</h4>
-                    <p>${escapeHtml(siteBuilderProjectSummary(selected))}</p>
-                  </div>
-                  ${selected ? `<span class="badge ${siteBuilderStatusTone(selected.status)}">${escapeHtml(siteBuilderStatusLabel(selected.status))}</span>` : ''}
-                </div>
-
-                ${selected ? `
-                  <div class="site-builder-summary-grid">
-                    <div class="site-builder-summary-card">
-                      <span>Текущая версия</span>
-                      <strong>v${escapeHtml(Number(selected.current_version || 0))}</strong>
-                    </div>
-                    <div class="site-builder-summary-card">
-                      <span>Бесплатная правка</span>
-                      <strong>${selected.free_revision_used ? 'использована' : 'доступна'}</strong>
-                    </div>
-                    <div class="site-builder-summary-card">
-                      <span>Обновлён</span>
-                      <strong>${escapeHtml(formatDate(selected.updated_at || selected.created_at))}</strong>
-                    </div>
-                  </div>
-
-                  <div class="site-builder-run-row">
-                    <button class="btn primary" data-action="site-run-build" data-project-id="${escapeHtml(selected.id || '')}" ${canBuild ? '' : 'disabled'}>${canBuild ? `Создать сайт за ${buildPrice} ток.` : 'Сначала дождись завершения текущего запуска'}</button>
-                    <button class="btn ghost" data-action="site-open-project" data-project-id="${escapeHtml(selected.id || '')}">Обновить проект</button>
-                  </div>
-
-                  <div class="input-group">
-                    <label class="label">Пакет правок</label>
-                    <textarea id="site_revision_text" placeholder="Например: сделать первый экран светлее, усилить CTA, добавить блок с тарифами и FAQ, сократить текст о компании.">${escapeHtml(state.siteBuilder.revisionText || '')}</textarea>
-                  </div>
-
-                  <div class="site-builder-revision-row">
-                    <button class="btn secondary" data-action="site-run-revision" data-project-id="${escapeHtml(selected.id || '')}" ${canRunRevision ? '' : 'disabled'}>${revisionPrice === 0 ? 'Запустить бесплатную правку' : `Запустить правку за ${revisionPrice} ток.`}</button>
-                    <div class="site-builder-inline-note">Первая правка уже включена в стоимость создания. Все следующие правки идут по 10 токенов.</div>
-                  </div>
-                ` : `
-                  <div class="site-builder-empty-card">Выбери проект из правой колонки или сначала создай новый — после этого здесь появится зона запуска и правок.</div>
-                `}
-              </section>
+            <div class="input-group">
+              <label class="label">Баланс</label>
+              <input type="text" value="${escapeHtml(state.balance == null ? '—' : `${state.balance} ток.`)}" disabled>
             </div>
+          </div>
+          <div class="input-group" style="margin-top:12px;">
+            <label class="label">Бриф сайта</label>
+            <textarea id="site_project_brief" placeholder="Кто вы, что продаёте, для кого сайт, какие блоки нужны, какой стиль, какие офферы и контакты должны быть на странице.">${escapeHtml(state.siteBuilder.create.briefRaw || '')}</textarea>
+          </div>
+          <div class="input-group" style="margin-top:12px;">
+            <label class="label">Готовые тексты и доп. материалы</label>
+            <textarea id="site_project_extraTexts" placeholder="Сюда можно вставить описание компании, преимущества, тарифы, FAQ, блоки услуг, адрес, телефон, CTA и любые обязательные формулировки.">${escapeHtml(state.siteBuilder.create.extraTextsRaw || '')}</textarea>
+          </div>
+          <div class="actions compact-gap" style="margin-top:14px; flex-wrap:wrap;">
+            <button class="btn primary" data-action="site-create-project">Создать проект</button>
+            <button class="btn ghost" data-action="site-clear-draft">Очистить поля</button>
+            <button class="btn outline" data-action="refresh-site-projects">Обновить список</button>
+          </div>
+          ${state.siteBuilder.lastError ? `<div class="help-text" style="margin-top:12px;">${escapeHtml(state.siteBuilder.lastError)}</div>` : ''}
+        </div>
 
-            <div class="site-builder-secondary">
-              <section class="site-builder-panel site-builder-list-panel">
-                <div class="site-builder-panel-head">
-                  <div>
-                    <h4>Проекты сайтов</h4>
-                    <p>${state.siteBuilder.loading ? 'Обновляю список проектов...' : 'Открой проект, чтобы посмотреть версии и статусы.'}</p>
-                  </div>
-                  <span class="site-builder-circle-count">${projects.length}</span>
+        <div class="profile-card site-builder-card" style="margin-top:16px;">
+          <div class="field-head" style="align-items:flex-start; flex-wrap:wrap; gap:12px;">
+            <div>
+              <h4>${escapeHtml(selected?.title || 'Выбери проект')}</h4>
+              <small>${selected ? 'Запуск сборки, версия сайта и дальнейшие правки.' : 'После создания или выбора проекта справа здесь появятся действия.'}</small>
+            </div>
+            ${selected ? `<span class="badge ${siteBuilderStatusTone(selected.status)}">${escapeHtml(siteBuilderStatusLabel(selected.status))}</span>` : ''}
+          </div>
+          ${selected ? `
+            <div class="tableish" style="margin-top:12px;">
+              <div class="table-row"><span class="muted">Текущая версия</span><span>v${escapeHtml(Number(selected.current_version || 0))}</span><span class="badge muted">versions</span></div>
+              <div class="table-row"><span class="muted">Бесплатная правка</span><span>${selected.free_revision_used ? 'уже использована' : 'доступна'}</span><span class="badge muted">revision</span></div>
+              <div class="table-row"><span class="muted">Обновлён</span><span>${escapeHtml(formatDate(selected.updated_at || selected.created_at))}</span><span class="badge muted">sync</span></div>
+            </div>
+            <div class="actions compact-gap" style="margin-top:14px; flex-wrap:wrap;">
+              <button class="btn primary" data-action="site-run-build" data-project-id="${escapeHtml(selected.id || '')}" ${canBuild ? '' : 'disabled'}>${canBuild ? `Создать сайт за ${buildPrice} ток.` : 'Сайт уже создаётся / создан'}</button>
+              <button class="btn ghost" data-action="site-open-project" data-project-id="${escapeHtml(selected.id || '')}">Обновить проект</button>
+            </div>
+            <div class="input-group" style="margin-top:14px;">
+              <label class="label">Пакет правок</label>
+              <textarea id="site_revision_text" placeholder="Например: сделать первый экран светлее, усилить CTA, добавить блок с тарифами и FAQ, сократить текст о компании.">${escapeHtml(state.siteBuilder.revisionText || '')}</textarea>
+            </div>
+            <div class="actions compact-gap" style="margin-top:12px; flex-wrap:wrap;">
+              <button class="btn secondary" data-action="site-run-revision" data-project-id="${escapeHtml(selected.id || '')}" ${Number(selected.current_version || 0) > 0 ? '' : 'disabled'}>${revisionPrice === 0 ? 'Запустить бесплатную правку' : `Запустить правку за ${revisionPrice} ток.`}</button>
+            </div>
+          ` : `<div class="empty-state" style="margin-top:14px;">Пока проект не выбран.</div>`}
+        </div>
+      </div>
+
+      <div class="workspace-side scroll">
+        <div class="result-card site-builder-card">
+          <div class="field-head"><h4>Проекты сайтов</h4><span class="badge muted">${projects.length}</span></div>
+          <small>${state.siteBuilder.loading ? 'Обновляю список...' : 'Выбери проект, чтобы открыть версии и статус.'}</small>
+          <div class="mini-list" style="margin-top:14px;">
+            ${projects.length ? projects.map((item) => `
+              <div class="history-item compact ${String(selected?.id || '') === String(item.id || '') ? 'active' : ''}">
+                <div class="history-item-row"><strong>${escapeHtml(item.title || 'Сайт')}</strong><span class="badge ${siteBuilderStatusTone(item.status)}">${escapeHtml(siteBuilderStatusLabel(item.status))}</span></div>
+                <small>v${escapeHtml(Number(item.current_version || 0))} · ${escapeHtml(formatDate(item.updated_at || item.created_at))}</small>
+                <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;">
+                  <button class="btn outline small" data-action="site-open-project" data-project-id="${escapeHtml(item.id || '')}">Открыть</button>
                 </div>
-                <div class="site-builder-list">
-                  ${projects.length ? projects.map((item) => `
-                    <div class="site-builder-list-item ${String(selected?.id || '') === String(item.id || '') ? 'active' : ''}">
-                      <div class="site-builder-list-top">
-                        <strong>${escapeHtml(item.title || 'Сайт')}</strong>
-                        <span class="badge ${siteBuilderStatusTone(item.status)}">${escapeHtml(siteBuilderStatusLabel(item.status))}</span>
-                      </div>
-                      <small>v${escapeHtml(Number(item.current_version || 0))} · ${escapeHtml(formatDate(item.updated_at || item.created_at))}</small>
-                      <div class="actions compact-gap">
-                        <button class="btn outline small" data-action="site-open-project" data-project-id="${escapeHtml(item.id || '')}">Открыть</button>
-                      </div>
-                    </div>
-                  `).join('') : `<div class="site-builder-empty-card">Пока нет проектов сайта.</div>`}
-                </div>
-              </section>
-
-              <div class="site-builder-stack-grid">
-                <section class="site-builder-panel site-builder-stack-panel">
-                  <div class="site-builder-panel-head">
-                    <div>
-                      <h4>Версии</h4>
-                      <p>Готовые сборки и ZIP-архивы проекта.</p>
-                    </div>
-                    <span class="site-builder-circle-count">${versions.length}</span>
-                  </div>
-                  <div class="site-builder-list">
-                    ${versions.length ? versions.map((version) => `
-                      <div class="site-builder-list-item compact">
-                        <div class="site-builder-list-top">
-                          <strong>v${escapeHtml(Number(version.version_number || 0))}</strong>
-                          <span class="badge muted">${escapeHtml(String(version.source_type || 'build'))}</span>
-                        </div>
-                        <small>${escapeHtml(formatDate(version.created_at))}</small>
-                        <div class="actions compact-gap">
-                          <button class="btn outline small" data-action="site-download-version" data-project-id="${escapeHtml(selected?.id || '')}" data-version-number="${escapeHtml(Number(version.version_number || 0))}">Скачать ZIP</button>
-                        </div>
-                      </div>
-                    `).join('') : `<div class="site-builder-empty-card">Версий ещё нет.</div>`}
-                  </div>
-                </section>
-
-                <section class="site-builder-panel site-builder-stack-panel">
-                  <div class="site-builder-panel-head">
-                    <div>
-                      <h4>Очередь и статусы</h4>
-                      <p>Запуски сборки и правок для текущего проекта.</p>
-                    </div>
-                    <span class="site-builder-circle-count">${jobs.length}</span>
-                  </div>
-                  <div class="site-builder-list">
-                    ${jobs.length ? jobs.map((job) => `
-                      <div class="site-builder-list-item compact">
-                        <div class="site-builder-list-top">
-                          <strong>${escapeHtml(siteBuilderJobTypeLabel(job.job_type))}</strong>
-                          <span class="badge ${siteBuilderStatusTone(job.status)}">${escapeHtml(siteBuilderStatusLabel(job.status))}</span>
-                        </div>
-                        <small>${escapeHtml(formatDate(job.updated_at || job.created_at))}</small>
-                        <small>${job.is_free_revision ? 'Бесплатная правка' : `${escapeHtml(Number(job.tokens_cost || 0))} ток.`}</small>
-                      </div>
-                    `).join('') : `<div class="site-builder-empty-card">Запусков пока нет.</div>`}
-                  </div>
-                </section>
               </div>
-            </div>
+            `).join('') : `<div class="empty-state">Пока нет проектов сайта.</div>`}
+          </div>
+        </div>
+
+        <div class="result-card site-builder-card">
+          <div class="field-head"><h4>Версии</h4><span class="badge muted">${versions.length}</span></div>
+          <div class="mini-list" style="margin-top:14px;">
+            ${versions.length ? versions.map((version) => `
+              <div class="history-item compact">
+                <div class="history-item-row"><strong>v${escapeHtml(Number(version.version_number || 0))}</strong><span class="badge muted">${escapeHtml(String(version.source_type || 'build'))}</span></div>
+                <small>${escapeHtml(formatDate(version.created_at))}</small>
+                <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;">
+                  <button class="btn outline small" data-action="site-download-version" data-project-id="${escapeHtml(selected?.id || '')}" data-version-number="${escapeHtml(Number(version.version_number || 0))}">Скачать ZIP</button>
+                </div>
+              </div>
+            `).join('') : `<div class="empty-state">Версий ещё нет.</div>`}
+          </div>
+        </div>
+
+        <div class="result-card site-builder-card">
+          <div class="field-head"><h4>Очередь и статусы</h4><span class="badge muted">${jobs.length}</span></div>
+          <div class="mini-list" style="margin-top:14px;">
+            ${jobs.length ? jobs.map((job) => `
+              <div class="history-item compact">
+                <div class="history-item-row"><strong>${escapeHtml(String(job.job_type || 'job').toUpperCase())}</strong><span class="badge ${siteBuilderStatusTone(job.status)}">${escapeHtml(siteBuilderStatusLabel(job.status))}</span></div>
+                <small>${escapeHtml(formatDate(job.updated_at || job.created_at))}</small>
+                <small>${job.is_free_revision ? 'Бесплатная правка' : `${escapeHtml(Number(job.tokens_cost || 0))} ток.`}</small>
+              </div>
+            `).join('') : `<div class="empty-state">Запусков пока нет.</div>`}
           </div>
         </div>
       </div>
@@ -4233,7 +4119,45 @@ function renderHistoryWorkspace() {
 }
 
 function renderHistoryInspector() {
-  return '';
+  const selected = siteBuilderSelectedProject();
+  const buildPrice = Number(state.siteBuilder.prices?.create || 30);
+  const revisionPrice = selected && !selected.free_revision_used ? 0 : Number(state.siteBuilder.prices?.revision || 10);
+  if (!state.authToken || !state.me) {
+    return `
+      <div class="inspector-card">
+        <div class="section-title">Site Creator</div>
+        <div class="help-text">Войди через Telegram, чтобы открыть проекты сайтов, запускать сборку и скачивать ZIP-версии.</div>
+      </div>
+    `;
+  }
+  return `
+    <div class="inspector-card">
+      <div class="section-title">Site Creator</div>
+      <div class="tableish" style="margin-top:12px;">
+        <div class="table-row"><span class="muted">Создание сайта</span><span>${escapeHtml(buildPrice)} ток.</span><span class="badge muted">build</span></div>
+        <div class="table-row"><span class="muted">Следующая правка</span><span>${escapeHtml(revisionPrice)} ток.</span><span class="badge muted">revision</span></div>
+        <div class="table-row"><span class="muted">Баланс</span><span>${escapeHtml(state.balance == null ? '—' : `${state.balance} ток.`)}</span><span class="badge muted">wallet</span></div>
+      </div>
+      <div class="actions compact-gap" style="margin-top:12px; flex-wrap:wrap;">
+        <button class="btn ghost small" data-action="refresh-site-projects">Обновить</button>
+      </div>
+    </div>
+    ${selected ? `
+      <div class="inspector-card">
+        <div class="section-title">Текущий проект</div>
+        <div class="help-text" style="margin-top:10px;">${escapeHtml(selected.title || 'Сайт')}</div>
+        <div class="tableish" style="margin-top:12px;">
+          <div class="table-row"><span class="muted">Статус</span><span>${escapeHtml(siteBuilderStatusLabel(selected.status))}</span><span class="badge ${siteBuilderStatusTone(selected.status)}">state</span></div>
+          <div class="table-row"><span class="muted">Версия</span><span>v${escapeHtml(Number(selected.current_version || 0))}</span><span class="badge muted">zip</span></div>
+          <div class="table-row"><span class="muted">Бесплатная правка</span><span>${selected.free_revision_used ? 'использована' : 'доступна'}</span><span class="badge muted">bonus</span></div>
+        </div>
+      </div>
+    ` : ''}
+    <div class="inspector-card">
+      <div class="section-title">Логика работы</div>
+      <div class="help-text" style="margin-top:10px;">1 бесплатная правка уже включена в 30 токенов. После этого каждая следующая правка стоит 10 токенов. Готовый архив также приходит в Telegram через worker_site.py.</div>
+    </div>
+  `;
 }
 
 function renderBillingWorkspace() {
