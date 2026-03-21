@@ -6133,6 +6133,26 @@ function handleAction(action, dataset = {}) {
     }
     case 'open-workspace': {
       if (dataset.studio) activateStudio(dataset.studio, { skipRender: true, skipSave: true });
+      if (dataset.studio === 'video') {
+        const provider = dataset.videoProvider || dataset.provider;
+        const model = dataset.videoModel || dataset.model;
+        const mode = dataset.videoMode || dataset.mode;
+        if (provider && VIDEO_REGISTRY[provider]) {
+          state.video.provider = provider;
+          const providerModels = VIDEO_REGISTRY[provider].models || {};
+          if (model && providerModels[model]) {
+            state.video.model = model;
+            const modelModes = providerModels[model].modes || {};
+            if (mode && modelModes[mode]) state.video.mode = mode;
+            else state.video.mode = Object.keys(modelModes)[0] || state.video.mode;
+          } else {
+            state.video.model = Object.keys(providerModels)[0] || state.video.model;
+            const modelModes = providerModels[state.video.model]?.modes || {};
+            state.video.mode = Object.keys(modelModes)[0] || state.video.mode;
+          }
+        }
+        state.video.panel = 'params';
+      }
       render();
       saveState();
       setAppView('workspace');
