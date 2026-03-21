@@ -8,6 +8,7 @@ const DEFAULT_VOICE_STATE = JSON.parse(localStorage.getItem('astrabot:voiceState
 const DEFAULT_VOICE_HISTORY_STATE = JSON.parse(localStorage.getItem('astrabot:voiceHistoryState') || '{}');
 const DEFAULT_MUSIC_STATE = JSON.parse(localStorage.getItem('astrabot:musicState') || '{}');
 const DEFAULT_MUSIC_HISTORY_STATE = JSON.parse(localStorage.getItem('astrabot:musicHistoryState') || '{}');
+const DEFAULT_SITE_BUILDER_STATE = JSON.parse(localStorage.getItem('astrabot:siteBuilderState') || '{}');
 const DEFAULT_VIDEO_EDITOR_STATE = JSON.parse(localStorage.getItem('astrabot:videoEditorState') || 'null');
 
 const runtime = {
@@ -239,6 +240,26 @@ video: {
     limit: 24,
     offset: 0,
   },
+  siteBuilder: {
+    projects: [],
+    loading: false,
+    loaded: false,
+    selectedProjectId: DEFAULT_SITE_BUILDER_STATE.selectedProjectId || '',
+    selectedProject: null,
+    versions: [],
+    jobs: [],
+    lastError: '',
+    prices: {
+      create: Number(DEFAULT_SITE_BUILDER_STATE.createPrice || 30),
+      revision: Number(DEFAULT_SITE_BUILDER_STATE.revisionPrice || 10),
+    },
+    create: {
+      title: DEFAULT_SITE_BUILDER_STATE.title || '',
+      briefRaw: DEFAULT_SITE_BUILDER_STATE.briefRaw || '',
+      extraTextsRaw: DEFAULT_SITE_BUILDER_STATE.extraTextsRaw || '',
+    },
+    revisionText: DEFAULT_SITE_BUILDER_STATE.revisionText || '',
+  },
 };
 
 function scrollChatToBottom() {
@@ -256,7 +277,7 @@ const STUDIO_META = {
   music: { icon: 'music', title: 'Music Studio', subtitle: 'Suno, Udio, генератор текста и понятная рабочая зона для генерации треков.', eyebrow: 'Музыкальная студия' },
   library: { icon: 'library', title: 'Prompt Library', subtitle: 'Категории, группы и карточки промптов с быстрым переносом в студии.', eyebrow: 'Prompt system' },
   workspace: { icon: 'workspace', title: 'Workspace', subtitle: 'Планы, референсы, заметки и проектная логика поверх генераций.', eyebrow: 'Project hub' },
-  history: { icon: 'history', title: 'History', subtitle: 'История запусков, статусов и готовых результатов.', eyebrow: 'Result archive' },
+  history: { icon: 'site', title: 'Site Creator', subtitle: 'Создание сайта, версии, правки и скачивание ZIP в одном разделе.', eyebrow: 'Website builder' },
   billing: { icon: 'billing', title: 'Billing', subtitle: 'Баланс, токены и экономика генераций.', eyebrow: 'Token economy' },
   profile: { icon: 'profile', title: 'Profile', subtitle: 'Telegram-связка, базовые настройки и состояние системы.', eyebrow: 'Account and access' },
 };
@@ -270,6 +291,7 @@ const STUDIO_ICON_SVG = {
   library: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6.5A2.5 2.5 0 0 1 7.5 4H20v14H7.5A2.5 2.5 0 0 0 5 20.5V6.5Zm0 0V20M8 7h8M8 11h8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   workspace: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4" width="17" height="16" rx="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M3.5 9.5h17M8.5 4v16" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>',
   history: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.34-5.66L4 8.7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 8v4l3 2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  site: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v11a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 17.5v-11Z" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M4 9h16M9 20V9" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>',
   billing: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="6" width="17" height="12" rx="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M3.5 10.5h17M8 14h3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>',
   profile: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M5.5 19a6.5 6.5 0 0 1 13 0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>',
 };
@@ -1030,6 +1052,15 @@ function saveState() {
   localStorage.setItem('astrabot:musicHistoryState', JSON.stringify({
     selectedId: state.musicHistory.selectedId || '',
   }));
+  localStorage.setItem('astrabot:siteBuilderState', JSON.stringify({
+    selectedProjectId: state.siteBuilder.selectedProjectId || '',
+    title: state.siteBuilder.create.title || '',
+    briefRaw: state.siteBuilder.create.briefRaw || '',
+    extraTextsRaw: state.siteBuilder.create.extraTextsRaw || '',
+    revisionText: state.siteBuilder.revisionText || '',
+    createPrice: Number(state.siteBuilder.prices?.create || 30),
+    revisionPrice: Number(state.siteBuilder.prices?.revision || 10),
+  }));
 }
 
 function escapeHtml(str = '') {
@@ -1457,7 +1488,10 @@ function currentMeta() {
     case 'music': return { studio: 'Music', provider: state.music.ai === 'udio' ? 'Udio' : 'Suno', model: state.music.ai === 'udio' ? 'PiAPI' : 'SunoAPI', mode: state.music.mode === 'lyrics' ? 'Текст' : 'Идея' };
     case 'library': return { studio: 'Library', provider: 'Prompt Library', model: state.prompts.selectedCategory || 'categories', mode: state.prompts.selectedGroupId || 'browse' };
     case 'workspace': return { studio: 'Workspace', provider: 'Project Board', model: 'Internal', mode: 'Planning' };
-    case 'history': return { studio: 'History', provider: 'Local timeline', model: 'Runs', mode: 'Audit' };
+    case 'history': {
+      const project = siteBuilderSelectedProject();
+      return { studio: 'Site Creator', provider: 'Website Builder', model: project?.title || 'Landing', mode: project ? `v${Number(project.current_version || 0)}` : 'Draft' };
+    }
     case 'billing': return { studio: 'Billing', provider: 'Wallet', model: 'Tokens', mode: 'Economics' };
     case 'profile': return { studio: 'Profile', provider: 'User State', model: 'Telegram', mode: 'System' };
     default: return { studio: 'AstraBot', provider: 'Workspace', model: '—', mode: '—' };
@@ -1954,12 +1988,21 @@ function setSession(payload) {
   localStorage.setItem('astrabot:authToken', state.authToken || '');
   localStorage.setItem('astrabot:me', JSON.stringify(state.me || null));
   render();
+  if (state.studio === 'history' && state.authToken) {
+    loadSiteBuilderMeta({ silent: true }).catch(() => {});
+    loadSiteBuilderProjects({ silent: true, keepSelection: true }).catch(() => {});
+  }
 }
 
 async function logoutWorkspace() {
   state.authToken = '';
   state.me = null;
   state.balance = null;
+  state.siteBuilder.projects = [];
+  state.siteBuilder.selectedProjectId = '';
+  state.siteBuilder.selectedProject = null;
+  state.siteBuilder.versions = [];
+  state.siteBuilder.jobs = [];
   localStorage.removeItem('astrabot:authToken');
   localStorage.removeItem('astrabot:me');
   try { await apiFetch('/api/workspace/logout', { method: 'POST' }); } catch (_) {}
@@ -3705,45 +3748,409 @@ function renderPlanningWorkspace() {
 }
 
 
+function siteBuilderSelectedProject() {
+  const items = Array.isArray(state.siteBuilder?.projects) ? state.siteBuilder.projects : [];
+  const selectedId = String(state.siteBuilder?.selectedProjectId || '').trim();
+  if (state.siteBuilder?.selectedProject && String(state.siteBuilder.selectedProject.id || '') === selectedId) {
+    return state.siteBuilder.selectedProject;
+  }
+  return items.find((item) => String(item.id || '') === selectedId) || state.siteBuilder?.selectedProject || null;
+}
+
+function siteBuilderStatusTone(status) {
+  const value = String(status || '').trim().toLowerCase();
+  if (['completed', 'preview_ready'].includes(value)) return 'ok';
+  if (['generating', 'queued', 'payment_pending'].includes(value)) return 'warn';
+  if (value === 'failed') return 'warn';
+  return 'muted';
+}
+
+function siteBuilderStatusLabel(status) {
+  const value = String(status || '').trim().toLowerCase();
+  if (value === 'draft') return 'Черновик';
+  if (value === 'preview_ready') return 'Готов к запуску';
+  if (value === 'payment_pending') return 'Списаны токены';
+  if (value === 'queued') return 'В очереди';
+  if (value === 'generating') return 'Создаётся';
+  if (value === 'completed') return 'Готово';
+  if (value === 'failed') return 'Ошибка';
+  return value || '—';
+}
+
+async function loadSiteBuilderMeta(options = {}) {
+  if (!state.authToken) return null;
+  try {
+    const res = await apiFetch('/api/site-builder/meta');
+    const data = await res.json();
+    state.siteBuilder.prices = {
+      create: Number(data?.prices?.create || state.siteBuilder.prices.create || 30),
+      revision: Number(data?.prices?.revision || state.siteBuilder.prices.revision || 10),
+    };
+    if (typeof data?.balance_tokens !== 'undefined') state.balance = Number(data.balance_tokens || 0);
+    saveState();
+    renderHeader();
+    renderInspector();
+    return data;
+  } catch (e) {
+    if (!options.silent) toast('error', 'Site Creator', String(e.message || e));
+    return null;
+  }
+}
+
+async function loadSiteBuilderProjects(options = {}) {
+  const { silent = true, keepSelection = true, selectId = '' } = options;
+  if (!state.authToken) {
+    state.siteBuilder.projects = [];
+    state.siteBuilder.selectedProjectId = '';
+    state.siteBuilder.selectedProject = null;
+    state.siteBuilder.versions = [];
+    state.siteBuilder.jobs = [];
+    state.siteBuilder.loaded = false;
+    state.siteBuilder.loading = false;
+    state.siteBuilder.lastError = '';
+    saveState();
+    renderWorkspace();
+    renderInspector();
+    return;
+  }
+  state.siteBuilder.loading = true;
+  state.siteBuilder.lastError = '';
+  renderWorkspace();
+  renderInspector();
+  try {
+    await loadSiteBuilderMeta({ silent: true });
+    const res = await apiFetch('/api/site-builder/projects');
+    const data = await res.json();
+    const items = Array.isArray(data.items) ? data.items : [];
+    state.siteBuilder.projects = items;
+    state.siteBuilder.loaded = true;
+    const preferredId = String(selectId || (keepSelection ? state.siteBuilder.selectedProjectId : '') || '').trim();
+    let selected = preferredId ? items.find((item) => String(item.id || '') === preferredId) : null;
+    if (!selected && items.length) selected = items[0];
+    state.siteBuilder.selectedProjectId = selected?.id || '';
+    state.siteBuilder.selectedProject = selected || null;
+    if (selected?.id) await loadSiteBuilderProject(selected.id, { silent: true });
+    else {
+      state.siteBuilder.versions = [];
+      state.siteBuilder.jobs = [];
+    }
+  } catch (e) {
+    state.siteBuilder.lastError = String(e.message || e);
+    if (!silent) toast('error', 'Не удалось загрузить проекты сайтов', state.siteBuilder.lastError);
+  } finally {
+    state.siteBuilder.loading = false;
+    saveState();
+    renderWorkspace();
+    renderInspector();
+    renderHeader();
+  }
+}
+
+async function loadSiteBuilderProject(projectId, options = {}) {
+  const { silent = true } = options;
+  const projectIdText = String(projectId || '').trim();
+  if (!projectIdText || !state.authToken) return null;
+  try {
+    const res = await apiFetch(`/api/site-builder/projects/${encodeURIComponent(projectIdText)}`);
+    const data = await res.json();
+    const item = data.item || null;
+    if (item) {
+      const idx = state.siteBuilder.projects.findIndex((entry) => String(entry.id || '') === String(item.id || ''));
+      if (idx >= 0) state.siteBuilder.projects[idx] = item;
+      else state.siteBuilder.projects.unshift(item);
+      state.siteBuilder.selectedProjectId = String(item.id || projectIdText);
+      state.siteBuilder.selectedProject = item;
+    }
+    state.siteBuilder.versions = Array.isArray(data.versions) ? data.versions : [];
+    state.siteBuilder.jobs = Array.isArray(data.jobs) ? data.jobs : [];
+    saveState();
+    renderWorkspace();
+    renderInspector();
+    renderHeader();
+    return item;
+  } catch (e) {
+    if (!silent) toast('error', 'Не удалось открыть проект', String(e.message || e));
+    return null;
+  }
+}
+
+async function createSiteBuilderProject() {
+  if (!requireAuth()) return;
+  const title = String(state.siteBuilder.create.title || '').trim() || 'Новый сайт';
+  const briefRaw = String(state.siteBuilder.create.briefRaw || '').trim();
+  const extraTextsRaw = String(state.siteBuilder.create.extraTextsRaw || '').trim();
+  if (briefRaw.length < 40) {
+    toast('error', 'Бриф слишком короткий', 'Опиши сайт подробнее: нишу, цель, блоки, стиль, оффер и контакты.');
+    return;
+  }
+  try {
+    const res = await apiFetch('/api/site-builder/projects', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, brief_raw: briefRaw, extra_texts_raw: extraTextsRaw }),
+    });
+    const data = await res.json();
+    state.siteBuilder.revisionText = '';
+    toast('success', 'Проект сайта создан', 'Теперь можно сразу запустить сборку сайта.');
+    await loadSiteBuilderProjects({ silent: true, keepSelection: false, selectId: data?.item?.id || '' });
+  } catch (e) {
+    toast('error', 'Не удалось создать проект', String(e.message || e));
+  }
+}
+
+async function runSiteBuilderBuild(projectId) {
+  if (!requireAuth()) return;
+  const projectIdText = String(projectId || '').trim();
+  if (!projectIdText) {
+    toast('error', 'Проект не выбран', 'Сначала создай проект или выбери его справа.');
+    return;
+  }
+  try {
+    const res = await apiFetch(`/api/site-builder/projects/${encodeURIComponent(projectIdText)}/build`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    const data = await res.json();
+    if (typeof data.balance_tokens !== 'undefined') state.balance = Number(data.balance_tokens || 0);
+    toast('success', 'Сборка запущена', 'Сайт ушёл в очередь воркера. Готовый ZIP появится в версиях и придёт в Telegram.');
+    await loadSiteBuilderProjects({ silent: true, keepSelection: true, selectId: projectIdText });
+  } catch (e) {
+    toast('error', 'Не удалось запустить сборку', String(e.message || e));
+  }
+}
+
+async function runSiteBuilderRevision(projectId) {
+  if (!requireAuth()) return;
+  const projectIdText = String(projectId || '').trim();
+  const requestRaw = String(state.siteBuilder.revisionText || '').trim();
+  if (!projectIdText) {
+    toast('error', 'Проект не выбран', 'Сначала выбери проект сайта.');
+    return;
+  }
+  if (requestRaw.length < 8) {
+    toast('error', 'Добавь правки', 'Опиши изменения одним сообщением: блоки, тексты, цвета, CTA, секции и т.д.');
+    return;
+  }
+  try {
+    const res = await apiFetch(`/api/site-builder/projects/${encodeURIComponent(projectIdText)}/revisions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ request_raw: requestRaw }),
+    });
+    const data = await res.json();
+    if (typeof data.balance_tokens !== 'undefined') state.balance = Number(data.balance_tokens || 0);
+    state.siteBuilder.revisionText = '';
+    toast('success', 'Правки запущены', 'Новая версия сайта собирается в фоне.');
+    await loadSiteBuilderProjects({ silent: true, keepSelection: true, selectId: projectIdText });
+  } catch (e) {
+    toast('error', 'Не удалось запустить правки', String(e.message || e));
+  }
+}
+
+async function downloadSiteBuilderVersion(projectId, versionNumber) {
+  if (!requireAuth()) return;
+  const projectIdText = String(projectId || '').trim();
+  const version = Number(versionNumber || 0);
+  if (!projectIdText || !version) return;
+  try {
+    const res = await apiFetch(`/api/site-builder/projects/${encodeURIComponent(projectIdText)}/versions/${encodeURIComponent(version)}/download`);
+    const blob = await res.blob();
+    const href = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = href;
+    a.download = `site-v${version}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(href), 1200);
+  } catch (e) {
+    toast('error', 'Не удалось скачать версию', String(e.message || e));
+  }
+}
+
 function renderHistoryWorkspace() {
-  const items = state.history.items || [];
-  const selected = historySelectedItem();
-  const previewUrl = historyVideoUrl(selected);
-  return `
-    <div class="history-browser">
-      <div class="history-preview-panel">
-        <div class="field-head" style="align-items:flex-start; flex-wrap:wrap; gap:12px;">
-          <div>
-            <h4 style="margin:0 0 6px;">Предпросмотр</h4>
-            <small>Лишние сводки и управление убраны. Здесь только ролик и действия с ним.</small>
-          </div>
-          <div class="actions compact-gap" style="margin-top:0; flex-wrap:wrap;">
-            <button class="btn ghost small" data-action="refresh-history">Обновить</button>
-            <button class="btn outline small" data-action="switch-studio" data-studio="video">Video Studio</button>
+  const selected = siteBuilderSelectedProject();
+  const projects = Array.isArray(state.siteBuilder.projects) ? state.siteBuilder.projects : [];
+  const versions = Array.isArray(state.siteBuilder.versions) ? state.siteBuilder.versions : [];
+  const jobs = Array.isArray(state.siteBuilder.jobs) ? state.siteBuilder.jobs : [];
+  const canBuild = !!selected && Number(selected.current_version || 0) <= 0 && !['queued', 'payment_pending', 'generating'].includes(String(selected.status || ''));
+  const revisionPrice = selected && !selected.free_revision_used ? 0 : Number(state.siteBuilder.prices?.revision || 10);
+  const buildPrice = Number(state.siteBuilder.prices?.create || 30);
+
+  if (!state.authToken || !state.me) {
+    return `
+      <div class="workspace-grid single">
+        <div class="workspace-main scroll">
+          <div class="profile-card">
+            <h4>Site Creator</h4>
+            <small>Чтобы создавать сайты, нужен вход через Telegram. После входа здесь появятся проекты, версии и запуск сборки через воркер.</small>
+            <div class="actions compact-gap" style="margin-top:14px; flex-wrap:wrap;">
+              <button class="btn primary" data-action="switch-studio" data-studio="profile">Перейти ко входу</button>
+              <button class="btn ghost" data-action="show-showcase">Назад к витрине</button>
+            </div>
           </div>
         </div>
-        ${previewUrl ? `<div class="history-preview-media" style="margin-top:14px;"><video class="preview-media" src="${escapeHtml(previewUrl)}" controls playsinline></video></div>` : `<div class="history-preview-empty" style="margin-top:14px;"><div><strong>${state.authToken ? 'Выбери ролик справа' : 'Нужна авторизация'}</strong><div>${state.authToken ? 'Библиотека открывается справа. Нажми «Просмотр» у нужного ролика.' : 'Сначала войди через Telegram, чтобы увидеть свою библиотеку видео.'}</div></div></div>`}
-        ${selected ? `<div class="actions compact-gap" style="margin-top:14px; flex-wrap:wrap;">${previewUrl ? `<a class="btn primary" href="${escapeHtml(historyVideoDownloadUrl(selected) || previewUrl)}" download>Скачать видео</a>` : ''}<button class="btn ghost" data-action="use-history-item" data-generation-id="${escapeHtml(selected.id || '')}">В рабочую зону</button></div>` : ''}
       </div>
-      <div class="history-library-panel">
-        <div class="field-head"><h4 style="margin:0;">Библиотека видео</h4><span class="badge muted">${items.length}</span></div>
-        <div class="history-library-list" style="margin-top:14px;">
-          ${state.history.lastError ? `<div class="empty-state">${escapeHtml(state.history.lastError)}</div>` : ''}
-          ${items.length ? items.map((item) => `
-            <div class="history-library-item ${selected?.id === item.id ? 'active' : ''}">
-              <button class="history-delete-btn" data-action="delete-history-item" data-generation-id="${escapeHtml(item.id || '')}" title="Удалить из истории" aria-label="Удалить из истории">×</button>
-              <div class="history-item-row"><strong>${escapeHtml(trimText(item.prompt || `${item.provider || 'video'} · ${item.model || ''}`, 96) || 'Видео')}</strong><span class="badge ${historyStatusTone(item.status)}">${escapeHtml(historyStatusLabel(item.status))}</span></div>
-              <small>${escapeHtml(formatDate(item.completed_at || item.created_at))}</small>
-              <small>${escapeHtml(trimText([item.provider, item.model, item.mode].filter(Boolean).join(' · '), 120) || '—')}</small>
-              <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;"><button class="btn ghost small" data-action="preview-history-item" data-generation-id="${escapeHtml(item.id || '')}">Просмотр</button><button class="btn outline small" data-action="use-history-item" data-generation-id="${escapeHtml(item.id || '')}">В рабочую зону</button></div>
+    `;
+  }
+
+  return `
+    <div class="workspace-grid">
+      <div class="workspace-main scroll">
+        <div class="profile-card site-builder-card">
+          <div class="field-head" style="align-items:flex-start; flex-wrap:wrap; gap:12px;">
+            <div>
+              <h4>Новый проект сайта</h4>
+              <small>Собирается лендинг в ZIP: index.html, styles.css, script.js и README.txt.</small>
             </div>
-          `).join('') : `<div class="empty-state">Пока нет сохранённых видео.</div>`}
+            <span class="badge muted">${buildPrice} ток.</span>
+          </div>
+          <div class="field-grid two" style="margin-top:12px;">
+            <div class="input-group">
+              <label class="label">Название проекта</label>
+              <input id="site_project_title" type="text" placeholder="Например: NeiroAstra Dance School" value="${escapeHtml(state.siteBuilder.create.title || '')}">
+            </div>
+            <div class="input-group">
+              <label class="label">Баланс</label>
+              <input type="text" value="${escapeHtml(state.balance == null ? '—' : `${state.balance} ток.`)}" disabled>
+            </div>
+          </div>
+          <div class="input-group" style="margin-top:12px;">
+            <label class="label">Бриф сайта</label>
+            <textarea id="site_project_brief" placeholder="Кто вы, что продаёте, для кого сайт, какие блоки нужны, какой стиль, какие офферы и контакты должны быть на странице.">${escapeHtml(state.siteBuilder.create.briefRaw || '')}</textarea>
+          </div>
+          <div class="input-group" style="margin-top:12px;">
+            <label class="label">Готовые тексты и доп. материалы</label>
+            <textarea id="site_project_extraTexts" placeholder="Сюда можно вставить описание компании, преимущества, тарифы, FAQ, блоки услуг, адрес, телефон, CTA и любые обязательные формулировки.">${escapeHtml(state.siteBuilder.create.extraTextsRaw || '')}</textarea>
+          </div>
+          <div class="actions compact-gap" style="margin-top:14px; flex-wrap:wrap;">
+            <button class="btn primary" data-action="site-create-project">Создать проект</button>
+            <button class="btn ghost" data-action="site-clear-draft">Очистить поля</button>
+            <button class="btn outline" data-action="refresh-site-projects">Обновить список</button>
+          </div>
+          ${state.siteBuilder.lastError ? `<div class="help-text" style="margin-top:12px;">${escapeHtml(state.siteBuilder.lastError)}</div>` : ''}
+        </div>
+
+        <div class="profile-card site-builder-card" style="margin-top:16px;">
+          <div class="field-head" style="align-items:flex-start; flex-wrap:wrap; gap:12px;">
+            <div>
+              <h4>${escapeHtml(selected?.title || 'Выбери проект')}</h4>
+              <small>${selected ? 'Запуск сборки, версия сайта и дальнейшие правки.' : 'После создания или выбора проекта справа здесь появятся действия.'}</small>
+            </div>
+            ${selected ? `<span class="badge ${siteBuilderStatusTone(selected.status)}">${escapeHtml(siteBuilderStatusLabel(selected.status))}</span>` : ''}
+          </div>
+          ${selected ? `
+            <div class="tableish" style="margin-top:12px;">
+              <div class="table-row"><span class="muted">Текущая версия</span><span>v${escapeHtml(Number(selected.current_version || 0))}</span><span class="badge muted">versions</span></div>
+              <div class="table-row"><span class="muted">Бесплатная правка</span><span>${selected.free_revision_used ? 'уже использована' : 'доступна'}</span><span class="badge muted">revision</span></div>
+              <div class="table-row"><span class="muted">Обновлён</span><span>${escapeHtml(formatDate(selected.updated_at || selected.created_at))}</span><span class="badge muted">sync</span></div>
+            </div>
+            <div class="actions compact-gap" style="margin-top:14px; flex-wrap:wrap;">
+              <button class="btn primary" data-action="site-run-build" data-project-id="${escapeHtml(selected.id || '')}" ${canBuild ? '' : 'disabled'}>${canBuild ? `Создать сайт за ${buildPrice} ток.` : 'Сайт уже создаётся / создан'}</button>
+              <button class="btn ghost" data-action="site-open-project" data-project-id="${escapeHtml(selected.id || '')}">Обновить проект</button>
+            </div>
+            <div class="input-group" style="margin-top:14px;">
+              <label class="label">Пакет правок</label>
+              <textarea id="site_revision_text" placeholder="Например: сделать первый экран светлее, усилить CTA, добавить блок с тарифами и FAQ, сократить текст о компании.">${escapeHtml(state.siteBuilder.revisionText || '')}</textarea>
+            </div>
+            <div class="actions compact-gap" style="margin-top:12px; flex-wrap:wrap;">
+              <button class="btn secondary" data-action="site-run-revision" data-project-id="${escapeHtml(selected.id || '')}" ${Number(selected.current_version || 0) > 0 ? '' : 'disabled'}>${revisionPrice === 0 ? 'Запустить бесплатную правку' : `Запустить правку за ${revisionPrice} ток.`}</button>
+            </div>
+          ` : `<div class="empty-state" style="margin-top:14px;">Пока проект не выбран.</div>`}
+        </div>
+      </div>
+
+      <div class="workspace-side scroll">
+        <div class="result-card site-builder-card">
+          <div class="field-head"><h4>Проекты сайтов</h4><span class="badge muted">${projects.length}</span></div>
+          <small>${state.siteBuilder.loading ? 'Обновляю список...' : 'Выбери проект, чтобы открыть версии и статус.'}</small>
+          <div class="mini-list" style="margin-top:14px;">
+            ${projects.length ? projects.map((item) => `
+              <div class="history-item compact ${String(selected?.id || '') === String(item.id || '') ? 'active' : ''}">
+                <div class="history-item-row"><strong>${escapeHtml(item.title || 'Сайт')}</strong><span class="badge ${siteBuilderStatusTone(item.status)}">${escapeHtml(siteBuilderStatusLabel(item.status))}</span></div>
+                <small>v${escapeHtml(Number(item.current_version || 0))} · ${escapeHtml(formatDate(item.updated_at || item.created_at))}</small>
+                <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;">
+                  <button class="btn outline small" data-action="site-open-project" data-project-id="${escapeHtml(item.id || '')}">Открыть</button>
+                </div>
+              </div>
+            `).join('') : `<div class="empty-state">Пока нет проектов сайта.</div>`}
+          </div>
+        </div>
+
+        <div class="result-card site-builder-card">
+          <div class="field-head"><h4>Версии</h4><span class="badge muted">${versions.length}</span></div>
+          <div class="mini-list" style="margin-top:14px;">
+            ${versions.length ? versions.map((version) => `
+              <div class="history-item compact">
+                <div class="history-item-row"><strong>v${escapeHtml(Number(version.version_number || 0))}</strong><span class="badge muted">${escapeHtml(String(version.source_type || 'build'))}</span></div>
+                <small>${escapeHtml(formatDate(version.created_at))}</small>
+                <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;">
+                  <button class="btn outline small" data-action="site-download-version" data-project-id="${escapeHtml(selected?.id || '')}" data-version-number="${escapeHtml(Number(version.version_number || 0))}">Скачать ZIP</button>
+                </div>
+              </div>
+            `).join('') : `<div class="empty-state">Версий ещё нет.</div>`}
+          </div>
+        </div>
+
+        <div class="result-card site-builder-card">
+          <div class="field-head"><h4>Очередь и статусы</h4><span class="badge muted">${jobs.length}</span></div>
+          <div class="mini-list" style="margin-top:14px;">
+            ${jobs.length ? jobs.map((job) => `
+              <div class="history-item compact">
+                <div class="history-item-row"><strong>${escapeHtml(String(job.job_type || 'job').toUpperCase())}</strong><span class="badge ${siteBuilderStatusTone(job.status)}">${escapeHtml(siteBuilderStatusLabel(job.status))}</span></div>
+                <small>${escapeHtml(formatDate(job.updated_at || job.created_at))}</small>
+                <small>${job.is_free_revision ? 'Бесплатная правка' : `${escapeHtml(Number(job.tokens_cost || 0))} ток.`}</small>
+              </div>
+            `).join('') : `<div class="empty-state">Запусков пока нет.</div>`}
+          </div>
         </div>
       </div>
     </div>
   `;
 }
 
+function renderHistoryInspector() {
+  const selected = siteBuilderSelectedProject();
+  const buildPrice = Number(state.siteBuilder.prices?.create || 30);
+  const revisionPrice = selected && !selected.free_revision_used ? 0 : Number(state.siteBuilder.prices?.revision || 10);
+  if (!state.authToken || !state.me) {
+    return `
+      <div class="inspector-card">
+        <div class="section-title">Site Creator</div>
+        <div class="help-text">Войди через Telegram, чтобы открыть проекты сайтов, запускать сборку и скачивать ZIP-версии.</div>
+      </div>
+    `;
+  }
+  return `
+    <div class="inspector-card">
+      <div class="section-title">Site Creator</div>
+      <div class="tableish" style="margin-top:12px;">
+        <div class="table-row"><span class="muted">Создание сайта</span><span>${escapeHtml(buildPrice)} ток.</span><span class="badge muted">build</span></div>
+        <div class="table-row"><span class="muted">Следующая правка</span><span>${escapeHtml(revisionPrice)} ток.</span><span class="badge muted">revision</span></div>
+        <div class="table-row"><span class="muted">Баланс</span><span>${escapeHtml(state.balance == null ? '—' : `${state.balance} ток.`)}</span><span class="badge muted">wallet</span></div>
+      </div>
+      <div class="actions compact-gap" style="margin-top:12px; flex-wrap:wrap;">
+        <button class="btn ghost small" data-action="refresh-site-projects">Обновить</button>
+      </div>
+    </div>
+    ${selected ? `
+      <div class="inspector-card">
+        <div class="section-title">Текущий проект</div>
+        <div class="help-text" style="margin-top:10px;">${escapeHtml(selected.title || 'Сайт')}</div>
+        <div class="tableish" style="margin-top:12px;">
+          <div class="table-row"><span class="muted">Статус</span><span>${escapeHtml(siteBuilderStatusLabel(selected.status))}</span><span class="badge ${siteBuilderStatusTone(selected.status)}">state</span></div>
+          <div class="table-row"><span class="muted">Версия</span><span>v${escapeHtml(Number(selected.current_version || 0))}</span><span class="badge muted">zip</span></div>
+          <div class="table-row"><span class="muted">Бесплатная правка</span><span>${selected.free_revision_used ? 'использована' : 'доступна'}</span><span class="badge muted">bonus</span></div>
+        </div>
+      </div>
+    ` : ''}
+    <div class="inspector-card">
+      <div class="section-title">Логика работы</div>
+      <div class="help-text" style="margin-top:10px;">1 бесплатная правка уже включена в 30 токенов. После этого каждая следующая правка стоит 10 токенов. Готовый архив также приходит в Telegram через worker_site.py.</div>
+    </div>
+  `;
+}
 
 function renderBillingWorkspace() {
   const runs = state.recentRuns.length;
@@ -5839,6 +6246,12 @@ function resetCurrentStudio() {
     case 'workspace':
       state.workspaceNotes = '';
       break;
+    case 'history':
+      state.siteBuilder.create.title = '';
+      state.siteBuilder.create.briefRaw = '';
+      state.siteBuilder.create.extraTextsRaw = '';
+      state.siteBuilder.revisionText = '';
+      break;
   }
   render();
   saveState();
@@ -6041,6 +6454,10 @@ function handleInputChange(target, eventType = 'change') {
     case 'music_continueAt': state.music.continueAt = Number(value); break;
     case 'music_songwriterInput': state.music.songwriter.input = value; break;
     case 'workspaceNotes': state.workspaceNotes = value; break;
+    case 'site_project_title': state.siteBuilder.create.title = value; break;
+    case 'site_project_brief': state.siteBuilder.create.briefRaw = value; break;
+    case 'site_project_extraTexts': state.siteBuilder.create.extraTextsRaw = value; break;
+    case 'site_revision_text': state.siteBuilder.revisionText = value; break;
     default: return;
   }
   const structuralRerenderIds = new Set([
@@ -6091,7 +6508,10 @@ function activateStudio(studio, options = {}) {
   if (state.studio === 'voice' && !state.voice.voices.length) loadVoices();
   if (state.studio === 'voice' && state.authToken) loadVoiceHistory({ silent: true, keepSelection: true }).catch(() => {});
   if (state.studio === 'music' && state.authToken) loadMusicHistory({ silent: true, keepSelection: true }).catch(() => {});
-  if (state.studio === 'history' && state.authToken) loadVideoHistory({ silent: true, keepSelection: true });
+  if (state.studio === 'history' && state.authToken) {
+    loadSiteBuilderMeta({ silent: true }).catch(() => {});
+    loadSiteBuilderProjects({ silent: true, keepSelection: true }).catch(() => {});
+  }
   if (state.studio === 'video' && state.video.panel === 'library' && state.authToken) loadVideoHistory({ silent: true, keepSelection: true });
   if (state.studio === 'image' && state.image.panel === 'library' && state.authToken) loadImageHistory({ silent: true, keepSelection: true });
   if (!options.skipRender) render();
@@ -6133,26 +6553,6 @@ function handleAction(action, dataset = {}) {
     }
     case 'open-workspace': {
       if (dataset.studio) activateStudio(dataset.studio, { skipRender: true, skipSave: true });
-      if (dataset.studio === 'video') {
-        const provider = dataset.videoProvider || dataset.provider;
-        const model = dataset.videoModel || dataset.model;
-        const mode = dataset.videoMode || dataset.mode;
-        if (provider && VIDEO_REGISTRY[provider]) {
-          state.video.provider = provider;
-          const providerModels = VIDEO_REGISTRY[provider].models || {};
-          if (model && providerModels[model]) {
-            state.video.model = model;
-            const modelModes = providerModels[model].modes || {};
-            if (mode && modelModes[mode]) state.video.mode = mode;
-            else state.video.mode = Object.keys(modelModes)[0] || state.video.mode;
-          } else {
-            state.video.model = Object.keys(providerModels)[0] || state.video.model;
-            const modelModes = providerModels[state.video.model]?.modes || {};
-            state.video.mode = Object.keys(modelModes)[0] || state.video.mode;
-          }
-        }
-        state.video.panel = 'params';
-      }
       render();
       saveState();
       setAppView('workspace');
@@ -6301,6 +6701,31 @@ function handleAction(action, dataset = {}) {
       render();
       break;
     case 'clear-video-run': clearVideoRunState({ keepPrompt: true }); render(); break;
+    case 'refresh-site-projects':
+      loadSiteBuilderProjects({ silent: false, keepSelection: true });
+      break;
+    case 'site-clear-draft':
+      state.siteBuilder.create.title = '';
+      state.siteBuilder.create.briefRaw = '';
+      state.siteBuilder.create.extraTextsRaw = '';
+      saveState();
+      render();
+      break;
+    case 'site-create-project':
+      createSiteBuilderProject();
+      break;
+    case 'site-open-project':
+      if (dataset.projectId) loadSiteBuilderProject(dataset.projectId, { silent: false });
+      break;
+    case 'site-run-build':
+      runSiteBuilderBuild(dataset.projectId || state.siteBuilder.selectedProjectId || '');
+      break;
+    case 'site-run-revision':
+      runSiteBuilderRevision(dataset.projectId || state.siteBuilder.selectedProjectId || '');
+      break;
+    case 'site-download-version':
+      downloadSiteBuilderVersion(dataset.projectId || state.siteBuilder.selectedProjectId || '', Number(dataset.versionNumber || 0));
+      break;
     case 'refresh-history': loadVideoHistory(); break;
     case 'preview-history-item':
       loadHistoryItem(dataset.generationId, { switchStudio: state.studio === 'history' }).then((item) => {
@@ -6565,6 +6990,7 @@ function runCurrentStudio() {
     case 'music': runMusic(); break;
     case 'library': loadPromptCategories(); break;
     case 'workspace': saveState(); toast('success', 'Workspace сохранён', 'Заметки сохранены локально.'); break;
+    case 'history': loadSiteBuilderProjects({ silent: false, keepSelection: true }); break;
     case 'billing': loadBalance(); break;
     default: toast('info', 'Нет действия', 'Для этой студии глобальная кнопка пока не назначена.');
   }
@@ -6626,6 +7052,10 @@ async function init() {
     loadVideoHistory({ silent: true }).catch(() => {});
     loadVoiceHistory({ silent: true, keepSelection: true }).catch(() => {});
     if (state.image.panel === 'library') loadImageHistory({ silent: true }).catch(() => {});
+    if (state.studio === 'history') {
+      loadSiteBuilderMeta({ silent: true }).catch(() => {});
+      loadSiteBuilderProjects({ silent: true, keepSelection: true }).catch(() => {});
+    }
   }
   if (state.voice.voices.length === 0) loadVoices();
   if (state.studio === 'library' || state.prompts.categories.length === 0) loadPromptCategories();
