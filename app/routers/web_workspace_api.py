@@ -2909,6 +2909,15 @@ def _workspace_nano_banana_pro_safety(value: Any) -> str:
     return level
 
 
+def _workspace_nano_banana_pro_aspect_ratio(value: Any) -> Optional[str]:
+    ar = str(value or "").strip()
+    if not ar or ar == "match_input_image":
+        return None
+    if ar not in {"16:9", "9:16", "1:1", "3:4", "4:3"}:
+        return None
+    return ar
+
+
 async def _workspace_run_nano_banana_pro_site(
     *,
     user_id: int,
@@ -2931,6 +2940,8 @@ async def _workspace_run_nano_banana_pro_site(
         "safety_level": _workspace_nano_banana_pro_safety(safety_level),
     }
 
+    normalized_aspect_ratio = _workspace_nano_banana_pro_aspect_ratio(aspect_ratio)
+
     if source_image_bytes:
         source_url = _upload_workspace_input_image(
             int(user_id),
@@ -2938,14 +2949,11 @@ async def _workspace_run_nano_banana_pro_site(
             filename=source_filename,
             slot="nano_banana_pro_source",
         )
-        # For i2i the bot succeeds because PiAPI receives a fetchable public URL.
-        # The site must avoid data: URLs and avoid forcing aspect_ratio here.
         input_payload["image_urls"] = [source_url]
+        if normalized_aspect_ratio:
+            input_payload["aspect_ratio"] = normalized_aspect_ratio
     else:
-        ar = str(aspect_ratio or "").strip()
-        if not ar or ar == "match_input_image":
-            ar = "16:9"
-        input_payload["aspect_ratio"] = ar
+        input_payload["aspect_ratio"] = normalized_aspect_ratio or "16:9"
 
     payload: Dict[str, Any] = {
         "model": "gemini",
