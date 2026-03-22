@@ -23,6 +23,14 @@ def _normalize_output_format(fmt: Optional[str]) -> Optional[str]:
     return fmt
 
 
+def _normalize_aspect_ratio(value: Optional[str]) -> str:
+    raw = str(value or "").strip()
+    allowed = {"match_input_image", "16:9", "9:16", "1:1", "3:4", "4:3"}
+    if raw in allowed:
+        return raw
+    return "match_input_image"
+
+
 def _detect_image_mime_and_ext(image_bytes: bytes) -> Tuple[str, str]:
     """Best-effort detect mime/ext from magic bytes."""
     b = image_bytes or b""
@@ -143,6 +151,7 @@ async def run_nano_banana(
     prompt: str,
     *,
     output_format: Optional[str] = "jpg",
+    aspect_ratio: Optional[str] = "match_input_image",
     timeout_sec: float = REPLICATE_TIMEOUT_SEC,
 ) -> Tuple[bytes, str]:
     """Google Nano Banana via Replicate.
@@ -157,6 +166,7 @@ async def run_nano_banana(
         raise RuntimeError("REPLICATE_API_TOKEN is not set")
 
     out_fmt = _normalize_output_format(output_format) or "jpg"
+    aspect_ratio_value = _normalize_aspect_ratio(aspect_ratio)
     owner, model_name = _split_owner_model(REPLICATE_MODEL)
     pred_url = f"https://api.replicate.com/v1/models/{owner}/{model_name}/predictions"
 
@@ -176,7 +186,7 @@ async def run_nano_banana(
                 "input": {
                     "prompt": prompt,
                     "image_input": [{"value": uploaded_url}],
-                    "aspect_ratio": "match_input_image",
+                    "aspect_ratio": aspect_ratio_value,
                     "output_format": out_fmt,
                 }
             },
@@ -185,7 +195,7 @@ async def run_nano_banana(
                 "input": {
                     "prompt": prompt,
                     "image_input": [uploaded_url],
-                    "aspect_ratio": "match_input_image",
+                    "aspect_ratio": aspect_ratio_value,
                     "output_format": out_fmt,
                 }
             },
@@ -194,7 +204,7 @@ async def run_nano_banana(
                 "input": {
                     "prompt": prompt,
                     "image_input": uploaded_url,
-                    "aspect_ratio": "match_input_image",
+                    "aspect_ratio": aspect_ratio_value,
                     "output_format": out_fmt,
                 }
             },
@@ -203,7 +213,7 @@ async def run_nano_banana(
                 "input": {
                     "prompt": prompt,
                     "image": uploaded_url,
-                    "aspect_ratio": "match_input_image",
+                    "aspect_ratio": aspect_ratio_value,
                     "output_format": out_fmt,
                 }
             },
@@ -212,7 +222,7 @@ async def run_nano_banana(
                 "input": {
                     "prompt": prompt,
                     "init_image": uploaded_url,
-                    "aspect_ratio": "match_input_image",
+                    "aspect_ratio": aspect_ratio_value,
                     "output_format": out_fmt,
                 }
             },
