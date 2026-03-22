@@ -1056,6 +1056,24 @@ async def _piapi_seedance_wait_workspace(task_id: str, *, timeout_s: int = 7200,
         await asyncio.sleep(poll_s)
 
 
+def _seedance_extract_output_url_workspace(resp: Dict[str, Any]) -> Optional[str]:
+    if not isinstance(resp, dict):
+        return None
+    payload = resp.get("data") if isinstance(resp.get("data"), dict) else resp
+    output = (payload.get("output") or {}) if isinstance(payload, dict) else {}
+    if isinstance(output, dict):
+        for key in ("video", "video_url", "videoUrl", "url", "mp4_url", "mp4Url", "file_url", "fileUrl"):
+            value = output.get(key)
+            if isinstance(value, str) and value.startswith("http"):
+                return value
+        values = output.get("video_urls") or output.get("videoUrls")
+        if isinstance(values, list):
+            for value in values:
+                if isinstance(value, str) and value.startswith("http"):
+                    return value
+    return None
+
+
 def _sora_headers_workspace() -> Dict[str, str]:
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not set")
