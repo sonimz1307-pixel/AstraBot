@@ -2909,15 +2909,6 @@ def _workspace_nano_banana_pro_safety(value: Any) -> str:
     return level
 
 
-def _workspace_nano_banana_pro_aspect_ratio(value: Any) -> Optional[str]:
-    ar = str(value or "").strip()
-    if not ar or ar == "match_input_image":
-        return None
-    if ar not in {"16:9", "9:16", "1:1", "3:4", "4:3"}:
-        return None
-    return ar
-
-
 async def _workspace_run_nano_banana_pro_site(
     *,
     user_id: int,
@@ -2940,7 +2931,7 @@ async def _workspace_run_nano_banana_pro_site(
         "safety_level": _workspace_nano_banana_pro_safety(safety_level),
     }
 
-    normalized_aspect_ratio = _workspace_nano_banana_pro_aspect_ratio(aspect_ratio)
+    ar = str(aspect_ratio or "").strip()
 
     if source_image_bytes:
         source_url = _upload_workspace_input_image(
@@ -2949,11 +2940,16 @@ async def _workspace_run_nano_banana_pro_site(
             filename=source_filename,
             slot="nano_banana_pro_source",
         )
+        # For i2i PiAPI needs a public source URL.
+        # If the user explicitly selected a concrete ratio, forward it.
+        # When match_input_image is selected, omit aspect_ratio and let the provider use the source image defaults.
         input_payload["image_urls"] = [source_url]
-        if normalized_aspect_ratio:
-            input_payload["aspect_ratio"] = normalized_aspect_ratio
+        if ar and ar != "match_input_image":
+            input_payload["aspect_ratio"] = ar
     else:
-        input_payload["aspect_ratio"] = normalized_aspect_ratio or "16:9"
+        if not ar or ar == "match_input_image":
+            ar = "16:9"
+        input_payload["aspect_ratio"] = ar
 
     payload: Dict[str, Any] = {
         "model": "gemini",
@@ -3905,7 +3901,7 @@ async def workspace_image_run(
         compare_mode = False
 
         if provider == "nano_banana":
-            out_bytes, ext = await run_nano_banana(source_image, run_prompt, output_format="jpg")
+            out_bytes, ext = await run_nano_banana(source_image, run_prompt, output_format="jpg", aspect_ratio=aspect_ratio)
             engine = "nano_banana"
         elif provider == "photosession":
             from main import ark_edit_image
