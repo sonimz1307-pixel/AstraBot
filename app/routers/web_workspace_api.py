@@ -725,7 +725,7 @@ async def _download_video_to_tempfile(url: str) -> tuple[str, int, str]:
     ext = "mp4"
     tmp_path = ""
 
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, trust_env=False) as client:
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         async with client.stream("GET", target_url) as resp:
             resp.raise_for_status()
             content_type = (resp.headers.get("content-type") or "video/mp4").split(";", 1)[0].strip() or "video/mp4"
@@ -1600,7 +1600,7 @@ async def _download_workspace_image_bytes(url: str) -> tuple[bytes, str]:
         raise RuntimeError("Missing image url")
 
     timeout = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=60.0)
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, trust_env=False) as client:
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         resp = await client.get(target_url)
         resp.raise_for_status()
         raw = resp.content or b""
@@ -1815,6 +1815,36 @@ async def _read_optional_upload_bytes(upload: Any) -> Optional[bytes]:
         return None
     raw = await upload.read()
     return raw or None
+
+
+def _normalize_workspace_kling_frame(raw: Optional[bytes], *, max_side: int = 1280, quality: int = 88) -> Optional[bytes]:
+    """
+    Site-only hardening for Kling 3.0 Image→Video:
+    browser uploads are often much larger/original than Telegram photos from the bot.
+    We re-encode to a sane JPEG to avoid provider-side resumable upload issues.
+    """
+    if not raw:
+        return raw
+
+    try:
+        from PIL import Image, ImageOps
+
+        with Image.open(io.BytesIO(raw)) as img:
+            frame = ImageOps.exif_transpose(img).convert("RGB")
+            width, height = frame.size
+            longest = max(width, height)
+            if longest > int(max_side):
+                scale = float(max_side) / float(longest)
+                frame = frame.resize(
+                    (max(1, int(round(width * scale))), max(1, int(round(height * scale)))),
+                    Image.Resampling.LANCZOS,
+                )
+
+            out = io.BytesIO()
+            frame.save(out, format="JPEG", quality=int(quality), optimize=True)
+            return out.getvalue()
+    except Exception:
+        return raw
 
 
 def _compose_workspace_pair_image(base_bytes: bytes, source_bytes: bytes) -> bytes:
@@ -2358,6 +2388,10 @@ async def workspace_video_run(
         raw = await rf.read()
         if raw:
             reference_images.append(raw)
+
+    if provider == "kling" and model == "kling-3.0" and mode in {"image_to_video", "multi_shot"}:
+        start_frame = _normalize_workspace_kling_frame(start_frame)
+        end_frame = _normalize_workspace_kling_frame(end_frame)
 
     if provider == "kling" and mode in {"image_to_video", "multi_shot"} and model in {"kling-1.6", "kling-2.5", "kling-3.0"} and not start_frame:
         raise HTTPException(status_code=400, detail="Для Image→Video нужен start frame.")
