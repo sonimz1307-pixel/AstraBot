@@ -725,7 +725,7 @@ async def _download_video_to_tempfile(url: str) -> tuple[str, int, str]:
     ext = "mp4"
     tmp_path = ""
 
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, trust_env=False) as client:
         async with client.stream("GET", target_url) as resp:
             resp.raise_for_status()
             content_type = (resp.headers.get("content-type") or "video/mp4").split(";", 1)[0].strip() or "video/mp4"
@@ -1600,7 +1600,7 @@ async def _download_workspace_image_bytes(url: str) -> tuple[bytes, str]:
         raise RuntimeError("Missing image url")
 
     timeout = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=60.0)
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, trust_env=False) as client:
         resp = await client.get(target_url)
         resp.raise_for_status()
         raw = resp.content or b""
@@ -2931,8 +2931,6 @@ async def _workspace_run_nano_banana_pro_site(
         "safety_level": _workspace_nano_banana_pro_safety(safety_level),
     }
 
-    ar = str(aspect_ratio or "").strip()
-
     if source_image_bytes:
         source_url = _upload_workspace_input_image(
             int(user_id),
@@ -2940,13 +2938,11 @@ async def _workspace_run_nano_banana_pro_site(
             filename=source_filename,
             slot="nano_banana_pro_source",
         )
-        # For i2i PiAPI needs a public source URL.
-        # If the user explicitly selected a concrete ratio, forward it.
-        # When match_input_image is selected, omit aspect_ratio and let the provider use the source image defaults.
+        # For i2i the bot succeeds because PiAPI receives a fetchable public URL.
+        # The site must avoid data: URLs and avoid forcing aspect_ratio here.
         input_payload["image_urls"] = [source_url]
-        if ar and ar != "match_input_image":
-            input_payload["aspect_ratio"] = ar
     else:
+        ar = str(aspect_ratio or "").strip()
         if not ar or ar == "match_input_image":
             ar = "16:9"
         input_payload["aspect_ratio"] = ar
@@ -3901,7 +3897,7 @@ async def workspace_image_run(
         compare_mode = False
 
         if provider == "nano_banana":
-            out_bytes, ext = await run_nano_banana(source_image, run_prompt, output_format="jpg", aspect_ratio=aspect_ratio)
+            out_bytes, ext = await run_nano_banana(source_image, run_prompt, output_format="jpg")
             engine = "nano_banana"
         elif provider == "photosession":
             from main import ark_edit_image
