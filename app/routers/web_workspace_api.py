@@ -40,6 +40,7 @@ from kling_flow import (
     upload_bytes_to_supabase,
 )
 from veo_flow import VeoFlowError, run_veo_image_to_video, run_veo_text_to_video
+from veo_billing import calc_veo_charge
 from kling3_pricing import calculate_kling3_price
 from songwriter_prompt import SONGWRITER_SYSTEM_PROMPT
 from queue_redis import enqueue_job
@@ -969,6 +970,112 @@ def _history_mode_for_run(provider: str, mode: str) -> str:
     return mode or "text_to_video"
 
 
+def _workspace_video_charge_payload(
+    *,
+    provider: str,
+    model: str,
+    duration: int,
+    resolution: str,
+    aspect_ratio: str,
+    enable_audio: bool,
+) -> Optional[Dict[str, Any]]:
+    provider_key = str(provider or "").strip().lower()
+    model_key = str(model or "").strip().lower()
+    safe_duration = max(1, int(duration or 0))
+
+    if provider_key == "veo":
+        veo_model = "pro" if model_key == "veo-3.1-pro" else "fast"
+        model_slug = "veo-3.1" if veo_model == "pro" else "veo-3-fast"
+        ch = calc_veo_charge(
+            veo_model=veo_model,
+            model_slug=model_slug,
+            generate_audio=bool(enable_audio),
+            duration_sec=safe_duration,
+        )
+        return {
+            "tokens": int(ch.total_tokens),
+            "reason": "veo_video",
+            "refund_reason": "veo_video_refund",
+            "meta": {
+                "origin": "workspace_video",
+                "provider": provider_key,
+                "model": model_key,
+                "flow": "workspace_video_run",
+                "tier": ch.tier,
+                "generate_audio": ch.generate_audio,
+                "duration": ch.duration_sec,
+                "tokens_per_sec": ch.tokens_per_sec,
+                "total_tokens": ch.total_tokens,
+                "aspect_ratio": aspect_ratio,
+                "resolution": resolution,
+            },
+        }
+
+    if provider_key == "seedance":
+        rate_preview = int(os.getenv("SEEDANCE_TOKENS_PER_SEC_PREVIEW", "2") or 2)
+        rate_fast = int(os.getenv("SEEDANCE_TOKENS_PER_SEC_FAST", "1") or 1)
+        is_fast = ("fast" in model_key)
+        rate = rate_fast if is_fast else rate_preview
+        tokens = int(rate * safe_duration)
+        return {
+            "tokens": tokens,
+            "reason": "seedance_video",
+            "refund_reason": "seedance_video_refund",
+            "meta": {
+                "origin": "workspace_video",
+                "provider": provider_key,
+                "model": model_key,
+                "flow": "workspace_video_run",
+                "duration": safe_duration,
+                "aspect_ratio": aspect_ratio,
+                "rate_per_sec": rate,
+                "cost_tokens": tokens,
+            },
+        }
+
+    if provider_key == "sora":
+        cost_map = {4: 5, 8: 10, 12: 15}
+        tokens = int(cost_map.get(safe_duration, 5))
+        return {
+            "tokens": tokens,
+            "reason": "sora_video",
+            "refund_reason": "sora_video_refund",
+            "meta": {
+                "origin": "workspace_video",
+                "provider": provider_key,
+                "model": model_key or "sora-2",
+                "flow": "workspace_video_run",
+                "duration": safe_duration,
+                "aspect_ratio": aspect_ratio,
+                "cost_tokens": tokens,
+            },
+        }
+
+    if provider_key == "kling" and model_key == "kling-3.0":
+        tokens = int(calculate_kling3_price(
+            resolution=resolution,
+            enable_audio=bool(enable_audio),
+            duration=safe_duration,
+        ))
+        return {
+            "tokens": tokens,
+            "reason": "kling3_create",
+            "refund_reason": "kling3_refund",
+            "meta": {
+                "origin": "workspace_video",
+                "provider": provider_key,
+                "model": model_key,
+                "flow": "workspace_video_run",
+                "duration": safe_duration,
+                "aspect_ratio": aspect_ratio,
+                "resolution": resolution,
+                "enable_audio": bool(enable_audio),
+            },
+        }
+
+    return None
+
+
 async def _upload_reference_images_to_public_urls(user_id: int, images: List[bytes], prefix: str) -> List[str]:
     urls: List[str] = []
     for idx, raw in enumerate(images or [], start=1):
@@ -1312,6 +1419,10 @@ async def _run_workspace_video_job(
     avatar_image: Optional[bytes],
     motion_video: Optional[bytes],
     reference_images: List[bytes],
+    charge_tokens: int = 0,
+    charge_reason: Optional[str] = None,
+    refund_reason: Optional[str] = None,
+    charge_ref_id: Optional[str] = None,
 ) -> None:
     try:
         provider_video_url: Optional[str] = None
@@ -1465,8 +1576,34 @@ async def _run_workspace_video_job(
         )
     except (Kling3Error, KlingFlowError, VeoFlowError, ValueError, RuntimeError, TimeoutError) as e:
         _mark_workspace_generation_failed(generation_id, str(e), error_code="provider_error")
+        if int(charge_tokens or 0) > 0 and refund_reason:
+            try:
+                add_tokens(
+                    int(user_id),
+                    int(charge_tokens),
+                    reason=str(refund_reason),
+                    ref_id=(charge_ref_id or uuid4().hex),
+                    meta={"origin": "workspace_video", "generation_id": str(generation_id), "error": str(e)[:300]},
+                )
+            except TypeError:
+                add_tokens(int(user_id), int(charge_tokens), reason=str(refund_reason))
+            except Exception:
+                pass
     except Exception as e:
         _mark_workspace_generation_failed(generation_id, f"Internal run error: {e}", error_code="internal_error")
+        if int(charge_tokens or 0) > 0 and refund_reason:
+            try:
+                add_tokens(
+                    int(user_id),
+                    int(charge_tokens),
+                    reason=str(refund_reason),
+                    ref_id=(charge_ref_id or uuid4().hex),
+                    meta={"origin": "workspace_video", "generation_id": str(generation_id), "error": str(e)[:300]},
+                )
+            except TypeError:
+                add_tokens(int(user_id), int(charge_tokens), reason=str(refund_reason))
+            except Exception:
+                pass
 
 
 
@@ -2541,6 +2678,33 @@ async def workspace_video_run(
     if model == "motion-control" and (not avatar_image or not motion_video):
         raise HTTPException(status_code=400, detail="Для Motion Control нужны avatar image и motion video.")
 
+    charge_spec = _workspace_video_charge_payload(
+        provider=provider,
+        model=model,
+        duration=duration,
+        resolution=resolution,
+        aspect_ratio=aspect_ratio,
+        enable_audio=enable_audio,
+    )
+    charge_tokens = int((charge_spec or {}).get("tokens") or 0)
+    charge_reason = str((charge_spec or {}).get("reason") or "").strip() or None
+    refund_reason = str((charge_spec or {}).get("refund_reason") or "").strip() or None
+    charge_meta = dict((charge_spec or {}).get("meta") or {})
+    charge_ref_id = uuid4().hex if charge_tokens > 0 and charge_reason else None
+
+    ensure_user_row(uid)
+    if charge_tokens > 0 and charge_reason:
+        try:
+            balance = int(get_balance(uid) or 0)
+        except Exception:
+            balance = 0
+        if balance < charge_tokens:
+            raise HTTPException(status_code=402, detail=f"Недостаточно токенов. Нужно: {charge_tokens}, баланс: {balance}")
+        try:
+            add_tokens(uid, -charge_tokens, reason=charge_reason, ref_id=charge_ref_id, meta=charge_meta)
+        except TypeError:
+            add_tokens(uid, -int(charge_tokens), reason=charge_reason)
+
     generation_id = _insert_workspace_generation(
         {
             "user_id": str(uid),
@@ -2578,6 +2742,10 @@ async def workspace_video_run(
             avatar_image=avatar_image,
             motion_video=motion_video,
             reference_images=reference_images,
+            charge_tokens=charge_tokens,
+            charge_reason=charge_reason,
+            refund_reason=refund_reason,
+            charge_ref_id=charge_ref_id,
         )
     )
 
@@ -2587,6 +2755,8 @@ async def workspace_video_run(
         "task_id": generation_id,
         "status": "processing",
         "status_text": "Генерация началась. Видео появится в рабочей зоне автоматически.",
+        "balance_tokens": int(get_balance(uid) or 0),
+        "charged_tokens": charge_tokens,
     }
 
 
