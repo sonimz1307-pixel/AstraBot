@@ -935,6 +935,11 @@ async def _sync_workspace_generation_by_task(user_id: int, task_id: Optional[str
 PIAPI_BASE_URL = (os.getenv("PIAPI_BASE_URL", "https://api.piapi.ai") or "https://api.piapi.ai").strip().rstrip("/")
 PIAPI_API_KEY = (os.getenv("PIAPI_API_KEY") or os.getenv("PIAPI_KEY") or "").strip()
 
+SORA_TIMEOUT_SEC = int(os.getenv("SORA_TIMEOUT_SEC", "1800") or "1800")
+SORA_POLL_SEC = float(os.getenv("SORA_POLL_SEC", "10") or "10")
+OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip()
+OPENAI_API_BASE = (os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1") or "https://api.openai.com/v1").rstrip("/")
+
 
 def _parse_form_bool(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
@@ -1051,22 +1056,133 @@ async def _piapi_seedance_wait_workspace(task_id: str, *, timeout_s: int = 7200,
         await asyncio.sleep(poll_s)
 
 
-def _seedance_extract_output_url_workspace(resp: Dict[str, Any]) -> Optional[str]:
-    if not isinstance(resp, dict):
-        return None
-    payload = resp.get("data") if isinstance(resp.get("data"), dict) else resp
-    output = (payload.get("output") or {}) if isinstance(payload, dict) else {}
-    if isinstance(output, dict):
-        for key in ("video", "video_url", "videoUrl", "url", "mp4_url", "mp4Url", "file_url", "fileUrl"):
-            value = output.get(key)
-            if isinstance(value, str) and value.startswith("http"):
-                return value
-        values = output.get("video_urls") or output.get("videoUrls")
-        if isinstance(values, list):
-            for value in values:
-                if isinstance(value, str) and value.startswith("http"):
-                    return value
-    return None
+def _sora_headers_workspace() -> Dict[str, str]:
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not set")
+    return {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+    }
+
+
+def _sora_size_from_aspect_workspace(aspect_ratio: str) -> str:
+    ar = str(aspect_ratio or "16:9").strip()
+    if ar == "9:16":
+        return "720x1280"
+    return "1280x720"
+
+
+async def _sora_create_video_workspace(*, prompt: str, duration: int, aspect_ratio: str, model: str = "sora-2") -> Dict[str, Any]:
+    url = f"{OPENAI_API_BASE}/videos"
+    files = [
+        ("model", (None, str(model or "sora-2"))),
+        ("prompt", (None, str(prompt or "").strip())),
+        ("seconds", (None, str(int(duration)))),
+        ("size", (None, _sora_size_from_aspect_workspace(aspect_ratio))),
+    ]
+    headers = _sora_headers_workspace()
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        resp = await client.post(url, headers=headers, files=files)
+    if resp.status_code >= 300:
+        try:
+            payload = resp.json()
+            message = ((payload.get("error") or {}).get("message")) or resp.text[:800]
+            raise RuntimeError(message)
+        except Exception:
+            raise RuntimeError(f"OpenAI create video failed: {resp.status_code} {resp.text[:800]}")
+    return resp.json()
+
+
+async def _sora_retrieve_video_workspace(video_id: str) -> Dict[str, Any]:
+    url = f"{OPENAI_API_BASE}/videos/{video_id}"
+    headers = _sora_headers_workspace()
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.get(url, headers=headers)
+    if resp.status_code >= 300:
+        try:
+            payload = resp.json()
+            message = ((payload.get("error") or {}).get("message")) or resp.text[:800]
+            raise RuntimeError(message)
+        except Exception:
+            raise RuntimeError(f"OpenAI retrieve video failed: {resp.status_code} {resp.text[:800]}")
+    return resp.json()
+
+
+async def _sora_download_video_workspace(video_id: str) -> bytes:
+    url = f"{OPENAI_API_BASE}/videos/{video_id}/content"
+    headers = _sora_headers_workspace()
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        resp = await client.get(url, headers=headers, params={"variant": "video"})
+    if resp.status_code >= 300:
+        try:
+            payload = resp.json()
+            message = ((payload.get("error") or {}).get("message")) or resp.text[:800]
+            raise RuntimeError(message)
+        except Exception:
+            raise RuntimeError(f"OpenAI download video failed: {resp.status_code} {resp.text[:800]}")
+    return resp.content
+
+
+async def _sora_poll_video_workspace(video_id: str, *, timeout_sec: int = SORA_TIMEOUT_SEC, sleep_sec: float = SORA_POLL_SEC) -> Dict[str, Any]:
+    started = time.time()
+    last: Dict[str, Any] = {}
+    while True:
+        last = await _sora_retrieve_video_workspace(video_id)
+        status = str(last.get("status") or "").strip().lower()
+        if status in {"completed", "failed"}:
+            return last
+        if (time.time() - started) > float(timeout_sec):
+            raise TimeoutError(f"Sora timeout after {timeout_sec}s (video_id={video_id}, status={status})")
+        await asyncio.sleep(max(2.0, float(sleep_sec)))
+
+
+async def _finalize_workspace_generation_from_bytes(
+    *,
+    generation_id: str,
+    user_id: int,
+    video_bytes: bytes,
+    provider_video_url: Optional[str] = None,
+    content_type: str = "video/mp4",
+) -> None:
+    if not video_bytes:
+        raise RuntimeError("Provider returned empty video bytes")
+
+    tmp_path = ""
+    try:
+        patch: Dict[str, Any] = {"status": "processing"}
+        if provider_video_url:
+            patch["provider_video_url"] = provider_video_url
+        _update_workspace_generation(generation_id, patch)
+
+        ext = _storage_content_type_to_ext(content_type, provider_video_url)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
+            tmp.write(video_bytes)
+            tmp_path = tmp.name
+
+        uploaded = _upload_workspace_video_file(
+            local_path=tmp_path,
+            user_id=user_id,
+            generation_id=generation_id,
+            content_type=content_type,
+        )
+        _update_workspace_generation(
+            generation_id,
+            {
+                "status": "completed",
+                "provider_video_url": provider_video_url,
+                "storage_path": uploaded.get("storage_path"),
+                "file_size_bytes": int(uploaded.get("file_size_bytes") or len(video_bytes) or 0),
+                "mime_type": uploaded.get("mime_type") or content_type or "video/mp4",
+                "completed_at": _utc_now_iso(),
+                "error_code": None,
+                "error_message": None,
+            },
+        )
+    finally:
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
 
 
 async def _finalize_workspace_generation_from_url(
@@ -1283,6 +1399,40 @@ async def _run_workspace_video_job(
             provider_video_url = _seedance_extract_output_url_workspace(done)
             if not provider_video_url:
                 raise RuntimeError("Seedance output video url missing")
+
+        elif provider == "sora":
+            created = await _sora_create_video_workspace(
+                prompt=prompt,
+                duration=duration,
+                aspect_ratio=aspect_ratio,
+                model=model or "sora-2",
+            )
+            provider_task_id = str(created.get("id") or "").strip()
+            if not provider_task_id:
+                raise RuntimeError(f"OpenAI did not return video id: {created}")
+            _update_workspace_generation(
+                generation_id,
+                {
+                    "task_id": provider_task_id,
+                    "status": "processing",
+                },
+            )
+            done = await _sora_poll_video_workspace(provider_task_id)
+            status = str(done.get("status") or "").strip().lower()
+            if status == "failed":
+                error_message = ((done.get("error") or {}).get("message")) or "Sora generation failed"
+                raise RuntimeError(error_message)
+            if status != "completed":
+                raise RuntimeError(f"Unexpected Sora status: {status}")
+            video_bytes = await _sora_download_video_workspace(provider_task_id)
+            await _finalize_workspace_generation_from_bytes(
+                generation_id=generation_id,
+                user_id=user_id,
+                video_bytes=video_bytes,
+                provider_video_url=f"{OPENAI_API_BASE}/videos/{provider_task_id}/content",
+                content_type="video/mp4",
+            )
+            return
 
         else:
             raise RuntimeError(f"Провайдер {provider} пока не поддержан в workspace video run")
@@ -2329,11 +2479,9 @@ async def workspace_video_run(
     if not prompt and provider != "seedance":
         raise HTTPException(status_code=400, detail="Missing prompt")
 
-    supported = {"kling", "veo", "seedance"}
+    supported = {"kling", "veo", "seedance", "sora"}
     if provider not in supported:
         raise HTTPException(status_code=400, detail=f"Provider {provider} is not supported in /video/run yet")
-    if provider == "sora":
-        raise HTTPException(status_code=400, detail="Sora пока не подключена в workspace backend")
 
     start_file = form.get("start_frame")
     end_file = form.get("end_frame")
@@ -2365,6 +2513,13 @@ async def workspace_video_run(
         raise HTTPException(status_code=400, detail="Для Veo Image→Video нужен start frame.")
     if provider == "seedance" and mode == "image_to_video" and not reference_images:
         raise HTTPException(status_code=400, detail="Для Seedance Image→Video нужен хотя бы один reference image.")
+    if provider == "sora":
+        if mode != "text_to_video":
+            raise HTTPException(status_code=400, detail="Sora в workspace сейчас поддерживает только Text→Video.")
+        if duration not in {4, 8, 12}:
+            raise HTTPException(status_code=400, detail="Для Sora доступны только 4, 8 или 12 секунд.")
+        if aspect_ratio not in {"16:9", "9:16"}:
+            raise HTTPException(status_code=400, detail="Для Sora доступны только 16:9 или 9:16.")
     if model == "motion-control" and (not avatar_image or not motion_video):
         raise HTTPException(status_code=400, detail="Для Motion Control нужны avatar image и motion video.")
 
