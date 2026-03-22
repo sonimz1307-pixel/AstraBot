@@ -1817,36 +1817,6 @@ async def _read_optional_upload_bytes(upload: Any) -> Optional[bytes]:
     return raw or None
 
 
-def _normalize_workspace_kling_frame(raw: Optional[bytes], *, max_side: int = 1280, quality: int = 88) -> Optional[bytes]:
-    """
-    Site-only hardening for Kling 3.0 Image→Video:
-    browser uploads are often much larger/original than Telegram photos from the bot.
-    We re-encode to a sane JPEG to avoid provider-side resumable upload issues.
-    """
-    if not raw:
-        return raw
-
-    try:
-        from PIL import Image, ImageOps
-
-        with Image.open(io.BytesIO(raw)) as img:
-            frame = ImageOps.exif_transpose(img).convert("RGB")
-            width, height = frame.size
-            longest = max(width, height)
-            if longest > int(max_side):
-                scale = float(max_side) / float(longest)
-                frame = frame.resize(
-                    (max(1, int(round(width * scale))), max(1, int(round(height * scale)))),
-                    Image.Resampling.LANCZOS,
-                )
-
-            out = io.BytesIO()
-            frame.save(out, format="JPEG", quality=int(quality), optimize=True)
-            return out.getvalue()
-    except Exception:
-        return raw
-
-
 def _compose_workspace_pair_image(base_bytes: bytes, source_bytes: bytes) -> bytes:
     from PIL import Image, ImageOps
 
@@ -2388,10 +2358,6 @@ async def workspace_video_run(
         raw = await rf.read()
         if raw:
             reference_images.append(raw)
-
-    if provider == "kling" and model == "kling-3.0" and mode in {"image_to_video", "multi_shot"}:
-        start_frame = _normalize_workspace_kling_frame(start_frame)
-        end_frame = _normalize_workspace_kling_frame(end_frame)
 
     if provider == "kling" and mode in {"image_to_video", "multi_shot"} and model in {"kling-1.6", "kling-2.5", "kling-3.0"} and not start_frame:
         raise HTTPException(status_code=400, detail="Для Image→Video нужен start frame.")
@@ -2965,6 +2931,8 @@ async def _workspace_run_nano_banana_pro_site(
         "safety_level": _workspace_nano_banana_pro_safety(safety_level),
     }
 
+    ar = str(aspect_ratio or "").strip()
+
     if source_image_bytes:
         source_url = _upload_workspace_input_image(
             int(user_id),
@@ -2972,11 +2940,13 @@ async def _workspace_run_nano_banana_pro_site(
             filename=source_filename,
             slot="nano_banana_pro_source",
         )
-        # For i2i the bot succeeds because PiAPI receives a fetchable public URL.
-        # The site must avoid data: URLs and avoid forcing aspect_ratio here.
+        # For i2i PiAPI needs a public source URL.
+        # If the user explicitly selected a concrete ratio, forward it.
+        # When match_input_image is selected, omit aspect_ratio and let the provider use the source image defaults.
         input_payload["image_urls"] = [source_url]
+        if ar and ar != "match_input_image":
+            input_payload["aspect_ratio"] = ar
     else:
-        ar = str(aspect_ratio or "").strip()
         if not ar or ar == "match_input_image":
             ar = "16:9"
         input_payload["aspect_ratio"] = ar
@@ -3931,7 +3901,7 @@ async def workspace_image_run(
         compare_mode = False
 
         if provider == "nano_banana":
-            out_bytes, ext = await run_nano_banana(source_image, run_prompt, output_format="jpg")
+            out_bytes, ext = await run_nano_banana(source_image, run_prompt, output_format="jpg", aspect_ratio=aspect_ratio)
             engine = "nano_banana"
         elif provider == "photosession":
             from main import ark_edit_image
