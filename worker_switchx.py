@@ -12,6 +12,10 @@ from typing import Any, Dict, Optional
 import httpx
 
 from billing_db import add_tokens
+try:
+    from billing_db import ledger_ref_exists
+except Exception:
+    ledger_ref_exists = None
 from queue_redis import dequeue_job
 from switchx_service import SwitchXClient, SwitchXError, guess_content_type
 from switchx_types import JOB_TYPE_SWITCHX, RESOLUTION_720, RESOLUTION_1080
@@ -540,12 +544,116 @@ async def sunoapi_poll_task(task_id: str, *, timeout_sec: Optional[int] = None, 
 
 
 def _sunoapi_extract_tracks(task_json: dict) -> list[dict]:
-    data = task_json.get("data") or {}
-    resp = data.get("response") or {}
-    resp_data = resp.get("data") or []
-    if isinstance(resp_data, list):
-        return [x for x in resp_data if isinstance(x, dict)]
-    return []
+    if not isinstance(task_json, dict):
+        return []
+
+    audio_keys = {
+        "audio_url", "audioUrl", "stream_audio_url", "streamAudioUrl",
+        "source_audio_url", "sourceAudioUrl", "source_stream_audio_url", "sourceStreamAudioUrl",
+        "song_url", "songUrl", "song_path", "songPath",
+        "mp3_url", "mp3", "file_url", "fileUrl", "url",
+    }
+    hint_keys = audio_keys | {
+        "image_url", "imageUrl", "cover", "cover_url", "coverUrl",
+        "title", "prompt", "tags", "lyrics", "duration",
+        "video_url", "videoUrl", "mv", "model_name", "modelName",
+    }
+
+    def _track_score(obj: Any) -> int:
+        if not isinstance(obj, dict):
+            return 0
+        score = 0
+        for key in hint_keys:
+            if key in obj and obj.get(key) not in (None, "", [], {}):
+                score += 2 if key in audio_keys else 1
+        return score
+
+    def _coerce_list(val: Any) -> list[dict]:
+        if isinstance(val, list):
+            return [x for x in val if isinstance(x, dict)]
+        if isinstance(val, dict):
+            inner = val.get("data")
+            if isinstance(inner, list):
+                return [x for x in inner if isinstance(x, dict)]
+            if _track_score(val) > 0:
+                return [val]
+        return []
+
+    candidates = []
+    data = task_json.get("data")
+    if isinstance(data, dict):
+        candidates.extend([
+            data.get("data"),
+            data.get("response"),
+            (data.get("response") or {}).get("data") if isinstance(data.get("response"), dict) else None,
+            ((data.get("response") or {}).get("data") or {}).get("data") if isinstance((data.get("response") or {}).get("data"), dict) else None,
+            data.get("output"),
+            data.get("result"),
+        ])
+    candidates.extend([
+        task_json.get("output"),
+        task_json.get("result"),
+    ])
+
+    best: list[dict] = []
+    best_score = -1
+    for cand in candidates:
+        items = _coerce_list(cand)
+        if not items:
+            continue
+        score = sum(_track_score(x) for x in items)
+        if score > best_score:
+            best = items
+            best_score = score
+    if best:
+        return best
+
+    def _scan(obj: Any) -> list[dict]:
+        if isinstance(obj, dict):
+            if _track_score(obj) > 0:
+                return [obj]
+            for v in obj.values():
+                found = _scan(v)
+                if found:
+                    return found
+        elif isinstance(obj, list):
+            dict_items = [x for x in obj if isinstance(x, dict)]
+            if dict_items:
+                score = sum(_track_score(x) for x in dict_items)
+                if score > 0:
+                    return dict_items
+            for v in obj:
+                found = _scan(v)
+                if found:
+                    return found
+        return []
+
+    return _scan(task_json)
+
+
+def _refund_tokens_once(user_id: int, amount: int, *, reason: str, ref_id: str, meta: Optional[dict] = None) -> bool:
+    amount = int(amount or 0)
+    if amount <= 0:
+        return False
+
+    ref_id = (ref_id or "").strip()
+    if ref_id and callable(ledger_ref_exists):
+        try:
+            if ledger_ref_exists(reason=str(reason), ref_id=ref_id):
+                return False
+        except Exception:
+            pass
+
+    try:
+        add_tokens(user_id, amount, reason=str(reason), meta=meta or {}, ref_id=ref_id or None)
+        return True
+    except TypeError:
+        try:
+            add_tokens(user_id, amount, reason=str(reason), meta=meta or {})
+            return True
+        except TypeError:
+            add_tokens(user_id, amount, reason=str(reason))
+            return True
 
 
 def _progress_seq() -> list[int]:
@@ -890,6 +998,7 @@ async def handle_music_job(job: Dict[str, Any]) -> None:
     job_type = str(job.get("type") or job.get("job_type") or "").strip().lower()
     chat_id = int(job.get("chat_id") or 0)
     user_id = int(job.get("user_id") or 0)
+    job_id = str(job.get("job_id") or "").strip() or uuid.uuid4().hex
     settings = dict(job.get("settings") or {})
     ai_choice = str(job.get("ai") or settings.get("ai") or "suno").lower().strip()
     if ai_choice not in ("suno", "udio"):
@@ -1002,20 +1111,50 @@ async def handle_music_job(job: Dict[str, Any]) -> None:
             status = str(data.get("status") or "").upper().strip()
             if status != "SUCCESS":
                 raise RuntimeError(f"Музыка не сгенерировалась (SunoAPI). Статус: {status}. {done.get('msg') or 'unknown error'}")
+
             out = _sunoapi_extract_tracks(done)
-            if not out:
-                raise RuntimeError("SunoAPI завершил задачу, но не вернул ссылки на треки")
-        else:
-            data = done.get("data") or {}
-            status = str(data.get("status") or "")
-            if status.lower() != "completed":
-                err = (data.get("error") or {}).get("message") or "unknown error"
-                raise RuntimeError(f"Музыка не сгенерировалась. Статус: {status}. {err}")
-            out = data.get("output") or []
-            if isinstance(out, dict):
-                out = [out]
-            if not out:
-                raise RuntimeError("PiAPI завершил задачу, но не вернул output")
+            task_id_remote = str(data.get("taskId") or data.get("task_id") or job.get("task_id") or "").strip()
+
+            stop.set()
+            try:
+                await prog_task
+            except Exception:
+                pass
+
+            wait_text = "✅ SunoAPI: задача завершена. Жду финальный callback с MP3 — как только придёт, отправлю треки сюда."
+            if msg_id:
+                try:
+                    await tg_edit_message_text(chat_id, msg_id, wait_text)
+                except Exception:
+                    pass
+            else:
+                await tg_send_message(chat_id, wait_text)
+
+            print(
+                "SunoAPI music task completed; delivery delegated to callback ",
+                json.dumps(
+                    {
+                        "job_id": job_id,
+                        "task_id": task_id_remote,
+                        "tracks_in_poll": len(out),
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            return
+
+        data = done.get("data") or {}
+        status = str(data.get("status") or "")
+        if status.lower() != "completed":
+            err = (data.get("error") or {}).get("message") or "unknown error"
+            raise RuntimeError(f"Музыка не сгенерировалась. Статус: {status}. {err}")
+        out = data.get("output") or []
+        if isinstance(out, dict):
+            out = [out]
+        if not out:
+            raise RuntimeError("PiAPI завершил задачу, но не вернул output")
 
         stop.set()
         try:
@@ -1055,12 +1194,15 @@ async def handle_music_job(job: Dict[str, Any]) -> None:
             pass
         if charge_tokens > 0:
             try:
-                add_tokens(user_id, int(charge_tokens), reason=refund_reason, meta={"error": str(e)[:300], "job_type": job_type})
-            except TypeError:
-                try:
-                    add_tokens(user_id, int(charge_tokens), reason=refund_reason)
-                except Exception:
-                    pass
+                _refund_tokens_once(
+                    user_id,
+                    int(charge_tokens),
+                    reason=refund_reason,
+                    ref_id=job_id,
+                    meta={"error": str(e)[:300], "job_type": job_type, "job_id": job_id},
+                )
+            except Exception:
+                pass
         await tg_send_message(chat_id, f"❌ Ошибка music worker: {e}", reply_markup=menu_markup)
 
 
