@@ -125,7 +125,12 @@ def _send_email_code(email: str, code: str, *, purpose: str) -> None:
         raise WorkspaceMailerError("SMTP не настроен. Добавь SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS и SMTP_FROM.")
 
     subject = "Код подтверждения AstraBot"
-    intro = "Код для подтверждения email" if purpose == "link_email" else "Код для регистрации AstraBot"
+    if purpose == "link_email":
+        intro = "Код для подтверждения email"
+    elif purpose == "reset_password":
+        intro = "Код для сброса пароля AstraBot"
+    else:
+        intro = "Код для регистрации AstraBot"
     body = (
         f"{intro}: {code}\n\n"
         f"Код действует {WORKSPACE_EMAIL_CODE_TTL_MIN} минут.\n"
@@ -295,8 +300,10 @@ def _check_resend_cooldown(row: Optional[Dict[str, Any]]) -> None:
     created_at = _parse_dt(row.get("created_at"))
     if not created_at:
         return
-    if (_now_dt() - created_at).total_seconds() < WORKSPACE_EMAIL_RESEND_COOLDOWN_SEC:
-        raise WorkspaceAccountError(f"Повторно отправить код можно через {WORKSPACE_EMAIL_RESEND_COOLDOWN_SEC} сек.")
+    elapsed = (_now_dt() - created_at).total_seconds()
+    if elapsed < WORKSPACE_EMAIL_RESEND_COOLDOWN_SEC:
+        remain = max(1, int(WORKSPACE_EMAIL_RESEND_COOLDOWN_SEC - elapsed + 0.999))
+        raise WorkspaceAccountError(f"Повторно отправить код можно через {remain} сек.")
 
 
 def _create_email_code_record(*, account_id: Optional[int], email: str, password_hash: str, purpose: str) -> None:
@@ -375,6 +382,67 @@ def confirm_email_registration(email: str, code: str) -> Dict[str, Any]:
     ensure_user_row(int(account["id"]))
     return account
 
+
+
+
+def start_password_reset(email: str) -> None:
+    normalized = normalize_email(email)
+    account = get_workspace_account_by_email(normalized)
+    if not account:
+        raise WorkspaceAccountError("Аккаунт с таким email не найден.")
+    if not bool(account.get("email_verified", False)):
+        raise WorkspaceAccountError("Email ещё не подтверждён.")
+    latest = _latest_active_email_code(email=normalized, purpose="reset_password", account_id=int(account["id"]))
+    _check_resend_cooldown(latest)
+    _create_email_code_record(account_id=int(account["id"]), email=normalized, password_hash="reset_pending", purpose="reset_password")
+
+
+def confirm_password_reset(email: str, code: str, new_password: str) -> Dict[str, Any]:
+    normalized = normalize_email(email)
+    account = get_workspace_account_by_email(normalized)
+    if not account:
+        raise WorkspaceAccountError("Аккаунт с таким email не найден.")
+    row = _validate_email_code(email=normalized, code=code, purpose="reset_password", account_id=int(account["id"]))
+    _ = row
+    password_hash = hash_password(new_password)
+    sb = _require_supabase()
+    res = sb.table("workspace_accounts").update(
+        {
+            "password_hash": password_hash,
+            "updated_at": _now_iso(),
+            "last_login_at": _now_iso(),
+        }
+    ).eq("id", int(account["id"])).execute()
+    out = (getattr(res, "data", None) or [None])[0] or get_workspace_account_by_id(int(account["id"]))
+    if not out:
+        raise WorkspaceAccountError("Не удалось обновить пароль.")
+    ensure_user_row(int(out["id"]))
+    return out
+
+
+def change_password(*, account_id: int, current_password: str, new_password: str) -> Dict[str, Any]:
+    account = get_workspace_account_by_id(account_id)
+    if not account:
+        raise WorkspaceAccountNotFound("Аккаунт не найден")
+    if not account.get("email") or not bool(account.get("email_verified", False)):
+        raise WorkspaceAccountError("Сначала привяжи и подтверди email.")
+    stored_hash = str(account.get("password_hash") or "")
+    if not stored_hash or not verify_password(current_password, stored_hash):
+        raise WorkspaceAuthFailed("Текущий пароль введён неверно.")
+    if str(current_password or "") == str(new_password or ""):
+        raise WorkspaceAccountError("Новый пароль должен отличаться от текущего.")
+    password_hash = hash_password(new_password)
+    sb = _require_supabase()
+    res = sb.table("workspace_accounts").update(
+        {
+            "password_hash": password_hash,
+            "updated_at": _now_iso(),
+        }
+    ).eq("id", int(account_id)).execute()
+    out = (getattr(res, "data", None) or [None])[0] or get_workspace_account_by_id(account_id)
+    if not out:
+        raise WorkspaceAccountError("Не удалось обновить пароль.")
+    return out
 
 def start_link_email(*, account_id: int, email: str, password: str) -> None:
     account = get_workspace_account_by_id(account_id)
