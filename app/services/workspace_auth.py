@@ -47,9 +47,13 @@ def create_access_token(*, user: Dict[str, Any], ttl_seconds: Optional[int] = No
 
     header = {"alg": "HS256", "typ": "JWT"}
     payload = {
-        "sub": str(user["id"]),
-        "telegram_user_id": int(user["id"]),
+        "sub": str(int(user.get("workspace_user_id") or user.get("id") or user.get("telegram_user_id") or 0)),
+        "workspace_user_id": int(user.get("workspace_user_id") or user.get("id") or user.get("telegram_user_id") or 0),
+        "telegram_user_id": int(user.get("workspace_user_id") or user.get("id") or user.get("telegram_user_id") or 0),
+        "linked_telegram_user_id": (int(user.get("linked_telegram_user_id")) if user.get("linked_telegram_user_id") not in (None, "") else None),
         "username": user.get("username"),
+        "email": user.get("email"),
+        "email_verified": bool(user.get("email_verified", False)),
         "first_name": user.get("first_name"),
         "last_name": user.get("last_name"),
         "language_code": user.get("language_code"),
@@ -98,10 +102,14 @@ def decode_access_token(token: str) -> Dict[str, Any]:
     if exp <= now_ts:
         raise WorkspaceAuthError("Access token expired")
 
-    uid = int(payload.get("telegram_user_id") or 0)
+    had_workspace_user_id = "workspace_user_id" in payload
+    uid = int(payload.get("workspace_user_id") or payload.get("telegram_user_id") or 0)
     if uid <= 0:
-        raise WorkspaceAuthError("Access token has invalid telegram_user_id")
+        raise WorkspaceAuthError("Access token has invalid workspace_user_id")
 
+    payload["workspace_user_id"] = uid
+    if "linked_telegram_user_id" not in payload and payload.get("telegram_user_id") not in (None, "") and not had_workspace_user_id:
+        payload["linked_telegram_user_id"] = payload.get("telegram_user_id")
     return payload
 
 
