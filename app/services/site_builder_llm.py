@@ -27,17 +27,29 @@ def _supports_temperature(model: str) -> bool:
 
 
 def _extract_text_content(message_content: Any) -> str:
-    if isinstance(message_content, str):
-        return message_content.strip()
-    if isinstance(message_content, list):
-        parts: list[str] = []
-        for item in message_content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                text = str(item.get("text") or "").strip()
+    def _pick_text(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, dict):
+            for key in ("text", "output_text", "value"):
+                v = value.get(key)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+            if "content" in value:
+                return _pick_text(value.get("content"))
+            return ""
+        if isinstance(value, list):
+            parts: list[str] = []
+            for item in value:
+                text = _pick_text(item)
                 if text:
                     parts.append(text)
-        return "\n".join(parts).strip()
-    return str(message_content or "").strip()
+            return "\n".join(parts).strip()
+        return str(value).strip()
+
+    return _pick_text(message_content)
 
 
 def _extract_json_object(text: str) -> Dict[str, Any]:
