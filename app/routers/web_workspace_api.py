@@ -34,14 +34,17 @@ from app.services.workspace_account_service import (
     WorkspaceCodeTooManyAttempts,
     WorkspaceMailerError,
     account_to_workspace_user_payload,
+    change_password,
     confirm_email_registration,
     confirm_link_email,
+    confirm_password_reset,
     ensure_workspace_account_from_claims,
     get_or_create_workspace_account_for_telegram,
     link_telegram_to_account,
     login_with_email,
     start_email_registration,
     start_link_email,
+    start_password_reset,
 )
 from app.services.workspace_auth import WORKSPACE_SESSION_TTL_SEC, create_access_token, get_current_workspace_user, get_optional_workspace_user
 from billing_db import add_tokens, ensure_user_row, get_balance
@@ -1516,6 +1519,21 @@ class EmailLoginPayload(BaseModel):
     password: str = Field(..., min_length=6, max_length=200)
 
 
+class EmailOnlyPayload(BaseModel):
+    email: str = Field(..., min_length=5, max_length=200)
+
+
+class ResetPasswordConfirmPayload(BaseModel):
+    email: str = Field(..., min_length=5, max_length=200)
+    code: str = Field(..., min_length=4, max_length=12)
+    password: str = Field(..., min_length=6, max_length=200)
+
+
+class ChangePasswordPayload(BaseModel):
+    current_password: str = Field(..., min_length=6, max_length=200)
+    new_password: str = Field(..., min_length=6, max_length=200)
+
+
 class ChatTurn(BaseModel):
     role: str
     content: str = Field(..., min_length=1, max_length=8000)
@@ -2198,6 +2216,36 @@ async def workspace_auth_email_login(payload: EmailLoginPayload) -> Dict[str, An
     }
 
 
+
+
+@router.post("/auth/password-reset/start")
+async def workspace_auth_password_reset_start(payload: EmailOnlyPayload) -> Dict[str, Any]:
+    try:
+        start_password_reset(payload.email)
+        return {"ok": True, "message": "Код для сброса пароля отправлен на почту."}
+    except (WorkspaceAccountError, WorkspaceMailerError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/auth/password-reset/confirm")
+async def workspace_auth_password_reset_confirm(payload: ResetPasswordConfirmPayload) -> Dict[str, Any]:
+    try:
+        account = confirm_password_reset(payload.email, payload.code, payload.password)
+    except (WorkspaceCodeExpired, WorkspaceCodeTooManyAttempts, WorkspaceAuthFailed, WorkspaceAccountError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    token_user = account_to_workspace_user_payload(account)
+    access_token = create_access_token(user=token_user)
+    return {
+        "ok": True,
+        "access_token": access_token,
+        "token_type": "Bearer",
+        "expires_in": WORKSPACE_SESSION_TTL_SEC,
+        "user": token_user,
+        "balance_tokens": int(get_balance(int(account["id"])) or 0),
+    }
+
+
 @router.post("/account/link-email/start")
 async def workspace_account_link_email_start(payload: EmailAuthStartPayload, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
     account = ensure_workspace_account_from_claims(user)
@@ -2214,6 +2262,28 @@ async def workspace_account_link_email_confirm(payload: EmailAuthConfirmPayload,
     try:
         account = confirm_link_email(account_id=int(account["id"]), email=payload.email, code=payload.code)
     except (WorkspaceCodeExpired, WorkspaceCodeTooManyAttempts, WorkspaceAccountError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    token_user = account_to_workspace_user_payload(account)
+    access_token = create_access_token(user=token_user)
+    return {
+        "ok": True,
+        "access_token": access_token,
+        "token_type": "Bearer",
+        "expires_in": WORKSPACE_SESSION_TTL_SEC,
+        "user": token_user,
+        "balance_tokens": int(get_balance(int(account["id"])) or 0),
+    }
+
+
+
+
+@router.post("/account/change-password")
+async def workspace_account_change_password(payload: ChangePasswordPayload, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
+    account = ensure_workspace_account_from_claims(user)
+    try:
+        account = change_password(account_id=int(account["id"]), current_password=payload.current_password, new_password=payload.new_password)
+    except (WorkspaceAuthFailed, WorkspaceAccountError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     token_user = account_to_workspace_user_payload(account)
