@@ -2,22 +2,28 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any
+import re
+from typing import Any, Dict, Optional
 
-import requests
+import httpx
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-OPENAI_MODEL = os.getenv("SITE_BUILDER_MODEL", "gpt-5.4")
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+SITE_BUILDER_MODEL = (os.getenv("SITE_BUILDER_MODEL", "gpt-5.4") or "gpt-5.4").strip()
 
 
-def _headers() -> dict[str, str]:
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY is not set")
-    return {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
-    }
+class SiteBuilderLLMError(RuntimeError):
+    pass
+
+
+_JSON_BLOCK_RE = re.compile(r"```json\s*(\{.*?\}|\[.*?\])\s*```", re.DOTALL | re.IGNORECASE)
+
+
+def _supports_temperature(model: str) -> bool:
+    name = str(model or "").strip().lower()
+    if not name:
+        return True
+    blocked_prefixes = ("gpt-5", "o1", "o3", "o4")
+    return not any(name.startswith(prefix) for prefix in blocked_prefixes)
 
 
 def _extract_text_content(message_content: Any) -> str:
@@ -46,160 +52,264 @@ def _extract_text_content(message_content: Any) -> str:
     return _pick_text(message_content)
 
 
-def _extract_response_text(data: dict[str, Any]) -> str:
-    # Responses API style
-    output_text = data.get("output_text")
-    if isinstance(output_text, str) and output_text.strip():
-        return output_text.strip()
-
-    output = data.get("output")
-    if isinstance(output, list):
-        parts: list[str] = []
-        for item in output:
-            if not isinstance(item, dict):
-                continue
-            content = item.get("content")
-            text = _extract_text_content(content)
-            if text:
-                parts.append(text)
-        if parts:
-            return "\n".join(parts).strip()
-
-    # Chat Completions style
-    choices = data.get("choices")
-    if isinstance(choices, list) and choices:
-        choice0 = choices[0] if isinstance(choices[0], dict) else {}
-        message = choice0.get("message") if isinstance(choice0, dict) else {}
-        if isinstance(message, dict):
-            content = message.get("content")
-            text = _extract_text_content(content)
-            if text:
-                return text
-        text = choice0.get("text") if isinstance(choice0, dict) else None
-        if isinstance(text, str) and text.strip():
-            return text.strip()
-
-    return ""
-
-
-def _post_json(path: str, payload: dict[str, Any]) -> dict[str, Any]:
-    url = f"{OPENAI_BASE_URL}{path}"
-    resp = requests.post(url, headers=_headers(), json=payload, timeout=300)
+def _extract_json_object(text: str) -> Dict[str, Any]:
+    raw = (text or "").strip()
+    if not raw:
+        raise SiteBuilderLLMError("Model returned empty JSON payload")
+    match = _JSON_BLOCK_RE.search(raw)
+    if match:
+        raw = match.group(1).strip()
+    else:
+        first = raw.find("{")
+        last = raw.rfind("}")
+        if first >= 0 and last > first:
+            raw = raw[first:last + 1]
     try:
-        data = resp.json()
-    except Exception:
-        raise RuntimeError(f"OpenAI non-JSON response: status={resp.status_code} body={resp.text[:1000]}")
-    if resp.status_code >= 400:
-        raise RuntimeError(
-            f"OpenAI HTTP {resp.status_code}: {json.dumps(data, ensure_ascii=False)[:1500]}"
-        )
+        data = json.loads(raw)
+    except Exception as exc:
+        raise SiteBuilderLLMError(f"Failed to parse JSON: {exc}; raw={raw[:1200]}")
+    if not isinstance(data, dict):
+        raise SiteBuilderLLMError("Expected JSON object from model")
     return data
 
 
-def _call_model_json(system_prompt: str, user_prompt: str) -> str:
-    payload = {
-        "model": OPENAI_MODEL,
-        "input": [
-            {"role": "system", "content": [{"type": "input_text", "text": system_prompt}]},
-            {"role": "user", "content": [{"type": "input_text", "text": user_prompt}]},
+async def _chat_completion(
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    model: Optional[str] = None,
+    max_tokens: int = 4000,
+    temperature: float = 0.2,
+) -> str:
+    if not OPENAI_API_KEY:
+        raise SiteBuilderLLMError("OPENAI_API_KEY is not set")
+
+    resolved_model = (model or SITE_BUILDER_MODEL).strip() or SITE_BUILDER_MODEL
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+    payload: Dict[str, Any] = {
+        "model": resolved_model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
         ],
+        "max_completion_tokens": int(max_tokens),
     }
-    data = _post_json("/responses", payload)
-    text = _extract_response_text(data)
+    if _supports_temperature(resolved_model):
+        payload["temperature"] = float(temperature)
+
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        response = await client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
+    if response.status_code != 200:
+        raise SiteBuilderLLMError(f"OpenAI error {response.status_code}: {response.text[:2000]}")
+
+    data = response.json()
+    message = (((data.get("choices") or [{}])[0]).get("message") or {})
+    text = _extract_text_content(message.get("content"))
     if not text:
-        debug_preview = json.dumps(data, ensure_ascii=False)[:3000]
-        print(f"[site][llm] empty text raw_response={debug_preview}", flush=True)
-        raise RuntimeError("Model returned empty text")
-    return text.strip()
+        print(f"[site][llm] empty text raw_response={json.dumps(data, ensure_ascii=False)[:4000]}", flush=True)
+        raise SiteBuilderLLMError("Model returned empty text")
+    return text
 
 
-def normalize_brief(brief_raw: str, extra_texts_raw: str | None = None) -> dict[str, Any]:
+async def normalize_brief(*, brief_raw: str, extra_texts_raw: Optional[str], model: Optional[str] = None) -> Dict[str, Any]:
     system_prompt = (
-        "Ты извлекаешь из брифа данные для генерации одностраничного сайта без фото. "
-        "Верни только JSON-объект без markdown."
+        "Ты нормализуешь бриф на создание коммерческого одностраничного сайта. "
+        "Нужно вернуть только JSON без пояснений. Не выдумывай факты, которых нет. "
+        "Если поле не дано, оставь пустую строку или пустой массив."
     )
-    user_prompt = (
-        f"Бриф:\n{brief_raw}\n\n"
-        f"Дополнительные тексты:\n{extra_texts_raw or ''}\n\n"
-        "Верни JSON с полями: project_name, niche, audience, goal, offer, "
-        "sections_requested, style_preferences, cta, contacts, extra_texts_raw."
-    )
-    text = _call_model_json(system_prompt, user_prompt)
-    try:
-        return json.loads(text)
-    except Exception:
-        print(f"[site][llm] normalize_brief non_json={text[:2000]}", flush=True)
-        raise RuntimeError("normalize_brief returned non-JSON")
+    user_prompt = f'''
+Собери JSON такого вида:
+{{
+  "project_name": "",
+  "niche": "",
+  "audience": "",
+  "goal": "",
+  "offer": "",
+  "sections_requested": ["hero", "advantages", "services", "faq", "contacts"],
+  "style_preferences": {{
+    "visual_style": "",
+    "colors": "",
+    "tone": ""
+  }},
+  "cta": "",
+  "contacts": {{
+    "phone": "",
+    "telegram": "",
+    "whatsapp": "",
+    "email": ""
+  }},
+  "key_points": [],
+  "constraints": {{
+    "no_photos": true,
+    "one_page_only": true,
+    "professional_saas_quality": true
+  }},
+  "extra_text_summary": ""
+}}
+
+БРИФ:
+{brief_raw}
+
+ДОПОЛНИТЕЛЬНЫЕ ТЕКСТЫ:
+{extra_texts_raw or ""}
+'''
+    raw = await _chat_completion(system_prompt=system_prompt, user_prompt=user_prompt, model=model, max_tokens=2500)
+    return _extract_json_object(raw)
 
 
-def build_blueprint(structured: dict[str, Any]) -> dict[str, Any]:
+async def build_blueprint(*, structured_context: Dict[str, Any], model: Optional[str] = None) -> Dict[str, Any]:
     system_prompt = (
-        "Ты проектируешь premium SaaS / modern business landing page без фото. "
-        "Верни только JSON-объект без markdown."
+        "Ты UX-стратег и копирайтер лендингов. Верни только JSON-план одностраничного сайта "
+        "в стиле premium SaaS / modern business. Без фото."
     )
-    user_prompt = (
-        "На основе данных проекта верни blueprint сайта в JSON. "
-        "Нужны поля: title, sections, tone, visual_direction, cta, notes.\n\n"
-        f"DATA:\n{json.dumps(structured, ensure_ascii=False)}"
-    )
-    text = _call_model_json(system_prompt, user_prompt)
-    try:
-        return json.loads(text)
-    except Exception:
-        print(f"[site][llm] build_blueprint non_json={text[:2000]}", flush=True)
-        raise RuntimeError("build_blueprint returned non-JSON")
+    user_prompt = f'''
+Контекст проекта:
+{json.dumps(structured_context, ensure_ascii=False, indent=2)}
+
+Верни JSON вида:
+{{
+  "site_title": "",
+  "hero": {{
+    "eyebrow": "",
+    "headline": "",
+    "subheadline": "",
+    "primary_cta": "",
+    "secondary_cta": ""
+  }},
+  "sections": [
+    {{
+      "id": "hero",
+      "title": "",
+      "subtitle": "",
+      "items": []
+    }}
+  ],
+  "faq": [{{"q": "", "a": ""}}],
+  "footer_note": "",
+  "design_direction": {{
+    "style_words": ["clean", "premium", "modern"],
+    "palette_hint": "",
+    "ui_notes": ["soft gradients", "card layout"]
+  }}
+}}
+'''
+    raw = await _chat_completion(system_prompt=system_prompt, user_prompt=user_prompt, model=model, max_tokens=3000)
+    return _extract_json_object(raw)
 
 
-def generate_index_html(structured: dict[str, Any], blueprint: dict[str, Any]) -> str:
+async def apply_revision(
+    *,
+    structured_context: Dict[str, Any],
+    current_blueprint: Dict[str, Any],
+    current_version: Dict[str, Any],
+    revision_request: str,
+    model: Optional[str] = None,
+) -> Dict[str, Any]:
     system_prompt = (
-        "Сгенерируй чистый production-ready index.html для адаптивного одностраничного сайта. "
-        "Не добавляй markdown fences."
+        "Ты обновляешь план сайта по правкам клиента. Верни только JSON. "
+        "Сохраняй общую структуру сайта, меняй только то, что логично по запросу."
     )
-    user_prompt = (
-        f"STRUCTURED:\n{json.dumps(structured, ensure_ascii=False)}\n\n"
-        f"BLUEPRINT:\n{json.dumps(blueprint, ensure_ascii=False)}"
-    )
-    return _call_model_json(system_prompt, user_prompt)
+    user_prompt = f'''
+КОНТЕКСТ ПРОЕКТА:
+{json.dumps(structured_context, ensure_ascii=False, indent=2)}
+
+ТЕКУЩИЙ BLUEPRINT:
+{json.dumps(current_blueprint or {}, ensure_ascii=False, indent=2)}
+
+ТЕКУЩАЯ HTML ВЕРСИЯ:
+{(current_version.get("html_content") or "")[:10000]}
+
+ПРАВКИ КЛИЕНТА:
+{revision_request}
+
+Верни обновлённый blueprint в том же формате JSON, что и раньше.
+'''
+    raw = await _chat_completion(system_prompt=system_prompt, user_prompt=user_prompt, model=model, max_tokens=3200)
+    return _extract_json_object(raw)
 
 
-def generate_styles_css(structured: dict[str, Any], blueprint: dict[str, Any]) -> str:
+async def generate_html(*, structured_context: Dict[str, Any], blueprint: Dict[str, Any], model: Optional[str] = None) -> str:
     system_prompt = (
-        "Сгенерируй чистый styles.css для адаптивного premium SaaS сайта. "
-        "Не добавляй markdown fences."
+        "Ты senior frontend developer. Верни только содержимое файла index.html без markdown. "
+        "Сайт статический, one-page, без внешних библиотек, без CDN. Подключай styles.css и script.js. "
+        "Тексты на русском, если вход на русском."
     )
-    user_prompt = (
-        f"STRUCTURED:\n{json.dumps(structured, ensure_ascii=False)}\n\n"
-        f"BLUEPRINT:\n{json.dumps(blueprint, ensure_ascii=False)}"
-    )
-    return _call_model_json(system_prompt, user_prompt)
+    user_prompt = f'''
+Контекст:
+{json.dumps(structured_context, ensure_ascii=False, indent=2)}
+
+Blueprint:
+{json.dumps(blueprint, ensure_ascii=False, indent=2)}
+
+Требования:
+- чистая семантическая HTML5-разметка
+- блок hero, секции, FAQ, footer
+- без фото
+- аккуратные классы
+- адаптивная структура
+- одна страница
+- CTA и контакты обязательно
+'''
+    return await _chat_completion(system_prompt=system_prompt, user_prompt=user_prompt, model=model, max_tokens=5000)
 
 
-def generate_script_js(structured: dict[str, Any], blueprint: dict[str, Any]) -> str:
+async def generate_css(*, structured_context: Dict[str, Any], blueprint: Dict[str, Any], html_content: str, model: Optional[str] = None) -> str:
     system_prompt = (
-        "Сгенерируй минимальный script.js для сайта. Только нужный код, без markdown fences."
+        "Ты senior frontend developer. Верни только содержимое файла styles.css без markdown. "
+        "Сделай premium SaaS / modern business стиль, мобильную адаптацию и аккуратную типографику."
     )
-    user_prompt = (
-        f"STRUCTURED:\n{json.dumps(structured, ensure_ascii=False)}\n\n"
-        f"BLUEPRINT:\n{json.dumps(blueprint, ensure_ascii=False)}"
-    )
-    return _call_model_json(system_prompt, user_prompt)
+    user_prompt = f'''
+Контекст:
+{json.dumps(structured_context, ensure_ascii=False, indent=2)}
+
+Blueprint:
+{json.dumps(blueprint, ensure_ascii=False, indent=2)}
+
+HTML:
+{html_content[:12000]}
+
+Требования:
+- без CSS reset-библиотек
+- хорошие отступы
+- hero, cards, faq, footer
+- mobile-first
+- максимум качества без визуального мусора
+'''
+    return await _chat_completion(system_prompt=system_prompt, user_prompt=user_prompt, model=model, max_tokens=4500)
 
 
-def generate_readme(structured: dict[str, Any]) -> str:
-    project_name = (
-        structured.get("project_name")
-        or structured.get("title")
-        or "site"
+async def generate_js(*, blueprint: Dict[str, Any], html_content: str, model: Optional[str] = None) -> str:
+    system_prompt = (
+        "Ты senior frontend developer. Верни только содержимое файла script.js без markdown. "
+        "Нужен только лёгкий vanilla JS: mobile menu, плавный скролл, FAQ accordion, micro interactions."
     )
-    return (
-        f"{project_name}\n\n"
-        "Файлы сайта:\n"
-        "- index.html\n"
-        "- styles.css\n"
-        "- script.js\n\n"
-        "Как открыть:\n"
-        "1. Распакуйте архив.\n"
-        "2. Откройте index.html в браузере.\n\n"
-        "Как опубликовать:\n"
-        "Загрузите файлы на любой статический хостинг.\n"
-    )
+    user_prompt = f'''
+Blueprint:
+{json.dumps(blueprint, ensure_ascii=False, indent=2)}
+
+HTML:
+{html_content[:12000]}
+
+Требования:
+- чистый vanilla JS
+- не использовать внешние библиотеки
+- без сложных анимаций
+- код должен быть безопасным и коротким
+'''
+    return await _chat_completion(system_prompt=system_prompt, user_prompt=user_prompt, model=model, max_tokens=2200)
+
+
+async def generate_readme(*, structured_context: Dict[str, Any], version_number: int, model: Optional[str] = None) -> str:
+    system_prompt = "Ты готовишь короткий README для клиента. Верни только plain text без markdown-блоков."
+    user_prompt = f'''
+Контекст:
+{json.dumps(structured_context, ensure_ascii=False, indent=2)}
+
+Собери README на русском языке.
+Он должен объяснять:
+- как открыть сайт локально
+- какой файл главный
+- как загрузить сайт на хостинг
+- что это версия v{int(version_number)}
+'''
+    return await _chat_completion(system_prompt=system_prompt, user_prompt=user_prompt, model=model, max_tokens=1200)
