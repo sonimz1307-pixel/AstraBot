@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import unicodedata
 from typing import Optional
 
 from db_supabase import supabase
@@ -16,7 +17,8 @@ def _require_client() -> None:
 
 def safe_slug(value: str, *, default: str = "site") -> str:
     raw = (value or "").strip().lower()
-    raw = re.sub(r"[^a-z0-9а-яё_-]+", "-", raw, flags=re.IGNORECASE)
+    raw = unicodedata.normalize("NFKD", raw).encode("ascii", "ignore").decode("ascii")
+    raw = re.sub(r"[^a-z0-9_-]+", "-", raw)
     raw = re.sub(r"-+", "-", raw).strip("-_")
     return raw or default
 
