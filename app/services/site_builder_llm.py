@@ -78,7 +78,7 @@ async def _chat_completion(
     system_prompt: str,
     user_prompt: str,
     model: Optional[str] = None,
-    max_tokens: int = 4000,
+    max_tokens: int = 14000,
     temperature: float = 0.2,
 ) -> str:
     if not OPENAI_API_KEY:
@@ -153,7 +153,7 @@ async def normalize_brief(*, brief_raw: str, extra_texts_raw: Optional[str], mod
 ДОПОЛНИТЕЛЬНЫЕ ТЕКСТЫ:
 {extra_texts_raw or ""}
 '''
-    raw = await _chat_completion(system_prompt=system_prompt, user_prompt=user_prompt, model=model, max_tokens=2500)
+    raw = await _chat_completion(system_prompt=system_prompt, user_prompt=user_prompt, model=model, max_tokens=15000)
     return _extract_json_object(raw)
 
 
@@ -193,7 +193,7 @@ async def build_blueprint(*, structured_context: Dict[str, Any], model: Optional
   }}
 }}
 '''
-    raw = await _chat_completion(system_prompt=system_prompt, user_prompt=user_prompt, model=model, max_tokens=3000)
+    raw = await _chat_completion(system_prompt=system_prompt, user_prompt=user_prompt, model=model, max_tokens=15000)
     return _extract_json_object(raw)
 
 
@@ -224,7 +224,7 @@ async def apply_revision(
 
 Верни обновлённый blueprint в том же формате JSON, что и раньше.
 '''
-    raw = await _chat_completion(system_prompt=system_prompt, user_prompt=user_prompt, model=model, max_tokens=3200)
+    raw = await _chat_completion(system_prompt=system_prompt, user_prompt=user_prompt, model=model, max_tokens=13200)
     return _extract_json_object(raw)
 
 
@@ -250,7 +250,7 @@ Blueprint:
 - одна страница
 - CTA и контакты обязательно
 '''
-    return await _chat_completion(system_prompt=system_prompt, user_prompt=user_prompt, model=model, max_tokens=5000)
+    return await _chat_completion(system_prompt=system_prompt, user_prompt=user_prompt, model=model, max_tokens=15000)
 
 
 async def generate_css(*, structured_context: Dict[str, Any], blueprint: Dict[str, Any], html_content: str, model: Optional[str] = None) -> str:
@@ -275,7 +275,7 @@ HTML:
 - mobile-first
 - максимум качества без визуального мусора
 '''
-    return await _chat_completion(system_prompt=system_prompt, user_prompt=user_prompt, model=model, max_tokens=4500)
+    return await _chat_completion(system_prompt=system_prompt, user_prompt=user_prompt, model=model, max_tokens=15000)
 
 
 async def generate_js(*, blueprint: Dict[str, Any], html_content: str, model: Optional[str] = None) -> str:
@@ -296,7 +296,7 @@ HTML:
 - без сложных анимаций
 - код должен быть безопасным и коротким
 '''
-    return await _chat_completion(system_prompt=system_prompt, user_prompt=user_prompt, model=model, max_tokens=2200)
+    return await _chat_completion(system_prompt=system_prompt, user_prompt=user_prompt, model=model, max_tokens=12200)
 
 
 async def generate_readme(*, structured_context: Dict[str, Any], version_number: int, model: Optional[str] = None) -> str:
@@ -312,4 +312,4 @@ async def generate_readme(*, structured_context: Dict[str, Any], version_number:
 - как загрузить сайт на хостинг
 - что это версия v{int(version_number)}
 '''
-    return await _chat_completion(system_prompt=system_prompt, user_prompt=user_prompt, model=model, max_tokens=1200)
+    return await _chat_completion(system_prompt=system_prompt, user_prompt=user_prompt, model=model, max_tokens=11200)
