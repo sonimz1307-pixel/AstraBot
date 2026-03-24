@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-from io import BytesIO
 from typing import Optional
 
 from db_supabase import supabase
@@ -31,11 +30,10 @@ def upload_zip(*, path: str, raw_bytes: bytes) -> str:
     _require_client()
     if not raw_bytes:
         raise ValueError("raw_bytes is empty")
-    bio = BytesIO(raw_bytes)
     try:
         supabase.storage.from_(SITE_BUILDS_BUCKET).upload(
             path,
-            bio,
+            raw_bytes,
             {"content-type": "application/zip", "upsert": "true"},
         )
     except Exception as exc:
