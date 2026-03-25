@@ -66,6 +66,7 @@ from nano_banana import run_nano_banana
 from nano_banana_pro import handle_nano_banana_pro
 from topaz_image_replicate import TopazImageParams, run_topaz_image_upscale
 from topaz_pricing import get_photo_preset_settings, get_photo_preset_tokens
+from yookassa_flow import create_yookassa_payment
 from app.services.video_editor_service import (
     VIDEO_EDIT_QUEUE_NAME,
     MAX_AUDIO_CLIPS,
@@ -121,6 +122,25 @@ def _clamp_int(value: Any, default: int, low: int, high: int) -> int:
     except Exception:
         out = int(default)
     return max(low, min(high, out))
+
+
+WORKSPACE_TOPUP_PACKS: List[Dict[str, Any]] = [
+    {"tokens": 5, "rub": 60, "stars": 33, "badge": "💰", "code": "lite"},
+    {"tokens": 20, "rub": 180, "stars": 99, "badge": "⭐", "code": "plus"},
+    {"tokens": 50, "rub": 450, "stars": 247, "badge": "🚀", "code": "pro"},
+    {"tokens": 100, "rub": 850, "stars": 467, "badge": "👑", "code": "ultra"},
+]
+
+
+def _workspace_find_topup_pack(tokens: Any) -> Optional[Dict[str, Any]]:
+    try:
+        wanted = int(tokens)
+    except Exception:
+        return None
+    for pack in WORKSPACE_TOPUP_PACKS:
+        if int(pack.get("tokens") or 0) == wanted:
+            return dict(pack)
+    return None
 
 
 def _sanitize_chat_history(value: Any) -> List[Dict[str, str]]:
@@ -2339,6 +2359,57 @@ async def workspace_balance(user: Dict[str, Any] = Depends(get_current_workspace
     ensure_user_row(uid)
     balance = int(get_balance(uid) or 0)
     return {"ok": True, "balance_tokens": balance}
+
+
+class WorkspaceTopupCreatePayload(BaseModel):
+    tokens: int = Field(..., ge=1, le=100000)
+    return_url: Optional[str] = None
+
+
+@router.get("/topup/packs")
+async def workspace_topup_packs() -> Dict[str, Any]:
+    return {"ok": True, "packs": WORKSPACE_TOPUP_PACKS}
+
+
+@router.post("/topup/create")
+async def workspace_topup_create(payload: WorkspaceTopupCreatePayload, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
+    account = ensure_workspace_account_from_claims(user)
+    uid = int(account.get("id") or user.get("workspace_user_id") or user.get("telegram_user_id") or 0)
+    if uid <= 0:
+        raise HTTPException(status_code=400, detail="Не удалось определить пользователя для пополнения.")
+
+    pack = _workspace_find_topup_pack(payload.tokens)
+    if not pack:
+        raise HTTPException(status_code=400, detail="Неизвестный пакет пополнения.")
+
+    email = str(account.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Для оплаты картой или СБП сначала добавь email в профиле аккаунта.")
+
+    try:
+        payment_id, confirmation_url = await create_yookassa_payment(
+            amount_rub=int(pack["rub"]),
+            description=f'Пополнение баланса: {int(pack["tokens"])} токенов',
+            user_id=uid,
+            tokens=int(pack["tokens"]),
+            customer_email=email,
+            return_url=(str(payload.return_url or "").strip() or None),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Не удалось создать платёж: {e}")
+
+    return {
+        "ok": True,
+        "payment_id": payment_id,
+        "confirmation_url": confirmation_url,
+        "tokens": int(pack["tokens"]),
+        "amount_rub": int(pack["rub"]),
+        "customer_email": email,
+    }
 
 
 
