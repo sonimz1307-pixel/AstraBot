@@ -3026,12 +3026,17 @@ async def workspace_video_run(
             )
         )
 
+        try:
+            balance_tokens = int(get_balance(uid) or 0)
+        except Exception:
+            balance_tokens = None
         return {
             "ok": True,
             "generation_id": generation_id,
             "task_id": generation_id,
             "status": "processing",
             "status_text": "Генерация началась. Видео появится в рабочей зоне автоматически.",
+            "balance_tokens": balance_tokens,
         }
     except HTTPException:
         if charged:
@@ -4765,7 +4770,11 @@ async def workspace_music_run(payload: MusicGenerateIn, user: Dict[str, Any] = D
         )
     )
 
-    return {"ok": True, "generation_id": generation_id, "status": "queued", "cost_tokens": int(cost if charged else 0)}
+    try:
+        balance_tokens = int(get_balance(uid) or 0)
+    except Exception:
+        balance_tokens = None
+    return {"ok": True, "generation_id": generation_id, "status": "queued", "cost_tokens": int(cost if charged else 0), "balance_tokens": balance_tokens}
 
 
 @router.post("/music/lyrics/generate")
