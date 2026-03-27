@@ -59,6 +59,7 @@ from kling_flow import (
     upload_bytes_to_supabase,
 )
 from veo_flow import VeoFlowError, run_veo_image_to_video, run_veo_text_to_video
+from veo_billing import calc_veo_charge
 from kling3_pricing import calculate_kling3_price
 from songwriter_prompt import SONGWRITER_SYSTEM_PROMPT
 from queue_redis import enqueue_job
@@ -1362,6 +1363,9 @@ async def _run_workspace_video_job(
     avatar_image: Optional[bytes],
     motion_video: Optional[bytes],
     reference_images: List[bytes],
+    charge_tokens: int = 0,
+    charge_ref_id: str = "",
+    refund_reason: str = "workspace_video_refund",
 ) -> None:
     try:
         provider_video_url: Optional[str] = None
@@ -1515,8 +1519,30 @@ async def _run_workspace_video_job(
         )
     except (Kling3Error, KlingFlowError, VeoFlowError, ValueError, RuntimeError, TimeoutError) as e:
         _mark_workspace_generation_failed(generation_id, str(e), error_code="provider_error")
+        if int(charge_tokens or 0) > 0:
+            try:
+                add_tokens(
+                    int(user_id),
+                    int(charge_tokens),
+                    reason=str(refund_reason or "workspace_video_refund"),
+                    ref_id=charge_ref_id or uuid4().hex,
+                    meta={"origin": "workspace_video", "generation_id": generation_id, "error": str(e)[:300]},
+                )
+            except Exception:
+                pass
     except Exception as e:
         _mark_workspace_generation_failed(generation_id, f"Internal run error: {e}", error_code="internal_error")
+        if int(charge_tokens or 0) > 0:
+            try:
+                add_tokens(
+                    int(user_id),
+                    int(charge_tokens),
+                    reason=str(refund_reason or "workspace_video_refund"),
+                    ref_id=charge_ref_id or uuid4().hex,
+                    meta={"origin": "workspace_video", "generation_id": generation_id, "error": str(e)[:300]},
+                )
+            except Exception:
+                pass
 
 
 
@@ -2745,6 +2771,114 @@ async def workspace_history_delete_item(
         raise HTTPException(status_code=500, detail=f"History delete failed: {e}")
 
 
+def _workspace_video_charge_spec(
+    *,
+    provider: str,
+    model: str,
+    mode: str,
+    duration: int,
+    resolution: str,
+    enable_audio: bool,
+    quality: str,
+) -> Dict[str, Any]:
+    provider = str(provider or "").strip().lower()
+    model = str(model or "").strip().lower()
+    mode = str(mode or "").strip().lower()
+    quality = str(quality or "pro").strip().lower() or "pro"
+    duration = max(1, int(duration or 0))
+
+    if provider == "kling":
+        if model == "kling-3.0":
+            tokens = int(calculate_kling3_price(
+                resolution=str(resolution or "720").replace("p", ""),
+                enable_audio=bool(enable_audio),
+                duration=duration,
+            ))
+            return {
+                "tokens": tokens,
+                "charge_reason": "kling3_create",
+                "refund_reason": "kling3_refund",
+                "meta": {
+                    "origin": "workspace_video",
+                    "provider": provider,
+                    "model": model,
+                    "mode": mode,
+                    "duration": duration,
+                    "resolution": str(resolution or "720"),
+                    "enable_audio": bool(enable_audio),
+                },
+            }
+        if model == "kling-2.5":
+            tokens = int(duration)
+            return {
+                "tokens": tokens,
+                "charge_reason": "kling_video",
+                "refund_reason": "kling_video_refund",
+                "meta": {"origin": "workspace_video", "provider": provider, "model": model, "mode": mode, "duration": duration},
+            }
+        if model == "kling-1.6":
+            rate = 1 if quality == "standard" else 2
+            tokens = int(duration) * int(rate)
+            return {
+                "tokens": tokens,
+                "charge_reason": "kling_video",
+                "refund_reason": "kling_video_refund",
+                "meta": {"origin": "workspace_video", "provider": provider, "model": model, "mode": mode, "duration": duration, "quality": quality},
+            }
+        if model == "motion-control":
+            return {
+                "tokens": 0,
+                "charge_reason": "",
+                "refund_reason": "workspace_video_refund",
+                "meta": {"origin": "workspace_video", "provider": provider, "model": model, "mode": mode, "billing": "todo_motion_control"},
+            }
+
+    if provider == "veo":
+        ch = calc_veo_charge(
+            veo_model=("pro" if model == "veo-3.1-pro" else "fast"),
+            model_slug=model,
+            generate_audio=bool(enable_audio),
+            duration_sec=duration,
+        )
+        return {
+            "tokens": int(ch.total_tokens),
+            "charge_reason": "veo_video",
+            "refund_reason": "veo_video_refund",
+            "meta": {
+                "origin": "workspace_video",
+                "provider": provider,
+                "model": model,
+                "mode": mode,
+                "duration": int(ch.duration_sec),
+                "tokens_per_sec": int(ch.tokens_per_sec),
+                "enable_audio": bool(enable_audio),
+                "tier": ch.tier,
+            },
+        }
+
+    if provider == "seedance":
+        rate = 1 if model == "seedance-fast" else 2
+        tokens = int(duration) * int(rate)
+        return {
+            "tokens": tokens,
+            "charge_reason": "seedance_video",
+            "refund_reason": "seedance_video_refund",
+            "meta": {"origin": "workspace_video", "provider": provider, "model": model, "mode": mode, "duration": duration, "rate": rate},
+        }
+
+    if provider == "sora":
+        cost_map = {4: 5, 8: 10, 12: 15}
+        tokens = int(cost_map.get(int(duration), 5))
+        return {
+            "tokens": tokens,
+            "charge_reason": "sora_video",
+            "refund_reason": "sora_video_refund",
+            "meta": {"origin": "workspace_video", "provider": provider, "model": model, "mode": mode, "duration": duration},
+        }
+
+    return {"tokens": 0, "charge_reason": "", "refund_reason": "workspace_video_refund", "meta": {"origin": "workspace_video", "provider": provider, "model": model, "mode": mode}}
+
+
 @router.post("/video/run")
 async def workspace_video_run(
     request: Request,
@@ -2816,53 +2950,103 @@ async def workspace_video_run(
     if model == "motion-control" and (not avatar_image or not motion_video):
         raise HTTPException(status_code=400, detail="Для Motion Control нужны avatar image и motion video.")
 
-    generation_id = _insert_workspace_generation(
-        {
-            "user_id": str(uid),
-            "provider": provider,
-            "model": model,
-            "mode": _history_mode_for_run(provider, mode),
-            "prompt": prompt,
-            "status": "queued",
-            "aspect_ratio": aspect_ratio,
-            "duration_sec": int(duration or 0),
-            "resolution": resolution,
-            "enable_audio": bool(enable_audio),
-            "origin": "workspace",
-        }
+    ensure_user_row(uid)
+    try:
+        balance = int(get_balance(uid) or 0)
+    except Exception:
+        balance = 0
+
+    charge = _workspace_video_charge_spec(
+        provider=provider,
+        model=model,
+        mode=mode,
+        duration=duration,
+        resolution=resolution,
+        enable_audio=enable_audio,
+        quality=quality,
     )
+    cost_tokens = int(charge.get("tokens") or 0)
+    charge_reason = str(charge.get("charge_reason") or "")
+    refund_reason = str(charge.get("refund_reason") or "workspace_video_refund")
+    charge_meta = dict(charge.get("meta") or {})
+    charge_ref_id = uuid4().hex if cost_tokens > 0 and charge_reason else ""
 
-    _update_workspace_generation(generation_id, {"status": "processing"})
+    if cost_tokens > 0 and balance < cost_tokens:
+        raise HTTPException(status_code=402, detail=f"Недостаточно токенов. Нужно: {cost_tokens} ток.")
 
-    asyncio.create_task(
-        _run_workspace_video_job(
-            generation_id=generation_id,
-            user_id=uid,
-            provider=provider,
-            model=model,
-            mode=mode,
-            prompt=prompt,
-            duration=duration,
-            resolution=resolution,
-            aspect_ratio=aspect_ratio,
-            enable_audio=enable_audio,
-            quality=quality,
-            start_frame=start_frame,
-            end_frame=end_frame,
-            last_frame=last_frame,
-            avatar_image=avatar_image,
-            motion_video=motion_video,
-            reference_images=reference_images,
+    charged = False
+    try:
+        if cost_tokens > 0 and charge_reason:
+            try:
+                add_tokens(uid, -int(cost_tokens), reason=charge_reason, ref_id=charge_ref_id, meta=charge_meta)
+            except TypeError:
+                add_tokens(uid, -int(cost_tokens), reason=charge_reason)
+            charged = True
+
+        generation_id = _insert_workspace_generation(
+            {
+                "user_id": str(uid),
+                "provider": provider,
+                "model": model,
+                "mode": _history_mode_for_run(provider, mode),
+                "prompt": prompt,
+                "status": "queued",
+                "aspect_ratio": aspect_ratio,
+                "duration_sec": int(duration or 0),
+                "resolution": resolution,
+                "enable_audio": bool(enable_audio),
+                "origin": "workspace",
+            }
         )
-    )
 
-    return {
-        "ok": True,
-        "generation_id": generation_id,
-        "task_id": generation_id,
-        "status": "processing",
-        "status_text": "Генерация началась. Видео появится в рабочей зоне автоматически.",
-    }
+        _update_workspace_generation(generation_id, {"status": "processing"})
+
+        asyncio.create_task(
+            _run_workspace_video_job(
+                generation_id=generation_id,
+                user_id=uid,
+                provider=provider,
+                model=model,
+                mode=mode,
+                prompt=prompt,
+                duration=duration,
+                resolution=resolution,
+                aspect_ratio=aspect_ratio,
+                enable_audio=enable_audio,
+                quality=quality,
+                start_frame=start_frame,
+                end_frame=end_frame,
+                last_frame=last_frame,
+                avatar_image=avatar_image,
+                motion_video=motion_video,
+                reference_images=reference_images,
+                charge_tokens=(int(cost_tokens) if charged else 0),
+                charge_ref_id=charge_ref_id,
+                refund_reason=refund_reason,
+            )
+        )
+
+        return {
+            "ok": True,
+            "generation_id": generation_id,
+            "task_id": generation_id,
+            "status": "processing",
+            "status_text": "Генерация началась. Видео появится в рабочей зоне автоматически.",
+        }
+    except HTTPException:
+        if charged:
+            try:
+                add_tokens(uid, int(cost_tokens), reason=refund_reason, ref_id=charge_ref_id or uuid4().hex, meta={"origin": "workspace_video", "stage": "route_http_exception"})
+            except Exception:
+                pass
+        raise
+    except Exception as e:
+        if charged:
+            try:
+                add_tokens(uid, int(cost_tokens), reason=refund_reason, ref_id=charge_ref_id or uuid4().hex, meta={"origin": "workspace_video", "stage": "route_exception", "error": str(e)[:300]})
+            except Exception:
+                pass
+        raise HTTPException(status_code=500, detail=f"Video run failed: {e}")
 
 
 @router.post("/video/upload")
