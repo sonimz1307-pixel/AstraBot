@@ -248,6 +248,10 @@ async def supabase_upload_public_bytes(data: bytes, *, ext: str = "jpg") -> str:
 
 SEEDANCE_TIMEOUT_SEC = int(os.getenv("SEEDANCE_TIMEOUT_SEC", "7200"))  # up to 2h (queue may be long)
 SEEDANCE_POLL_SEC = float(os.getenv("SEEDANCE_POLL_SEC", "6"))
+SEEDANCE_GET_RETRIES = int(os.getenv("SEEDANCE_GET_RETRIES", "3"))
+SEEDANCE_GET_RETRY_DELAY_SEC = float(os.getenv("SEEDANCE_GET_RETRY_DELAY_SEC", "3"))
+SEEDANCE_RECOVERY_CHECKS = int(os.getenv("SEEDANCE_RECOVERY_CHECKS", "3"))
+SEEDANCE_RECOVERY_DELAY_SEC = float(os.getenv("SEEDANCE_RECOVERY_DELAY_SEC", "8"))
 
 
 async def _piapi_seedance_create_task(*, task_type: str, prompt: Optional[str] = None,
@@ -303,6 +307,47 @@ async def _piapi_seedance_get_task(task_id: str) -> dict:
         return j
 
 
+def _seedance_should_retry_get(exc: Exception) -> bool:
+    msg = str(exc or "").lower()
+    retry_markers = (
+        "piapi seedance get failed: 401",
+        "piapi seedance get failed: 408",
+        "piapi seedance get failed: 409",
+        "piapi seedance get failed: 425",
+        "piapi seedance get failed: 429",
+        "piapi seedance get failed: 500",
+        "piapi seedance get failed: 502",
+        "piapi seedance get failed: 503",
+        "piapi seedance get failed: 504",
+        "timed out",
+        "timeout",
+        "temporarily unavailable",
+        "connection reset",
+        "read error",
+        "connect error",
+        "network",
+    )
+    return any(marker in msg for marker in retry_markers)
+
+
+async def _piapi_seedance_get_task_with_retry(task_id: str, *, retries: int, delay_s: float) -> dict:
+    attempt = 0
+    last_exc: Optional[Exception] = None
+    max_attempts = max(0, int(retries))
+    while attempt <= max_attempts:
+        try:
+            return await _piapi_seedance_get_task(task_id)
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= max_attempts or not _seedance_should_retry_get(exc):
+                raise
+            await asyncio.sleep(max(0.5, float(delay_s)))
+            attempt += 1
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Seedance get task failed without exception")
+
+
 def _seedance_status_lower(resp: dict) -> str:
     """PiAPI can return fields either top-level or under data."""
     if not isinstance(resp, dict):
@@ -349,7 +394,11 @@ async def _piapi_seedance_wait(task_id: str, *, timeout_s: int, poll_s: float) -
     t0 = asyncio.get_event_loop().time()
     last = None
     while True:
-        last = await _piapi_seedance_get_task(task_id)
+        last = await _piapi_seedance_get_task_with_retry(
+            task_id,
+            retries=SEEDANCE_GET_RETRIES,
+            delay_s=SEEDANCE_GET_RETRY_DELAY_SEC,
+        )
         st = _seedance_status_lower(last)
         if st in ("completed", "failed"):
             return last
@@ -749,6 +798,7 @@ async def handle_job(job: Dict[str, Any]) -> None:
         duration = int(job.get("duration") or 5)
         parent_task_id = str(job.get("extend_from_task_id") or "").strip() or None
         charge_tokens = int(job.get("charge_tokens") or 0)
+        task_id: Optional[str] = None
 
         if not chat_id or not user_id:
             raise RuntimeError("seedance_extend job missing chat_id/user_id")
@@ -784,6 +834,7 @@ async def handle_job(job: Dict[str, Any]) -> None:
         service_mode = str(job.get("service_mode") or "public").strip() or "public"
 
         charge_tokens = int(job.get("charge_tokens") or 0)
+        task_id: Optional[str] = None
 
         if not chat_id or not user_id:
             raise RuntimeError("seedance_video job missing chat_id/user_id")
@@ -838,7 +889,6 @@ async def handle_job(job: Dict[str, Any]) -> None:
                 service_mode=service_mode,
             )
 
-            task_id = None
             if isinstance(created, dict):
                 task_id = (created.get('task_id') or ((created.get('data') or {}).get('task_id')))
             
@@ -893,10 +943,56 @@ async def handle_job(job: Dict[str, Any]) -> None:
             except Exception:
                 pass
 
+            recovered = False
+            recovery_error = None
+            if task_id:
+                print(f"Seedance: exception after task creation, trying recovery task_id={task_id}: {e}")
+                for _ in range(max(0, SEEDANCE_RECOVERY_CHECKS)):
+                    try:
+                        recovered_resp = await _piapi_seedance_get_task_with_retry(
+                            task_id,
+                            retries=SEEDANCE_GET_RETRIES,
+                            delay_s=SEEDANCE_GET_RETRY_DELAY_SEC,
+                        )
+                        recovered_status = _seedance_status_lower(recovered_resp)
+                        if recovered_status == "completed":
+                            recovered_url = _seedance_extract_output_url(recovered_resp)
+                            if recovered_url:
+                                try:
+                                    if msg_id:
+                                        await tg_edit_message_text(chat_id, msg_id, "✅ Seedance: восстановил задачу после сбоя. Отправляю видео…")
+                                except Exception:
+                                    pass
+                                try:
+                                    await tg_send_video_from_url(chat_id, recovered_url, caption="🎬 Seedance видео")
+                                except Exception:
+                                    await tg_send_message(chat_id, f"✅ Seedance готово!\n🎬 {recovered_url}")
+                                await tg_send_message(
+                                    chat_id,
+                                    "Продолжить сцену?",
+                                    reply_markup=_seedance_continue_kb(task_id),
+                                )
+                                recovered = True
+                                break
+                        if recovered_status == "failed":
+                            break
+                    except Exception as recovery_exc:
+                        recovery_error = recovery_exc
+                    await asyncio.sleep(max(1.0, SEEDANCE_RECOVERY_DELAY_SEC))
+
+            if recovered:
+                return
+
+            final_error = str(e)
+            if task_id:
+                final_error += f"\nTask ID: {task_id}"
+            if recovery_error:
+                final_error += f"\nRecovery check: {recovery_error}"
+
             # refund on failure if charged
             if charge_tokens > 0:
                 try:
-                    add_tokens(user_id, int(charge_tokens), reason="seedance_video_refund", meta={"error": str(e)[:300]})
+                    add_tokens(user_id, int(charge_tokens), reason="seedance_video_refund", meta={"error": final_error[:300], "task_id": task_id or ""})
                 except TypeError:
                     try:
                         add_tokens(user_id, int(charge_tokens), reason="seedance_video_refund")
@@ -904,7 +1000,7 @@ async def handle_job(job: Dict[str, Any]) -> None:
                         pass
 
             try:
-                await tg_send_message(chat_id, f"❌ Seedance: ошибка генерации.\n{e}")
+                await tg_send_message(chat_id, f"❌ Seedance: ошибка генерации.\n{final_error}")
             except Exception:
                 pass
             return
