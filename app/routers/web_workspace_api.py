@@ -91,6 +91,9 @@ TOPAZ_INPUT_PREFIX = (os.getenv("TOPAZ_INPUT_PREFIX", "inputs") or "inputs").str
 TOPAZ_IMAGE_CREATE_RETRIES = max(1, int(os.getenv("TOPAZ_IMAGE_CREATE_RETRIES", "3") or "3"))
 TOPAZ_IMAGE_RETRY_DELAY_SEC = max(0.25, float(os.getenv("TOPAZ_IMAGE_RETRY_DELAY_SEC", "1.5") or "1.5"))
 
+WORKSPACE_MEDIA_QUEUE_NAME = (os.getenv("WORKSPACE_MEDIA_QUEUE_NAME", "workspace_media") or "workspace_media").strip() or "workspace_media"
+WORKSPACE_IMAGE_QUEUE_NAME = (os.getenv("WORKSPACE_IMAGE_QUEUE_NAME", "workspace_image") or "workspace_image").strip() or "workspace_image"
+
 
 CHAT_MODEL_LABEL_DEFAULT = "gpt-4o-mini"
 PROMPT_MODEL_LABEL = "gpt-5.4"
@@ -2975,6 +2978,7 @@ async def workspace_video_run(
         raise HTTPException(status_code=402, detail=f"Недостаточно токенов. Нужно: {cost_tokens} ток.")
 
     charged = False
+    generation_id: Optional[str] = None
     try:
         if cost_tokens > 0 and charge_reason:
             try:
@@ -2999,32 +3003,52 @@ async def workspace_video_run(
             }
         )
 
-        _update_workspace_generation(generation_id, {"status": "processing"})
+        start_frame_url = _upload_workspace_input_image(uid, start_frame, filename=getattr(start_file, "filename", None), slot="video_start_frame") if start_frame else None
+        end_frame_url = _upload_workspace_input_image(uid, end_frame, filename=getattr(end_file, "filename", None), slot="video_end_frame") if end_frame else None
+        last_frame_url = _upload_workspace_input_image(uid, last_frame, filename=getattr(last_file, "filename", None), slot="video_last_frame") if last_frame else None
+        avatar_image_url = _upload_workspace_input_image(uid, avatar_image, filename=getattr(avatar_file, "filename", None), slot="video_avatar_image") if avatar_image else None
+        reference_image_urls = [
+            _upload_workspace_input_image(uid, raw, filename=getattr(ref_files[idx], "filename", None), slot=f"video_reference_{idx + 1}")
+            for idx, raw in enumerate(reference_images)
+            if raw
+        ]
 
-        asyncio.create_task(
-            _run_workspace_video_job(
-                generation_id=generation_id,
+        motion_video_upload_id = None
+        if motion_video:
+            uploaded_motion = create_workspace_upload_record(
                 user_id=uid,
-                provider=provider,
-                model=model,
-                mode=mode,
-                prompt=prompt,
-                duration=duration,
-                resolution=resolution,
-                aspect_ratio=aspect_ratio,
-                enable_audio=enable_audio,
-                quality=quality,
-                start_frame=start_frame,
-                end_frame=end_frame,
-                last_frame=last_frame,
-                avatar_image=avatar_image,
-                motion_video=motion_video,
-                reference_images=reference_images,
-                charge_tokens=(int(cost_tokens) if charged else 0),
-                charge_ref_id=charge_ref_id,
-                refund_reason=refund_reason,
+                filename=getattr(motion_file, "filename", None) or "motion_video.mp4",
+                content_type=getattr(motion_file, "content_type", None) or "video/mp4",
+                raw_bytes=motion_video,
             )
-        )
+            motion_video_upload_id = str(uploaded_motion.get("id") or "").strip() or None
+
+        job = {
+            "job_id": uuid4().hex,
+            "kind": "workspace_video_run",
+            "generation_id": generation_id,
+            "user_id": uid,
+            "provider": provider,
+            "model": model,
+            "mode": mode,
+            "prompt": prompt,
+            "duration": duration,
+            "resolution": resolution,
+            "aspect_ratio": aspect_ratio,
+            "enable_audio": bool(enable_audio),
+            "quality": quality,
+            "start_frame_url": start_frame_url,
+            "end_frame_url": end_frame_url,
+            "last_frame_url": last_frame_url,
+            "avatar_image_url": avatar_image_url,
+            "motion_video_upload_id": motion_video_upload_id,
+            "reference_image_urls": reference_image_urls,
+            "charge_tokens": int(cost_tokens) if charged else 0,
+            "charge_ref_id": charge_ref_id,
+            "refund_reason": refund_reason,
+            "origin": "workspace",
+        }
+        await enqueue_job(job, queue_name=WORKSPACE_MEDIA_QUEUE_NAME)
 
         try:
             balance_tokens = int(get_balance(uid) or 0)
@@ -3034,8 +3058,8 @@ async def workspace_video_run(
             "ok": True,
             "generation_id": generation_id,
             "task_id": generation_id,
-            "status": "processing",
-            "status_text": "Генерация началась. Видео появится в рабочей зоне автоматически.",
+            "status": "queued",
+            "status_text": "Генерация поставлена в очередь. Видео появится в рабочей зоне автоматически.",
             "balance_tokens": balance_tokens,
         }
     except HTTPException:
@@ -3051,10 +3075,13 @@ async def workspace_video_run(
                 add_tokens(uid, int(cost_tokens), reason=refund_reason, ref_id=charge_ref_id or uuid4().hex, meta={"origin": "workspace_video", "stage": "route_exception", "error": str(e)[:300]})
             except Exception:
                 pass
+        if generation_id:
+            _mark_workspace_generation_failed(generation_id, str(e), error_code="route_error")
         raise HTTPException(status_code=500, detail=f"Video run failed: {e}")
 
 
 @router.post("/video/upload")
+
 async def workspace_video_upload(
     file: UploadFile = File(...),
     user: Dict[str, Any] = Depends(get_current_workspace_user),
@@ -4114,9 +4141,6 @@ async def workspace_tts_run(payload: TTSGenerateIn, user: Dict[str, Any] = Depen
     if payload.output_format not in _WORKSPACE_TTS_ALLOWED_FORMATS:
         raise HTTPException(status_code=400, detail="output_format is not allowed")
 
-    language_code = _workspace_tts_language_code(payload.language_code)
-    voice_settings = _workspace_tts_voice_settings(payload)
-
     uid = int(user["telegram_user_id"])
     voice_meta = next((item for item in ALLOWED_VOICES if item.get("voice_id") == payload.voice_id), None) or {}
     voice_name = str(voice_meta.get("name") or payload.voice_id)
@@ -4128,7 +4152,7 @@ async def workspace_tts_run(payload: TTSGenerateIn, user: Dict[str, Any] = Depen
         "voice_id": payload.voice_id,
         "voice_name": voice_name,
         "text": payload.text,
-        "status": "processing",
+        "status": "queued",
         "output_format": payload.output_format,
         "origin": "workspace_voice",
         "created_at": now_iso,
@@ -4136,61 +4160,37 @@ async def workspace_tts_run(payload: TTSGenerateIn, user: Dict[str, Any] = Depen
     })
 
     try:
-        tts = _get_tts()
-        audio_bytes = await tts.tts(
-            text=payload.text,
-            voice_id=payload.voice_id,
-            model_id=payload.model_id,
-            output_format=payload.output_format,
-            language_code=language_code,
-            voice_settings=voice_settings,
-        )
-        ext = _workspace_voice_ext(payload.output_format)
-        mime_type = _workspace_voice_content_type(payload.output_format)
-        output_path = _workspace_voice_output_path(uid, ext)
-        audio_url = upload_bytes_to_supabase(output_path, audio_bytes, mime_type)
-        done_iso = _utc_now_iso()
-        _update_workspace_voice_generation(
-            generation_id,
+        await enqueue_job(
             {
-                "status": "completed",
-                "storage_path": output_path,
-                "audio_url": audio_url,
-                "download_url": audio_url,
-                "file_size_bytes": len(audio_bytes or b""),
-                "mime_type": mime_type,
-                "error_code": None,
-                "error_message": None,
-                "updated_at": done_iso,
-                "completed_at": done_iso,
+                "job_id": uuid4().hex,
+                "kind": "workspace_tts_run",
+                "generation_id": generation_id,
+                "user_id": uid,
+                "payload": payload.model_dump(),
+                "origin": "workspace_voice",
             },
+            queue_name=WORKSPACE_MEDIA_QUEUE_NAME,
         )
-        return {
-            "ok": True,
-            "generation_id": generation_id,
-            "provider": "elevenlabs",
-            "model": payload.model_id,
-            "voice_id": payload.voice_id,
-            "voice_name": voice_name,
-            "output_format": payload.output_format,
-            "language_code": language_code,
-            "voice_settings": voice_settings,
-            "audio_url": audio_url,
-            "download_url": audio_url,
-            "status": "completed",
-            "status_text": "Звук готов.",
-            "created_at": done_iso,
-            "completed_at": done_iso,
-        }
-    except HTTPException as e:
-        _mark_workspace_voice_generation_failed(generation_id, str(e.detail), error_code="http_error")
-        raise
     except Exception as e:
-        _mark_workspace_voice_generation_failed(generation_id, str(e), error_code="provider_error")
+        _mark_workspace_voice_generation_failed(generation_id, str(e), error_code="queue_error")
         raise HTTPException(status_code=500, detail=f"Voice generation failed: {e}")
+
+    return {
+        "ok": True,
+        "generation_id": generation_id,
+        "provider": "elevenlabs",
+        "model": payload.model_id,
+        "voice_id": payload.voice_id,
+        "voice_name": voice_name,
+        "output_format": payload.output_format,
+        "status": "queued",
+        "status_text": "Озвучка поставлена в очередь. Файл появится в рабочей зоне автоматически.",
+        "created_at": now_iso,
+    }
 
 
 @router.get("/tts/history")
+
 async def workspace_tts_history(
     limit: int = 20,
     offset: int = 0,
@@ -4513,7 +4513,7 @@ async def workspace_image_run(
             "model": model,
             "mode": mode,
             "prompt": prompt,
-            "status": "processing",
+            "status": "queued",
             "resolution": resolution,
             "aspect_ratio": aspect_ratio,
             "safety_level": safety_level,
@@ -4533,104 +4533,39 @@ async def workspace_image_run(
                 add_tokens(uid, -int(cost), reason=reason)
             charged = True
 
-        before_image_url: Optional[str] = None
-        after_image_url: Optional[str] = None
-        compare_mode = False
+        source_image_url = _upload_workspace_input_image(uid, source_image, filename=getattr(source_upload, "filename", None), slot="workspace_image_source") if source_image else None
+        base_image_url = _upload_workspace_input_image(uid, base_image, filename=getattr(base_upload, "filename", None), slot="workspace_image_base") if base_image else None
 
-        if provider == "nano_banana":
-            out_bytes, ext = await run_nano_banana(source_image, run_prompt, output_format="jpg", aspect_ratio=aspect_ratio)
-            engine = "nano_banana"
-        elif provider == "photosession":
-            from main import ark_edit_image
-
-            source_url = _upload_workspace_input_image(
-                uid,
-                source_image,
-                filename=getattr(source_upload, "filename", None),
-                slot="photosession_source",
-            )
-            out_bytes = await ark_edit_image(
-                source_image_bytes=b"",
-                prompt=run_prompt,
-                size=_workspace_ark_size(resolution),
-                source_image_url=source_url,
-            )
-            ext = _workspace_detect_image_ext(out_bytes, default="jpg")
-            engine = "modelark_seedream"
-        elif provider == "text_to_image":
-            from main import ark_text_to_image
-
-            out_bytes = await ark_text_to_image(run_prompt, size=_workspace_ark_size(resolution))
-            ext = _workspace_detect_image_ext(out_bytes, default="jpg")
-            engine = "modelark_seedream"
-        elif provider == "topaz_photo":
-            try:
-                preset_settings = get_photo_preset_settings(preset_slug)
-            except Exception:
-                raise HTTPException(status_code=400, detail=f"Unknown Topaz preset: {preset_slug}")
-
-            source_url = await _upload_workspace_topaz_input_image(
-                uid,
-                source_image,
-                filename=getattr(source_upload, "filename", None),
-                slot=f"topaz_{preset_slug}",
-            )
-            topaz_result = await _run_workspace_topaz_with_retry(
-                TopazImageParams(
-                    image_url=source_url,
-                    enhance_model=str(preset_settings.get("enhance_model") or "Standard V2"),
-                    upscale_factor=str(preset_settings.get("upscale_factor") or "2x"),
-                    output_format=str(preset_settings.get("output_format") or "jpg"),
-                    subject_detection=str(preset_settings.get("subject_detection") or "Foreground"),
-                    face_enhancement=bool(preset_settings.get("face_enhancement")),
-                    face_enhancement_creativity=float(preset_settings.get("face_enhancement_creativity") or 0.0),
-                    face_enhancement_strength=float(preset_settings.get("face_enhancement_strength") or 0.8),
-                )
-            )
-            out_bytes, ext = await _download_workspace_image_bytes(topaz_result.output_url)
-            engine = "topaz_photo_replicate"
-            before_image_url = source_url
-            compare_mode = True
-        else:
-            input_image = source_image
-            if provider == "two_images":
-                input_image = _compose_workspace_pair_image(base_image, source_image)
-                aspect_ratio = "match_input_image"
-            out_bytes, ext = await _workspace_run_nano_banana_pro_site(
-                user_id=uid,
-                prompt=run_prompt,
-                source_image_bytes=input_image,
-                source_filename=getattr(source_upload, "filename", None),
-                resolution=resolution,
-                aspect_ratio=aspect_ratio,
-                safety_level=safety_level,
-            )
-            engine = "nano_banana_pro"
-
-        output_path = _workspace_image_output_path(uid, ext)
-        image_url = upload_bytes_to_supabase(output_path, out_bytes, _workspace_image_content_type(ext))
-        after_image_url = image_url
-        now_iso = _utc_now_iso()
-        _update_workspace_image_generation(
-            generation_id,
+        await enqueue_job(
             {
-                "status": "completed",
-                "storage_path": output_path,
-                "image_url": image_url,
-                "download_url": image_url,
-                "file_size_bytes": len(out_bytes or b""),
-                "mime_type": _workspace_image_content_type(ext),
-                "error_code": None,
-                "error_message": None,
-                "preset_slug": preset_slug if provider == "topaz_photo" else None,
-                "source_image_url": before_image_url if provider == "topaz_photo" else None,
-                "before_image_url": before_image_url if provider == "topaz_photo" else None,
-                "after_image_url": after_image_url if provider == "topaz_photo" else image_url,
-                "compare_mode": compare_mode if provider == "topaz_photo" else False,
-                "updated_at": now_iso,
-                "completed_at": now_iso,
+                "job_id": uuid4().hex,
+                "kind": "workspace_image_run",
+                "generation_id": generation_id,
+                "user_id": uid,
+                "provider": provider,
+                "model": model,
+                "mode": mode,
+                "prompt": prompt,
+                "run_prompt": run_prompt,
+                "resolution": resolution,
+                "aspect_ratio": aspect_ratio,
+                "safety_level": safety_level,
+                "poster_style": poster_style,
+                "style_preset": style_preset,
+                "mood_preset": mood_preset,
+                "preset_slug": preset_slug,
+                "source_image_url": source_image_url,
+                "base_image_url": base_image_url,
+                "source_filename": getattr(source_upload, "filename", None),
+                "base_filename": getattr(base_upload, "filename", None),
+                "charge_tokens": int(cost if charged else 0),
+                "charge_ref_id": ref_id,
+                "refund_reason": f"{reason}_refund" if reason else "workspace_image_refund",
+                "origin": "workspace_image",
             },
+            queue_name=WORKSPACE_IMAGE_QUEUE_NAME,
         )
+
         try:
             balance_tokens = int(get_balance(uid) or 0)
         except Exception:
@@ -4641,43 +4576,37 @@ async def workspace_image_run(
             "provider": provider,
             "model": model,
             "mode": mode,
-            "engine": engine,
             "tokens_required": cost,
-            "image_url": image_url,
-            "download_url": image_url,
-            "before_image_url": before_image_url,
-            "after_image_url": after_image_url or image_url,
-            "compare_mode": bool(compare_mode and before_image_url and (after_image_url or image_url)),
-            "preset_slug": preset_slug if provider == "topaz_photo" else None,
-            "status": "completed",
-            "status_text": "Изображение готово.",
+            "status": "queued",
+            "status_text": "Изображение поставлено в очередь. Результат появится в рабочей зоне автоматически.",
             "balance_tokens": balance_tokens,
         }
-    except HTTPException as e:
+    except HTTPException:
         if charged:
             try:
                 try:
-                    add_tokens(uid, cost, reason=f"{reason}_refund", ref_id=ref_id, meta={"origin": "workspace_image", "error": str(e.detail)})
+                    add_tokens(uid, cost, reason=f"{reason}_refund", ref_id=ref_id or uuid4().hex, meta={"origin": "workspace_image", "stage": "route_http_exception"})
                 except TypeError:
                     add_tokens(uid, int(cost), reason=f"{reason}_refund")
             except Exception:
                 pass
-        _mark_workspace_image_generation_failed(generation_id, str(e.detail), error_code="http_error")
+        _mark_workspace_image_generation_failed(generation_id, "Queueing failed", error_code="queue_error")
         raise
     except Exception as e:
         if charged:
             try:
                 try:
-                    add_tokens(uid, cost, reason=f"{reason}_refund", ref_id=ref_id, meta={"origin": "workspace_image", "error": str(e)})
+                    add_tokens(uid, cost, reason=f"{reason}_refund", ref_id=ref_id or uuid4().hex, meta={"origin": "workspace_image", "error": str(e)})
                 except TypeError:
                     add_tokens(uid, int(cost), reason=f"{reason}_refund")
             except Exception:
                 pass
-        _mark_workspace_image_generation_failed(generation_id, str(e), error_code="provider_error")
+        _mark_workspace_image_generation_failed(generation_id, str(e), error_code="queue_error")
         raise HTTPException(status_code=500, detail=f"Image generation failed: {e}")
 
 
 @router.post("/tts/generate")
+
 async def workspace_tts_generate(payload: TTSGenerateIn, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Response:
     if payload.voice_id not in ALLOWED_VOICE_IDS:
         raise HTTPException(status_code=400, detail="voice_id is not allowed")
@@ -4760,15 +4689,28 @@ async def workspace_music_run(payload: MusicGenerateIn, user: Dict[str, Any] = D
         "charge_tokens": int(cost if charged else 0),
     })
 
-    asyncio.create_task(
-        _run_workspace_music_job(
-            generation_id=generation_id,
-            user_id=uid,
-            payload=payload,
-            charge_tokens=(int(cost) if charged else 0),
-            charge_ref_id=ref_id,
+    try:
+        await enqueue_job(
+            {
+                "job_id": uuid4().hex,
+                "kind": "workspace_music_run",
+                "generation_id": generation_id,
+                "user_id": uid,
+                "payload": payload.model_dump(),
+                "charge_tokens": int(cost if charged else 0),
+                "charge_ref_id": ref_id,
+                "origin": "workspace",
+            },
+            queue_name=WORKSPACE_MEDIA_QUEUE_NAME,
         )
-    )
+    except Exception as e:
+        if charged:
+            try:
+                add_tokens(uid, int(cost), reason="workspace_music_refund", ref_id=ref_id or uuid4().hex, meta={"origin": "workspace_music", "error": str(e)[:300], "stage": "enqueue"})
+            except Exception:
+                pass
+        _mark_workspace_music_failed(generation_id, str(e), error_code="queue_error")
+        raise HTTPException(status_code=500, detail=f"Music run failed: {e}")
 
     try:
         balance_tokens = int(get_balance(uid) or 0)
@@ -4778,6 +4720,7 @@ async def workspace_music_run(payload: MusicGenerateIn, user: Dict[str, Any] = D
 
 
 @router.post("/music/lyrics/generate")
+
 async def workspace_music_generate_lyrics(payload: MusicLyricsGenerateIn, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
     _ = int(user["telegram_user_id"])
     task_id = await _workspace_sunoapi_create_lyrics_task(str(payload.prompt or "").strip())
