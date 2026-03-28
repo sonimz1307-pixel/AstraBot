@@ -892,6 +892,14 @@ def _topup_packs_kb() -> dict:
     kb += chunk(btns, 2)
     return {"inline_keyboard": kb}
 
+def _nano_banana_pro_aspect_inline_kb(current: str = "9:16") -> dict:
+    values = ("1:1", "9:16", "16:9")
+    row = []
+    for value in values:
+        text = f"✅ {value}" if value == current else value
+        row.append({"text": text, "callback_data": f"nbp:aspect:{value}"})
+    return {"inline_keyboard": [row]}
+
 async def tg_send_stars_invoice(chat_id: int, title: str, description: str, payload: str, stars: int):
     """Send Stars invoice (currency XTR)."""
     body = {
@@ -1182,7 +1190,12 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
         st["nano_banana"] = {"step": "need_photo", "photo_bytes": None}
         
     elif mode == "nano_banana_pro":
-        st["nano_banana_pro"] = {"step": "need_photo", "photo_bytes": None, "resolution": "2K"}
+        st["nano_banana_pro"] = {
+            "step": "need_photo",
+            "photo_bytes": None,
+            "resolution": "2K",
+            "aspect_ratio": "9:16",
+        }
 
     elif mode == "topaz_photo":
         st["topaz_photo"] = {"step": "choose_preset", "preset_slug": None}
@@ -3628,6 +3641,29 @@ async def webhook(secret: str, request: Request):
             except Exception:
                 pass
 
+        if chat_id and user_id and data.startswith("nbp:aspect:"):
+            aspect_ratio = data.split(":", 2)[2].strip()
+            if aspect_ratio not in ("1:1", "9:16", "16:9"):
+                return {"ok": True}
+
+            st = _ensure_state(chat_id, user_id)
+            nbp = st.get("nano_banana_pro") or {
+                "step": "need_photo",
+                "photo_bytes": None,
+                "resolution": "2K",
+                "aspect_ratio": "9:16",
+            }
+            nbp["aspect_ratio"] = aspect_ratio
+            st["nano_banana_pro"] = nbp
+            st["ts"] = _now()
+
+            await tg_send_message(
+                chat_id,
+                f"✅ Формат Nano Banana Pro: {aspect_ratio}\nТеперь пришли фото или сразу напиши текст.",
+                reply_markup=_nano_banana_pro_aspect_inline_kb(aspect_ratio),
+            )
+            return {"ok": True}
+
         if chat_id and user_id and data.startswith("aichat:"):
             st = _ensure_state(chat_id, user_id)
             parts = data.split(":")
@@ -5928,6 +5964,11 @@ async def webhook(secret: str, request: Request):
             "Стоимость: 2 токена за результат.",
             reply_markup=_photo_future_menu_keyboard(),
         )
+        await tg_send_message(
+            chat_id,
+            "Выбери формат Nano Banana Pro:",
+            reply_markup=_nano_banana_pro_aspect_inline_kb("9:16"),
+        )
         return {"ok": True}
 
     if incoming_text in ("🖼 Апскейл фото", "Апскейл фото"):
@@ -6231,9 +6272,10 @@ async def webhook(secret: str, request: Request):
                 nbp["step"] = "need_prompt"
                 st["nano_banana_pro"] = nbp
                 st["ts"] = _now()
+                current_aspect = (nbp.get("aspect_ratio") or "9:16")
                 await tg_send_message(
                     chat_id,
-                    "Фото принял ✅\nТеперь напиши одним сообщением, что изменить (фон/стиль/детали).\n\nСтоимость: 2 токена.",
+                    f"Фото принял ✅\nФормат: {current_aspect}\nТеперь напиши одним сообщением, что изменить (фон/стиль/детали).\n\nСтоимость: 2 токена.",
                     reply_markup=_photo_future_menu_keyboard(),
                 )
                 return {"ok": True}
@@ -7218,7 +7260,7 @@ async def webhook(secret: str, request: Request):
                         "prompt": user_prompt,
                         "photo_file_id": "",
                         "resolution": (nbp.get("resolution") or "2K"),
-                        "aspect_ratio": (nbp.get("aspect_ratio") or "match_input_image"),
+                        "aspect_ratio": (nbp.get("aspect_ratio") or "9:16"),
                         "safety_level": (nbp.get("safety_level") or "high"),
                         "output_format": "png",
                         "cost": cost,
@@ -7247,6 +7289,7 @@ async def webhook(secret: str, request: Request):
                     "step": "need_photo",
                     "photo_bytes": None,
                     "resolution": (nbp.get("resolution") or "2K"),
+                    "aspect_ratio": (nbp.get("aspect_ratio") or "9:16"),
                 }
                 st["ts"] = _now()
                 return {"ok": True}
@@ -7261,6 +7304,7 @@ async def webhook(secret: str, request: Request):
                     "step": "need_photo",
                     "photo_bytes": None,
                     "resolution": (nbp.get("resolution") or "2K"),
+                    "aspect_ratio": (nbp.get("aspect_ratio") or "9:16"),
                 }
                 st["ts"] = _now()
 
@@ -7346,6 +7390,7 @@ async def webhook(secret: str, request: Request):
                 "step": "need_photo",
                 "photo_bytes": None,
                 "resolution": (nbp.get("resolution") or "2K"),
+                "aspect_ratio": (nbp.get("aspect_ratio") or "9:16"),
             }
             st["ts"] = _now()
 
