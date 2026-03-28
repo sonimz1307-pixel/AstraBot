@@ -893,7 +893,7 @@ def _topup_packs_kb() -> dict:
     return {"inline_keyboard": kb}
 
 def _nano_banana_pro_aspect_inline_kb(current: str = "9:16") -> dict:
-    values = ("1:1", "9:16", "16:9")
+    values = ("1:1", "4:5", "9:16", "16:9")
     row = []
     for value in values:
         text = f"✅ {value}" if value == current else value
@@ -3643,7 +3643,7 @@ async def webhook(secret: str, request: Request):
 
         if chat_id and user_id and data.startswith("nbp:aspect:"):
             aspect_ratio = data.split(":", 2)[2].strip()
-            if aspect_ratio not in ("1:1", "9:16", "16:9"):
+            if aspect_ratio not in ("1:1", "4:5", "9:16", "16:9"):
                 return {"ok": True}
 
             st = _ensure_state(chat_id, user_id)
