@@ -2148,13 +2148,16 @@ def _build_workspace_image_prompt(
     return base
 
 
-def _workspace_image_cost(provider: str, mode: str, preset_slug: str = "") -> int:
+def _workspace_image_cost(provider: str, mode: str, preset_slug: str = "", resolution: str = "2K") -> int:
     provider_key = str(provider or "").strip().lower()
     mode_key = str(mode or "").strip().lower()
     preset_key = str(preset_slug or "").strip().lower()
+    resolution_key = str(resolution or "2K").strip().upper() or "2K"
 
     if provider_key == "nano_banana":
         return 1
+    if provider_key == "nano_banana_2":
+        return 2 if resolution_key == "4K" else 1
     if provider_key == "nano_banana_pro":
         return 2
     if provider_key == "photosession":
@@ -2180,6 +2183,8 @@ def _workspace_image_charge_reason(provider: str, mode: str) -> Optional[str]:
 
     if provider_key == "nano_banana":
         return "nano_banana"
+    if provider_key == "nano_banana_2":
+        return "nano_banana_2"
     if provider_key == "nano_banana_pro":
         return "nano_banana_pro"
     if provider_key == "photosession":
@@ -4458,7 +4463,7 @@ async def workspace_image_run(
     if provider != "topaz_photo" and not prompt:
         raise HTTPException(status_code=400, detail="Missing prompt")
 
-    supported = {"nano_banana", "nano_banana_pro", "posters", "photosession", "two_images", "text_to_image", "topaz_photo"}
+    supported = {"nano_banana", "nano_banana_2", "nano_banana_pro", "posters", "photosession", "two_images", "text_to_image", "topaz_photo"}
     if provider not in supported:
         raise HTTPException(status_code=400, detail=f"Provider {provider} is not supported in /image/run")
 
@@ -4469,6 +4474,8 @@ async def workspace_image_run(
 
     if provider == "nano_banana" and not source_image:
         raise HTTPException(status_code=400, detail="Для Nano Banana нужен source image.")
+    if provider == "nano_banana_2" and mode == "image_to_image" and not source_image:
+        raise HTTPException(status_code=400, detail="Для Nano Banana 2 Image→Image нужен source image.")
     if provider == "nano_banana_pro" and mode == "image_to_image" and not source_image:
         raise HTTPException(status_code=400, detail="Для Image→Image нужен source image.")
     if provider == "posters" and mode == "photo_edit" and not source_image:
@@ -4480,7 +4487,7 @@ async def workspace_image_run(
     if provider == "topaz_photo" and not source_image:
         raise HTTPException(status_code=400, detail="Для Topaz Photo Upscale нужен source image.")
 
-    if provider in {"nano_banana_pro", "text_to_image"} and mode in {"text_to_image", "t2i"} and aspect_ratio == "match_input_image":
+    if provider in {"nano_banana_2", "nano_banana_pro", "text_to_image"} and mode in {"text_to_image", "t2i"} and aspect_ratio == "match_input_image":
         aspect_ratio = "16:9"
 
     run_prompt = _build_workspace_image_prompt(
@@ -4499,7 +4506,7 @@ async def workspace_image_run(
         bal = float(get_balance(uid) or 0)
     except Exception:
         bal = 0
-    cost = int(_workspace_image_cost(provider, mode, preset_slug))
+    cost = int(_workspace_image_cost(provider, mode, preset_slug, resolution))
     if cost > 0 and bal < cost:
         raise HTTPException(status_code=402, detail=f"Недостаточно токенов. Нужно: {cost} ток.")
 
