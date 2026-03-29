@@ -176,7 +176,6 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
 
     source_image = await _download_optional_bytes(job.get("source_image_url"))
     base_image = await _download_optional_bytes(job.get("base_image_url"))
-    mask_image = await _download_optional_bytes(job.get("mask_image_url"))
 
     ww._update_workspace_image_generation(
         generation_id,
@@ -223,24 +222,6 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
             )
             ext = ww._workspace_detect_image_ext(out_bytes, default="jpg")
             engine = "modelark_seedream"
-        elif provider == "openai_editor":
-            from main import openai_edit_image
-
-            if not source_image:
-                raise RuntimeError("Editor source image is missing")
-            if not mask_image:
-                raise RuntimeError("Editor mask image is missing")
-
-            out_bytes = await openai_edit_image(
-                source_image,
-                run_prompt,
-                ww._workspace_openai_edit_size_from_bytes(source_image),
-                mask_png_bytes=mask_image,
-            )
-            ext = ww._workspace_detect_image_ext(out_bytes, default="png")
-            engine = "openai_image_editor"
-            before_image_url = str(job.get("source_image_url") or "").strip() or None
-            compare_mode = True
         elif provider == "text_to_image":
             from main import ark_text_to_image
 
@@ -305,10 +286,10 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
                 "error_code": None,
                 "error_message": None,
                 "preset_slug": preset_slug if provider == "topaz_photo" else None,
-                "source_image_url": before_image_url if provider in {"topaz_photo", "openai_editor"} else None,
-                "before_image_url": before_image_url if provider in {"topaz_photo", "openai_editor"} else None,
-                "after_image_url": after_image_url if provider in {"topaz_photo", "openai_editor"} else image_url,
-                "compare_mode": compare_mode if provider in {"topaz_photo", "openai_editor"} else False,
+                "source_image_url": before_image_url if provider == "topaz_photo" else None,
+                "before_image_url": before_image_url if provider == "topaz_photo" else None,
+                "after_image_url": after_image_url if provider == "topaz_photo" else image_url,
+                "compare_mode": compare_mode if provider == "topaz_photo" else False,
                 "updated_at": now_iso,
                 "completed_at": now_iso,
             },
