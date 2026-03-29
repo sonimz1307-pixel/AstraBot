@@ -3781,12 +3781,94 @@ def _workspace_sunoapi_extract_lyrics_variants(task_json: Dict[str, Any]) -> Lis
 
 
 def _workspace_sunoapi_extract_tracks(task_json: Dict[str, Any]) -> List[Dict[str, Any]]:
-    data = task_json.get("data") or {}
-    resp = data.get("response") or {}
-    resp_data = resp.get("data") or []
-    if isinstance(resp_data, list):
-        return [item for item in resp_data if isinstance(item, dict)]
-    return []
+    if not isinstance(task_json, dict):
+        return []
+
+    audio_keys = {
+        "audio_url", "audioUrl", "stream_audio_url", "streamAudioUrl",
+        "source_audio_url", "sourceAudioUrl", "source_stream_audio_url", "sourceStreamAudioUrl",
+        "song_url", "songUrl", "song_path", "songPath",
+        "mp3_url", "mp3", "file_url", "fileUrl", "url",
+    }
+    hint_keys = audio_keys | {
+        "image_url", "imageUrl", "cover", "cover_url", "coverUrl",
+        "title", "prompt", "tags", "lyrics", "duration",
+        "video_url", "videoUrl", "mv", "model_name", "modelName",
+    }
+
+    def _track_score(obj: Any) -> int:
+        if not isinstance(obj, dict):
+            return 0
+        score = 0
+        for key in hint_keys:
+            if key in obj and obj.get(key) not in (None, "", [], {}):
+                score += 2 if key in audio_keys else 1
+        return score
+
+    def _coerce_list(val: Any) -> List[Dict[str, Any]]:
+        if isinstance(val, list):
+            items = [x for x in val if isinstance(x, dict)]
+            return [x for x in items if _track_score(x) > 0]
+        if isinstance(val, dict):
+            inner = val.get("data")
+            if isinstance(inner, list):
+                items = [x for x in inner if isinstance(x, dict)]
+                return [x for x in items if _track_score(x) > 0]
+            if _track_score(val) > 0:
+                return [val]
+        return []
+
+    candidates: List[Any] = []
+    data = task_json.get("data")
+    if isinstance(data, dict):
+        response = data.get("response") if isinstance(data.get("response"), dict) else {}
+        response_data = response.get("data") if isinstance(response, dict) else None
+        candidates.extend([
+            data.get("data"),
+            data.get("response"),
+            response_data,
+            response_data.get("data") if isinstance(response_data, dict) else None,
+            data.get("output"),
+            data.get("result"),
+        ])
+    candidates.extend([
+        task_json.get("output"),
+        task_json.get("result"),
+    ])
+
+    best: List[Dict[str, Any]] = []
+    best_score = -1
+    for cand in candidates:
+        items = _coerce_list(cand)
+        if not items:
+            continue
+        score = sum(_track_score(x) for x in items)
+        if score > best_score:
+            best = items
+            best_score = score
+    if best:
+        return best
+
+    def _scan(obj: Any) -> List[Dict[str, Any]]:
+        if isinstance(obj, dict):
+            if _track_score(obj) > 0:
+                return [obj]
+            for value in obj.values():
+                found = _scan(value)
+                if found:
+                    return found
+        elif isinstance(obj, list):
+            dict_items = [x for x in obj if isinstance(x, dict)]
+            scored_items = [x for x in dict_items if _track_score(x) > 0]
+            if scored_items:
+                return scored_items
+            for item in obj:
+                found = _scan(item)
+                if found:
+                    return found
+        return []
+
+    return _scan(task_json)
 def _workspace_pick_first_url(val: Any) -> str:
     if not val:
         return ""
@@ -3794,7 +3876,13 @@ def _workspace_pick_first_url(val: Any) -> str:
         s = val.strip()
         return s if s.startswith(("http://", "https://")) else ""
     if isinstance(val, dict):
-        for k in ("url", "audio_url", "audioUrl", "song_url", "songUrl", "song_path", "songPath", "mp3", "mp3_url", "file_url", "fileUrl", "download_url", "downloadUrl", "source_stream_audio_url", "sourceStreamAudioUrl", "video_url", "videoUrl", "image_url", "imageUrl"):
+        for k in (
+            "url", "audio_url", "audioUrl", "stream_audio_url", "streamAudioUrl",
+            "source_audio_url", "sourceAudioUrl", "source_stream_audio_url", "sourceStreamAudioUrl",
+            "song_url", "songUrl", "song_path", "songPath",
+            "mp3", "mp3_url", "file_url", "fileUrl", "download_url", "downloadUrl",
+            "video_url", "videoUrl", "image_url", "imageUrl",
+        ):
             v = val.get(k)
             if isinstance(v, str) and v.strip().startswith(("http://", "https://")):
                 return v.strip()
@@ -3813,7 +3901,12 @@ def _workspace_pick_first_url(val: Any) -> str:
 def _workspace_extract_audio_url(item: Dict[str, Any]) -> str:
     if not isinstance(item, dict):
         return ""
-    for k in ("audio_url", "audioUrl", "song_url", "songUrl", "song_path", "songPath", "mp3_url", "mp3", "file_url", "fileUrl", "url", "source_stream_audio_url", "sourceStreamAudioUrl"):
+    for k in (
+        "audio_url", "audioUrl", "stream_audio_url", "streamAudioUrl",
+        "source_audio_url", "sourceAudioUrl", "source_stream_audio_url", "sourceStreamAudioUrl",
+        "song_url", "songUrl", "song_path", "songPath",
+        "mp3_url", "mp3", "file_url", "fileUrl", "download_url", "downloadUrl", "url",
+    ):
         v = item.get(k)
         if isinstance(v, str) and v.strip().startswith(("http://", "https://")):
             return v.strip()
