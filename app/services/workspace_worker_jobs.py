@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+from nano_banana_2_piapi import handle_nano_banana_2
 from app.routers import web_workspace_api as ww
 from app.services.video_editor_service import (
     build_workspace_video_access_urls,
@@ -194,6 +195,16 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
         if provider == "nano_banana":
             out_bytes, ext = await ww.run_nano_banana(source_image, run_prompt, output_format="jpg", aspect_ratio=aspect_ratio)
             engine = "nano_banana"
+        elif provider == "nano_banana_2":
+            out_bytes, ext = await handle_nano_banana_2(
+                source_image,
+                run_prompt,
+                resolution=resolution,
+                output_format="jpg",
+                aspect_ratio=aspect_ratio,
+                source_image_url=str(job.get("source_image_url") or "").strip() or None,
+            )
+            engine = "nano_banana_2"
         elif provider == "photosession":
             from main import ark_edit_image
 
@@ -241,7 +252,7 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
             engine = "topaz_photo_replicate"
             before_image_url = source_url
             compare_mode = True
-        else:
+        elif provider in {"two_images", "nano_banana_pro"}:
             input_image = source_image
             if provider == "two_images":
                 input_image = ww._compose_workspace_pair_image(base_image, source_image)
@@ -256,6 +267,8 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
                 safety_level=safety_level,
             )
             engine = "nano_banana_pro"
+        else:
+            raise RuntimeError(f"Unsupported workspace image provider: {provider}")
 
         output_path = ww._workspace_image_output_path(user_id, ext)
         image_url = ww.upload_bytes_to_supabase(output_path, out_bytes, ww._workspace_image_content_type(ext))
