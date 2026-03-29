@@ -10,6 +10,7 @@ import httpx
 from queue_redis import dequeue_job
 
 from nano_banana_pro import handle_nano_banana_pro
+from nano_banana_2_piapi import handle_nano_banana_2
 from billing_db import add_tokens
 
 # --- Telegram ---
@@ -679,6 +680,111 @@ async def handle_job(job: Dict[str, Any]) -> None:
                 except Exception:
                     pass
             await tg_send_message(chat_id, f"❌ Ошибка Картинка+Картинка.\n{err}")
+            return
+
+    # --- NANO BANANA 2 (queue worker) ---
+    elif job_type == "nano_banana_2":
+        prompt = str(job.get("prompt") or "").strip()
+        photo_file_id = str(job.get("photo_file_id") or "").strip()
+        resolution = str(job.get("resolution") or "2K").strip()
+        output_format = str(job.get("output_format") or "jpg").strip()
+        aspect_ratio = str(job.get("aspect_ratio") or "").strip() or None
+        cost = int(job.get("cost") or 1)
+
+        if not chat_id or not user_id:
+            raise RuntimeError("nano_banana_2 job missing chat_id/user_id")
+        if not prompt:
+            raise RuntimeError("nano_banana_2 job missing prompt")
+
+        msg_id = await tg_send_message(chat_id, "⏳ Nano Banana 2: начинаю обработку…")
+
+        stop = asyncio.Event()
+
+        async def _progress_loop_nano2() -> None:
+            if not msg_id:
+                return
+            seq = _parse_progress_seq()
+            i = 0
+            while not stop.is_set():
+                pct = seq[min(i, len(seq) - 1)]
+                i += 1
+                try:
+                    await tg_edit_message_text(chat_id, msg_id, f"⏳ Nano Banana 2: обработка… {pct}%")
+                except Exception:
+                    pass
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=PROGRESS_STEP_SEC)
+                except asyncio.TimeoutError:
+                    continue
+
+        prog_task = asyncio.create_task(_progress_loop_nano2())
+
+        try:
+            if photo_file_id:
+                out_bytes, ext = await handle_nano_banana_2(
+                    b"x",
+                    prompt,
+                    resolution=resolution,
+                    output_format=output_format,
+                    aspect_ratio=aspect_ratio,
+                    telegram_file_id=photo_file_id,
+                )
+            else:
+                out_bytes, ext = await handle_nano_banana_2(
+                    None,
+                    prompt,
+                    resolution=resolution,
+                    output_format=output_format,
+                    aspect_ratio=aspect_ratio,
+                )
+
+            stop.set()
+            try:
+                await prog_task
+            except Exception:
+                pass
+
+            if msg_id:
+                try:
+                    await tg_edit_message_text(chat_id, msg_id, "✅ Nano Banana 2: готово. Отправляю файл…")
+                except Exception:
+                    pass
+
+            token = await register_dl2k_slot(chat_id, user_id, out_bytes)
+            reply_markup = None
+            if token:
+                reply_markup = {"inline_keyboard": [[{"text": "⬇️ Скачать оригинал 2К", "callback_data": f"dl2k:{token}"}]]}
+
+            if msg_id:
+                try:
+                    await tg_edit_message_text(chat_id, msg_id, "✅ Nano Banana 2: готово")
+                except Exception:
+                    pass
+
+            await tg_send_photo_bytes(chat_id, out_bytes, caption="🍌 Nano Banana 2 — готово", reply_markup=reply_markup)
+            return
+
+        except Exception as e:
+            err = str(e)[:800]
+            print("nano_banana_2 failed:", err)
+
+            stop.set()
+            try:
+                await prog_task
+            except Exception:
+                pass
+
+            try:
+                add_tokens(user_id, cost, reason="nano_banana_2_refund")
+            except Exception:
+                pass
+
+            if msg_id:
+                try:
+                    await tg_edit_message_text(chat_id, msg_id, f"❌ Ошибка Nano Banana 2.\n{err}")
+                except Exception:
+                    pass
+            await tg_send_message(chat_id, f"❌ Ошибка Nano Banana 2.\n{err}")
             return
 
     # --- NANO BANANA PRO (queue worker) ---
