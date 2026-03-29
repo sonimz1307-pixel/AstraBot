@@ -2148,6 +2148,39 @@ def _build_workspace_image_prompt(
     return base
 
 
+
+
+def _build_workspace_image_editor_prompt(prompt: str) -> str:
+    raw = str(prompt or "").strip()
+    prefix = (
+        "Edit only the masked area of the source image. "
+        "Keep camera angle, composition, perspective, lighting, shadows, colors, background and all unmasked regions as close to the original as possible. "
+        "Do not add text, labels, captions or watermarks unless the user explicitly asked for it."
+    )
+    return f"{prefix} User request: {raw}".strip()
+
+
+def _workspace_openai_edit_size_from_bytes(raw: Optional[bytes]) -> str:
+    if not raw:
+        return "1024x1024"
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(raw)) as img:
+            width, height = img.size
+    except Exception:
+        return "1024x1024"
+
+    if width <= 0 or height <= 0:
+        return "1024x1024"
+
+    ratio = float(width) / float(height)
+    if 0.86 <= ratio <= 1.16:
+        return "1024x1024"
+    if ratio > 1.16:
+        return "1536x1024"
+    return "1024x1536"
+
 def _workspace_image_cost(provider: str, mode: str, preset_slug: str = "", resolution: str = "2K") -> int:
     provider_key = str(provider or "").strip().lower()
     mode_key = str(mode or "").strip().lower()
@@ -2159,6 +2192,8 @@ def _workspace_image_cost(provider: str, mode: str, preset_slug: str = "", resol
     if provider_key == "nano_banana_2":
         return 2 if resolution_key == "4K" else 1
     if provider_key == "nano_banana_pro":
+        return 2
+    if provider_key == "openai_editor":
         return 2
     if provider_key == "photosession":
         return 1
@@ -2187,6 +2222,8 @@ def _workspace_image_charge_reason(provider: str, mode: str) -> Optional[str]:
         return "nano_banana_2"
     if provider_key == "nano_banana_pro":
         return "nano_banana_pro"
+    if provider_key == "openai_editor":
+        return "workspace_image_editor"
     if provider_key == "photosession":
         return "photosession_generation"
     if provider_key == "two_images":
@@ -4432,6 +4469,133 @@ async def workspace_image_history_delete_item(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Image history delete failed: {e}")
+
+
+@router.post("/image/editor/run")
+async def workspace_image_editor_run(
+    request: Request,
+    user: Dict[str, Any] = Depends(get_current_workspace_user),
+) -> Dict[str, Any]:
+    uid = int(user["telegram_user_id"])
+    form = await request.form()
+
+    prompt = str(form.get("prompt") or "").strip()
+    resolution = str(form.get("resolution") or "2K").strip().upper() or "2K"
+    source_upload = form.get("source_image")
+    mask_upload = form.get("mask_image")
+    source_image = await _read_optional_upload_bytes(source_upload)
+    mask_image = await _read_optional_upload_bytes(mask_upload)
+
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Missing prompt")
+    if not source_image:
+        raise HTTPException(status_code=400, detail="Для editor нужен source image.")
+    if not mask_image:
+        raise HTTPException(status_code=400, detail="Для editor нужна mask image.")
+
+    ensure_user_row(uid)
+    try:
+        bal = float(get_balance(uid) or 0)
+    except Exception:
+        bal = 0
+    provider = "openai_editor"
+    model = "gpt-image-1"
+    mode = "masked_edit"
+    cost = int(_workspace_image_cost(provider, mode, "", resolution))
+    reason = _workspace_image_charge_reason(provider, mode)
+    if cost > 0 and bal < cost:
+        raise HTTPException(status_code=402, detail=f"Недостаточно токенов. Нужно: {cost} ток.")
+
+    charged = False
+    ref_id = uuid4().hex if cost > 0 and reason else ""
+    generation_id = _insert_workspace_image_generation(
+        {
+            "user_id": str(uid),
+            "provider": provider,
+            "model": model,
+            "mode": mode,
+            "prompt": prompt,
+            "status": "queued",
+            "resolution": resolution,
+            "aspect_ratio": "match_input_image",
+            "origin": "workspace_image_editor",
+        }
+    )
+
+    try:
+        if cost > 0 and reason:
+            try:
+                add_tokens(uid, -cost, reason=reason, ref_id=ref_id, meta={"origin": "workspace_image_editor", "provider": provider, "mode": mode})
+            except TypeError:
+                add_tokens(uid, -int(cost), reason=reason)
+            charged = True
+
+        source_image_url = _upload_workspace_input_image(uid, source_image, filename=getattr(source_upload, "filename", None), slot="workspace_image_editor_source")
+        mask_image_url = _upload_workspace_input_image(uid, mask_image, filename=getattr(mask_upload, "filename", None), slot="workspace_image_editor_mask")
+        run_prompt = _build_workspace_image_editor_prompt(prompt)
+
+        await enqueue_job(
+            {
+                "job_id": uuid4().hex,
+                "kind": "workspace_image_run",
+                "generation_id": generation_id,
+                "user_id": uid,
+                "provider": provider,
+                "model": model,
+                "mode": mode,
+                "prompt": prompt,
+                "run_prompt": run_prompt,
+                "resolution": resolution,
+                "aspect_ratio": "match_input_image",
+                "source_image_url": source_image_url,
+                "mask_image_url": mask_image_url,
+                "source_filename": getattr(source_upload, "filename", None),
+                "mask_filename": getattr(mask_upload, "filename", None),
+                "charge_tokens": int(cost if charged else 0),
+                "charge_ref_id": ref_id,
+                "refund_reason": f"{reason}_refund" if reason else "workspace_image_editor_refund",
+                "origin": "workspace_image_editor",
+            },
+            queue_name=WORKSPACE_IMAGE_QUEUE_NAME,
+        )
+
+        try:
+            balance_tokens = int(get_balance(uid) or 0)
+        except Exception:
+            balance_tokens = None
+        return {
+            "ok": True,
+            "generation_id": generation_id,
+            "provider": provider,
+            "model": model,
+            "mode": mode,
+            "tokens_required": cost,
+            "status": "queued",
+            "status_text": "Editor поставил правку в очередь. Обновлённое изображение появится в рабочей зоне автоматически.",
+            "balance_tokens": balance_tokens,
+        }
+    except HTTPException:
+        if charged:
+            try:
+                try:
+                    add_tokens(uid, cost, reason=f"{reason}_refund", ref_id=ref_id or uuid4().hex, meta={"origin": "workspace_image_editor", "stage": "route_http_exception"})
+                except TypeError:
+                    add_tokens(uid, int(cost), reason=f"{reason}_refund")
+            except Exception:
+                pass
+        _mark_workspace_image_generation_failed(generation_id, "Queueing failed", error_code="queue_error")
+        raise
+    except Exception as e:
+        if charged:
+            try:
+                try:
+                    add_tokens(uid, cost, reason=f"{reason}_refund", ref_id=ref_id or uuid4().hex, meta={"origin": "workspace_image_editor", "error": str(e)})
+                except TypeError:
+                    add_tokens(uid, int(cost), reason=f"{reason}_refund")
+            except Exception:
+                pass
+        _mark_workspace_image_generation_failed(generation_id, str(e), error_code="queue_error")
+        raise HTTPException(status_code=500, detail=f"Image editor failed: {e}")
 
 
 @router.post("/image/run")
