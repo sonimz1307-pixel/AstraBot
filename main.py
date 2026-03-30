@@ -4089,6 +4089,25 @@ async def webhook(secret: str, request: Request):
     # ✅ Telegram: текст может быть в caption
     incoming_text = (message.get("text") or message.get("caption") or "").strip()
 
+    # Красивая reply-кнопка должна вести себя как реальный /reset
+    if incoming_text == "🔄 Сбросить генерацию":
+        incoming_text = "/reset"
+
+    # /reset — сбросить текущий режим/зависшие состояния (должен срабатывать даже во время busy-lock)
+    if incoming_text.startswith("/reset") or incoming_text.startswith("/resetgen"):
+        # чистим in-memory state
+        st.clear()
+        st.update({"mode": "chat", "ts": _now(), "poster": {}, "dl": {}})
+        # снимаем busy-lock (если зависла генерация)
+        _busy_end(int(user_id))
+        # чистим Supabase FSM (например music_wait_text)
+        try:
+            sb_clear_user_state(user_id)
+        except Exception:
+            pass
+        await tg_send_message(chat_id, "✅ Сброс выполнен. Возвращаю в главное меню.", reply_markup=_main_menu_for(user_id))
+        return {"ok": True}
+
     # Execution guard: while a long generation is running, ignore accidental navigation/button texts
     # so they do not get interpreted as prompts and start a second generation.
     if _busy_is_active(int(user_id)) and _is_nav_or_menu_text(incoming_text):
@@ -4962,21 +4981,6 @@ async def webhook(secret: str, request: Request):
         )
         return {"ok": True}
 
-
-    # /reset — сбросить текущий режим/зависшие состояния (крайняя мера)
-    if incoming_text.startswith("/reset") or incoming_text.startswith("/resetgen"):
-        # чистим in-memory state
-        st.clear()
-        st.update({"mode": "chat", "ts": _now(), "poster": {}, "dl": {}})
-        # снимаем busy-lock (если зависла генерация)
-        _busy_end(int(user_id))
-        # чистим Supabase FSM (например music_wait_text)
-        try:
-            sb_clear_user_state(user_id)
-        except Exception:
-            pass
-        await tg_send_message(chat_id, "✅ Сброс выполнен. Возвращаю в главное меню.", reply_markup=_main_menu_for(user_id))
-        return {"ok": True}
 
 
     if incoming_text in ("⬅ Назад", "Назад"):
