@@ -583,6 +583,29 @@ def _music_optional_float(value: Any, default: float = 0.65) -> float:
     return out
 
 
+def _workspace_suno_prompt_limit(model: Any, *, custom_mode: bool) -> int:
+    normalized = _normalize_suno_model(model)
+    if not custom_mode:
+        return 500
+    return 3000 if normalized == "V4" else 5000
+
+
+def _workspace_suno_title_limit(model: Any) -> int:
+    normalized = _normalize_suno_model(model)
+    return 80 if normalized in {"V4", "V4_5ALL"} else 100
+
+
+def _workspace_suno_style_limit(model: Any) -> int:
+    normalized = _normalize_suno_model(model)
+    return 200 if normalized == "V4" else 1000
+
+
+def _workspace_default_cover_title(filename: str) -> str:
+    stem = Path(str(filename or "cover")).stem
+    cleaned = re.sub(r"[_-]+", " ", stem or "").strip()
+    return cleaned or "Astra Cover"
+
+
 def _workspace_music_source_audio_path(*, user_id: int, slot: str, filename: str = "audio.bin") -> str:
     dt = datetime.now(timezone.utc)
     safe_slot = re.sub(r"[^a-z0-9_-]+", "_", str(slot or "audio").strip().lower()).strip("_") or "audio"
@@ -3666,7 +3689,8 @@ async def _workspace_sunoapi_post(path: str, payload: Dict[str, Any]) -> Dict[st
     response.raise_for_status()
     js = response.json()
     if js.get("code") != 200:
-        raise RuntimeError(f"SunoAPI request failed: {js}")
+        msg = str(js.get("msg") or "").strip()
+        raise RuntimeError(f"SunoAPI request failed: {msg or js}")
     return js
 
 
@@ -4885,15 +4909,41 @@ async def workspace_music_upload_cover_start(
 ) -> Dict[str, Any]:
     uid = int(user["telegram_user_id"])
     raw = await file.read()
+    normalized_model = _normalize_suno_model(model)
+    prompt_text = str(prompt or "").strip()
+    custom_mode_requested = bool(custom_mode)
+    instrumental_mode = bool(instrumental)
+    effective_custom_mode = custom_mode_requested or (not instrumental_mode and bool(prompt_text))
+    cover_title = str(title or "").strip()
+    cover_style = str(style or "").strip()
+
+    if effective_custom_mode:
+        if not cover_title:
+            cover_title = _workspace_default_cover_title(file.filename or "cover")
+        if not cover_style:
+            cover_style = "Modern pop cover"
+
+    prompt_limit = _workspace_suno_prompt_limit(normalized_model, custom_mode=effective_custom_mode)
+    if prompt_text and len(prompt_text) > prompt_limit:
+        mode_label = "custom lyrics mode" if effective_custom_mode else "non-custom mode"
+        raise HTTPException(status_code=400, detail=f"Текст для кавера слишком длинный для {normalized_model}: максимум {prompt_limit} символов в {mode_label}.")
+
+    title_limit = _workspace_suno_title_limit(normalized_model)
+    style_limit = _workspace_suno_style_limit(normalized_model)
+    if len(cover_title) > title_limit:
+        cover_title = cover_title[:title_limit]
+    if len(cover_style) > style_limit:
+        cover_style = cover_style[:style_limit]
+
     uploaded = _upload_workspace_music_source_file(file_bytes=raw, filename=file.filename or "audio.bin", content_type=(file.content_type or "audio/mpeg"), user_id=uid, slot="cover")
     task_id = await _workspace_sunoapi_start_upload_cover_task(
         upload_url=uploaded["upload_url"],
-        prompt=str(prompt or "").strip(),
-        title=str(title or "").strip(),
-        style=str(style or "").strip(),
-        model=model,
-        custom_mode=bool(custom_mode),
-        instrumental=bool(instrumental),
+        prompt=prompt_text,
+        title=cover_title,
+        style=cover_style,
+        model=normalized_model,
+        custom_mode=effective_custom_mode,
+        instrumental=instrumental_mode,
         negative_tags=str(negative_tags or "").strip(),
         vocal_gender=_normalize_vocal_gender(vocal_gender),
         style_weight=style_weight,
@@ -4902,7 +4952,7 @@ async def workspace_music_upload_cover_start(
         persona_id=str(persona_id or "").strip(),
         persona_model=str(persona_model or "style_persona").strip(),
     )
-    return {"ok": True, "task_id": task_id, "status": "queued", "upload_url": uploaded["upload_url"]}
+    return {"ok": True, "task_id": task_id, "status": "queued", "upload_url": uploaded["upload_url"], "custom_mode": effective_custom_mode}
 
 
 @router.post("/music/upload-extend/start")
