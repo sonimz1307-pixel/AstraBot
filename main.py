@@ -229,7 +229,6 @@ def _is_nav_or_menu_text(t: str) -> bool:
         "topaz видео • full hd smooth • 3 токена / 5 сек",
         "афиша: ярко", "афиша: кино",
         "текст→картинка",
-        "🔄 сбросить генерацию".lower(),
     }
 
     return s in nav_exact
@@ -1610,14 +1609,8 @@ def _tts_voices_keyboard(gender: str) -> dict:
     }
     
 def _help_menu_for(user_id: int) -> dict:
-    """Главное меню + экстренная кнопка сброса генерации (показываем ТОЛЬКО в «Помощь»)."""
-    base = _main_menu_keyboard(_is_admin(user_id))
-    # defensive copy
-    rows = [list(r) for r in (base.get("keyboard") or [])]
-    rows.append([{"text": "🔄 Сбросить генерацию"}])
-    base2 = dict(base)
-    base2["keyboard"] = rows
-    return base2
+    """Клавиатура для раздела «Помощь» без отдельной кнопки сброса генерации."""
+    return _main_menu_keyboard(_is_admin(user_id))
 
 
 def _photo_future_menu_keyboard() -> dict:
@@ -6158,7 +6151,7 @@ async def webhook(secret: str, request: Request):
             "• 🍌 Nano Banana 2: генерация или редактирование изображений через PiAPI.\n"
             "• 🍌 Nano Banana Pro: продвинутый AI-редактор изображений.\n"
             "• 💰 Баланс: токены, пополнение, история операций.\n"
-            "• 🔄 Сбросить генерацию — если зациклилась/зависла\n• /reset — сбросить текущий режим\n",
+            "• /reset — сбросить текущий режим, если что-то зависло\n",
             reply_markup=_help_menu_for(user_id),
         )
         return {"ok": True}
