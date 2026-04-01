@@ -4,6 +4,7 @@ from typing import Any, Dict, Optional
 
 from queue_redis import dequeue_job
 from app.services.workspace_worker_jobs import (
+    process_tg_grok_video_job,
     process_workspace_music_job,
     process_workspace_tts_job,
     process_workspace_video_job,
@@ -24,7 +25,7 @@ def _job_kind(job: Dict[str, Any]) -> str:
 
 
 def _sem_for_kind(kind: str) -> asyncio.Semaphore:
-    if kind == "workspace_video_run":
+    if kind in {"workspace_video_run", "tg_grok_video_run"}:
         return video_sem
     if kind == "workspace_music_run":
         return music_sem
@@ -38,6 +39,10 @@ async def _handle(job: Dict[str, Any]) -> None:
         if kind == "workspace_video_run":
             await process_workspace_video_job(job)
             print(f"[workspace_media] completed video job={job.get('job_id')}", flush=True)
+            return
+        if kind == "tg_grok_video_run":
+            await process_tg_grok_video_job(job)
+            print(f"[workspace_media] completed tg_grok job={job.get('job_id')}", flush=True)
             return
         if kind == "workspace_music_run":
             await process_workspace_music_job(job)
