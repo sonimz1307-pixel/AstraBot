@@ -578,6 +578,109 @@ async def handle_job(job: Dict[str, Any]) -> None:
             await tg_send_message(chat_id, f"❌ Ошибка нейро‑фотосессии.\n{err}")
             return
 
+    # --- SEEDREAM 4.5 SINGLE IMAGE (queue worker) ---
+    elif job_type == "seedream_45_single":
+        photo_file_id = (job.get("photo_file_id") or "").strip()
+        prompt = (job.get("prompt") or "").strip()
+        size = (job.get("size") or "1024x1024").strip()
+        charge_ref_id = (job.get("charge_ref_id") or "").strip() or None
+        charge_tokens = int(job.get("charge_tokens") or 1)
+        seedream_model = str(job.get("seedream_model") or "").strip() or None
+
+        if not chat_id or not user_id:
+            raise RuntimeError("seedream_45_single job missing chat_id/user_id")
+        if not photo_file_id:
+            raise RuntimeError("seedream_45_single job missing photo_file_id")
+        if not prompt:
+            raise RuntimeError("seedream_45_single job missing prompt")
+
+        msg_id = await tg_send_message(chat_id, "⏳ Seedream 4.5: начинаю обработку…")
+
+        stop = asyncio.Event()
+        prog_task: Optional[asyncio.Task] = None
+
+        async def _progress_loop_seedream_single() -> None:
+            if not msg_id:
+                return
+            seq = _parse_progress_seq()
+            i = 0
+            while not stop.is_set():
+                pct = seq[min(i, len(seq) - 1)]
+                i += 1
+                try:
+                    await tg_edit_message_text(chat_id, msg_id, f"⏳ Seedream 4.5: обработка… {pct}%")
+                except Exception:
+                    pass
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=PROGRESS_STEP_SEC)
+                except asyncio.TimeoutError:
+                    continue
+
+        prog_task = asyncio.create_task(_progress_loop_seedream_single())
+
+        try:
+            source_url = await tg_file_url_by_id(photo_file_id)
+
+            from main import ark_edit_image
+
+            out_bytes = await ark_edit_image(
+                source_image_bytes=b"",
+                prompt=prompt,
+                size=size,
+                source_image_url=source_url,
+                model=seedream_model,
+            )
+
+            stop.set()
+            if prog_task:
+                try:
+                    await prog_task
+                except Exception:
+                    pass
+
+            if msg_id:
+                try:
+                    await tg_edit_message_text(chat_id, msg_id, "✅ Seedream 4.5: готово.")
+                except Exception:
+                    pass
+
+            token = await register_dl2k_slot(chat_id, user_id, out_bytes)
+            reply_markup = None
+            if token:
+                reply_markup = {
+                    "inline_keyboard": [[
+                        {"text": "⬇️ Скачать оригинал 2К", "callback_data": f"dl2k:{token}"}
+                    ]]
+                }
+
+            await tg_send_photo_bytes(chat_id, out_bytes, caption="✅ Готово (Seedream 4.5)", reply_markup=reply_markup)
+            return
+
+        except Exception as e:
+            err = str(e)[:800]
+            print("seedream_45_single failed:", err)
+
+            stop.set()
+            if prog_task:
+                try:
+                    await prog_task
+                except Exception:
+                    pass
+
+            try:
+                add_tokens(user_id, int(charge_tokens), reason="seedream_45_single_refund", ref_id=charge_ref_id, meta={"error": err[:300]})
+            except Exception as refund_err:
+                print("seedream_45_single refund failed:", refund_err)
+
+            if msg_id:
+                try:
+                    await tg_edit_message_text(chat_id, msg_id, f"❌ Ошибка Seedream 4.5.\n{err}")
+                    return
+                except Exception:
+                    pass
+            await tg_send_message(chat_id, f"❌ Ошибка Seedream 4.5.\n{err}")
+            return
+
     # --- TWO PHOTOS / КАРТИНКА+КАРТИНКА (queue worker) ---
     elif job_type == "two_photos":
         prompt = str(job.get("prompt") or "").strip()
@@ -586,6 +689,7 @@ async def handle_job(job: Dict[str, Any]) -> None:
         charge_tokens = int(job.get("charge_tokens") or 1)
         charge_ref_id = str(job.get("charge_ref_id") or "").strip() or None
         size = (job.get("size") or "").strip() or None
+        seedream_model = str(job.get("seedream_model") or "").strip() or None
 
         if not chat_id or not user_id:
             raise RuntimeError("two_photos job missing chat_id/user_id")
@@ -630,6 +734,7 @@ async def handle_job(job: Dict[str, Any]) -> None:
                 size=size,
                 mask_png_bytes=None,
                 source_image_urls=[url1, url2],
+                model=seedream_model,
             )
 
             stop.set()
