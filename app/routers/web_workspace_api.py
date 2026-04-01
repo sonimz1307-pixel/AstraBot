@@ -60,6 +60,15 @@ from kling_flow import (
 )
 from veo_flow import VeoFlowError, run_veo_image_to_video, run_veo_text_to_video
 from veo_billing import calc_veo_charge
+from grok_video_replicate import (
+    GrokVideoError,
+    grok_tokens_for_duration,
+    normalize_grok_aspect_ratio,
+    normalize_grok_duration,
+    normalize_grok_resolution,
+    run_grok_image_to_video,
+    run_grok_text_to_video,
+)
 from kling3_pricing import calculate_kling3_price
 from songwriter_prompt import SONGWRITER_SYSTEM_PROMPT
 from queue_redis import enqueue_job
@@ -1010,6 +1019,8 @@ def _normalize_workspace_video_resolution(provider: str, model: str, resolution:
     value = str(resolution or "").strip().lower()
     if provider == "veo":
         return "1080p" if model == "veo-3.1-pro" else "720p"
+    if provider == "grok":
+        return normalize_grok_resolution(value or "720p")
     if value in {"720", "720p"}:
         return "720"
     if value in {"1080", "1080p"}:
@@ -1452,6 +1463,26 @@ async def _run_workspace_video_job(
                     reference_images_bytes=(reference_images or None),
                 )
 
+        elif provider == "grok":
+            if mode == "image_to_video":
+                if not start_frame:
+                    raise RuntimeError("Для Grok Image→Video нужен start_frame")
+                provider_video_url = await run_grok_image_to_video(
+                    user_id=user_id,
+                    image_bytes=start_frame,
+                    prompt=prompt,
+                    duration=duration,
+                    resolution=resolution,
+                    aspect_ratio=aspect_ratio,
+                )
+            else:
+                provider_video_url = await run_grok_text_to_video(
+                    prompt=prompt,
+                    duration=duration,
+                    resolution=resolution,
+                    aspect_ratio=aspect_ratio,
+                )
+
         elif provider == "seedance":
             task_type = "seedance-2-fast-preview" if model == "seedance-fast" else "seedance-2-preview"
             image_urls = await _upload_reference_images_to_public_urls(user_id, reference_images[:9], "seedance") if reference_images else None
@@ -1520,7 +1551,7 @@ async def _run_workspace_video_job(
             user_id=user_id,
             provider_video_url=provider_video_url,
         )
-    except (Kling3Error, KlingFlowError, VeoFlowError, ValueError, RuntimeError, TimeoutError) as e:
+    except (Kling3Error, KlingFlowError, VeoFlowError, GrokVideoError, ValueError, RuntimeError, TimeoutError) as e:
         _mark_workspace_generation_failed(generation_id, str(e), error_code="provider_error")
         if int(charge_tokens or 0) > 0:
             try:
@@ -2160,6 +2191,8 @@ def _workspace_image_cost(provider: str, mode: str, preset_slug: str = "", resol
         return 2 if resolution_key == "4K" else 1
     if provider_key == "nano_banana_pro":
         return 2
+    if provider_key == "seedream":
+        return 0 if mode_key in {"text_to_image", "t2i"} else 1
     if provider_key == "photosession":
         return 1
     if provider_key == "two_images":
@@ -2187,6 +2220,12 @@ def _workspace_image_charge_reason(provider: str, mode: str) -> Optional[str]:
         return "nano_banana_2"
     if provider_key == "nano_banana_pro":
         return "nano_banana_pro"
+    if provider_key == "seedream":
+        if mode_key in {"single", "seedream_45", "seedream_single"}:
+            return "seedream_45_single"
+        if mode_key in {"image_to_image", "i2i"}:
+            return "two_photos"
+        return None
     if provider_key == "photosession":
         return "photosession_generation"
     if provider_key == "two_images":
@@ -2864,6 +2903,15 @@ def _workspace_video_charge_spec(
             },
         }
 
+    if provider == "grok":
+        tokens = int(grok_tokens_for_duration(duration))
+        return {
+            "tokens": tokens,
+            "charge_reason": "grok_video",
+            "refund_reason": "grok_video_refund",
+            "meta": {"origin": "workspace_video", "provider": provider, "model": model, "mode": mode, "duration": duration, "rate": tokens / max(1, int(duration or 1))},
+        }
+
     if provider == "seedance":
         rate = 1 if model == "seedance-fast" else 2
         tokens = int(duration) * int(rate)
@@ -2914,7 +2962,7 @@ async def workspace_video_run(
     if not prompt and provider != "seedance":
         raise HTTPException(status_code=400, detail="Missing prompt")
 
-    supported = {"kling", "veo", "seedance", "sora"}
+    supported = {"kling", "veo", "grok", "seedance", "sora"}
     if provider not in supported:
         raise HTTPException(status_code=400, detail=f"Provider {provider} is not supported in /video/run yet")
 
@@ -2946,6 +2994,14 @@ async def workspace_video_run(
         raise HTTPException(status_code=400, detail="Для Image→Video нужен start frame.")
     if provider == "veo" and mode == "image_to_video" and not start_frame:
         raise HTTPException(status_code=400, detail="Для Veo Image→Video нужен start frame.")
+    if provider == "grok":
+        if mode not in {"text_to_video", "image_to_video"}:
+            raise HTTPException(status_code=400, detail="Grok поддерживает только Text→Video и Image→Video.")
+        duration = normalize_grok_duration(duration)
+        resolution = normalize_grok_resolution(resolution)
+        aspect_ratio = normalize_grok_aspect_ratio(aspect_ratio)
+        if mode == "image_to_video" and not start_frame:
+            raise HTTPException(status_code=400, detail="Для Grok Image→Video нужен start frame.")
     if provider == "seedance" and mode == "image_to_video" and not reference_images:
         raise HTTPException(status_code=400, detail="Для Seedance Image→Video нужен хотя бы один reference image.")
     if provider == "sora":
@@ -4556,7 +4612,7 @@ async def workspace_image_run(
     if provider != "topaz_photo" and not prompt:
         raise HTTPException(status_code=400, detail="Missing prompt")
 
-    supported = {"nano_banana", "nano_banana_2", "nano_banana_pro", "posters", "photosession", "two_images", "text_to_image", "topaz_photo"}
+    supported = {"nano_banana", "nano_banana_2", "nano_banana_pro", "seedream", "posters", "photosession", "two_images", "text_to_image", "topaz_photo"}
     if provider not in supported:
         raise HTTPException(status_code=400, detail=f"Provider {provider} is not supported in /image/run")
 
@@ -4571,6 +4627,10 @@ async def workspace_image_run(
         raise HTTPException(status_code=400, detail="Для Nano Banana 2 Image→Image нужен source image.")
     if provider == "nano_banana_pro" and mode == "image_to_image" and not source_image:
         raise HTTPException(status_code=400, detail="Для Image→Image нужен source image.")
+    if provider == "seedream" and mode in {"single", "seedream_45", "seedream_single"} and not source_image:
+        raise HTTPException(status_code=400, detail="Для Seedream 4.5 нужен source image.")
+    if provider == "seedream" and mode in {"image_to_image", "i2i"} and (not source_image or not base_image):
+        raise HTTPException(status_code=400, detail="Для режима Картинка + Картинка нужны base image и source image.")
     if provider == "posters" and mode == "photo_edit" and not source_image:
         raise HTTPException(status_code=400, detail="Для Photo Edit нужен source image.")
     if provider == "photosession" and not source_image:
@@ -4580,8 +4640,8 @@ async def workspace_image_run(
     if provider == "topaz_photo" and not source_image:
         raise HTTPException(status_code=400, detail="Для Topaz Photo Upscale нужен source image.")
 
-    if provider in {"nano_banana_2", "nano_banana_pro", "text_to_image"} and mode in {"text_to_image", "t2i"} and aspect_ratio == "match_input_image":
-        aspect_ratio = "16:9"
+    if provider in {"nano_banana_2", "nano_banana_pro", "text_to_image", "seedream"} and mode in {"text_to_image", "t2i"} and aspect_ratio == "match_input_image":
+        aspect_ratio = "9:16" if provider == "seedream" else "16:9"
 
     run_prompt = _build_workspace_image_prompt(
         provider=provider,
