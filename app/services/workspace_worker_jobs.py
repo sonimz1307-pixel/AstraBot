@@ -1,16 +1,74 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 from typing import Any, Dict, List, Optional
 
 import httpx
 
 from nano_banana_2_piapi import handle_nano_banana_2
+from billing_db import add_tokens
+from grok_video_replicate import (
+    GrokVideoError,
+    normalize_grok_aspect_ratio,
+    normalize_grok_duration,
+    normalize_grok_resolution,
+    run_grok_image_to_video,
+    run_grok_text_to_video,
+)
 from app.routers import web_workspace_api as ww
 from app.services.video_editor_service import (
     build_workspace_video_access_urls,
     get_workspace_upload_row,
 )
+
+TELEGRAM_BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+_TELEGRAM_API_BASE_RAW = (os.getenv("TELEGRAM_API_BASE") or "").strip()
+
+
+def _telegram_method_url(method: str) -> str:
+    if not TELEGRAM_BOT_TOKEN:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
+    raw = _TELEGRAM_API_BASE_RAW.rstrip("/")
+    if raw:
+        if TELEGRAM_BOT_TOKEN in raw:
+            return f"{raw}/{method}"
+        if raw.endswith("/bot"):
+            return f"{raw}{TELEGRAM_BOT_TOKEN}/{method}"
+        if raw.endswith("/bot/"):
+            return f"{raw}{TELEGRAM_BOT_TOKEN}/{method}"
+        if raw.endswith("/bot" + TELEGRAM_BOT_TOKEN):
+            return f"{raw}/{method}"
+    return f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
+
+
+async def _tg_post(method: str, *, json_payload: Optional[Dict[str, Any]] = None, data: Optional[Dict[str, Any]] = None) -> None:
+    url = _telegram_method_url(method)
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        resp = await client.post(url, json=json_payload, data=data)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Telegram {method} HTTP {resp.status_code}: {resp.text[:800]}")
+    try:
+        payload = resp.json()
+    except Exception:
+        return
+    if isinstance(payload, dict) and not payload.get("ok", False):
+        raise RuntimeError(f"Telegram {method} error: {payload}")
+
+
+async def _tg_send_message(chat_id: int, text: str) -> None:
+    await _tg_post("sendMessage", json_payload={"chat_id": int(chat_id), "text": str(text or "")})
+
+
+async def _tg_send_video_url(chat_id: int, video_url: str, caption: Optional[str] = None) -> None:
+    payload: Dict[str, Any] = {"chat_id": int(chat_id), "video": str(video_url or "").strip()}
+    if caption:
+        payload["caption"] = str(caption)
+    try:
+        await _tg_post("sendVideo", json_payload=payload)
+    except Exception:
+        await _tg_send_message(chat_id, f"✅ Grok готов. Видео: {video_url}")
 
 
 async def _download_bytes(url: str, *, timeout: float = 300.0) -> bytes:
@@ -91,6 +149,66 @@ async def process_workspace_video_job(job: Dict[str, Any]) -> None:
         charge_ref_id=str(job.get("charge_ref_id") or ""),
         refund_reason=str(job.get("refund_reason") or "workspace_video_refund"),
     )
+
+
+async def process_tg_grok_video_job(job: Dict[str, Any]) -> None:
+    chat_id = int(job.get("chat_id") or 0)
+    user_id = int(job.get("user_id") or 0)
+    mode = str(job.get("mode") or "text_to_video").strip().lower()
+    prompt = str(job.get("prompt") or "")
+    duration = normalize_grok_duration(job.get("duration") or 5)
+    resolution = normalize_grok_resolution(job.get("resolution") or "720p")
+    aspect_ratio = normalize_grok_aspect_ratio(job.get("aspect_ratio") or "16:9")
+    charge_tokens = int(job.get("charge_tokens") or 0)
+    charge_ref_id = str(job.get("charge_ref_id") or "")
+    refund_reason = str(job.get("refund_reason") or "grok_video_refund")
+
+    if not chat_id or not user_id:
+        raise RuntimeError("tg_grok_video_run job missing chat_id/user_id")
+
+    try:
+        video_url: Optional[str] = None
+        if mode == "image_to_video":
+            start_frame = await _download_optional_bytes(job.get("start_frame_url"), timeout=600.0)
+            if not start_frame:
+                raise GrokVideoError("Для Grok Image → Video нужен start frame")
+            video_url = await run_grok_image_to_video(
+                user_id=user_id,
+                image_bytes=start_frame,
+                image_url=str(job.get("start_frame_url") or "").strip() or None,
+                prompt=prompt,
+                duration=duration,
+                resolution=resolution,
+                aspect_ratio=aspect_ratio,
+            )
+        else:
+            video_url = await run_grok_text_to_video(
+                prompt=prompt,
+                duration=duration,
+                resolution=resolution,
+                aspect_ratio=aspect_ratio,
+            )
+        if not video_url:
+            raise GrokVideoError("Grok did not return video url")
+        await _tg_send_video_url(chat_id, video_url, caption="✅ Grok готов")
+    except Exception as e:
+        if charge_tokens > 0:
+            try:
+                add_tokens(
+                    int(user_id),
+                    int(charge_tokens),
+                    reason=refund_reason,
+                    ref_id=charge_ref_id or None,
+                    meta={"origin": "tg_grok_video", "error": str(e)[:300]},
+                )
+            except TypeError:
+                add_tokens(int(user_id), int(charge_tokens), reason=refund_reason)
+            except Exception:
+                pass
+        try:
+            await _tg_send_message(chat_id, f"❌ Ошибка Grok: {e}")
+        except Exception:
+            pass
 
 
 async def process_workspace_music_job(job: Dict[str, Any]) -> None:
@@ -205,6 +323,35 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
                 source_image_url=str(job.get("source_image_url") or "").strip() or None,
             )
             engine = "nano_banana_2"
+        elif provider == "seedream":
+            from main import ark_edit_image, ark_text_to_image
+
+            seedream_mode = str(job.get("mode") or "").strip().lower()
+            if seedream_mode in {"text_to_image", "t2i"}:
+                out_bytes = await ark_text_to_image(run_prompt, size=ww._workspace_ark_size(resolution))
+            else:
+                input_bytes = source_image
+                source_filename = job.get("source_filename")
+                upload_slot = "seedream_source_worker"
+                if seedream_mode in {"image_to_image", "i2i"}:
+                    input_bytes = ww._compose_workspace_pair_image(base_image, source_image)
+                    aspect_ratio = "match_input_image"
+                    source_filename = "seedream_pair.png"
+                    upload_slot = "seedream_pair_worker"
+                source_url = ww._upload_workspace_input_image(
+                    user_id,
+                    input_bytes or b"",
+                    filename=source_filename,
+                    slot=upload_slot,
+                )
+                out_bytes = await ark_edit_image(
+                    source_image_bytes=b"",
+                    prompt=run_prompt,
+                    size=ww._workspace_ark_size(resolution),
+                    source_image_url=source_url,
+                )
+            ext = ww._workspace_detect_image_ext(out_bytes, default="jpg")
+            engine = "modelark_seedream"
         elif provider == "photosession":
             from main import ark_edit_image
 
