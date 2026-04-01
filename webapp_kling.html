@@ -403,6 +403,16 @@
           </div>
         </label>
 
+        <input id="provider_grok" type="radio" name="provider" value="grok">
+        <label for="provider_grok" aria-label="Grok">
+          <div class="pfill"></div>
+          <div class="poverlay"></div>
+          <div class="ptxt">
+            <div class="pname">Grok</div>
+            <div class="pnote">Video</div>
+          </div>
+        </label>
+
         <input id="provider_sora" type="radio" name="provider" value="sora">
         <label for="provider_sora" aria-label="Sora 2">
           <img class="pimg" src="/static/img/providers/sora2.png" alt="Sora 2">
@@ -692,6 +702,73 @@
       </div>
     </div>
 
+    <!-- ===================== GROK BLOCK ===================== -->
+    <div id="grokBlock" style="display:none;">
+      <div class="card">
+        <h3>Grok Imagine Video</h3>
+        <div class="hint">Один и тот же Grok идёт через общий worker_workspace_media и для Telegram WebApp, и для сайта.</div>
+      </div>
+
+      <div class="card">
+        <h3>Режим</h3>
+        <div class="seg" role="radiogroup" aria-label="Режим Grok">
+          <input id="grok_flow_text" type="radio" name="grok_flow" value="text" checked>
+          <label for="grok_flow_text">
+            <span class="name">Text → Video</span>
+            <span class="desc">Только промпт</span>
+          </label>
+
+          <input id="grok_flow_image" type="radio" name="grok_flow" value="image">
+          <label for="grok_flow_image">
+            <span class="name">Image → Video</span>
+            <span class="desc">Фото + промпт</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Параметры</h3>
+        <div class="row">
+          <select id="grok_duration" aria-label="Длительность Grok">
+            <option value="1">1 секунда</option>
+            <option value="2">2 секунды</option>
+            <option value="3">3 секунды</option>
+            <option value="4">4 секунды</option>
+            <option value="5" selected>5 секунд</option>
+            <option value="6">6 секунд</option>
+            <option value="7">7 секунд</option>
+            <option value="8">8 секунд</option>
+            <option value="9">9 секунд</option>
+            <option value="10">10 секунд</option>
+            <option value="11">11 секунд</option>
+            <option value="12">12 секунд</option>
+            <option value="13">13 секунд</option>
+            <option value="14">14 секунд</option>
+            <option value="15">15 секунд</option>
+          </select>
+
+          <select id="grok_resolution" aria-label="Разрешение Grok">
+            <option value="480p">480p</option>
+            <option value="720p" selected>720p</option>
+          </select>
+        </div>
+
+        <div class="row" style="margin-top:10px;">
+          <select id="grok_aspect" aria-label="Формат Grok">
+            <option value="16:9">16:9 (YouTube)</option>
+            <option value="9:16">9:16 (Reels)</option>
+            <option value="1:1">1:1</option>
+            <option value="4:3">4:3</option>
+            <option value="3:4">3:4</option>
+            <option value="3:2">3:2</option>
+            <option value="2:3">2:3</option>
+          </select>
+        </div>
+
+        <div class="hint">У Grok звук встроен нативно. Отдельную галочку Audio включать не нужно.</div>
+      </div>
+    </div>
+
     <!-- ===================== SORA BLOCK ===================== -->
     <div id="soraBlock" style="display:none;">
       <div class="card">
@@ -812,6 +889,9 @@
     // Veo getters
     function getVeoModel(){ return qs('input[name="veo_model"]:checked')?.value || "fast"; } // fast|pro
     function getVeoFlow(){ return qs('input[name="veo_flow"]:checked')?.value || "text"; }   // text|image
+
+    // Grok getters
+    function getGrokFlow(){ return qs('input[name="grok_flow"]:checked')?.value || "text"; }
 
     function updateKlingUI(){
       let flow = getFlow();
@@ -971,11 +1051,13 @@
       const provider = getProvider();
       const klingBlock = qs('#klingBlock');
       const veoBlock = qs('#veoBlock');
+      const grokBlock = qs('#grokBlock');
       const seedanceBlock = qs('#seedanceBlock');
       const soraBlock = qs('#soraBlock');
 
       if (klingBlock) klingBlock.style.display = (provider === 'kling') ? 'block' : 'none';
       if (veoBlock) veoBlock.style.display   = (provider === 'veo')   ? 'block' : 'none';
+      if (grokBlock) grokBlock.style.display = (provider === 'grok') ? 'block' : 'none';
       if (seedanceBlock) seedanceBlock.style.display = (provider === 'seedance') ? 'block' : 'none';
       if (soraBlock) soraBlock.style.display = (provider === 'sora') ? 'block' : 'none';
 
@@ -1076,6 +1158,12 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
         const seconds = parseInt((qs('#sora_duration')?.value || "4"), 10);
         const map = {4:5, 8:10, 12:15};
         const tokens = map[seconds] || 5;
+        return { known:true, tokens, note:'' };
+      }
+
+      if (provider === 'grok'){
+        const seconds = parseInt((qs('#grok_duration')?.value || "5"), 10);
+        const tokens = Math.max(1, seconds);
         return { known:true, tokens, note:'' };
       }
 
@@ -1213,6 +1301,21 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
             };
           }
 
+        } else if (provider === 'grok'){
+          const flow = getGrokFlow();
+          const duration = parseInt((qs('#grok_duration')?.value || "5"), 10);
+          const resolution = (qs('#grok_resolution')?.value || '720p');
+          const aspect_ratio = (qs('#grok_aspect')?.value || '16:9');
+
+          payload = {
+            type: "grok_settings",
+            provider: "grok",
+            model: "grok-imagine-video",
+            flow,
+            duration,
+            resolution,
+            aspect_ratio
+          };
         } else if (provider === 'seedance'){
           const seedance_model = (qs('input[name="seedance_model"]:checked')?.value || 'preview');
           const flow = (qs('input[name="seedance_flow"]:checked')?.value || 'text');
