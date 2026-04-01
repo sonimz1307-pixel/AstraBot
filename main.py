@@ -222,7 +222,7 @@ def _is_nav_or_menu_text(t: str) -> bool:
         "статистика", "рассылка",
         # submenus you use in keyboards
         "фото/афиши", "нейро фотосессии", "картинка+картинка", "2 фото", "nano banana", "nano banana 2",
-        "апскейл фото", "апскейл видео",
+        "seedream", "апскейл", "апскейл фото", "апскейл видео",
         "topaz фото • standard • 2 токена", "topaz фото • detail • 3 токена", "topaz фото • max • 4 токена",
         "topaz видео • hd smooth • 1 токен / 5 сек",
         "topaz видео • full hd • 2 токена / 5 сек",
@@ -732,10 +732,14 @@ def _is_admin(user_id: int) -> bool:
     return int(user_id) in ADMIN_IDS
 
 
-# ---- BytePlus / ModelArk (Seedream) — used ONLY for "Нейро фотосессии" mode ----
+# ---- BytePlus / ModelArk (Seedream) ----
 ARK_API_KEY = os.getenv("ARK_API_KEY", "").strip()
 ARK_BASE_URL = os.getenv("ARK_BASE_URL", "https://ark.ap-southeast.bytepluses.com/api/v3").rstrip("/")
 ARK_IMAGE_MODEL = os.getenv("ARK_IMAGE_MODEL", "").strip()  # endpoint id: ep-...
+ARK_IMAGE_MODEL_SEEDREAM_45 = (
+    os.getenv("ARK_IMAGE_MODEL_SEEDREAM_45", "").strip()
+    or os.getenv("SEEDREAM_45_MODEL_ID", "").strip()
+)
 ARK_SIZE_DEFAULT = os.getenv("ARK_SIZE_DEFAULT", "2K").strip()
 ARK_TIMEOUT = float(os.getenv("ARK_TIMEOUT", "120"))
 ARK_WATERMARK = os.getenv("ARK_WATERMARK", "true").lower() in ("1","true","yes","y","on")
@@ -908,6 +912,30 @@ def _nano_banana_2_aspect_inline_kb(current: str = "9:16") -> dict:
         text = f"✅ {value}" if value == current else value
         row.append({"text": text, "callback_data": f"nb2:aspect:{value}"})
     return {"inline_keyboard": [row]}
+
+
+def _seedream_aspect_inline_kb(mode_key: str, current: str = "9:16") -> dict:
+    values = ("1:1", "4:5", "9:16", "16:9")
+    row = []
+    for value in values:
+        text = f"✅ {value}" if value == current else value
+        row.append({"text": text, "callback_data": f"sd45:{mode_key}:aspect:{value}"})
+    return {"inline_keyboard": [row]}
+
+
+def _seedream_model_for_bot() -> str:
+    return (ARK_IMAGE_MODEL_SEEDREAM_45 or ARK_IMAGE_MODEL or "").strip()
+
+
+def _seedream_size_for_aspect_ratio(aspect_ratio: str) -> str:
+    ratio = str(aspect_ratio or "").strip() or "9:16"
+    mapping = {
+        "1:1": "2048x2048",
+        "4:5": "2048x2560",
+        "9:16": "1600x2848",
+        "16:9": "2848x1600",
+    }
+    return mapping.get(ratio, mapping["9:16"])
 
 async def tg_send_stars_invoice(chat_id: int, title: str, description: str, payload: str, stars: int):
     """Send Stars invoice (currency XTR)."""
@@ -1181,7 +1209,7 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
 
     elif mode == "t2i":
         # Text-to-image: Seedream/ModelArk endpoint (text-to-image)
-        st["t2i"] = {"step": "need_prompt"}
+        st["t2i"] = {"step": "need_prompt", "aspect_ratio": "9:16", "model": "seedream_45"}
 
     elif mode == "two_photos":
         # 2 фото: multi-image (если эндпоинт поддерживает)
@@ -1191,6 +1219,8 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
             "photo1_file_id": None,
             "photo2_bytes": None,
             "photo2_file_id": None,
+            "aspect_ratio": "9:16",
+            "model": "seedream_45",
         }
 
 
@@ -1247,6 +1277,7 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
         st.pop("nano_banana_2", None)
         st.pop("topaz_photo", None)
         st.pop("topaz_video", None)
+        st.pop("photo_submenu", None)
         st.pop("sora_t2v", None)
         st.pop("sora_settings", None)
         st.pop("veo_t2v", None)
@@ -1624,9 +1655,37 @@ def _photo_future_menu_keyboard() -> dict:
     return {
         "keyboard": [
             [{"text": "Фото/Афиши"}, {"text": "Нейро фотосессии"}],
-            [{"text": "Текст→Картинка"}, {"text": "Картинка+Картинка"}],
-            [{"text": "🍌 Nano Banana"}, {"text": "🍌 Nano Banana 2"}],
-            [{"text": "🍌 Nano Banana Pro"}, {"text": "🖼 Апскейл фото"}],
+            [{"text": "🍌 Nano Banana"}],
+            [{"text": "🍌 Nano Banana 2"}],
+            [{"text": "🍌 Nano Banana Pro"}],
+            [{"text": "Seedream"}],
+            [{"text": "Апскейл"}],
+            [{"text": "⬅️ Назад"}],
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+        "selective": False,
+    }
+
+
+def _photo_seedream_menu_keyboard() -> dict:
+    return {
+        "keyboard": [
+            [{"text": "Seedream 4.5"}],
+            [{"text": "Текст→Картинка"}],
+            [{"text": "Картинка+Картинка"}],
+            [{"text": "⬅️ Назад"}],
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+        "selective": False,
+    }
+
+
+def _photo_upscale_menu_keyboard() -> dict:
+    return {
+        "keyboard": [
+            [{"text": "🖼 Апскейл фото"}],
             [{"text": "🎬 Апскейл видео"}],
             [{"text": "⬅️ Назад"}],
         ],
@@ -2512,6 +2571,7 @@ async def ark_edit_image(
     *,
     source_image_url: Optional[str] = None,
     source_image_urls: Optional[List[str]] = None,
+    model: Optional[str] = None,
 ) -> bytes:
     """Image-to-image via ModelArk (Seedream) using /images/generations.
 
@@ -2535,7 +2595,7 @@ async def ark_edit_image(
 
     if img_list:
         payload = {
-            "model": ARK_IMAGE_MODEL,
+            "model": (model or ARK_IMAGE_MODEL),
             "prompt": prompt,
             "response_format": "url",
             # ModelArk expects list for multi-image fusion; single image works too
@@ -2558,7 +2618,7 @@ async def ark_edit_image(
             "image": ("image.jpg", source_image_bytes, "image/jpeg"),
         }
         data = {
-            "model": ARK_IMAGE_MODEL,
+            "model": (model or ARK_IMAGE_MODEL),
             "prompt": prompt,
             "response_format": "url",
             "sequential_image_generation": "disabled",
@@ -2595,12 +2655,12 @@ async def ark_edit_image(
 
 
 
-async def ark_text_to_image(prompt: str, size: str = "2K") -> bytes:
+async def ark_text_to_image(prompt: str, size: str = "2K", model: Optional[str] = None) -> bytes:
     """Text-to-image via ModelArk (Seedream) using /images/generations."""
     url = f"{ARK_BASE_URL.rstrip('/')}/images/generations"
     headers = {"Authorization": f"Bearer {ARK_API_KEY}", "Content-Type": "application/json"}
     payload = {
-        "model": ARK_IMAGE_MODEL,
+        "model": (model or ARK_IMAGE_MODEL),
         "prompt": prompt,
         "response_format": "url",
         "size": size,
@@ -3703,6 +3763,69 @@ async def webhook(secret: str, request: Request):
                 chat_id,
                 f"✅ Формат Nano Banana 2: {aspect_ratio}\nТеперь пришли фото или сразу напиши текст.",
                 reply_markup=_nano_banana_2_aspect_inline_kb(aspect_ratio),
+            )
+            return {"ok": True}
+
+        if chat_id and user_id and data.startswith("sd45:"):
+            parts = data.split(":")
+            mode_key = parts[1].strip() if len(parts) > 1 else ""
+            aspect_ratio = ":".join(parts[3:]).strip() if len(parts) > 3 else ""
+            if mode_key not in ("t2i", "i2i", "single"):
+                return {"ok": True}
+            if aspect_ratio not in ("1:1", "4:5", "9:16", "16:9"):
+                return {"ok": True}
+
+            st = _ensure_state(chat_id, user_id)
+            if mode_key == "t2i":
+                _set_mode(chat_id, user_id, "t2i")
+                t2i = st.get("t2i") or {"step": "need_prompt", "model": "seedream_45"}
+                t2i["aspect_ratio"] = aspect_ratio
+                t2i["model"] = "seedream_45"
+                st["t2i"] = t2i
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    f"✅ Формат Seedream 4.5: {aspect_ratio}\nТеперь пришли текст.",
+                    reply_markup=_seedream_aspect_inline_kb("t2i", aspect_ratio),
+                )
+                return {"ok": True}
+
+            if mode_key == "single":
+                _set_mode(chat_id, user_id, "seedream_single")
+                sd = st.get("seedream_single") or {
+                    "step": "need_photo",
+                    "photo_bytes": None,
+                    "photo_file_id": None,
+                    "model": "seedream_45",
+                }
+                sd["aspect_ratio"] = aspect_ratio
+                sd["model"] = "seedream_45"
+                st["seedream_single"] = sd
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    f"✅ Формат Seedream 4.5: {aspect_ratio}\nТеперь пришли фото.",
+                    reply_markup=_seedream_aspect_inline_kb("single", aspect_ratio),
+                )
+                return {"ok": True}
+
+            _set_mode(chat_id, user_id, "two_photos")
+            tp = st.get("two_photos") or {
+                "step": "need_photo_1",
+                "photo1_bytes": None,
+                "photo1_file_id": None,
+                "photo2_bytes": None,
+                "photo2_file_id": None,
+                "model": "seedream_45",
+            }
+            tp["aspect_ratio"] = aspect_ratio
+            tp["model"] = "seedream_45"
+            st["two_photos"] = tp
+            st["ts"] = _now()
+            await tg_send_message(
+                chat_id,
+                f"✅ Формат Seedream 4.5: {aspect_ratio}\nТеперь пришли Фото 1.",
+                reply_markup=_seedream_aspect_inline_kb("i2i", aspect_ratio),
             )
             return {"ok": True}
 
@@ -4935,6 +5058,12 @@ async def webhook(secret: str, request: Request):
         return {"ok": True}
 
     if incoming_text == "⬅️ Назад":
+        submenu = str(st.get("photo_submenu") or "").strip().lower()
+        if submenu in ("seedream", "upscale"):
+            st.pop("photo_submenu", None)
+            st["ts"] = _now()
+            await tg_send_message(chat_id, "📸 Фото будущего — выбери режим:", reply_markup=_photo_future_menu_keyboard())
+            return {"ok": True}
         await tg_send_message(chat_id, "Главное меню.", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
 
@@ -5215,10 +5344,32 @@ async def webhook(secret: str, request: Request):
         
     if incoming_text in ("Фото будущего", "📸 Фото будущего"):
         # Подменю: объединённая точка входа в фото-режимы
+        st.pop("photo_submenu", None)
+        st["ts"] = _now()
         await tg_send_message(
             chat_id,
             "📸 Фото будущего — выбери режим:",
             reply_markup=_photo_future_menu_keyboard(),
+        )
+        return {"ok": True}
+
+    if incoming_text == "Seedream":
+        st["photo_submenu"] = "seedream"
+        st["ts"] = _now()
+        await tg_send_message(
+            chat_id,
+            "✨ Seedream — выбери режим:\n• Seedream 4.5 = 1 фото + чистый промпт\n• Текст→Картинка\n• Картинка+Картинка",
+            reply_markup=_photo_seedream_menu_keyboard(),
+        )
+        return {"ok": True}
+
+    if incoming_text == "Апскейл":
+        st["photo_submenu"] = "upscale"
+        st["ts"] = _now()
+        await tg_send_message(
+            chat_id,
+            "🖼 Апскейл — выбери режим:",
+            reply_markup=_photo_upscale_menu_keyboard(),
         )
         return {"ok": True}
 
@@ -6121,33 +6272,78 @@ async def webhook(secret: str, request: Request):
         )
         return {"ok": True}
 
-    if incoming_text in ("2 фото", "Картинка+Картинка"):
-        _set_mode(chat_id, user_id, "two_photos")
+    if incoming_text == "Seedream 4.5":
+        _set_mode(chat_id, user_id, "seedream_single")
+        st.pop("photo_submenu", None)
+        st["seedream_single"] = {
+            "step": "need_photo",
+            "photo_bytes": None,
+            "photo_file_id": None,
+            "aspect_ratio": "9:16",
+            "model": "seedream_45",
+        }
         await tg_send_message(
             chat_id,
-            "Режим «Картинка+Картинка».\n"
-            "1) Пришли Фото 1 — это ОСНОВА (поза/тело/фон).\n"
-            "2) Потом Пришли Фото 2 — это ИСТОЧНИК (лицо/стиль/одежда — что скажешь).\n"
-            "3) Потом одним сообщением напиши, что сделать из этих двух фото.\n\n"
-            "Стоимость: 1 токен.\n"
-            "Команда для сброса: /reset",
-            reply_markup=_help_menu_for(user_id),
+            "Seedream 4.5 • режим «1 фото + промпт».\n"
+            "1) Пришли одно фото.\n"
+            "2) Потом одним сообщением напиши, что сделать.\n"
+            "Промпт уйдёт как есть, без внутренней обвязки.\n\n"
+            "Стоимость: 1 токен.",
+            reply_markup=_photo_future_menu_keyboard(),
+        )
+        await tg_send_message(
+            chat_id,
+            "Выбери формат Seedream 4.5:",
+            reply_markup=_seedream_aspect_inline_kb("single", "9:16"),
+        )
+        return {"ok": True}
+
+    if incoming_text in ("2 фото", "Картинка+Картинка"):
+        _set_mode(chat_id, user_id, "two_photos")
+        st.pop("photo_submenu", None)
+        st["two_photos"] = {
+            "step": "need_photo_1",
+            "photo1_bytes": None,
+            "photo1_file_id": None,
+            "photo2_bytes": None,
+            "photo2_file_id": None,
+            "aspect_ratio": "9:16",
+            "model": "seedream_45",
+        }
+        await tg_send_message(
+            chat_id,
+            "Seedream 4.5 • режим «Картинка+Картинка».\n"
+            "1) Пришли Фото 1 — это ОСНОВА.\n"
+            "2) Потом пришли Фото 2 — это референс.\n"
+            "3) Потом одним сообщением напиши, что сделать. Промпт уйдёт как есть, без внутренней обвязки.\n\n"
+            "Стоимость: 1 токен.",
+            reply_markup=_photo_future_menu_keyboard(),
+        )
+        await tg_send_message(
+            chat_id,
+            "Выбери формат Seedream 4.5:",
+            reply_markup=_seedream_aspect_inline_kb("i2i", "9:16"),
         )
         return {"ok": True}
 
     if incoming_text == "Текст→Картинка":
         # Text-to-image mode (no input photo required)
         _set_mode(chat_id, user_id, "t2i")
-        st["t2i"] = {"step": "need_prompt"}
+        st.pop("photo_submenu", None)
+        st["t2i"] = {"step": "need_prompt", "aspect_ratio": "9:16", "model": "seedream_45"}
         await tg_send_message(
             chat_id,
-            "Ок. Режим «Текст→Картинка» (без фото).\n"
+            "Seedream 4.5 • режим «Текст→Картинка».\n"
             "Напиши одним сообщением, что нужно сгенерировать.\n"
-            "Пример: «Яркая афиша открытия цветочного магазина, лепестки в воздухе, крупный заголовок»",
-            reply_markup=_help_menu_for(user_id),
+            "Промпт уйдёт как есть, без внутренней обвязки.",
+            reply_markup=_photo_future_menu_keyboard(),
+        )
+        await tg_send_message(
+            chat_id,
+            "Выбери формат Seedream 4.5:",
+            reply_markup=_seedream_aspect_inline_kb("t2i", "9:16"),
         )
         return {"ok": True}
-
     if incoming_text == "Помощь":
         await tg_send_message(
             chat_id,
@@ -6182,6 +6378,23 @@ async def webhook(secret: str, request: Request):
         except Exception as e:
             await tg_send_message(chat_id, f"Ошибка при загрузке фото: {e}", reply_markup=_main_menu_for(user_id))
             return {"ok": True}
+
+        if st.get("mode") == "seedream_single":
+            sd = st.get("seedream_single") or {}
+            step = (sd.get("step") or "need_photo")
+            if step == "need_photo":
+                sd["photo_bytes"] = img_bytes
+                sd["photo_file_id"] = file_id
+                sd["step"] = "need_prompt"
+                st["seedream_single"] = sd
+                st["ts"] = _now()
+                current_aspect = (sd.get("aspect_ratio") or "9:16")
+                await tg_send_message(
+                    chat_id,
+                    f"Фото принял ✅\nФормат: {current_aspect}\nТеперь напиши одним сообщением, что сделать. Промпт уйдёт как есть.\n\nСтоимость: 1 токен.",
+                    reply_markup=_photo_future_menu_keyboard(),
+                )
+                return {"ok": True}
 
         if st.get("mode") == "topaz_photo":
             tpz = st.get("topaz_photo") or {}
@@ -6641,6 +6854,8 @@ async def webhook(secret: str, request: Request):
                     "photo1_file_id": file_id,
                     "photo2_bytes": None,
                     "photo2_file_id": None,
+                    "aspect_ratio": str(tp.get("aspect_ratio") or "9:16"),
+                    "model": str(tp.get("model") or "seedream_45"),
                 }
                 st["ts"] = _now()
                 await tg_send_message(
@@ -7086,6 +7301,8 @@ async def webhook(secret: str, request: Request):
                         "photo1_file_id": file_id,
                         "photo2_bytes": None,
                         "photo2_file_id": None,
+                        "aspect_ratio": str(tp.get("aspect_ratio") or "9:16"),
+                        "model": str(tp.get("model") or "seedream_45"),
                     }
                     st["ts"] = _now()
                     await tg_send_message(chat_id, "Фото 1 получил. Теперь пришли Фото 2.", reply_markup=_main_menu_for(user_id))
@@ -7169,7 +7386,7 @@ async def webhook(secret: str, request: Request):
             if nav_text in ("⬅ Назад", "Назад") or nav_text.startswith("/"):
                 # обработается выше в общих обработчиках (/reset, /start, Назад)
                 pass
-            elif nav_text in ("Фото будущего", "📸 Фото будущего", "Фото/Афиши", "Нейро фотосессии", "2 фото", "Картинка+Картинка", "🍌 Nano Banana", "🍌 Nano Banana 2", "Текст→Картинка", "🧠 ИИ (чат)", "ИИ (чат)", "🧠 ИИ чат"):
+            elif nav_text in ("Фото будущего", "📸 Фото будущего", "Фото/Афиши", "Нейро фотосессии", "2 фото", "Картинка+Картинка", "Seedream", "Seedream 4.5", "Апскейл", "🍌 Nano Banana", "🍌 Nano Banana 2", "🍌 Nano Banana Pro", "Текст→Картинка", "🖼 Апскейл фото", "🎬 Апскейл видео", "🧠 ИИ (чат)", "ИИ (чат)", "🧠 ИИ чат"):
                 # навигация по меню — тоже не промпт
                 pass
             else:
@@ -7717,6 +7934,10 @@ async def webhook(secret: str, request: Request):
             except Exception:
                 bal = 0
 
+            aspect_ratio = str(tp.get("aspect_ratio") or "9:16")
+            size = _seedream_size_for_aspect_ratio(aspect_ratio)
+            seedream_model = _seedream_model_for_bot()
+
             cost_tokens = 1
             if bal < cost_tokens:
                 await tg_send_message(
@@ -7727,7 +7948,7 @@ async def webhook(secret: str, request: Request):
                 return {"ok": True}
 
             charge_ref_id = f"two_photos:{int(user_id)}:{uuid4().hex}"
-            prompt = _two_photos_prompt(user_task)
+            prompt = user_task
             try:
                 add_tokens(
                     int(user_id),
@@ -7753,7 +7974,8 @@ async def webhook(secret: str, request: Request):
                     "photo1_file_id": str(photo1_file_id),
                     "photo2_file_id": str(photo2_file_id),
                     "prompt": prompt,
-                    "size": "1440x2560",
+                    "size": size,
+                    "seedream_model": seedream_model,
                     "charge_tokens": int(cost_tokens),
                     "charge_ref_id": charge_ref_id,
                 }, queue_name="gen")
@@ -7775,7 +7997,7 @@ async def webhook(secret: str, request: Request):
                 )
                 return {"ok": True}
 
-            await tg_send_message(chat_id, "⏳ Картинка+Картинка: Начинаю генерацию. Как будет готово — пришлю результат.", reply_markup=_main_menu_for(user_id))
+            await tg_send_message(chat_id, f"⏳ Seedream 4.5: запускаю «Картинка+Картинка» ({aspect_ratio}). Как будет готово — пришлю результат.", reply_markup=_main_menu_for(user_id))
 
             st["two_photos"] = {
                 "step": "need_photo_1",
@@ -7783,6 +8005,112 @@ async def webhook(secret: str, request: Request):
                 "photo1_file_id": None,
                 "photo2_bytes": None,
                 "photo2_file_id": None,
+                "aspect_ratio": aspect_ratio,
+                "model": "seedream_45",
+            }
+            st["ts"] = _now()
+            return {"ok": True}
+
+        if st.get("mode") == "seedream_single":
+            sd = st.get("seedream_single") or {}
+            step = (sd.get("step") or "need_photo")
+            photo_file_id = str(sd.get("photo_file_id") or "").strip()
+
+            if step != "need_prompt" or not photo_file_id:
+                await tg_send_message(
+                    chat_id,
+                    "Сначала пришли фото для Seedream 4.5.",
+                    reply_markup=_photo_future_menu_keyboard(),
+                )
+                return {"ok": True}
+
+            user_task = incoming_text.strip()
+            if not user_task:
+                await tg_send_message(
+                    chat_id,
+                    "Напиши одним сообщением, что сделать с фото.",
+                    reply_markup=_photo_future_menu_keyboard(),
+                )
+                return {"ok": True}
+
+            ensure_user_row(int(user_id))
+            try:
+                bal = int(get_balance(int(user_id)) or 0)
+            except Exception:
+                bal = 0
+
+            aspect_ratio = str(sd.get("aspect_ratio") or "9:16")
+            size = _seedream_size_for_aspect_ratio(aspect_ratio)
+            seedream_model = _seedream_model_for_bot()
+
+            cost_tokens = 1
+            if bal < cost_tokens:
+                await tg_send_message(
+                    chat_id,
+                    f"Недостаточно токенов 😕\nНужно: {cost_tokens} токен для Seedream 4.5.",
+                    reply_markup=_topup_packs_kb(),
+                )
+                return {"ok": True}
+
+            charge_ref_id = f"seedream_45_single:{int(user_id)}:{uuid4().hex}"
+            try:
+                add_tokens(
+                    int(user_id),
+                    -int(cost_tokens),
+                    reason="seedream_45_single",
+                    ref_id=charge_ref_id,
+                    meta={
+                        "cost": int(cost_tokens),
+                        "photo_file_id": str(photo_file_id),
+                    },
+                )
+            except Exception as e:
+                await tg_send_message(chat_id, f"❌ Не удалось списать токен: {e}", reply_markup=_topup_packs_kb())
+                return {"ok": True}
+
+            try:
+                await enqueue_job({
+                    "job_id": uuid4().hex,
+                    "type": "seedream_45_single",
+                    "chat_id": int(chat_id),
+                    "user_id": int(user_id),
+                    "photo_file_id": str(photo_file_id),
+                    "prompt": user_task,
+                    "size": size,
+                    "seedream_model": seedream_model,
+                    "charge_tokens": int(cost_tokens),
+                    "charge_ref_id": charge_ref_id,
+                }, queue_name="gen")
+            except Exception as e:
+                try:
+                    add_tokens(
+                        int(user_id),
+                        int(cost_tokens),
+                        reason="seedream_45_single_refund",
+                        ref_id=charge_ref_id,
+                        meta={"error": f"enqueue_failed: {str(e)[:300]}"},
+                    )
+                except Exception:
+                    pass
+                await tg_send_message(
+                    chat_id,
+                    f"❌ Не удалось поставить Seedream 4.5 в очередь: {e}",
+                    reply_markup=_photo_future_menu_keyboard(),
+                )
+                return {"ok": True}
+
+            await tg_send_message(
+                chat_id,
+                f"⏳ Seedream 4.5: запускаю режим «1 фото + промпт» ({aspect_ratio}). Как будет готово — пришлю результат.",
+                reply_markup=_main_menu_for(user_id),
+            )
+
+            st["seedream_single"] = {
+                "step": "need_photo",
+                "photo_bytes": None,
+                "photo_file_id": None,
+                "aspect_ratio": aspect_ratio,
+                "model": "seedream_45",
             }
             st["ts"] = _now()
             return {"ok": True}
@@ -7944,7 +8272,7 @@ async def webhook(secret: str, request: Request):
             t2i = st.get("t2i") or {}
             step = (t2i.get("step") or "need_prompt")
             if step != "need_prompt":
-                st["t2i"] = {"step": "need_prompt"}
+                st["t2i"] = {"step": "need_prompt", "aspect_ratio": str(t2i.get("aspect_ratio") or "9:16"), "model": "seedream_45"}
 
             user_prompt = incoming_text.strip()
             if not user_prompt:
@@ -7963,8 +8291,12 @@ async def webhook(secret: str, request: Request):
                 await tg_send_chat_action(chat_id, "upload_photo")
 
             try:
+                aspect_ratio = str(t2i.get("aspect_ratio") or "9:16")
+                model = _seedream_model_for_bot()
+                size = _seedream_size_for_aspect_ratio(aspect_ratio)
+
                 _busy_start(int(user_id), "Seedream T2I")
-                img_bytes = await ark_text_to_image(prompt=user_prompt, size=ARK_SIZE_DEFAULT)
+                img_bytes = await ark_text_to_image(prompt=user_prompt, size=size, model=model)
 
                 _dl_set_bytes(chat_id, user_id, token, img_bytes)
 
@@ -7994,7 +8326,7 @@ async def webhook(secret: str, request: Request):
             finally:
                 _busy_end(int(user_id))
                 # остаёмся в режиме t2i, чтобы можно было генерировать дальше без повторного выбора
-                st["t2i"] = {"step": "need_prompt"}
+                st["t2i"] = {"step": "need_prompt", "aspect_ratio": str(t2i.get("aspect_ratio") or "9:16"), "model": "seedream_45"}
                 st["ts"] = _now()
             return {"ok": True}
 
