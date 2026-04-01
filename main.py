@@ -1655,12 +1655,9 @@ def _photo_future_menu_keyboard() -> dict:
     return {
         "keyboard": [
             [{"text": "Фото/Афиши"}, {"text": "Нейро фотосессии"}],
-            [{"text": "🍌 Nano Banana"}],
-            [{"text": "🍌 Nano Banana 2"}],
-            [{"text": "🍌 Nano Banana Pro"}],
-            [{"text": "Seedream"}],
-            [{"text": "Апскейл"}],
-            [{"text": "⬅️ Назад"}],
+            [{"text": "🍌 Nano Banana"}, {"text": "🍌 Nano Banana 2"}],
+            [{"text": "🍌 Nano Banana Pro"}, {"text": "Seedream"}],
+            [{"text": "Апскейл"}, {"text": "⬅️ Назад"}],
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False,
