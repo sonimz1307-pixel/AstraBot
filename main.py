@@ -18,7 +18,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from db_supabase import track_user_activity, get_basic_stats, supabase as sb
-from kling_flow import run_motion_control_from_bytes, run_image_to_video_from_bytes, run_text_to_video_from_prompt
+from kling_flow import run_motion_control_from_bytes, run_image_to_video_from_bytes, run_text_to_video_from_prompt, upload_bytes_to_supabase
 from veo_flow import run_veo_text_to_video, run_veo_image_to_video
 from veo_billing import calc_veo_charge, format_veo_charge_line
 from billing_db import (
@@ -39,6 +39,12 @@ from topaz_pricing import (
 from yookassa_flow import create_yookassa_payment
 from kling3_pricing import calculate_kling3_price
 from kling3_telegram_handler import handle_kling3_wait_prompt
+from grok_video_replicate import (
+    grok_tokens_for_duration,
+    normalize_grok_aspect_ratio,
+    normalize_grok_duration,
+    normalize_grok_resolution,
+)
 from app.routers.tts import router as tts_router
 
 app = FastAPI()
@@ -96,6 +102,7 @@ if UVICORN_LOGGER.level > logging.INFO:
     UVICORN_LOGGER.setLevel(logging.INFO)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+WORKSPACE_MEDIA_QUEUE_NAME = (os.getenv("WORKSPACE_MEDIA_QUEUE_NAME", "workspace_media") or "workspace_media").strip() or "workspace_media"
 
 BALANCE_BANNER_PATH = os.getenv("BALANCE_BANNER_PATH", "").strip()
 
@@ -1265,6 +1272,12 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
             "prompt": None,
         }
 
+    elif mode == "grok_t2v":
+        st["grok_t2v"] = {"step": "need_prompt"}
+
+    elif mode == "grok_i2v":
+        st["grok_i2v"] = {"step": "need_image", "image_bytes": None, "image_name": None}
+
 
     else:
         # chat / default
@@ -1282,6 +1295,9 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
         st.pop("sora_settings", None)
         st.pop("veo_t2v", None)
         st.pop("veo_i2v", None)
+        st.pop("grok_settings", None)
+        st.pop("grok_t2v", None)
+        st.pop("grok_i2v", None)
         st.pop("ai_chat_mode", None)
         st.pop("ai_prompt", None)
 
@@ -1507,6 +1523,60 @@ async def _enqueue_music_job(*, chat_id: int, user_id: int, settings: dict, char
         job["charge_tokens"] = int(charge_tokens)
 
     await enqueue_job(job, queue_name="music")
+    return job
+
+
+async def _enqueue_tg_grok_job(*, chat_id: int, user_id: int, mode: str, prompt: str, settings: dict, image_bytes: bytes | None = None, image_name: str | None = None, charge_tokens: int = 0, charge_ref_id: str = "") -> dict:
+    settings = dict(settings or {})
+    duration = normalize_grok_duration(settings.get("duration") or 5)
+    resolution = normalize_grok_resolution(settings.get("resolution") or "720p")
+    aspect_ratio = normalize_grok_aspect_ratio(settings.get("aspect_ratio") or "16:9")
+    start_frame_url = None
+    if mode == "image_to_video":
+        if not image_bytes:
+            raise RuntimeError("Для Grok Image → Video нужно стартовое фото")
+        ext = "jpg"
+        mime = "image/jpeg"
+        head = bytes((image_bytes or b"")[:16])
+        if head.startswith(b"\x89PNG"):
+            ext = "png"
+            mime = "image/png"
+        elif head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+            ext = "webp"
+            mime = "image/webp"
+        elif isinstance(image_name, str) and "." in image_name:
+            tail = image_name.rsplit(".", 1)[-1].lower().strip()
+            if tail in ("jpg", "jpeg"):
+                ext = "jpg"
+                mime = "image/jpeg"
+            elif tail == "png":
+                ext = "png"
+                mime = "image/png"
+            elif tail == "webp":
+                ext = "webp"
+                mime = "image/webp"
+        path = f"grok_inputs/{int(user_id)}/{int(time.time())}_{uuid4().hex[:10]}.{ext}"
+        start_frame_url = upload_bytes_to_supabase(path, image_bytes, mime)
+
+    job = {
+        "job_id": uuid4().hex,
+        "kind": "tg_grok_video_run",
+        "chat_id": int(chat_id),
+        "user_id": int(user_id),
+        "provider": "grok",
+        "model": "grok-imagine-video",
+        "mode": "image_to_video" if mode == "image_to_video" else "text_to_video",
+        "prompt": str(prompt or "").strip(),
+        "duration": duration,
+        "resolution": resolution,
+        "aspect_ratio": aspect_ratio,
+        "start_frame_url": start_frame_url,
+        "charge_tokens": int(charge_tokens or 0),
+        "charge_ref_id": str(charge_ref_id or ""),
+        "refund_reason": "grok_video_refund",
+        "origin": "telegram",
+    }
+    await enqueue_job(job, queue_name=WORKSPACE_MEDIA_QUEUE_NAME)
     return job
 
 
@@ -4781,6 +4851,51 @@ async def webhook(secret: str, request: Request):
                 reply_markup=_help_menu_for(user_id),
             )
             return {"ok": True}
+
+        # ----- WebApp data (Grok settings) -----
+        is_grok = (
+            (str(payload.get("type") or "").lower().strip() == "grok_settings")
+            or (str(payload.get("provider") or provider_raw or "").lower().strip() == "grok")
+        )
+
+        if is_grok:
+            flow = str(payload.get("flow") or payload.get("mode") or "text").lower().strip()
+            if flow in ("image", "i2v", "image_to_video", "image2video", "image->video"):
+                flow = "image"
+            else:
+                flow = "text"
+
+            duration = normalize_grok_duration(payload.get("duration") or 5)
+            resolution = normalize_grok_resolution(payload.get("resolution") or "720p")
+            aspect_ratio = normalize_grok_aspect_ratio(payload.get("aspect_ratio") or "16:9")
+
+            st["grok_settings"] = {
+                "provider": "grok",
+                "model": "grok-imagine-video",
+                "flow": flow,
+                "duration": duration,
+                "resolution": resolution,
+                "aspect_ratio": aspect_ratio,
+            }
+            st["ts"] = _now()
+
+            if flow == "text":
+                _set_mode(chat_id, user_id, "grok_t2v")
+                st["grok_t2v"] = {"step": "need_prompt"}
+                await tg_send_message(
+                    chat_id,
+                    f"✅ Настройки Grok сохранены: Text → Video • {duration} сек • {resolution} • {aspect_ratio}\n\nТеперь пришли промпт одним сообщением.",
+                    reply_markup=_help_menu_for(user_id),
+                )
+            else:
+                _set_mode(chat_id, user_id, "grok_i2v")
+                st["grok_i2v"] = {"step": "need_image", "image_bytes": None, "image_name": None}
+                await tg_send_message(
+                    chat_id,
+                    f"✅ Настройки Grok сохранены: Image → Video • {duration} сек • {resolution} • {aspect_ratio}\n\nШаг 1) Пришли стартовое фото.\nШаг 2) Потом пришли текстом, что должно происходить в видео.",
+                    reply_markup=_help_menu_for(user_id),
+                )
+            return {"ok": True}
             
         # ----- Kling PRO 3.0 -----
         if str(payload.get("type") or "").lower().strip() == "kling3_settings":
@@ -5848,6 +5963,111 @@ async def webhook(secret: str, request: Request):
         finally:
             _busy_end(int(user_id))
 
+    # ---- GROK Text→Video / Image→Video: ставим в worker_workspace_media ----
+    if st.get("mode") in ("grok_t2v", "grok_i2v") and incoming_text:
+        if _is_nav_or_menu_text(incoming_text):
+            _set_mode(chat_id, user_id, "chat")
+            st.pop("grok_t2v", None)
+            st.pop("grok_i2v", None)
+            st.pop("grok_settings", None)
+            st["ts"] = _now()
+            await tg_send_message(chat_id, "Ок. Вышел из Grok. Главное меню.", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+
+        settings = st.get("grok_settings") or {}
+        duration = normalize_grok_duration(settings.get("duration") or 5)
+        resolution = normalize_grok_resolution(settings.get("resolution") or "720p")
+        aspect_ratio = normalize_grok_aspect_ratio(settings.get("aspect_ratio") or "16:9")
+        cost_tokens = int(grok_tokens_for_duration(duration))
+
+        try:
+            ensure_user_row(user_id)
+            bal = int(get_balance(user_id) or 0)
+        except Exception:
+            bal = 0
+
+        if bal < cost_tokens:
+            await tg_send_message(
+                chat_id,
+                f"❌ Недостаточно токенов.\nНужно: {cost_tokens}\nБаланс: {bal}",
+                reply_markup=_topup_balance_inline_kb(),
+            )
+            return {"ok": True}
+
+        charge_ref_id = uuid4().hex
+        try:
+            add_tokens(
+                user_id,
+                -cost_tokens,
+                reason="grok_video",
+                ref_id=charge_ref_id,
+                meta={
+                    "provider": "grok",
+                    "duration": duration,
+                    "resolution": resolution,
+                    "aspect_ratio": aspect_ratio,
+                    "flow": ("i2v" if st.get("mode") == "grok_i2v" else "t2v"),
+                },
+            )
+        except TypeError:
+            add_tokens(user_id, -int(cost_tokens), reason="grok_video")
+
+        try:
+            if st.get("mode") == "grok_i2v":
+                gi = st.get("grok_i2v") or {}
+                if (gi.get("step") or "need_image") != "need_prompt":
+                    await tg_send_message(chat_id, "Сначала пришли стартовое фото для Grok Image → Video.", reply_markup=_help_menu_for(user_id))
+                    try:
+                        add_tokens(user_id, int(cost_tokens), reason="grok_video_refund", ref_id=uuid4().hex, meta={"stage": "need_image"})
+                    except TypeError:
+                        add_tokens(user_id, int(cost_tokens), reason="grok_video_refund")
+                    return {"ok": True}
+                image_bytes = gi.get("image_bytes")
+                if not image_bytes:
+                    await tg_send_message(chat_id, "Не хватает стартового фото. Пришли фото и повтори промпт.", reply_markup=_help_menu_for(user_id))
+                    try:
+                        add_tokens(user_id, int(cost_tokens), reason="grok_video_refund", ref_id=uuid4().hex, meta={"stage": "missing_image"})
+                    except TypeError:
+                        add_tokens(user_id, int(cost_tokens), reason="grok_video_refund")
+                    return {"ok": True}
+                await _enqueue_tg_grok_job(
+                    chat_id=int(chat_id),
+                    user_id=int(user_id),
+                    mode="image_to_video",
+                    prompt=incoming_text.strip(),
+                    settings=settings,
+                    image_bytes=image_bytes,
+                    image_name=gi.get("image_name"),
+                    charge_tokens=cost_tokens,
+                    charge_ref_id=charge_ref_id,
+                )
+                await tg_send_message(chat_id, f"⏳ Grok поставлен в очередь: Image → Video • {duration} сек • {resolution} • {aspect_ratio}", reply_markup=_help_menu_for(user_id))
+            else:
+                await _enqueue_tg_grok_job(
+                    chat_id=int(chat_id),
+                    user_id=int(user_id),
+                    mode="text_to_video",
+                    prompt=incoming_text.strip(),
+                    settings=settings,
+                    charge_tokens=cost_tokens,
+                    charge_ref_id=charge_ref_id,
+                )
+                await tg_send_message(chat_id, f"⏳ Grok поставлен в очередь: Text → Video • {duration} сек • {resolution} • {aspect_ratio}", reply_markup=_help_menu_for(user_id))
+        except Exception as e:
+            try:
+                add_tokens(user_id, int(cost_tokens), reason="grok_video_refund", ref_id=uuid4().hex, meta={"stage": "enqueue_failed", "error": str(e)[:300]})
+            except TypeError:
+                add_tokens(user_id, int(cost_tokens), reason="grok_video_refund")
+            await tg_send_message(chat_id, f"❌ Не удалось поставить Grok в очередь: {e}", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+
+        _set_mode(chat_id, user_id, "chat")
+        st.pop("grok_t2v", None)
+        st.pop("grok_i2v", None)
+        st.pop("grok_settings", None)
+        st["ts"] = _now()
+        return {"ok": True}
+
     # ---- VEO Text→Video: ждём промпт ----
     if st.get("mode") == "veo_t2v" and incoming_text:
         # Если пользователь нажал кнопку меню/навигации — НЕ считаем это промптом
@@ -6601,6 +6821,36 @@ async def webhook(secret: str, request: Request):
             await tg_send_message(
                 chat_id,
                 "Фото уже есть ✅ Теперь жду ТЕКСТ (или /start чтобы выйти).",
+                reply_markup=_help_menu_for(user_id),
+            )
+            return {"ok": True}
+
+        # ---- GROK Image → Video: step=need_image ----
+        if st.get("mode") == "grok_i2v":
+            gi = st.get("grok_i2v") or {}
+            step = (gi.get("step") or "need_image")
+
+            if step == "need_image":
+                gi["image_bytes"] = img_bytes
+                gi["image_name"] = "grok_start.jpg"
+                gi["step"] = "need_prompt"
+                st["grok_i2v"] = gi
+                st["ts"] = _now()
+
+                gs = st.get("grok_settings") or {}
+                duration = normalize_grok_duration(gs.get("duration") or 5)
+                resolution = normalize_grok_resolution(gs.get("resolution") or "720p")
+                aspect_ratio = normalize_grok_aspect_ratio(gs.get("aspect_ratio") or "16:9")
+                await tg_send_message(
+                    chat_id,
+                    f"Фото получил ✅\nТеперь напиши текстом, что должно происходить (Grok • {duration} сек • {resolution} • {aspect_ratio})",
+                    reply_markup=_help_menu_for(user_id),
+                )
+                return {"ok": True}
+
+            await tg_send_message(
+                chat_id,
+                "Стартовое фото уже есть ✅ Теперь жду ТЕКСТ для Grok.",
                 reply_markup=_help_menu_for(user_id),
             )
             return {"ok": True}
