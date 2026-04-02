@@ -13,6 +13,7 @@ from grok_video_replicate import (
     GrokVideoError,
     normalize_grok_aspect_ratio,
     normalize_grok_duration,
+    normalize_grok_provider_mode,
     normalize_grok_resolution,
     run_grok_image_to_video,
     run_grok_text_to_video,
@@ -139,6 +140,7 @@ async def process_workspace_video_job(job: Dict[str, Any]) -> None:
         aspect_ratio=str(job.get("aspect_ratio") or "").strip() or "16:9",
         enable_audio=bool(job.get("enable_audio")),
         quality=str(job.get("quality") or "pro").strip().lower() or "pro",
+        provider_mode=str(job.get("provider_mode") or "normal").strip().lower() or "normal",
         start_frame=start_frame,
         end_frame=end_frame,
         last_frame=last_frame,
@@ -157,8 +159,9 @@ async def process_tg_grok_video_job(job: Dict[str, Any]) -> None:
     mode = str(job.get("mode") or "text_to_video").strip().lower()
     prompt = str(job.get("prompt") or "")
     duration = normalize_grok_duration(job.get("duration") or 5)
-    resolution = normalize_grok_resolution(job.get("resolution") or "720p")
+    resolution = normalize_grok_resolution(job.get("resolution") or "480p")
     aspect_ratio = normalize_grok_aspect_ratio(job.get("aspect_ratio") or "16:9")
+    provider_mode = normalize_grok_provider_mode(job.get("provider_mode") or "normal")
     charge_tokens = int(job.get("charge_tokens") or 0)
     charge_ref_id = str(job.get("charge_ref_id") or "")
     refund_reason = str(job.get("refund_reason") or "grok_video_refund")
@@ -180,6 +183,7 @@ async def process_tg_grok_video_job(job: Dict[str, Any]) -> None:
                 duration=duration,
                 resolution=resolution,
                 aspect_ratio=aspect_ratio,
+                provider_mode=provider_mode,
             )
         else:
             video_url = await run_grok_text_to_video(
@@ -187,6 +191,7 @@ async def process_tg_grok_video_job(job: Dict[str, Any]) -> None:
                 duration=duration,
                 resolution=resolution,
                 aspect_ratio=aspect_ratio,
+                provider_mode=provider_mode,
             )
         if not video_url:
             raise GrokVideoError("Grok did not return video url")
