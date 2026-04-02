@@ -758,21 +758,11 @@
           </select>
 
           <select id="grok_duration" aria-label="Длительность Grok">
-            <option value="1">1 секунда</option>
-            <option value="2">2 секунды</option>
-            <option value="3">3 секунды</option>
-            <option value="4">4 секунды</option>
-            <option value="5">5 секунд</option>
             <option value="6" selected>6 секунд</option>
-            <option value="7">7 секунд</option>
-            <option value="8">8 секунд</option>
-            <option value="9">9 секунд</option>
-            <option value="10">10 секунд</option>
-            <option value="11">11 секунд</option>
             <option value="12">12 секунд</option>
-            <option value="13">13 секунд</option>
-            <option value="14">14 секунд</option>
-            <option value="15">15 секунд</option>
+            <option value="18">18 секунд</option>
+            <option value="24">24 секунды</option>
+            <option value="30">30 секунд</option>
           </select>
         </div>
 
@@ -791,7 +781,7 @@
           </select>
         </div>
 
-        <div class="hint">Grok через KIE: Mode = Fun / Normal / Spicy, resolution = 480p / 720p.</div>
+        <div class="hint">Grok Mode = Fun / Normal / Spicy, resolution = 480p / 720p, длительности 6 / 12 / 18 / 24 / 30 сек.</div>
       </div>
     </div>
 
@@ -1190,7 +1180,9 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
 
       if (provider === 'grok'){
         const seconds = parseInt((qs('#grok_duration')?.value || "6"), 10);
-        const tokens = Math.max(1, seconds);
+        const resolution = (qs('#grok_resolution')?.value || '480p');
+        const secondsPerToken = resolution === '720p' ? 6 : 12;
+        const tokens = Math.max(1, Math.ceil(seconds / secondsPerToken));
         return { known:true, tokens, note:'' };
       }
 
