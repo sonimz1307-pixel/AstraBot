@@ -65,6 +65,7 @@ from grok_video_replicate import (
     grok_tokens_for_duration,
     normalize_grok_aspect_ratio,
     normalize_grok_duration,
+    normalize_grok_provider_mode,
     normalize_grok_resolution,
     run_grok_image_to_video,
     run_grok_text_to_video,
@@ -1020,7 +1021,7 @@ def _normalize_workspace_video_resolution(provider: str, model: str, resolution:
     if provider == "veo":
         return "1080p" if model == "veo-3.1-pro" else "720p"
     if provider == "grok":
-        return normalize_grok_resolution(value or "720p")
+        return normalize_grok_resolution(value or "480p")
     if value in {"720", "720p"}:
         return "720"
     if value in {"1080", "1080p"}:
@@ -1371,6 +1372,7 @@ async def _run_workspace_video_job(
     aspect_ratio: str,
     enable_audio: bool,
     quality: str,
+    provider_mode: str,
     start_frame: Optional[bytes],
     end_frame: Optional[bytes],
     last_frame: Optional[bytes],
@@ -1382,6 +1384,7 @@ async def _run_workspace_video_job(
     refund_reason: str = "workspace_video_refund",
 ) -> None:
     try:
+        provider_mode = normalize_grok_provider_mode(provider_mode or "normal")
         provider_video_url: Optional[str] = None
 
         if provider == "kling":
@@ -1474,6 +1477,7 @@ async def _run_workspace_video_job(
                     duration=duration,
                     resolution=resolution,
                     aspect_ratio=aspect_ratio,
+                    provider_mode=provider_mode,
                 )
             else:
                 provider_video_url = await run_grok_text_to_video(
@@ -1481,6 +1485,7 @@ async def _run_workspace_video_job(
                     duration=duration,
                     resolution=resolution,
                     aspect_ratio=aspect_ratio,
+                    provider_mode=provider_mode,
                 )
 
         elif provider == "seedance":
@@ -2950,6 +2955,7 @@ async def workspace_video_run(
     duration = _parse_form_int(form.get("duration"), 5)
     aspect_ratio = str(form.get("aspect_ratio") or "16:9").strip() or "16:9"
     resolution = _normalize_workspace_video_resolution(provider, model, form.get("resolution"))
+    provider_mode = str(form.get("provider_mode") or form.get("grok_provider_mode") or "normal").strip().lower() or "normal"
     enable_audio = _parse_form_bool(form.get("enable_audio"))
     quality = str(form.get("quality") or "pro").strip().lower() or "pro"
 
@@ -3000,6 +3006,7 @@ async def workspace_video_run(
         duration = normalize_grok_duration(duration)
         resolution = normalize_grok_resolution(resolution)
         aspect_ratio = normalize_grok_aspect_ratio(aspect_ratio)
+        provider_mode = normalize_grok_provider_mode(provider_mode)
         if mode == "image_to_video" and not start_frame:
             raise HTTPException(status_code=400, detail="Для Grok Image→Video нужен start frame.")
     if provider == "seedance" and mode == "image_to_video" and not reference_images:
@@ -3098,6 +3105,7 @@ async def workspace_video_run(
             "aspect_ratio": aspect_ratio,
             "enable_audio": bool(enable_audio),
             "quality": quality,
+            "provider_mode": provider_mode,
             "start_frame_url": start_frame_url,
             "end_frame_url": end_frame_url,
             "last_frame_url": last_frame_url,
