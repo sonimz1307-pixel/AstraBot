@@ -751,13 +751,19 @@
       <div class="card">
         <h3>Параметры</h3>
         <div class="row">
+          <select id="grok_mode" aria-label="Mode Grok">
+            <option value="fun">Mode: Fun</option>
+            <option value="normal" selected>Mode: Normal</option>
+            <option value="spicy">Mode: Spicy</option>
+          </select>
+
           <select id="grok_duration" aria-label="Длительность Grok">
             <option value="1">1 секунда</option>
             <option value="2">2 секунды</option>
             <option value="3">3 секунды</option>
             <option value="4">4 секунды</option>
-            <option value="5" selected>5 секунд</option>
-            <option value="6">6 секунд</option>
+            <option value="5">5 секунд</option>
+            <option value="6" selected>6 секунд</option>
             <option value="7">7 секунд</option>
             <option value="8">8 секунд</option>
             <option value="9">9 секунд</option>
@@ -768,26 +774,24 @@
             <option value="14">14 секунд</option>
             <option value="15">15 секунд</option>
           </select>
-
-          <select id="grok_resolution" aria-label="Разрешение Grok">
-            <option value="480p">480p</option>
-            <option value="720p" selected>720p</option>
-          </select>
         </div>
 
         <div class="row" style="margin-top:10px;">
+          <select id="grok_resolution" aria-label="Разрешение Grok">
+            <option value="480p" selected>480p</option>
+            <option value="720p">720p</option>
+          </select>
+
           <select id="grok_aspect" aria-label="Формат Grok">
-            <option value="16:9">16:9 (YouTube)</option>
-            <option value="9:16">9:16 (Reels)</option>
-            <option value="1:1">1:1</option>
-            <option value="4:3">4:3</option>
-            <option value="3:4">3:4</option>
-            <option value="3:2">3:2</option>
             <option value="2:3">2:3</option>
+            <option value="3:2">3:2</option>
+            <option value="1:1">1:1</option>
+            <option value="16:9" selected>16:9</option>
+            <option value="9:16">9:16</option>
           </select>
         </div>
 
-        <div class="hint">У Grok звук встроен нативно. Отдельную галочку Audio включать не нужно.</div>
+        <div class="hint">Grok через KIE: Mode = Fun / Normal / Spicy, resolution = 480p / 720p.</div>
       </div>
     </div>
 
@@ -914,6 +918,7 @@
 
     // Grok getters
     function getGrokFlow(){ return qs('input[name="grok_flow"]:checked')?.value || "text"; }
+    function getGrokProviderMode(){ return qs('#grok_mode')?.value || "normal"; }
 
     function updateKlingUI(){
       let flow = getFlow();
@@ -1184,7 +1189,7 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
       }
 
       if (provider === 'grok'){
-        const seconds = parseInt((qs('#grok_duration')?.value || "5"), 10);
+        const seconds = parseInt((qs('#grok_duration')?.value || "6"), 10);
         const tokens = Math.max(1, seconds);
         return { known:true, tokens, note:'' };
       }
@@ -1325,8 +1330,8 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
 
         } else if (provider === 'grok'){
           const flow = getGrokFlow();
-          const duration = parseInt((qs('#grok_duration')?.value || "5"), 10);
-          const resolution = (qs('#grok_resolution')?.value || '720p');
+          const duration = parseInt((qs('#grok_duration')?.value || "6"), 10);
+          const resolution = (qs('#grok_resolution')?.value || '480p');
           const aspect_ratio = (qs('#grok_aspect')?.value || '16:9');
 
           payload = {
@@ -1334,6 +1339,7 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
             provider: "grok",
             model: "grok-imagine-video",
             flow,
+            provider_mode: getGrokProviderMode(),
             duration,
             resolution,
             aspect_ratio
