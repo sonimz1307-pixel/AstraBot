@@ -2909,12 +2909,23 @@ def _workspace_video_charge_spec(
         }
 
     if provider == "grok":
-        tokens = int(grok_tokens_for_duration(duration))
+        normalized_resolution = normalize_grok_resolution(resolution)
+        seconds_per_token = 6 if normalized_resolution == "720p" else 12
+        tokens = int(grok_tokens_for_duration(duration, normalized_resolution))
         return {
             "tokens": tokens,
             "charge_reason": "grok_video",
             "refund_reason": "grok_video_refund",
-            "meta": {"origin": "workspace_video", "provider": provider, "model": model, "mode": mode, "duration": duration, "rate": tokens / max(1, int(duration or 1))},
+            "meta": {
+                "origin": "workspace_video",
+                "provider": provider,
+                "model": model,
+                "mode": mode,
+                "duration": duration,
+                "resolution": normalized_resolution,
+                "seconds_per_token": seconds_per_token,
+                "rate": tokens / max(1, int(duration or 1)),
+            },
         }
 
     if provider == "seedance":
