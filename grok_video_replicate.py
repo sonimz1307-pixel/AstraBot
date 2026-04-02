@@ -18,7 +18,9 @@ KIE_GROK_IMAGE_MODEL = (os.getenv("KIE_GROK_IMAGE_MODEL") or "grok-imagine/image
 KIE_GROK_CALLBACK_URL = (os.getenv("KIE_GROK_CALLBACK_URL") or "").strip()
 KIE_GROK_CREATE_TIMEOUT_SECONDS = float(os.getenv("KIE_GROK_CREATE_TIMEOUT_SECONDS", "60") or "60")
 KIE_GROK_MAX_WAIT_SECONDS = float(os.getenv("KIE_GROK_MAX_WAIT_SECONDS", "900") or "900")
-GROK_VIDEO_TOKENS_PER_SEC = max(1, int(os.getenv("GROK_VIDEO_TOKENS_PER_SEC", "1") or "1"))
+GROK_480P_SECONDS_PER_TOKEN = max(1, int(os.getenv("GROK_480P_SECONDS_PER_TOKEN", "12") or "12"))
+GROK_720P_SECONDS_PER_TOKEN = max(1, int(os.getenv("GROK_720P_SECONDS_PER_TOKEN", "6") or "6"))
+GROK_ALLOWED_DURATIONS = (6, 12, 18, 24, 30)
 
 GROK_ALLOWED_ASPECT_RATIOS = {
     "2:3", "3:2", "1:1", "16:9", "9:16",
@@ -49,7 +51,11 @@ def normalize_grok_duration(value: Any, default: int = 6) -> int:
         out = int(value)
     except Exception:
         out = int(default)
-    return max(1, min(15, out))
+    if out <= GROK_ALLOWED_DURATIONS[0]:
+        return GROK_ALLOWED_DURATIONS[0]
+    if out >= GROK_ALLOWED_DURATIONS[-1]:
+        return GROK_ALLOWED_DURATIONS[-1]
+    return min(GROK_ALLOWED_DURATIONS, key=lambda item: (abs(item - out), item))
 
 
 def normalize_grok_aspect_ratio(value: Any, default: str = "16:9") -> str:
@@ -66,8 +72,17 @@ def normalize_grok_resolution(value: Any, default: str = "480p") -> str:
     return default
 
 
-def grok_tokens_for_duration(duration: Any) -> int:
-    return normalize_grok_duration(duration) * int(GROK_VIDEO_TOKENS_PER_SEC)
+def grok_seconds_per_token(resolution: Any = "480p") -> int:
+    normalized = normalize_grok_resolution(resolution)
+    if normalized == "720p":
+        return int(GROK_720P_SECONDS_PER_TOKEN)
+    return int(GROK_480P_SECONDS_PER_TOKEN)
+
+
+def grok_tokens_for_duration(duration: Any, resolution: Any = "480p") -> int:
+    seconds = normalize_grok_duration(duration)
+    seconds_per_token = max(1, int(grok_seconds_per_token(resolution)))
+    return max(1, (seconds + seconds_per_token - 1) // seconds_per_token)
 
 
 def upload_grok_input_image(*, user_id: int, image_bytes: bytes, filename_hint: Optional[str] = None) -> str:
