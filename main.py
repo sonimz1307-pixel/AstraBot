@@ -43,6 +43,7 @@ from grok_video_replicate import (
     grok_tokens_for_duration,
     normalize_grok_aspect_ratio,
     normalize_grok_duration,
+    normalize_grok_provider_mode,
     normalize_grok_resolution,
 )
 from app.routers.tts import router as tts_router
@@ -1528,9 +1529,10 @@ async def _enqueue_music_job(*, chat_id: int, user_id: int, settings: dict, char
 
 async def _enqueue_tg_grok_job(*, chat_id: int, user_id: int, mode: str, prompt: str, settings: dict, image_bytes: bytes | None = None, image_name: str | None = None, charge_tokens: int = 0, charge_ref_id: str = "") -> dict:
     settings = dict(settings or {})
-    duration = normalize_grok_duration(settings.get("duration") or 5)
-    resolution = normalize_grok_resolution(settings.get("resolution") or "720p")
+    duration = normalize_grok_duration(settings.get("duration") or 6)
+    resolution = normalize_grok_resolution(settings.get("resolution") or "480p")
     aspect_ratio = normalize_grok_aspect_ratio(settings.get("aspect_ratio") or "16:9")
+    provider_mode = normalize_grok_provider_mode(settings.get("provider_mode") or "normal")
     start_frame_url = None
     if mode == "image_to_video":
         if not image_bytes:
@@ -1570,6 +1572,7 @@ async def _enqueue_tg_grok_job(*, chat_id: int, user_id: int, mode: str, prompt:
         "duration": duration,
         "resolution": resolution,
         "aspect_ratio": aspect_ratio,
+        "provider_mode": provider_mode,
         "start_frame_url": start_frame_url,
         "charge_tokens": int(charge_tokens or 0),
         "charge_ref_id": str(charge_ref_id or ""),
@@ -4865,9 +4868,10 @@ async def webhook(secret: str, request: Request):
             else:
                 flow = "text"
 
-            duration = normalize_grok_duration(payload.get("duration") or 5)
-            resolution = normalize_grok_resolution(payload.get("resolution") or "720p")
+            duration = normalize_grok_duration(payload.get("duration") or 6)
+            resolution = normalize_grok_resolution(payload.get("resolution") or "480p")
             aspect_ratio = normalize_grok_aspect_ratio(payload.get("aspect_ratio") or "16:9")
+            provider_mode = normalize_grok_provider_mode(payload.get("provider_mode") or "normal")
 
             st["grok_settings"] = {
                 "provider": "grok",
@@ -4876,6 +4880,7 @@ async def webhook(secret: str, request: Request):
                 "duration": duration,
                 "resolution": resolution,
                 "aspect_ratio": aspect_ratio,
+                "provider_mode": provider_mode,
             }
             st["ts"] = _now()
 
@@ -4884,7 +4889,7 @@ async def webhook(secret: str, request: Request):
                 st["grok_t2v"] = {"step": "need_prompt"}
                 await tg_send_message(
                     chat_id,
-                    f"✅ Настройки Grok сохранены: Text → Video • {duration} сек • {resolution} • {aspect_ratio}\n\nТеперь пришли промпт одним сообщением.",
+                    f"✅ Настройки Grok сохранены: Text → Video • {duration} сек • {resolution} • {aspect_ratio} • Mode: {provider_mode}\n\nТеперь пришли промпт одним сообщением.",
                     reply_markup=_help_menu_for(user_id),
                 )
             else:
@@ -4892,7 +4897,7 @@ async def webhook(secret: str, request: Request):
                 st["grok_i2v"] = {"step": "need_image", "image_bytes": None, "image_name": None}
                 await tg_send_message(
                     chat_id,
-                    f"✅ Настройки Grok сохранены: Image → Video • {duration} сек • {resolution} • {aspect_ratio}\n\nШаг 1) Пришли стартовое фото.\nШаг 2) Потом пришли текстом, что должно происходить в видео.",
+                    f"✅ Настройки Grok сохранены: Image → Video • {duration} сек • {resolution} • {aspect_ratio} • Mode: {provider_mode}\n\nШаг 1) Пришли стартовое фото.\nШаг 2) Потом пришли текстом, что должно происходить в видео.",
                     reply_markup=_help_menu_for(user_id),
                 )
             return {"ok": True}
@@ -5976,8 +5981,9 @@ async def webhook(secret: str, request: Request):
 
         settings = st.get("grok_settings") or {}
         duration = normalize_grok_duration(settings.get("duration") or 5)
-        resolution = normalize_grok_resolution(settings.get("resolution") or "720p")
+        resolution = normalize_grok_resolution(settings.get("resolution") or "480p")
         aspect_ratio = normalize_grok_aspect_ratio(settings.get("aspect_ratio") or "16:9")
+        provider_mode = normalize_grok_provider_mode(settings.get("provider_mode") or "normal")
         cost_tokens = int(grok_tokens_for_duration(duration))
 
         try:
@@ -6041,7 +6047,7 @@ async def webhook(secret: str, request: Request):
                     charge_tokens=cost_tokens,
                     charge_ref_id=charge_ref_id,
                 )
-                await tg_send_message(chat_id, f"⏳ Grok поставлен в очередь: Image → Video • {duration} сек • {resolution} • {aspect_ratio}", reply_markup=_help_menu_for(user_id))
+                await tg_send_message(chat_id, f"⏳ Grok поставлен в очередь: Image → Video • {duration} сек • {resolution} • {aspect_ratio} • Mode: {provider_mode}", reply_markup=_help_menu_for(user_id))
             else:
                 await _enqueue_tg_grok_job(
                     chat_id=int(chat_id),
@@ -6052,7 +6058,7 @@ async def webhook(secret: str, request: Request):
                     charge_tokens=cost_tokens,
                     charge_ref_id=charge_ref_id,
                 )
-                await tg_send_message(chat_id, f"⏳ Grok поставлен в очередь: Text → Video • {duration} сек • {resolution} • {aspect_ratio}", reply_markup=_help_menu_for(user_id))
+                await tg_send_message(chat_id, f"⏳ Grok поставлен в очередь: Text → Video • {duration} сек • {resolution} • {aspect_ratio} • Mode: {provider_mode}", reply_markup=_help_menu_for(user_id))
         except Exception as e:
             try:
                 add_tokens(user_id, int(cost_tokens), reason="grok_video_refund", ref_id=uuid4().hex, meta={"stage": "enqueue_failed", "error": str(e)[:300]})
@@ -6838,12 +6844,13 @@ async def webhook(secret: str, request: Request):
                 st["ts"] = _now()
 
                 gs = st.get("grok_settings") or {}
-                duration = normalize_grok_duration(gs.get("duration") or 5)
-                resolution = normalize_grok_resolution(gs.get("resolution") or "720p")
+                duration = normalize_grok_duration(gs.get("duration") or 6)
+                resolution = normalize_grok_resolution(gs.get("resolution") or "480p")
                 aspect_ratio = normalize_grok_aspect_ratio(gs.get("aspect_ratio") or "16:9")
+                provider_mode = normalize_grok_provider_mode(gs.get("provider_mode") or "normal")
                 await tg_send_message(
                     chat_id,
-                    f"Фото получил ✅\nТеперь напиши текстом, что должно происходить (Grok • {duration} сек • {resolution} • {aspect_ratio})",
+                    f"Фото получил ✅\nТеперь напиши текстом, что должно происходить (Grok • {duration} сек • {resolution} • {aspect_ratio} • Mode: {provider_mode})",
                     reply_markup=_help_menu_for(user_id),
                 )
                 return {"ok": True}
