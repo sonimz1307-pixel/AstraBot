@@ -5980,11 +5980,11 @@ async def webhook(secret: str, request: Request):
             return {"ok": True}
 
         settings = st.get("grok_settings") or {}
-        duration = normalize_grok_duration(settings.get("duration") or 5)
+        duration = normalize_grok_duration(settings.get("duration") or 6)
         resolution = normalize_grok_resolution(settings.get("resolution") or "480p")
         aspect_ratio = normalize_grok_aspect_ratio(settings.get("aspect_ratio") or "16:9")
         provider_mode = normalize_grok_provider_mode(settings.get("provider_mode") or "normal")
-        cost_tokens = int(grok_tokens_for_duration(duration))
+        cost_tokens = int(grok_tokens_for_duration(duration, resolution))
 
         try:
             ensure_user_row(user_id)
@@ -6013,6 +6013,7 @@ async def webhook(secret: str, request: Request):
                     "resolution": resolution,
                     "aspect_ratio": aspect_ratio,
                     "flow": ("i2v" if st.get("mode") == "grok_i2v" else "t2v"),
+                    "seconds_per_token": (6 if resolution == "720p" else 12),
                 },
             )
         except TypeError:
