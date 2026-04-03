@@ -205,6 +205,24 @@ def _run(cmd: List[str]) -> None:
         raise RuntimeError(err[:4000])
 
 
+def _parse_ffprobe_rate(value: Any) -> float:
+    text = str(value or "").strip()
+    if not text or text in {"0/0", "N/A"}:
+        return 0.0
+    if "/" in text:
+        num, den = text.split("/", 1)
+        try:
+            num_f = float(num)
+            den_f = float(den)
+            return (num_f / den_f) if den_f else 0.0
+        except Exception:
+            return 0.0
+    try:
+        return float(text)
+    except Exception:
+        return 0.0
+
+
 def probe_media(local_path: str) -> Dict[str, Any]:
     cmd = ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(local_path)]
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -220,13 +238,38 @@ def probe_media(local_path: str) -> Dict[str, Any]:
     except Exception:
         duration = 0.0
     video_stream = next((s for s in streams if s.get("codec_type") == "video"), {}) or {}
+    fps = _parse_ffprobe_rate(video_stream.get("avg_frame_rate") or video_stream.get("r_frame_rate"))
+    frame_count = 0
+    try:
+        frame_count = int(video_stream.get("nb_frames") or 0)
+    except Exception:
+        frame_count = 0
+    if frame_count <= 0 and duration > 0 and fps > 0:
+        frame_count = int(round(duration * fps))
     return {
         "duration": duration,
         "has_video": any(s.get("codec_type") == "video" for s in streams),
         "has_audio": any(s.get("codec_type") == "audio" for s in streams),
         "width": int(video_stream.get("width") or 0),
         "height": int(video_stream.get("height") or 0),
+        "fps": round(float(fps or 0.0), 3),
+        "frame_count": int(frame_count or 0),
     }
+
+
+def extract_first_frame_bytes(local_path: str, *, format: str = "png") -> bytes:
+    fmt = str(format or "png").strip().lower() or "png"
+    if fmt not in {"png", "jpg", "jpeg", "webp"}:
+        fmt = "png"
+    cmd = [
+        "ffmpeg", "-y", "-i", str(local_path), "-frames:v", "1", "-f", "image2pipe", "-vcodec",
+        ("png" if fmt == "png" else ("mjpeg" if fmt in {"jpg", "jpeg"} else "webp")), "-"
+    ]
+    proc = subprocess.run(cmd, capture_output=True)
+    if proc.returncode != 0 or not proc.stdout:
+        err = (proc.stderr.decode('utf-8', 'ignore') if proc.stderr else 'ffmpeg failed').strip()
+        raise RuntimeError(err[:4000])
+    return bytes(proc.stdout)
 
 
 def _download_remote_bytes(url: str) -> bytes:
@@ -282,6 +325,12 @@ def create_workspace_upload_record(*, user_id: int, filename: str, content_type:
     access = build_workspace_video_access_urls(storage_path=storage_path, fallback_url=None, expires_in=3600)
     out = dict(row)
     out.update(access)
+    out.update({
+        "width": int(meta.get("width") or 0),
+        "height": int(meta.get("height") or 0),
+        "fps": float(meta.get("fps") or 0.0),
+        "frame_count": int(meta.get("frame_count") or 0),
+    })
     return out
 
 
