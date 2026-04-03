@@ -75,6 +75,7 @@ from songwriter_prompt import SONGWRITER_SYSTEM_PROMPT
 from queue_redis import enqueue_job
 from nano_banana import run_nano_banana
 from nano_banana_pro import handle_nano_banana_pro
+from switchx_service import SwitchXClient, SwitchXError
 from topaz_image_replicate import TopazImageParams, run_topaz_image_upscale
 from topaz_pricing import get_photo_preset_settings, get_photo_preset_tokens
 from yookassa_flow import create_yookassa_payment
@@ -84,10 +85,12 @@ from app.services.video_editor_service import (
     MAX_MERGE_ITEMS,
     MAX_OUTPUT_DURATION_SEC,
     create_workspace_upload_record,
+    extract_first_frame_bytes,
     get_workspace_edit_job_row,
     get_workspace_generation_row,
     get_workspace_upload_row,
     insert_workspace_edit_job_row,
+    probe_media,
     resolve_operation_type,
 )
 
@@ -103,6 +106,8 @@ TOPAZ_IMAGE_RETRY_DELAY_SEC = max(0.25, float(os.getenv("TOPAZ_IMAGE_RETRY_DELAY
 
 WORKSPACE_MEDIA_QUEUE_NAME = (os.getenv("WORKSPACE_MEDIA_QUEUE_NAME", "workspace_media") or "workspace_media").strip() or "workspace_media"
 WORKSPACE_IMAGE_QUEUE_NAME = (os.getenv("WORKSPACE_IMAGE_QUEUE_NAME", "workspace_image") or "workspace_image").strip() or "workspace_image"
+SWITCHX_TOKENS_PER_SEC_720 = max(1, int(os.getenv("SWITCHX_TOKENS_PER_SEC_720", "1") or "1"))
+SWITCHX_TOKENS_PER_SEC_1080 = max(1, int(os.getenv("SWITCHX_TOKENS_PER_SEC_1080", "2") or "2"))
 
 
 CHAT_MODEL_LABEL_DEFAULT = "gpt-4o-mini"
@@ -1029,6 +1034,15 @@ def _normalize_workspace_video_resolution(provider: str, model: str, resolution:
     return "720"
 
 
+def _normalize_switchx_resolution(value: Any) -> str:
+    text = str(value or "1080").strip().lower()
+    return "720" if text in {"720", "720p"} else "1080"
+
+
+def _switchx_tokens_per_sec(resolution: Any) -> int:
+    return SWITCHX_TOKENS_PER_SEC_720 if _normalize_switchx_resolution(resolution) == "720" else SWITCHX_TOKENS_PER_SEC_1080
+
+
 def _history_mode_for_run(provider: str, mode: str) -> str:
     if provider == "kling" and mode == "motion_control":
         return "motion_control"
@@ -1379,6 +1393,8 @@ async def _run_workspace_video_job(
     avatar_image: Optional[bytes],
     motion_video: Optional[bytes],
     reference_images: List[bytes],
+    source_video_upload_id: Optional[str] = None,
+    reference_image_url: Optional[str] = None,
     charge_tokens: int = 0,
     charge_ref_id: str = "",
     refund_reason: str = "workspace_video_refund",
@@ -1545,6 +1561,79 @@ async def _run_workspace_video_job(
             )
             return
 
+        elif provider == "switchx":
+            upload_id = str(source_video_upload_id or "").strip()
+            ref_url = str(reference_image_url or "").strip()
+            if not upload_id:
+                raise RuntimeError("Для SwitchX нужен source video upload id")
+            if not ref_url:
+                raise RuntimeError("Для SwitchX нужен reference image")
+            row = get_workspace_upload_row(int(user_id), upload_id)
+            if not row:
+                raise RuntimeError(f"SwitchX source video not found: {upload_id}")
+            access = _build_workspace_video_access_urls(
+                storage_path=row.get("storage_path"),
+                fallback_url=row.get("download_url") or row.get("video_url"),
+                expires_in=3600,
+            )
+            source_url = str(access.get("download_url") or access.get("video_url") or "").strip()
+            if not source_url:
+                raise RuntimeError("SwitchX source video URL missing")
+            local_source_path = ""
+            source_bytes = b""
+            source_content_type = str(row.get("mime_type") or "video/mp4").split(";", 1)[0].strip() or "video/mp4"
+            try:
+                local_source_path, _, downloaded_ctype = await _download_video_to_tempfile(source_url)
+                if downloaded_ctype:
+                    source_content_type = downloaded_ctype
+                meta = probe_media(local_source_path)
+                frame_count = int(meta.get("frame_count") or 0)
+                width = int(meta.get("width") or 0)
+                height = int(meta.get("height") or 0)
+                if frame_count > 240:
+                    raise RuntimeError(f"SwitchX принимает максимум 240 кадров. У этого видео: {frame_count}.")
+                if width > 0 and height > 0 and (width * height) > 2770000:
+                    raise RuntimeError(f"SwitchX принимает максимум 2,770,000 px на кадр. Сейчас: {width}×{height}.")
+                with open(local_source_path, "rb") as fh:
+                    source_bytes = fh.read()
+            finally:
+                if local_source_path:
+                    try:
+                        os.remove(local_source_path)
+                    except Exception:
+                        pass
+            if not source_bytes:
+                raise RuntimeError("SwitchX source video is empty")
+            ref_bytes, ref_ext = await _download_workspace_image_bytes(ref_url)
+            ref_content_type = _workspace_image_content_type(ref_ext)
+            client = SwitchXClient()
+            source_upload = await client.create_and_upload(
+                filename=str(row.get("filename") or f"switchx_source_{upload_id}.mp4"),
+                file_bytes=source_bytes,
+                content_type=source_content_type,
+            )
+            ref_upload = await client.create_and_upload(
+                filename=f"switchx_reference.{ref_ext or 'png'}",
+                file_bytes=ref_bytes,
+                content_type=ref_content_type,
+            )
+            created = await client.start_generation(
+                source_uri=source_upload.beeble_uri,
+                reference_image_uri=ref_upload.beeble_uri,
+                prompt=str(prompt or "").strip(),
+                alpha_mode="auto",
+                max_resolution=int(_normalize_switchx_resolution(resolution)),
+                idempotency_key=generation_id,
+            )
+            if created.id:
+                _update_workspace_generation(generation_id, {"task_id": str(created.id), "status": "processing"})
+            done = await client.wait_until_done(created.id, timeout_sec=3600, poll_sec=8.0)
+            if str(done.status or "").strip().lower() != "completed":
+                raise RuntimeError(done.error or f"SwitchX status: {done.status}")
+            provider_video_url = str(done.render_url or "").strip()
+            if not provider_video_url:
+                raise RuntimeError("SwitchX completed but returned no render url")
+
         else:
             raise RuntimeError(f"Провайдер {provider} пока не поддержан в workspace video run")
 
@@ -1556,7 +1645,7 @@ async def _run_workspace_video_job(
             user_id=user_id,
             provider_video_url=provider_video_url,
         )
-    except (Kling3Error, KlingFlowError, VeoFlowError, GrokVideoError, ValueError, RuntimeError, TimeoutError) as e:
+    except (Kling3Error, KlingFlowError, VeoFlowError, GrokVideoError, SwitchXError, ValueError, RuntimeError, TimeoutError) as e:
         _mark_workspace_generation_failed(generation_id, str(e), error_code="provider_error")
         if int(charge_tokens or 0) > 0:
             try:
@@ -2833,10 +2922,6 @@ def _workspace_video_charge_spec(
     enable_audio: bool,
     quality: str,
 ) -> Dict[str, Any]:
-    provider = str(provider or "").strip().lower()
-    model = str(model or "").strip().lower()
-    mode = str(mode or "").strip().lower()
-    quality = str(quality or "pro").strip().lower() or "pro"
     duration = max(1, int(duration or 0))
 
     if provider == "kling":
@@ -2948,6 +3033,25 @@ def _workspace_video_charge_spec(
             "meta": {"origin": "workspace_video", "provider": provider, "model": model, "mode": mode, "duration": duration},
         }
 
+    if provider == "switchx":
+        normalized_resolution = _normalize_switchx_resolution(resolution)
+        rate = _switchx_tokens_per_sec(normalized_resolution)
+        tokens = max(1, int(duration) * int(rate))
+        return {
+            "tokens": tokens,
+            "charge_reason": "switchx_video",
+            "refund_reason": "switchx_video_refund",
+            "meta": {
+                "origin": "workspace_video",
+                "provider": provider,
+                "model": model,
+                "mode": mode,
+                "duration": duration,
+                "resolution": normalized_resolution,
+                "tokens_per_sec": rate,
+            },
+        }
+
     return {"tokens": 0, "charge_reason": "", "refund_reason": "workspace_video_refund", "meta": {"origin": "workspace_video", "provider": provider, "model": model, "mode": mode}}
 
 
@@ -2979,7 +3083,7 @@ async def workspace_video_run(
     if not prompt and provider != "seedance":
         raise HTTPException(status_code=400, detail="Missing prompt")
 
-    supported = {"kling", "veo", "grok", "seedance", "sora"}
+    supported = {"kling", "veo", "grok", "seedance", "sora", "switchx"}
     if provider not in supported:
         raise HTTPException(status_code=400, detail=f"Provider {provider} is not supported in /video/run yet")
 
@@ -2988,7 +3092,10 @@ async def workspace_video_run(
     last_file = form.get("last_frame")
     avatar_file = form.get("avatar_image")
     motion_file = form.get("motion_video")
+    source_video_file = form.get("source_video")
     ref_files = [f for f in form.getlist("reference_images") if getattr(f, "filename", None)]
+    source_video_upload_id = str(form.get("source_video_upload_id") or "").strip()
+    direct_reference_image_url = str(form.get("reference_image_url") or "").strip()
 
     async def _read_optional(upload: Any) -> Optional[bytes]:
         if not upload or not getattr(upload, "filename", None):
@@ -3001,11 +3108,22 @@ async def workspace_video_run(
     last_frame = await _read_optional(last_file)
     avatar_image = await _read_optional(avatar_file)
     motion_video = await _read_optional(motion_file)
+    source_video = await _read_optional(source_video_file)
     reference_images: List[bytes] = []
     for rf in ref_files:
         raw = await rf.read()
         if raw:
             reference_images.append(raw)
+
+    source_upload_row: Optional[Dict[str, Any]] = None
+    if provider == "switchx" and not source_video_upload_id and source_video:
+        source_upload_row = create_workspace_upload_record(
+            user_id=uid,
+            filename=getattr(source_video_file, "filename", None) or "switchx_source.mp4",
+            content_type=getattr(source_video_file, "content_type", None) or "video/mp4",
+            raw_bytes=source_video,
+        )
+        source_video_upload_id = str(source_upload_row.get("id") or "").strip()
 
     if provider == "kling" and mode in {"image_to_video", "multi_shot"} and model in {"kling-1.6", "kling-2.5", "kling-3.0"} and not start_frame:
         raise HTTPException(status_code=400, detail="Для Image→Video нужен start frame.")
@@ -3031,6 +3149,21 @@ async def workspace_video_run(
             raise HTTPException(status_code=400, detail="Для Sora доступны только 16:9 или 9:16.")
     if model == "motion-control" and (not avatar_image or not motion_video):
         raise HTTPException(status_code=400, detail="Для Motion Control нужны avatar image и motion video.")
+    if provider == "switchx":
+        resolution = _normalize_switchx_resolution(resolution)
+        if mode != "video_swap":
+            raise HTTPException(status_code=400, detail="SwitchX в workspace поддерживает только режим video_swap.")
+        if not source_video_upload_id:
+            raise HTTPException(status_code=400, detail="Для SwitchX нужно исходное видео.")
+        if not direct_reference_image_url and not reference_images:
+            raise HTTPException(status_code=400, detail="Для SwitchX нужен reference image или AI-референс.")
+        if source_upload_row is None:
+            source_upload_row = get_workspace_upload_row(uid, source_video_upload_id)
+        if not source_upload_row:
+            raise HTTPException(status_code=400, detail="Исходное видео для SwitchX не найдено.")
+        if str(source_upload_row.get("file_type") or "") != "video":
+            raise HTTPException(status_code=400, detail="SwitchX source upload должен быть видео.")
+        duration = max(1, int(float(source_upload_row.get("duration_sec") or 0) + 0.999))
 
     ensure_user_row(uid)
     try:
@@ -3072,7 +3205,7 @@ async def workspace_video_run(
                 "provider": provider,
                 "model": model,
                 "mode": _history_mode_for_run(provider, mode),
-                "prompt": prompt,
+                "prompt": ref_prompt,
                 "status": "queued",
                 "aspect_ratio": aspect_ratio,
                 "duration_sec": int(duration or 0),
@@ -3102,6 +3235,8 @@ async def workspace_video_run(
             )
             motion_video_upload_id = str(uploaded_motion.get("id") or "").strip() or None
 
+        switchx_reference_image_url = direct_reference_image_url or (reference_image_urls[0] if reference_image_urls else None)
+
         job = {
             "job_id": uuid4().hex,
             "kind": "workspace_video_run",
@@ -3122,6 +3257,8 @@ async def workspace_video_run(
             "last_frame_url": last_frame_url,
             "avatar_image_url": avatar_image_url,
             "motion_video_upload_id": motion_video_upload_id,
+            "source_video_upload_id": source_video_upload_id,
+            "reference_image_url": switchx_reference_image_url,
             "reference_image_urls": reference_image_urls,
             "charge_tokens": int(cost_tokens) if charged else 0,
             "charge_ref_id": charge_ref_id,
@@ -3141,23 +3278,156 @@ async def workspace_video_run(
             "status": "queued",
             "status_text": "Генерация поставлена в очередь. Видео появится в рабочей зоне автоматически.",
             "balance_tokens": balance_tokens,
+            "cost_tokens": int(cost_tokens) if charged else 0,
+            "source_video_upload_id": source_video_upload_id or None,
+            "reference_image_url": switchx_reference_image_url,
         }
     except HTTPException:
-        if charged:
-            try:
-                add_tokens(uid, int(cost_tokens), reason=refund_reason, ref_id=charge_ref_id or uuid4().hex, meta={"origin": "workspace_video", "stage": "route_http_exception"})
-            except Exception:
-                pass
         raise
     except Exception as e:
-        if charged:
+        if charged and cost_tokens > 0:
             try:
-                add_tokens(uid, int(cost_tokens), reason=refund_reason, ref_id=charge_ref_id or uuid4().hex, meta={"origin": "workspace_video", "stage": "route_exception", "error": str(e)[:300]})
+                add_tokens(uid, int(cost_tokens), reason=refund_reason, ref_id=charge_ref_id or uuid4().hex, meta={"origin": "workspace_video", "stage": "route", "error": str(e)[:300]})
             except Exception:
                 pass
         if generation_id:
-            _mark_workspace_generation_failed(generation_id, str(e), error_code="route_error")
+            _mark_workspace_generation_failed(generation_id, str(e), error_code="queue_error")
         raise HTTPException(status_code=500, detail=f"Video run failed: {e}")
+
+
+@router.post("/video/switchx/reference/run")
+async def workspace_switchx_reference_run(
+    request: Request,
+    user: Dict[str, Any] = Depends(get_current_workspace_user),
+) -> Dict[str, Any]:
+    uid = int(user["telegram_user_id"])
+    form = await request.form()
+    ref_prompt = str(form.get("ref_prompt") or form.get("prompt") or "").strip()
+    safety_level = str(form.get("safety_level") or "high").strip().lower() or "high"
+    source_video_upload_id = str(form.get("source_video_upload_id") or "").strip()
+    source_video_file = form.get("source_video")
+    if not ref_prompt:
+        raise HTTPException(status_code=400, detail="Missing ref_prompt")
+    source_video = None
+    if source_video_file and getattr(source_video_file, "filename", None):
+        source_video = await source_video_file.read()
+    source_upload_row = None
+    if not source_video_upload_id and source_video:
+        source_upload_row = create_workspace_upload_record(
+            user_id=uid,
+            filename=getattr(source_video_file, "filename", None) or "switchx_source.mp4",
+            content_type=getattr(source_video_file, "content_type", None) or "video/mp4",
+            raw_bytes=source_video,
+        )
+        source_video_upload_id = str(source_upload_row.get("id") or "").strip()
+    if not source_video_upload_id:
+        raise HTTPException(status_code=400, detail="Для создания AI-референса нужно исходное видео.")
+    if source_upload_row is None:
+        source_upload_row = get_workspace_upload_row(uid, source_video_upload_id)
+    if not source_upload_row:
+        raise HTTPException(status_code=404, detail="Исходное видео не найдено.")
+
+    ensure_user_row(uid)
+    cost = int(_workspace_image_cost("nano_banana_pro", "image_to_image", "standard", "2K"))
+    try:
+        balance = int(get_balance(uid) or 0)
+    except Exception:
+        balance = 0
+    if cost > 0 and balance < cost:
+        raise HTTPException(status_code=402, detail=f"Недостаточно токенов. Нужно: {cost} ток.")
+
+    ref_id = uuid4().hex if cost > 0 else ""
+    if cost > 0:
+        try:
+            add_tokens(uid, -cost, reason="nano_banana_pro", ref_id=ref_id, meta={"origin": "workspace_switchx_ref", "source_video_upload_id": source_video_upload_id})
+        except TypeError:
+            add_tokens(uid, -cost, reason="nano_banana_pro")
+
+    generation_id = _insert_workspace_image_generation(
+        {
+            "user_id": str(uid),
+            "provider": "nano_banana_pro",
+            "model": "nano-banana-pro",
+            "mode": "image_to_image",
+            "prompt": prompt,
+            "status": "queued",
+            "resolution": "2K",
+            "aspect_ratio": "match_input_image",
+            "safety_level": safety_level,
+            "origin": "workspace_switchx_ref",
+        }
+    )
+    try:
+        await enqueue_job(
+            {
+                "job_id": uuid4().hex,
+                "kind": "workspace_switchx_ref_run",
+                "generation_id": generation_id,
+                "user_id": uid,
+                "source_video_upload_id": source_video_upload_id,
+                "prompt": ref_prompt,
+                "resolution": "2K",
+                "aspect_ratio": "match_input_image",
+                "safety_level": safety_level,
+                "charge_tokens": cost,
+                "charge_ref_id": ref_id,
+                "refund_reason": "nano_banana_pro_refund",
+                "origin": "workspace_switchx_ref",
+            },
+            queue_name=WORKSPACE_MEDIA_QUEUE_NAME,
+        )
+    except Exception as e:
+        _mark_workspace_image_generation_failed(generation_id, str(e), error_code="queue_error")
+        if cost > 0:
+            try:
+                add_tokens(uid, cost, reason="nano_banana_pro_refund", ref_id=ref_id or uuid4().hex, meta={"origin": "workspace_switchx_ref", "stage": "enqueue", "error": str(e)[:300]})
+            except Exception:
+                pass
+        raise HTTPException(status_code=500, detail=f"SwitchX AI reference queue failed: {e}")
+
+    try:
+        balance_tokens = int(get_balance(uid) or 0)
+    except Exception:
+        balance_tokens = None
+    return {
+        "ok": True,
+        "generation_id": generation_id,
+        "status": "queued",
+        "status_text": "AI-референс поставлен в очередь.",
+        "source_video_upload_id": source_video_upload_id,
+        "cost_tokens": cost,
+        "balance_tokens": balance_tokens,
+    }
+
+
+@router.get("/video/switchx/reference/{generation_id}")
+async def workspace_switchx_reference_status(
+    generation_id: str,
+    user: Dict[str, Any] = Depends(get_current_workspace_user),
+) -> Dict[str, Any]:
+    uid = int(user["telegram_user_id"])
+    generation_id_text = str(generation_id or "").strip()
+    if not generation_id_text:
+        raise HTTPException(status_code=400, detail="Missing generation_id")
+    if supabase is None:
+        raise HTTPException(status_code=404, detail="Reference generation not found")
+    try:
+        resp = (
+            supabase.table(_WORKSPACE_IMAGE_GENERATIONS_TABLE)
+            .select("*")
+            .eq("id", generation_id_text)
+            .eq("user_id", str(uid))
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(resp, "data", None) or []
+        if not rows or not isinstance(rows[0], dict):
+            raise HTTPException(status_code=404, detail="Reference generation not found")
+        return {"ok": True, "item": _serialize_workspace_image_generation(rows[0])}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Reference status load failed: {e}")
 
 
 @router.post("/video/upload")
