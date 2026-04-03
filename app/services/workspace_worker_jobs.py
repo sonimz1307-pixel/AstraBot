@@ -147,10 +147,88 @@ async def process_workspace_video_job(job: Dict[str, Any]) -> None:
         avatar_image=avatar_image,
         motion_video=motion_video,
         reference_images=reference_images,
+        source_video_upload_id=str(job.get("source_video_upload_id") or "").strip() or None,
+        reference_image_url=str(job.get("reference_image_url") or "").strip() or None,
         charge_tokens=int(job.get("charge_tokens") or 0),
         charge_ref_id=str(job.get("charge_ref_id") or ""),
         refund_reason=str(job.get("refund_reason") or "workspace_video_refund"),
     )
+
+
+async def process_workspace_switchx_ref_job(job: Dict[str, Any]) -> None:
+    generation_id = str(job.get("generation_id") or "").strip()
+    user_id = int(job.get("user_id") or 0)
+    upload_id = str(job.get("source_video_upload_id") or "").strip()
+    prompt = str(job.get("prompt") or "").strip()
+    safety_level = str(job.get("safety_level") or "high").strip().lower() or "high"
+    charge_tokens = int(job.get("charge_tokens") or 0)
+    charge_ref_id = str(job.get("charge_ref_id") or "")
+    refund_reason = str(job.get("refund_reason") or "nano_banana_pro_refund")
+    if not generation_id or not user_id or not upload_id:
+        raise RuntimeError("workspace_switchx_ref_run job missing generation_id/user_id/source_video_upload_id")
+
+    try:
+        ww._update_workspace_image_generation(
+            generation_id,
+            {"status": "processing", "error_message": None, "error_code": None, "updated_at": ww._utc_now_iso()},
+        )
+        source_url = _workspace_upload_url(user_id, upload_id)
+        local_source_path = ""
+        try:
+            local_source_path, _, _ = await ww._download_video_to_tempfile(source_url)
+            frame_bytes = ww.extract_first_frame_bytes(local_source_path, format="png")
+        finally:
+            if local_source_path:
+                try:
+                    os.remove(local_source_path)
+                except Exception:
+                    pass
+        before_url = ww._upload_workspace_input_image(
+            user_id,
+            frame_bytes,
+            filename="switchx_first_frame.png",
+            slot="switchx_first_frame",
+        )
+        ww._update_workspace_image_generation(
+            generation_id,
+            {"source_image_url": before_url, "before_image_url": before_url, "updated_at": ww._utc_now_iso()},
+        )
+        out_bytes, ext = await ww._workspace_run_nano_banana_pro_site(
+            user_id=user_id,
+            prompt=prompt,
+            source_image_bytes=frame_bytes,
+            source_filename="switchx_first_frame.png",
+            resolution=str(job.get("resolution") or "2K"),
+            aspect_ratio=str(job.get("aspect_ratio") or "match_input_image"),
+            safety_level=safety_level,
+        )
+        output_path = ww._workspace_image_output_path(user_id, ext)
+        image_url = ww.upload_bytes_to_supabase(output_path, out_bytes, ww._workspace_image_content_type(ext))
+        now_iso = ww._utc_now_iso()
+        ww._update_workspace_image_generation(
+            generation_id,
+            {
+                "status": "completed",
+                "storage_path": output_path,
+                "image_url": image_url,
+                "download_url": image_url,
+                "file_size_bytes": len(out_bytes or b""),
+                "mime_type": ww._workspace_image_content_type(ext),
+                "error_code": None,
+                "error_message": None,
+                "updated_at": now_iso,
+                "completed_at": now_iso,
+            },
+        )
+    except Exception as e:
+        if charge_tokens > 0:
+            try:
+                add_tokens(user_id, charge_tokens, reason=refund_reason, ref_id=charge_ref_id or None, meta={"origin": "workspace_switchx_ref", "generation_id": generation_id, "error": str(e)[:300]})
+            except TypeError:
+                add_tokens(user_id, charge_tokens, reason=refund_reason)
+            except Exception:
+                pass
+        ww._mark_workspace_image_generation_failed(generation_id, str(e), error_code="provider_error")
 
 
 async def process_tg_grok_video_job(job: Dict[str, Any]) -> None:
