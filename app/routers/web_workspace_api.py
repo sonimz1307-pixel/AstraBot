@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import math
 import json
 import mimetypes
 import os
@@ -1041,6 +1042,16 @@ def _normalize_switchx_resolution(value: Any) -> str:
 
 def _switchx_tokens_per_sec(resolution: Any) -> int:
     return SWITCHX_TOKENS_PER_SEC_720 if _normalize_switchx_resolution(resolution) == "720" else SWITCHX_TOKENS_PER_SEC_1080
+
+
+def _normalize_switchx_source_duration_seconds(value: Any) -> int:
+    try:
+        raw = float(value or 0)
+    except Exception:
+        raw = 0.0
+    if raw <= 0:
+        return 0
+    return max(1, int(math.floor(raw + 0.5)))
 
 
 def _history_mode_for_run(provider: str, mode: str) -> str:
@@ -3163,7 +3174,9 @@ async def workspace_video_run(
             raise HTTPException(status_code=400, detail="Исходное видео для SwitchX не найдено.")
         if str(source_upload_row.get("file_type") or "") != "video":
             raise HTTPException(status_code=400, detail="SwitchX source upload должен быть видео.")
-        duration = max(1, int(float(source_upload_row.get("duration_sec") or 0) + 0.999))
+        duration = _normalize_switchx_source_duration_seconds(source_upload_row.get("duration_sec"))
+        if duration <= 0:
+            raise HTTPException(status_code=400, detail="Не удалось определить длительность исходного видео для SwitchX.")
 
     ensure_user_row(uid)
     try:
