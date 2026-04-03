@@ -42,7 +42,7 @@ class SwitchXClient:
         timeout: float = 60.0,
     ) -> None:
         self.api_key = (api_key or os.getenv("BEEBLE_API_KEY", "")).strip()
-        self.base_url = (base_url or os.getenv("BEEBLE_BASE_URL", "https://api.modal.beeble.ai/v1")).strip().rstrip("/")
+        self.base_url = (base_url or os.getenv("BEEBLE_BASE_URL", "https://api.beeble.ai/v1")).strip().rstrip("/")
         self.timeout = timeout
         if not self.api_key:
             raise SwitchXError("BEEBLE_API_KEY not set")
