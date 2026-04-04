@@ -111,15 +111,9 @@ async def process_workspace_video_job(job: Dict[str, Any]) -> None:
 
     ww._update_workspace_generation(generation_id, {"status": "processing", "error_message": None, "updated_at": ww._utc_now_iso()})
 
-    provider = str(job.get("provider") or "").strip()
-    start_frame_url_raw = str(job.get("start_frame_url") or "").strip() or None
-    last_frame_url_raw = str(job.get("last_frame_url") or "").strip() or None
-    reference_image_urls_raw = [str(url or "").strip() for url in (job.get("reference_image_urls") or []) if str(url or "").strip()]
-    reference_audio_urls_raw = [str(url or "").strip() for url in (job.get("reference_audio_urls") or []) if str(url or "").strip()]
-
-    start_frame = await _download_optional_bytes(start_frame_url_raw)
+    start_frame = await _download_optional_bytes(job.get("start_frame_url"))
     end_frame = await _download_optional_bytes(job.get("end_frame_url"))
-    last_frame = await _download_optional_bytes(last_frame_url_raw)
+    last_frame = await _download_optional_bytes(job.get("last_frame_url"))
     avatar_image = await _download_optional_bytes(job.get("avatar_image_url"))
 
     motion_video = None
@@ -128,14 +122,23 @@ async def process_workspace_video_job(job: Dict[str, Any]) -> None:
         motion_video = await _download_bytes(_workspace_upload_url(user_id, motion_video_upload_id), timeout=600.0)
 
     reference_images: List[bytes] = []
-    if provider != "seedance_kie":
-        for url in reference_image_urls_raw:
-            reference_images.append(await _download_bytes(url))
+    for url in job.get("reference_image_urls") or []:
+        target = str(url or "").strip()
+        if not target:
+            continue
+        reference_images.append(await _download_bytes(target))
+
+    reference_audio_clips: List[bytes] = []
+    for upload_id in job.get("reference_audio_upload_ids") or []:
+        target_id = str(upload_id or "").strip()
+        if not target_id:
+            continue
+        reference_audio_clips.append(await _download_bytes(_workspace_upload_url(user_id, target_id), timeout=600.0))
 
     await ww._run_workspace_video_job(
         generation_id=generation_id,
         user_id=user_id,
-        provider=provider,
+        provider=str(job.get("provider") or "").strip(),
         model=str(job.get("model") or "").strip(),
         mode=str(job.get("mode") or "").strip(),
         prompt=str(job.get("prompt") or ""),
@@ -151,10 +154,7 @@ async def process_workspace_video_job(job: Dict[str, Any]) -> None:
         avatar_image=avatar_image,
         motion_video=motion_video,
         reference_images=reference_images,
-        start_frame_url_input=start_frame_url_raw,
-        last_frame_url_input=last_frame_url_raw,
-        reference_image_urls_input=reference_image_urls_raw,
-        reference_audio_urls_input=reference_audio_urls_raw,
+        reference_audio_clips=reference_audio_clips,
         source_video_upload_id=str(job.get("source_video_upload_id") or "").strip() or None,
         reference_image_url=str(job.get("reference_image_url") or "").strip() or None,
         charge_tokens=int(job.get("charge_tokens") or 0),
