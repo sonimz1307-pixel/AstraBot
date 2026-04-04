@@ -73,12 +73,13 @@ from grok_video_replicate import (
 )
 from seedance_kie import (
     SeedanceKieError,
+    create_seedance_kie_task,
     normalize_seedance_kie_aspect_ratio,
     normalize_seedance_kie_duration,
     normalize_seedance_kie_model,
-    normalize_seedance_kie_resolution,
-    run_seedance_kie_video,
+    seedance_kie_resolution_for_model,
     seedance_kie_tokens_for_duration,
+    wait_seedance_kie_task,
 )
 from kling3_pricing import calculate_kling3_price
 from songwriter_prompt import SONGWRITER_SYSTEM_PROMPT
@@ -1038,7 +1039,7 @@ def _normalize_workspace_video_resolution(provider: str, model: str, resolution:
     if provider == "grok":
         return normalize_grok_resolution(value or "480p")
     if provider == "seedance_kie":
-        return normalize_seedance_kie_resolution(value, model=model)
+        return seedance_kie_resolution_for_model(model)
     if value in {"720", "720p"}:
         return "720"
     if value in {"1080", "1080p"}:
@@ -1088,62 +1089,6 @@ async def _upload_reference_images_to_public_urls(user_id: int, images: List[byt
         url = upload_bytes_to_supabase(path, raw, content_type)
         urls.append(url)
     return urls
-
-
-def _workspace_audio_input_path(user_id: int, slot: str, ext: str) -> str:
-    dt = datetime.now(timezone.utc)
-    safe_ext = (ext or "mp3").strip().lower()
-    if safe_ext not in {"mp3", "wav", "m4a", "aac", "ogg", "flac"}:
-        safe_ext = "mp3"
-    safe_slot = re.sub(r"[^a-z0-9_-]+", "_", str(slot or "audio").strip().lower()).strip("_") or "audio"
-    return f"workspace_audio_inputs/{int(user_id)}/{dt:%Y/%m/%d}/{safe_slot}_{uuid4().hex}.{safe_ext}"
-
-
-def _workspace_detect_audio_ext(raw: bytes, *, filename: Optional[str], content_type: Optional[str] = None) -> str:
-    head = bytes(raw[:16]) if isinstance(raw, (bytes, bytearray)) else b""
-    if head.startswith(b"ID3") or (len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0):
-        return "mp3"
-    if head.startswith(b"RIFF") and bytes(raw[8:12]) == b"WAVE":
-        return "wav"
-    if head.startswith(b"OggS"):
-        return "ogg"
-    if len(head) >= 12 and head[4:8] == b"ftyp":
-        return "m4a"
-    suffix = Path(str(filename or "")).suffix.lstrip(".").lower()
-    if suffix in {"mp3", "wav", "m4a", "aac", "ogg", "flac"}:
-        return suffix
-    ctype = str(content_type or "").strip().lower()
-    ctype_map = {
-        "audio/mpeg": "mp3",
-        "audio/mp3": "mp3",
-        "audio/wav": "wav",
-        "audio/x-wav": "wav",
-        "audio/mp4": "m4a",
-        "audio/x-m4a": "m4a",
-        "audio/aac": "aac",
-        "audio/ogg": "ogg",
-        "audio/flac": "flac",
-        "audio/x-flac": "flac",
-    }
-    return ctype_map.get(ctype, "mp3")
-
-
-def _workspace_audio_content_type(ext: str) -> str:
-    mapping = {
-        "mp3": "audio/mpeg",
-        "wav": "audio/wav",
-        "m4a": "audio/mp4",
-        "aac": "audio/aac",
-        "ogg": "audio/ogg",
-        "flac": "audio/flac",
-    }
-    return mapping.get((ext or "mp3").strip().lower(), "audio/mpeg")
-
-
-def _upload_workspace_input_audio(user_id: int, raw: bytes, *, filename: Optional[str], slot: str, content_type: Optional[str] = None) -> str:
-    ext = _workspace_detect_audio_ext(raw, filename=filename, content_type=content_type)
-    path = _workspace_audio_input_path(user_id, slot, ext)
-    return upload_bytes_to_supabase(path, raw, _workspace_audio_content_type(ext))
 
 
 async def _piapi_seedance_create_task_workspace(
@@ -1471,10 +1416,10 @@ async def _run_workspace_video_job(
     avatar_image: Optional[bytes],
     motion_video: Optional[bytes],
     reference_images: List[bytes],
-    start_frame_url: Optional[str] = None,
-    last_frame_url: Optional[str] = None,
-    reference_image_urls: Optional[List[str]] = None,
-    reference_audio_urls: Optional[List[str]] = None,
+    start_frame_url_input: Optional[str] = None,
+    last_frame_url_input: Optional[str] = None,
+    reference_image_urls_input: Optional[List[str]] = None,
+    reference_audio_urls_input: Optional[List[str]] = None,
     source_video_upload_id: Optional[str] = None,
     reference_image_url: Optional[str] = None,
     charge_tokens: int = 0,
@@ -1585,6 +1530,33 @@ async def _run_workspace_video_job(
                     aspect_ratio=aspect_ratio,
                     provider_mode=provider_mode,
                 )
+
+        elif provider == "seedance_kie":
+            normalized_model = normalize_seedance_kie_model(model)
+            start_frame_url_text = str(start_frame_url_input or "").strip() or None
+            last_frame_url_text = str(last_frame_url_input or "").strip() or None
+            reference_image_urls = [str(item or "").strip() for item in (reference_image_urls_input or []) if str(item or "").strip()]
+            reference_audio_urls = [str(item or "").strip() for item in (reference_audio_urls_input or []) if str(item or "").strip()]
+            if last_frame_url_text and not start_frame_url_text:
+                raise RuntimeError("Для Seedance last frame доступен только вместе со start frame")
+            if mode == "image_to_video" and not start_frame_url_text and not reference_image_urls:
+                raise RuntimeError("Для Seedance Image→Video нужен хотя бы один reference image или start frame")
+            if start_frame_url_text:
+                reference_image_urls = []
+                reference_audio_urls = []
+            provider_task_id = await create_seedance_kie_task(
+                model=normalized_model,
+                prompt=prompt,
+                duration=duration,
+                aspect_ratio=aspect_ratio,
+                generate_audio=enable_audio,
+                first_frame_url=start_frame_url_text,
+                last_frame_url=last_frame_url_text,
+                reference_image_urls=reference_image_urls,
+                reference_audio_urls=reference_audio_urls,
+            )
+            _update_workspace_generation(generation_id, {"task_id": str(provider_task_id), "status": "processing"})
+            provider_video_url = await wait_seedance_kie_task(str(provider_task_id))
 
         elif provider == "seedance":
             task_type = "seedance-2-fast-preview" if model == "seedance-fast" else "seedance-2-preview"
@@ -2292,6 +2264,51 @@ def _workspace_image_content_type(ext: str) -> str:
     if value == "webp":
         return "image/webp"
     return "image/jpeg"
+
+
+def _workspace_detect_audio_ext(raw: Optional[bytes] = None, filename: Optional[str] = None, default: str = "mp3") -> str:
+    if isinstance(raw, (bytes, bytearray)):
+        head = bytes(raw[:16])
+        if head.startswith(b"RIFF"):
+            return "wav"
+        if head.startswith(b"ID3") or head[:2] == b"\xff\xfb":
+            return "mp3"
+        if b"ftypM4A" in head or b"ftypisom" in head:
+            return "m4a"
+        if head.startswith(b"OggS"):
+            return "ogg"
+    suffix = Path(str(filename or "")).suffix.lstrip(".").lower()
+    if suffix in {"mp3", "wav", "m4a", "aac", "ogg"}:
+        return suffix
+    return default
+
+
+def _workspace_audio_content_type(ext: str) -> str:
+    value = (ext or "mp3").strip().lower()
+    if value == "wav":
+        return "audio/wav"
+    if value == "m4a":
+        return "audio/mp4"
+    if value == "aac":
+        return "audio/aac"
+    if value == "ogg":
+        return "audio/ogg"
+    return "audio/mpeg"
+
+
+def _workspace_audio_input_path(user_id: int, slot: str, ext: str) -> str:
+    dt = datetime.now(timezone.utc)
+    safe_ext = (ext or "mp3").strip().lower()
+    if safe_ext not in {"mp3", "wav", "m4a", "aac", "ogg"}:
+        safe_ext = "mp3"
+    safe_slot = re.sub(r"[^a-z0-9_-]+", "_", str(slot or "audio").strip().lower()).strip("_") or "audio"
+    return f"workspace_audio_inputs/{int(user_id)}/{dt:%Y/%m/%d}/{safe_slot}_{uuid4().hex}.{safe_ext}"
+
+
+def _upload_workspace_input_audio(user_id: int, raw: bytes, *, filename: Optional[str], slot: str) -> str:
+    ext = _workspace_detect_audio_ext(raw, filename=filename)
+    path = _workspace_audio_input_path(user_id, slot, ext)
+    return upload_bytes_to_supabase(path, raw, _workspace_audio_content_type(ext))
 
 
 async def _read_optional_upload_bytes(upload: Any) -> Optional[bytes]:
@@ -3095,21 +3112,10 @@ def _workspace_video_charge_spec(
             },
         }
 
-    if provider == "seedance":
-        rate = 1 if model == "seedance-fast" else 2
-        tokens = int(duration) * int(rate)
-        return {
-            "tokens": tokens,
-            "charge_reason": "seedance_video",
-            "refund_reason": "seedance_video_refund",
-            "meta": {"origin": "workspace_video", "provider": provider, "model": model, "mode": mode, "duration": duration, "rate": rate},
-        }
-
     if provider == "seedance_kie":
         normalized_model = normalize_seedance_kie_model(model)
         normalized_duration = normalize_seedance_kie_duration(duration)
-        normalized_resolution = normalize_seedance_kie_resolution(resolution, model=normalized_model)
-        tokens = int(seedance_kie_tokens_for_duration(normalized_duration, model=normalized_model))
+        tokens = int(seedance_kie_tokens_for_duration(normalized_model, normalized_duration))
         return {
             "tokens": tokens,
             "charge_reason": "seedance_kie_video",
@@ -3120,9 +3126,18 @@ def _workspace_video_charge_spec(
                 "model": normalized_model,
                 "mode": mode,
                 "duration": normalized_duration,
-                "resolution": normalized_resolution,
-                "generate_audio": bool(enable_audio),
+                "resolution": seedance_kie_resolution_for_model(normalized_model),
             },
+        }
+
+    if provider == "seedance":
+        rate = 1 if model == "seedance-fast" else 2
+        tokens = int(duration) * int(rate)
+        return {
+            "tokens": tokens,
+            "charge_reason": "seedance_video",
+            "refund_reason": "seedance_video_refund",
+            "meta": {"origin": "workspace_video", "provider": provider, "model": model, "mode": mode, "duration": duration, "rate": rate},
         }
 
     if provider == "sora":
@@ -3217,15 +3232,11 @@ async def workspace_video_run(
         raw = await rf.read()
         if raw:
             reference_images.append(raw)
-    reference_audios: List[Dict[str, Any]] = []
+    reference_audios: List[bytes] = []
     for af in ref_audio_files:
         raw = await af.read()
         if raw:
-            reference_audios.append({
-                "raw": raw,
-                "filename": getattr(af, "filename", None),
-                "content_type": getattr(af, "content_type", None),
-            })
+            reference_audios.append(raw)
 
     source_upload_row: Optional[Dict[str, Any]] = None
     if provider == "switchx" and not source_video_upload_id and source_video:
@@ -3255,14 +3266,18 @@ async def workspace_video_run(
     if provider == "seedance_kie":
         model = normalize_seedance_kie_model(model)
         duration = normalize_seedance_kie_duration(duration)
-        resolution = normalize_seedance_kie_resolution(resolution, model=model)
         aspect_ratio = normalize_seedance_kie_aspect_ratio(aspect_ratio)
-        if mode == "first_frame" and not start_frame:
-            raise HTTPException(status_code=400, detail="Для Seedance 2.0 First Frame нужен start frame.")
-        if mode == "first_last_frame" and (not start_frame or not last_frame):
-            raise HTTPException(status_code=400, detail="Для Seedance 2.0 First + Last нужны start и last frame.")
-        if mode == "reference_to_video" and not reference_images and not reference_audios:
-            raise HTTPException(status_code=400, detail="Для Seedance 2.0 Reference → Video нужен хотя бы один image/audio reference.")
+        resolution = seedance_kie_resolution_for_model(model)
+        if mode not in {"text_to_video", "image_to_video"}:
+            raise HTTPException(status_code=400, detail="Seedance Kie поддерживает только Text→Video и Image→Video.")
+        if len(reference_images) > 5:
+            raise HTTPException(status_code=400, detail="Для Seedance можно загрузить максимум 5 image refs.")
+        if len(reference_audios) > 3:
+            raise HTTPException(status_code=400, detail="Для Seedance можно загрузить максимум 3 audio refs.")
+        if last_frame and not start_frame:
+            raise HTTPException(status_code=400, detail="Last frame доступен только вместе со start frame.")
+        if mode == "image_to_video" and not reference_images and not start_frame:
+            raise HTTPException(status_code=400, detail="Для Seedance Image→Video нужен хотя бы один reference image или start frame.")
     if provider == "sora":
         if mode != "text_to_video":
             raise HTTPException(status_code=400, detail="Sora в workspace сейчас поддерживает только Text→Video.")
@@ -3350,15 +3365,9 @@ async def workspace_video_run(
             if raw
         ]
         reference_audio_urls = [
-            _upload_workspace_input_audio(
-                uid,
-                item.get("raw") or b"",
-                filename=item.get("filename"),
-                slot=f"video_reference_audio_{idx + 1}",
-                content_type=item.get("content_type"),
-            )
-            for idx, item in enumerate(reference_audios)
-            if item.get("raw")
+            _upload_workspace_input_audio(uid, raw, filename=getattr(ref_audio_files[idx], "filename", None), slot=f"video_reference_audio_{idx + 1}")
+            for idx, raw in enumerate(reference_audios)
+            if raw
         ]
 
         motion_video_upload_id = None
