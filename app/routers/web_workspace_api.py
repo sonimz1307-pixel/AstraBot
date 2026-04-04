@@ -71,6 +71,15 @@ from grok_video_replicate import (
     run_grok_image_to_video,
     run_grok_text_to_video,
 )
+from seedance_kie import (
+    SeedanceKieError,
+    normalize_seedance_kie_aspect_ratio,
+    normalize_seedance_kie_duration,
+    normalize_seedance_kie_model,
+    normalize_seedance_kie_resolution,
+    run_seedance_kie_video,
+    seedance_kie_tokens_for_duration,
+)
 from kling3_pricing import calculate_kling3_price
 from songwriter_prompt import SONGWRITER_SYSTEM_PROMPT
 from queue_redis import enqueue_job
@@ -1028,6 +1037,8 @@ def _normalize_workspace_video_resolution(provider: str, model: str, resolution:
         return "1080p" if model == "veo-3.1-pro" else "720p"
     if provider == "grok":
         return normalize_grok_resolution(value or "480p")
+    if provider == "seedance_kie":
+        return normalize_seedance_kie_resolution(value, model=model)
     if value in {"720", "720p"}:
         return "720"
     if value in {"1080", "1080p"}:
@@ -1077,6 +1088,62 @@ async def _upload_reference_images_to_public_urls(user_id: int, images: List[byt
         url = upload_bytes_to_supabase(path, raw, content_type)
         urls.append(url)
     return urls
+
+
+def _workspace_audio_input_path(user_id: int, slot: str, ext: str) -> str:
+    dt = datetime.now(timezone.utc)
+    safe_ext = (ext or "mp3").strip().lower()
+    if safe_ext not in {"mp3", "wav", "m4a", "aac", "ogg", "flac"}:
+        safe_ext = "mp3"
+    safe_slot = re.sub(r"[^a-z0-9_-]+", "_", str(slot or "audio").strip().lower()).strip("_") or "audio"
+    return f"workspace_audio_inputs/{int(user_id)}/{dt:%Y/%m/%d}/{safe_slot}_{uuid4().hex}.{safe_ext}"
+
+
+def _workspace_detect_audio_ext(raw: bytes, *, filename: Optional[str], content_type: Optional[str] = None) -> str:
+    head = bytes(raw[:16]) if isinstance(raw, (bytes, bytearray)) else b""
+    if head.startswith(b"ID3") or (len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0):
+        return "mp3"
+    if head.startswith(b"RIFF") and bytes(raw[8:12]) == b"WAVE":
+        return "wav"
+    if head.startswith(b"OggS"):
+        return "ogg"
+    if len(head) >= 12 and head[4:8] == b"ftyp":
+        return "m4a"
+    suffix = Path(str(filename or "")).suffix.lstrip(".").lower()
+    if suffix in {"mp3", "wav", "m4a", "aac", "ogg", "flac"}:
+        return suffix
+    ctype = str(content_type or "").strip().lower()
+    ctype_map = {
+        "audio/mpeg": "mp3",
+        "audio/mp3": "mp3",
+        "audio/wav": "wav",
+        "audio/x-wav": "wav",
+        "audio/mp4": "m4a",
+        "audio/x-m4a": "m4a",
+        "audio/aac": "aac",
+        "audio/ogg": "ogg",
+        "audio/flac": "flac",
+        "audio/x-flac": "flac",
+    }
+    return ctype_map.get(ctype, "mp3")
+
+
+def _workspace_audio_content_type(ext: str) -> str:
+    mapping = {
+        "mp3": "audio/mpeg",
+        "wav": "audio/wav",
+        "m4a": "audio/mp4",
+        "aac": "audio/aac",
+        "ogg": "audio/ogg",
+        "flac": "audio/flac",
+    }
+    return mapping.get((ext or "mp3").strip().lower(), "audio/mpeg")
+
+
+def _upload_workspace_input_audio(user_id: int, raw: bytes, *, filename: Optional[str], slot: str, content_type: Optional[str] = None) -> str:
+    ext = _workspace_detect_audio_ext(raw, filename=filename, content_type=content_type)
+    path = _workspace_audio_input_path(user_id, slot, ext)
+    return upload_bytes_to_supabase(path, raw, _workspace_audio_content_type(ext))
 
 
 async def _piapi_seedance_create_task_workspace(
@@ -1404,6 +1471,10 @@ async def _run_workspace_video_job(
     avatar_image: Optional[bytes],
     motion_video: Optional[bytes],
     reference_images: List[bytes],
+    start_frame_url: Optional[str] = None,
+    last_frame_url: Optional[str] = None,
+    reference_image_urls: Optional[List[str]] = None,
+    reference_audio_urls: Optional[List[str]] = None,
     source_video_upload_id: Optional[str] = None,
     reference_image_url: Optional[str] = None,
     charge_tokens: int = 0,
@@ -3034,6 +3105,26 @@ def _workspace_video_charge_spec(
             "meta": {"origin": "workspace_video", "provider": provider, "model": model, "mode": mode, "duration": duration, "rate": rate},
         }
 
+    if provider == "seedance_kie":
+        normalized_model = normalize_seedance_kie_model(model)
+        normalized_duration = normalize_seedance_kie_duration(duration)
+        normalized_resolution = normalize_seedance_kie_resolution(resolution, model=normalized_model)
+        tokens = int(seedance_kie_tokens_for_duration(normalized_duration, model=normalized_model))
+        return {
+            "tokens": tokens,
+            "charge_reason": "seedance_kie_video",
+            "refund_reason": "seedance_kie_video_refund",
+            "meta": {
+                "origin": "workspace_video",
+                "provider": provider,
+                "model": normalized_model,
+                "mode": mode,
+                "duration": normalized_duration,
+                "resolution": normalized_resolution,
+                "generate_audio": bool(enable_audio),
+            },
+        }
+
     if provider == "sora":
         cost_map = {4: 5, 8: 10, 12: 15}
         tokens = int(cost_map.get(int(duration), 5))
@@ -3094,7 +3185,7 @@ async def workspace_video_run(
     if not prompt and provider != "seedance":
         raise HTTPException(status_code=400, detail="Missing prompt")
 
-    supported = {"kling", "veo", "grok", "seedance", "sora", "switchx"}
+    supported = {"kling", "veo", "grok", "seedance", "seedance_kie", "sora", "switchx"}
     if provider not in supported:
         raise HTTPException(status_code=400, detail=f"Provider {provider} is not supported in /video/run yet")
 
@@ -3105,6 +3196,7 @@ async def workspace_video_run(
     motion_file = form.get("motion_video")
     source_video_file = form.get("source_video")
     ref_files = [f for f in form.getlist("reference_images") if getattr(f, "filename", None)]
+    ref_audio_files = [f for f in form.getlist("reference_audios") if getattr(f, "filename", None)]
     source_video_upload_id = str(form.get("source_video_upload_id") or "").strip()
     direct_reference_image_url = str(form.get("reference_image_url") or "").strip()
 
@@ -3125,6 +3217,15 @@ async def workspace_video_run(
         raw = await rf.read()
         if raw:
             reference_images.append(raw)
+    reference_audios: List[Dict[str, Any]] = []
+    for af in ref_audio_files:
+        raw = await af.read()
+        if raw:
+            reference_audios.append({
+                "raw": raw,
+                "filename": getattr(af, "filename", None),
+                "content_type": getattr(af, "content_type", None),
+            })
 
     source_upload_row: Optional[Dict[str, Any]] = None
     if provider == "switchx" and not source_video_upload_id and source_video:
@@ -3151,6 +3252,17 @@ async def workspace_video_run(
             raise HTTPException(status_code=400, detail="Для Grok Image→Video нужен start frame.")
     if provider == "seedance" and mode == "image_to_video" and not reference_images:
         raise HTTPException(status_code=400, detail="Для Seedance Image→Video нужен хотя бы один reference image.")
+    if provider == "seedance_kie":
+        model = normalize_seedance_kie_model(model)
+        duration = normalize_seedance_kie_duration(duration)
+        resolution = normalize_seedance_kie_resolution(resolution, model=model)
+        aspect_ratio = normalize_seedance_kie_aspect_ratio(aspect_ratio)
+        if mode == "first_frame" and not start_frame:
+            raise HTTPException(status_code=400, detail="Для Seedance 2.0 First Frame нужен start frame.")
+        if mode == "first_last_frame" and (not start_frame or not last_frame):
+            raise HTTPException(status_code=400, detail="Для Seedance 2.0 First + Last нужны start и last frame.")
+        if mode == "reference_to_video" and not reference_images and not reference_audios:
+            raise HTTPException(status_code=400, detail="Для Seedance 2.0 Reference → Video нужен хотя бы один image/audio reference.")
     if provider == "sora":
         if mode != "text_to_video":
             raise HTTPException(status_code=400, detail="Sora в workspace сейчас поддерживает только Text→Video.")
@@ -3237,6 +3349,17 @@ async def workspace_video_run(
             for idx, raw in enumerate(reference_images)
             if raw
         ]
+        reference_audio_urls = [
+            _upload_workspace_input_audio(
+                uid,
+                item.get("raw") or b"",
+                filename=item.get("filename"),
+                slot=f"video_reference_audio_{idx + 1}",
+                content_type=item.get("content_type"),
+            )
+            for idx, item in enumerate(reference_audios)
+            if item.get("raw")
+        ]
 
         motion_video_upload_id = None
         if motion_video:
@@ -3273,6 +3396,7 @@ async def workspace_video_run(
             "source_video_upload_id": source_video_upload_id,
             "reference_image_url": switchx_reference_image_url,
             "reference_image_urls": reference_image_urls,
+            "reference_audio_urls": reference_audio_urls,
             "charge_tokens": int(cost_tokens) if charged else 0,
             "charge_ref_id": charge_ref_id,
             "refund_reason": refund_reason,
