@@ -120,24 +120,6 @@ SWITCHX_TOKENS_PER_SEC_720 = max(1, int(os.getenv("SWITCHX_TOKENS_PER_SEC_720", 
 SWITCHX_TOKENS_PER_SEC_1080 = max(1, int(os.getenv("SWITCHX_TOKENS_PER_SEC_1080", "2") or "2"))
 
 
-TELEGRAM_BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
-_TELEGRAM_API_BASE_RAW = (os.getenv("TELEGRAM_API_BASE") or "").strip()
-
-
-def _telegram_method_url(method: str) -> str:
-    if not TELEGRAM_BOT_TOKEN:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
-    raw = _TELEGRAM_API_BASE_RAW.rstrip("/")
-    if raw:
-        if TELEGRAM_BOT_TOKEN in raw:
-            return f"{raw}/{method}"
-        if raw.endswith("/bot") or raw.endswith("/bot/"):
-            return f"{raw}{TELEGRAM_BOT_TOKEN}/{method}"
-        if raw.endswith("/bot" + TELEGRAM_BOT_TOKEN):
-            return f"{raw}/{method}"
-    return f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
-
-
 CHAT_MODEL_LABEL_DEFAULT = "gpt-4o-mini"
 PROMPT_MODEL_LABEL = "gpt-5.4"
 MAX_CHAT_ATTACHMENTS = 6
@@ -188,35 +170,6 @@ def _workspace_find_topup_pack(tokens: Any) -> Optional[Dict[str, Any]]:
         if int(pack.get("tokens") or 0) == wanted:
             return dict(pack)
     return None
-
-
-async def _create_workspace_stars_invoice_link(*, telegram_user_id: int, tokens: int, stars: int) -> str:
-    title = f"Nabex — {int(tokens)} токенов"
-    description = f"Пополнение баланса на {int(tokens)} токенов"
-    payload = f"stars_topup:{int(tokens)}:{int(telegram_user_id)}"
-    body = {
-        "title": title,
-        "description": description,
-        "payload": payload,
-        "provider_token": "",
-        "currency": "XTR",
-        "prices": [{"label": title, "amount": int(stars)}],
-    }
-    url = _telegram_method_url("createInvoiceLink")
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(url, json=body)
-    if resp.status_code >= 400:
-        raise RuntimeError(f"Telegram createInvoiceLink HTTP {resp.status_code}: {resp.text[:800]}")
-    try:
-        data = resp.json()
-    except Exception as e:
-        raise RuntimeError(f"Telegram createInvoiceLink вернул некорректный JSON: {e}")
-    if not isinstance(data, dict) or not data.get("ok"):
-        raise RuntimeError(f"Telegram createInvoiceLink error: {data}")
-    invoice_link = str(data.get("result") or "").strip()
-    if not invoice_link:
-        raise RuntimeError("Telegram createInvoiceLink не вернул invoice link")
-    return invoice_link
 
 
 def _sanitize_chat_history(value: Any) -> List[Dict[str, str]]:
@@ -2639,39 +2592,33 @@ async def workspace_topup_create(payload: WorkspaceTopupCreatePayload, user: Dic
     if not pack:
         raise HTTPException(status_code=400, detail="Неизвестный пакет пополнения.")
 
-    linked_tg = account.get("telegram_user_id")
-    if linked_tg in (None, ""):
-        linked_tg = user.get("linked_telegram_user_id")
-    if linked_tg in (None, ""):
-        raise HTTPException(status_code=400, detail="Для временной оплаты через Stars сначала войди на сайт через Telegram или привяжи Telegram к аккаунту.")
+    email = str(account.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Для оплаты картой или СБП сначала добавь email в профиле аккаунта.")
 
     try:
-        target_tg_user_id = int(linked_tg)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Не удалось определить Telegram ID для оплаты через Stars.")
-    if target_tg_user_id <= 0:
-        raise HTTPException(status_code=400, detail="Не удалось определить Telegram ID для оплаты через Stars.")
-
-    try:
-        invoice_link = await _create_workspace_stars_invoice_link(
-            telegram_user_id=target_tg_user_id,
+        payment_id, confirmation_url = await create_yookassa_payment(
+            amount_rub=int(pack["rub"]),
+            description=f'Пополнение баланса: {int(pack["tokens"])} токенов',
+            user_id=uid,
             tokens=int(pack["tokens"]),
-            stars=int(pack["stars"]),
+            customer_email=email,
+            return_url=(str(payload.return_url or "").strip() or None),
         )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Не удалось создать Stars invoice: {e}")
+        raise HTTPException(status_code=500, detail=f"Не удалось создать платёж: {e}")
 
     return {
         "ok": True,
-        "payment_id": None,
-        "confirmation_url": invoice_link,
-        "invoice_url": invoice_link,
+        "payment_id": payment_id,
+        "confirmation_url": confirmation_url,
         "tokens": int(pack["tokens"]),
         "amount_rub": int(pack["rub"]),
-        "amount_stars": int(pack["stars"]),
-        "target_telegram_user_id": target_tg_user_id,
+        "customer_email": email,
     }
 
 
