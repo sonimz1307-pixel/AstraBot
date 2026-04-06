@@ -227,13 +227,18 @@ def _prompt_builder_redirect_message() -> str:
     )
 
 
-def _build_prompt_builder_system_prompt(model_label: str, image_refs: List[str]) -> str:
+def _build_prompt_builder_system_prompt(model_label: str, image_refs: List[str], audio_refs: List[str]) -> str:
     ref_hint = ""
-    if image_refs:
+    if image_refs or audio_refs:
+        seedance_bits: List[str] = []
+        if image_refs:
+            seedance_bits.append("изображения: " + ", ".join(image_refs))
+        if audio_refs:
+            seedance_bits.append("аудио: " + ", ".join(audio_refs))
         ref_hint = (
-            " Если пользователь просит prompt для Seedance и приложены изображения, используй теги "
-            + ", ".join(image_refs)
-            + ". Для Kling используй формат @image_1, @image_2. Для Veo, Sora и Nano Banana не придумывай inline-теги, если они не нужны."
+            " Если пользователь просит prompt для Seedance и приложены референсы, используй теги "
+            + "; ".join(seedance_bits)
+            + ". Используй только реально загруженные теги. Для Kling используй формат @image_1, @image_2. Для Veo, Sora и Nano Banana не придумывай inline-теги, если они не нужны."
         )
     return (
         "Ты — AstraBot Prompt Builder. "
@@ -281,6 +286,10 @@ def _guess_attachment_kind(filename: str, content_type: str) -> str:
     ctype = (content_type or "").lower()
     if ctype.startswith("image/"):
         return "image"
+    if ctype.startswith("audio/") or ext in {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}:
+        return "audio"
+    if ctype.startswith("video/") or ext in {".mp4", ".mov", ".webm", ".mkv"}:
+        return "video"
     if ext == ".pdf" or ctype == "application/pdf":
         return "pdf"
     if ext == ".docx" or ctype == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
@@ -1529,7 +1538,7 @@ async def _run_workspace_video_job(
                 )
 
         elif provider == "seedance_kie":
-            if mode == "image_to_video" and not reference_images:
+            if mode == "image_to_video" and not (reference_images or start_frame or last_frame):
                 raise RuntimeError("Для Seedance 2.0 Image→Video нужен хотя бы один image reference")
             if mode == "image_to_video":
                 provider_video_url = await run_seedance_kie_image_to_video(
@@ -1537,6 +1546,9 @@ async def _run_workspace_video_job(
                     model=model,
                     prompt=prompt,
                     duration=duration,
+                    aspect_ratio=aspect_ratio,
+                    start_frame=start_frame,
+                    last_frame=last_frame,
                     reference_images=reference_images,
                     reference_audios=reference_audio_clips,
                 )
@@ -1545,6 +1557,7 @@ async def _run_workspace_video_job(
                     model=model,
                     prompt=prompt,
                     duration=duration,
+                    aspect_ratio=aspect_ratio,
                 )
 
         elif provider == "seedance":
@@ -2653,6 +2666,8 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
 
     prepared_files = await _prepare_workspace_chat_attachments(files) if files else {"items": [], "context": "", "image_bytes_list": []}
     image_refs = [f"@image{i}" for i in range(1, len(prepared_files.get("image_bytes_list") or []) + 1)]
+    audio_count = sum(1 for item in (prepared_files.get("items") or []) if str(item.get("kind") or "") == "audio")
+    audio_refs = [f"@audio{i}" for i in range(1, audio_count + 1)]
 
     user_text = text_value or "Проанализируй приложенные файлы и кратко скажи, что в них находится, затем предложи полезные следующие шаги."
     if prepared_files.get("context"):
@@ -2672,7 +2687,7 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
                 "attachments": prepared_files.get("items") or [],
                 "is_prompt": False,
             }
-        system_prompt = _build_prompt_builder_system_prompt(model_label, image_refs)
+        system_prompt = _build_prompt_builder_system_prompt(model_label, image_refs, audio_refs)
     else:
         system_prompt = (
             "Ты — AstraBot Workspace Assistant. "
@@ -3211,18 +3226,13 @@ async def workspace_video_run(
         mode = normalize_seedance_kie_mode(mode)
         duration = normalize_seedance_kie_duration(duration)
         resolution = _normalize_workspace_video_resolution(provider, model, resolution)
-        aspect_ratio = "16:9"
+        aspect_ratio = normalize_seedance_kie_aspect_ratio(aspect_ratio)
         enable_audio = True
         if mode == "image_to_video":
-            combined_images = list(reference_images)
-            if start_frame:
-                combined_images.insert(0, start_frame)
-            if last_frame:
-                combined_images.append(last_frame)
-            reference_images = combined_images
-            if not reference_images:
+            total_image_refs = len(reference_images) + (1 if start_frame else 0) + (1 if last_frame else 0)
+            if total_image_refs < 1:
                 raise HTTPException(status_code=400, detail="Для Seedance 2.0 Image→Video нужен хотя бы один image reference.")
-            if len(reference_images) > 7:
+            if total_image_refs > 7:
                 raise HTTPException(status_code=400, detail="Для Seedance 2.0 доступно максимум 7 image references суммарно.")
             if len(reference_audios) > 3:
                 raise HTTPException(status_code=400, detail="Для Seedance 2.0 доступно максимум 3 audio references.")
