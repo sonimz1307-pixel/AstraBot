@@ -73,6 +73,7 @@ from grok_video_replicate import (
 )
 from seedance_kie import (
     SeedanceKieError,
+    normalize_seedance_kie_aspect_ratio,
     normalize_seedance_kie_duration,
     normalize_seedance_kie_mode,
     normalize_seedance_kie_model,
