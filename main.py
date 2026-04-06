@@ -6048,7 +6048,7 @@ async def webhook(secret: str, request: Request):
                     charge_tokens=cost_tokens,
                     charge_ref_id=charge_ref_id,
                 )
-                await tg_send_message(chat_id, f"⏳ Grok поставлен в очередь: Image → Video • {duration} сек • {resolution} • {aspect_ratio} • Mode: {provider_mode}", reply_markup=_help_menu_for(user_id))
+                await tg_send_message(chat_id, f"⏳ Grok - Генерация началась: Image → Video • {duration} сек • {resolution} • {aspect_ratio} • Mode: {provider_mode}", reply_markup=_help_menu_for(user_id))
             else:
                 await _enqueue_tg_grok_job(
                     chat_id=int(chat_id),
@@ -6059,7 +6059,7 @@ async def webhook(secret: str, request: Request):
                     charge_tokens=cost_tokens,
                     charge_ref_id=charge_ref_id,
                 )
-                await tg_send_message(chat_id, f"⏳ Grok поставлен в очередь: Text → Video • {duration} сек • {resolution} • {aspect_ratio} • Mode: {provider_mode}", reply_markup=_help_menu_for(user_id))
+                await tg_send_message(chat_id, f"⏳ Grok - Генерация началась: Text → Video • {duration} сек • {resolution} • {aspect_ratio} • Mode: {provider_mode}", reply_markup=_help_menu_for(user_id))
         except Exception as e:
             try:
                 add_tokens(user_id, int(cost_tokens), reason="grok_video_refund", ref_id=uuid4().hex, meta={"stage": "enqueue_failed", "error": str(e)[:300]})
