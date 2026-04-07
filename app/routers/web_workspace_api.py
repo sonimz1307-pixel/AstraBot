@@ -1062,6 +1062,11 @@ def _normalize_switchx_resolution(value: Any) -> str:
     return "720" if text in {"720", "720p"} else "1080"
 
 
+def _normalize_switchx_alpha_mode(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return text if text in {"auto", "fill", "select"} else "auto"
+
+
 def _switchx_tokens_per_sec(resolution: Any) -> int:
     return SWITCHX_TOKENS_PER_SEC_720 if _normalize_switchx_resolution(resolution) == "720" else SWITCHX_TOKENS_PER_SEC_1080
 
@@ -1429,6 +1434,8 @@ async def _run_workspace_video_job(
     reference_audio_clips: List[bytes],
     source_video_upload_id: Optional[str] = None,
     reference_image_url: Optional[str] = None,
+    switchx_alpha_mode: Optional[str] = None,
+    switchx_select_mask_url: Optional[str] = None,
     charge_tokens: int = 0,
     charge_ref_id: str = "",
     refund_reason: str = "workspace_video_refund",
@@ -1621,10 +1628,14 @@ async def _run_workspace_video_job(
         elif provider == "switchx":
             upload_id = str(source_video_upload_id or "").strip()
             ref_url = str(reference_image_url or "").strip()
+            alpha_mode = _normalize_switchx_alpha_mode(switchx_alpha_mode)
+            select_mask_url = str(switchx_select_mask_url or "").strip()
             if not upload_id:
                 raise RuntimeError("Для SwitchX нужен source video upload id")
             if not ref_url:
                 raise RuntimeError("Для SwitchX нужен reference image")
+            if alpha_mode == "select" and not select_mask_url:
+                raise RuntimeError("Для SwitchX Select нужен alpha mask 1-го кадра")
             row = get_workspace_upload_row(int(user_id), upload_id)
             if not row:
                 raise RuntimeError(f"SwitchX source video not found: {upload_id}")
@@ -1663,6 +1674,7 @@ async def _run_workspace_video_job(
                 raise RuntimeError("SwitchX source video is empty")
             ref_bytes, ref_ext = await _download_workspace_image_bytes(ref_url)
             ref_content_type = _workspace_image_content_type(ref_ext)
+            alpha_uri = None
             client = SwitchXClient()
             source_upload = await client.create_and_upload(
                 filename=str(row.get("filename") or f"switchx_source_{upload_id}.mp4"),
@@ -1674,11 +1686,20 @@ async def _run_workspace_video_job(
                 file_bytes=ref_bytes,
                 content_type=ref_content_type,
             )
+            if alpha_mode == "select":
+                alpha_bytes, alpha_ext = await _download_workspace_image_bytes(select_mask_url)
+                alpha_upload = await client.create_and_upload(
+                    filename=f"switchx_alpha.{alpha_ext or 'png'}",
+                    file_bytes=alpha_bytes,
+                    content_type=_workspace_image_content_type(alpha_ext),
+                )
+                alpha_uri = alpha_upload.beeble_uri
             created = await client.start_generation(
                 source_uri=source_upload.beeble_uri,
                 reference_image_uri=ref_upload.beeble_uri,
                 prompt=str(prompt or "").strip(),
-                alpha_mode="auto",
+                alpha_mode=alpha_mode,
+                alpha_uri=alpha_uri,
                 max_resolution=int(_normalize_switchx_resolution(resolution)),
                 idempotency_key=generation_id,
             )
@@ -3171,10 +3192,12 @@ async def workspace_video_run(
     avatar_file = form.get("avatar_image")
     motion_file = form.get("motion_video")
     source_video_file = form.get("source_video")
+    switchx_select_mask_file = form.get("switchx_select_mask")
     ref_files = [f for f in form.getlist("reference_images") if getattr(f, "filename", None)]
     ref_audio_files = [f for f in form.getlist("reference_audios") if getattr(f, "filename", None)]
     source_video_upload_id = str(form.get("source_video_upload_id") or "").strip()
     direct_reference_image_url = str(form.get("reference_image_url") or "").strip()
+    switchx_alpha_mode = _normalize_switchx_alpha_mode(form.get("switchx_alpha_mode"))
 
     async def _read_optional(upload: Any) -> Optional[bytes]:
         if not upload or not getattr(upload, "filename", None):
@@ -3188,6 +3211,7 @@ async def workspace_video_run(
     avatar_image = await _read_optional(avatar_file)
     motion_video = await _read_optional(motion_file)
     source_video = await _read_optional(source_video_file)
+    switchx_select_mask = await _read_optional(switchx_select_mask_file)
     reference_images: List[bytes] = []
     for rf in ref_files:
         raw = await rf.read()
@@ -3255,12 +3279,15 @@ async def workspace_video_run(
         raise HTTPException(status_code=400, detail="Для Motion Control нужны avatar image и motion video.")
     if provider == "switchx":
         resolution = _normalize_switchx_resolution(resolution)
+        switchx_alpha_mode = _normalize_switchx_alpha_mode(switchx_alpha_mode)
         if mode != "video_swap":
             raise HTTPException(status_code=400, detail="SwitchX в workspace поддерживает только режим video_swap.")
         if not source_video_upload_id:
             raise HTTPException(status_code=400, detail="Для SwitchX нужно исходное видео.")
         if not direct_reference_image_url and not reference_images:
             raise HTTPException(status_code=400, detail="Для SwitchX нужен reference image или AI-референс.")
+        if switchx_alpha_mode == "select" and not switchx_select_mask:
+            raise HTTPException(status_code=400, detail="Для SwitchX Select нужна PNG/JPG маска 1-го кадра.")
         if source_upload_row is None:
             source_upload_row = get_workspace_upload_row(uid, source_video_upload_id)
         if not source_upload_row:
@@ -3352,7 +3379,10 @@ async def workspace_video_run(
             )
             motion_video_upload_id = str(uploaded_motion.get("id") or "").strip() or None
 
-        switchx_reference_image_url = direct_reference_image_url or (reference_image_urls[0] if reference_image_urls else None)
+        switchx_reference_image_url = (reference_image_urls[0] if reference_image_urls else None) or direct_reference_image_url
+        switchx_select_mask_url = None
+        if provider == "switchx" and switchx_alpha_mode == "select" and switchx_select_mask:
+            switchx_select_mask_url = _upload_workspace_input_image(uid, switchx_select_mask, filename=getattr(switchx_select_mask_file, "filename", None), slot="switchx_select_mask")
 
         job = {
             "job_id": uuid4().hex,
@@ -3377,6 +3407,8 @@ async def workspace_video_run(
             "source_video_upload_id": source_video_upload_id,
             "reference_image_url": switchx_reference_image_url,
             "reference_image_urls": reference_image_urls,
+            "switchx_alpha_mode": switchx_alpha_mode if provider == "switchx" else None,
+            "switchx_select_mask_url": switchx_select_mask_url,
             "reference_audio_upload_ids": reference_audio_upload_ids,
             "charge_tokens": int(cost_tokens) if charged else 0,
             "charge_ref_id": charge_ref_id,
