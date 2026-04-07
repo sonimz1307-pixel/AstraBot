@@ -87,6 +87,7 @@ class SwitchXClient:
         reference_image_uri: str,
         prompt: str,
         alpha_mode: str = DEFAULT_ALPHA_MODE,
+        alpha_uri: Optional[str] = None,
         max_resolution: int = 1080,
         callback_url: Optional[str] = None,
         idempotency_key: Optional[str] = None,
@@ -103,6 +104,8 @@ class SwitchXClient:
             "alpha_mode": alpha_mode,
             "max_resolution": int(max_resolution),
         }
+        if alpha_uri:
+            body["alpha_uri"] = str(alpha_uri)
         if callback_url:
             body["callback_url"] = callback_url
         if idempotency_key:
