@@ -157,6 +157,8 @@ async def process_workspace_video_job(job: Dict[str, Any]) -> None:
         reference_audio_clips=reference_audio_clips,
         source_video_upload_id=str(job.get("source_video_upload_id") or "").strip() or None,
         reference_image_url=str(job.get("reference_image_url") or "").strip() or None,
+        switchx_alpha_mode=str(job.get("switchx_alpha_mode") or "").strip() or None,
+        switchx_select_mask_url=str(job.get("switchx_select_mask_url") or "").strip() or None,
         charge_tokens=int(job.get("charge_tokens") or 0),
         charge_ref_id=str(job.get("charge_ref_id") or ""),
         refund_reason=str(job.get("refund_reason") or "workspace_video_refund"),
