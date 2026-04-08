@@ -48,7 +48,7 @@ from app.services.workspace_account_service import (
     start_password_reset,
 )
 from app.services.workspace_auth import WORKSPACE_SESSION_TTL_SEC, create_access_token, get_current_workspace_user, get_optional_workspace_user
-from billing_db import add_tokens, ensure_user_row, get_balance
+from billing_db import add_tokens, ensure_user_row, get_balance, get_balance_history
 from db_supabase import supabase, track_user_activity
 from kling3_flow import Kling3Error, create_kling3_task, get_kling3_task
 from kling_flow import (
@@ -1064,7 +1064,7 @@ def _normalize_switchx_resolution(value: Any) -> str:
 
 def _normalize_switchx_alpha_mode(value: Any) -> str:
     text = str(value or "").strip().lower()
-    return text if text in {"auto", "fill", "select"} else "auto"
+    return text if text in {"auto", "fill"} else "auto"
 
 
 def _switchx_tokens_per_sec(resolution: Any) -> int:
@@ -2606,6 +2606,15 @@ async def workspace_balance(user: Dict[str, Any] = Depends(get_current_workspace
     return {"ok": True, "balance_tokens": balance}
 
 
+@router.get("/balance/history")
+async def workspace_balance_history(limit: int = 30, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
+    uid = int(user.get("workspace_user_id") or user["telegram_user_id"])
+    ensure_user_row(uid)
+    items = get_balance_history(uid, limit=limit)
+    balance = int(get_balance(uid) or 0)
+    return {"ok": True, "items": items, "balance_tokens": balance}
+
+
 class WorkspaceTopupCreatePayload(BaseModel):
     tokens: int = Field(..., ge=1, le=100000)
     return_url: Optional[str] = None
@@ -3390,7 +3399,7 @@ async def workspace_video_run(
             )
             motion_video_upload_id = str(uploaded_motion.get("id") or "").strip() or None
 
-        switchx_reference_image_url = (reference_image_urls[0] if reference_image_urls else None) or direct_reference_image_url
+        switchx_reference_image_url = ((reference_image_urls[0] if reference_image_urls else None) or direct_reference_image_url) if provider == "switchx" else None
         switchx_select_mask_url = None
         if provider == "switchx" and switchx_alpha_mode == "select" and switchx_select_mask:
             switchx_select_mask_url = _upload_workspace_input_image(uid, switchx_select_mask, filename=getattr(switchx_select_mask_file, "filename", None), slot="switchx_select_mask")
