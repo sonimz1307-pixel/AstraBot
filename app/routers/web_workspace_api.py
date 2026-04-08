@@ -3212,6 +3212,17 @@ async def workspace_video_run(
     motion_video = await _read_optional(motion_file)
     source_video = await _read_optional(source_video_file)
     switchx_select_mask = await _read_optional(switchx_select_mask_file)
+    print("[switchx form]", {
+        "provider": provider,
+        "mode": mode,
+        "switchx_alpha_mode": switchx_alpha_mode,
+        "source_video_upload_id": source_video_upload_id,
+        "has_source_video_file": bool(source_video),
+        "has_direct_reference_image_url": bool(direct_reference_image_url),
+        "reference_images_count": len(ref_files),
+        "mask_bytes": len(switchx_select_mask or b""),
+        "mask_filename": getattr(switchx_select_mask_file, "filename", None),
+    }, flush=True)
     reference_images: List[bytes] = []
     for rf in ref_files:
         raw = await rf.read()
@@ -3383,6 +3394,17 @@ async def workspace_video_run(
         switchx_select_mask_url = None
         if provider == "switchx" and switchx_alpha_mode == "select" and switchx_select_mask:
             switchx_select_mask_url = _upload_workspace_input_image(uid, switchx_select_mask, filename=getattr(switchx_select_mask_file, "filename", None), slot="switchx_select_mask")
+
+        if provider == "switchx":
+            print("[switchx queued job]", {
+                "generation_id": generation_id,
+                "alpha_mode": switchx_alpha_mode,
+                "select_mask_url": switchx_select_mask_url,
+                "reference_image_url": switchx_reference_image_url,
+                "source_video_upload_id": source_video_upload_id,
+                "resolution": resolution,
+                "prompt_len": len(str(prompt or "")),
+            }, flush=True)
 
         job = {
             "job_id": uuid4().hex,
