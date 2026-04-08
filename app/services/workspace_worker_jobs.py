@@ -135,6 +135,15 @@ async def process_workspace_video_job(job: Dict[str, Any]) -> None:
             continue
         reference_audio_clips.append(await _download_bytes(_workspace_upload_url(user_id, target_id), timeout=600.0))
 
+    print("[switchx worker job]", {
+        "generation_id": generation_id,
+        "provider": str(job.get("provider") or "").strip(),
+        "alpha_mode": str(job.get("switchx_alpha_mode") or "").strip() or None,
+        "select_mask_url": str(job.get("switchx_select_mask_url") or "").strip() or None,
+        "reference_image_url": str(job.get("reference_image_url") or "").strip() or None,
+        "source_video_upload_id": str(job.get("source_video_upload_id") or "").strip() or None,
+    }, flush=True)
+
     await ww._run_workspace_video_job(
         generation_id=generation_id,
         user_id=user_id,
