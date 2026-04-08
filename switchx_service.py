@@ -113,15 +113,19 @@ class SwitchXClient:
         if seed is not None:
             body["seed"] = int(seed)
 
+        print("[switchx beeble request]", body, flush=True)
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             r = await client.post(f"{self.base_url}/switchx/generations", json=body, headers=self._headers)
+        print("[switchx beeble response]", {"status_code": r.status_code, "body": r.text[:1200]}, flush=True)
         if r.status_code >= 300:
             raise SwitchXError(f"Start generation failed: {r.status_code} {r.text[:1200]}")
         return self._parse_status_response(r.json())
 
     async def get_status(self, job_id: str) -> SwitchXJobResult:
+        print("[switchx status request]", {"job_id": job_id}, flush=True)
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             r = await client.get(f"{self.base_url}/switchx/generations/{job_id}", headers=self._headers)
+        print("[switchx status response]", {"job_id": job_id, "status_code": r.status_code, "body": r.text[:1200]}, flush=True)
         if r.status_code >= 300:
             raise SwitchXError(f"Get status failed: {r.status_code} {r.text[:800]}")
         return self._parse_status_response(r.json())
