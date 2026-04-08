@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from supabase import create_client
@@ -86,6 +86,58 @@ def ledger_ref_exists(*, reason: str, ref_id: str) -> bool:
         .execute()
     )
     return bool(getattr(r, "data", None))
+
+def get_balance_history(telegram_user_id: int, *, limit: int = 30) -> List[Dict[str, Any]]:
+    """Возвращает последние операции по балансу пользователя."""
+    _require_client()
+    uid = int(telegram_user_id)
+    lim = max(1, min(int(limit or 30), 100))
+    fields = "id, telegram_user_id, delta_tokens, reason, ref_id, meta, created_at"
+    fallback_fields = "id, telegram_user_id, delta_tokens, reason, ref_id, meta"
+
+    try:
+        response = (
+            supabase.table("bot_balance_ledger")
+            .select(fields)
+            .eq("telegram_user_id", uid)
+            .order("created_at", desc=True)
+            .limit(lim)
+            .execute()
+        )
+    except Exception:
+        response = (
+            supabase.table("bot_balance_ledger")
+            .select(fallback_fields)
+            .eq("telegram_user_id", uid)
+            .limit(lim)
+            .execute()
+        )
+
+    rows = list(getattr(response, "data", None) or [])
+    rows.sort(key=lambda row: str((row or {}).get("created_at") or ""), reverse=True)
+
+    items: List[Dict[str, Any]] = []
+    for row in rows[:lim]:
+        meta = row.get("meta")
+        if not isinstance(meta, dict):
+            meta = {}
+        try:
+            delta = int(row.get("delta_tokens") or 0)
+        except Exception:
+            delta = 0
+        items.append(
+            {
+                "id": str(row.get("id") or ""),
+                "telegram_user_id": uid,
+                "delta_tokens": delta,
+                "reason": str(row.get("reason") or ""),
+                "ref_id": row.get("ref_id"),
+                "meta": meta,
+                "created_at": row.get("created_at"),
+            }
+        )
+    return items
+
 
 def add_tokens(
     telegram_user_id: int,
