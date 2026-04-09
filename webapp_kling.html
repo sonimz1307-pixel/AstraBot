@@ -814,26 +814,63 @@
     <!-- ===================== SEEDANCE BLOCK ===================== -->
     <div id="seedanceBlock" style="display:none;">
       <div class="card">
-        <h3>Модель Seedance</h3>
-        <div class="seg" role="radiogroup" aria-label="Модель Seedance">
-          <input id="seed_preview" type="radio" name="seedance_model" value="preview" checked>
-          <label for="seed_preview">
-            <span class="name">Preview</span>
-            <span class="desc">Максимальное качество</span>
+        <h3>Тип Seedance</h3>
+        <div class="seg" role="radiogroup" aria-label="Тип Seedance">
+          <input id="seed_variant_kie" type="radio" name="seedance_variant" value="kie">
+          <label for="seed_variant_kie">
+            <span class="name">Seedance 2.0</span>
+            <span class="desc">Как на сайте</span>
           </label>
 
-          <input id="seed_fast" type="radio" name="seedance_model" value="fast">
-          <label for="seed_fast">
-            <span class="name">Fast</span>
-            <span class="desc">Быстрее / дешевле</span>
+          <input id="seed_variant_preview" type="radio" name="seedance_variant" value="preview" checked>
+          <label for="seed_variant_preview">
+            <span class="name">Seedance 2.0 Preview</span>
+            <span class="desc">Текущий режим</span>
           </label>
         </div>
-        <div class="hint">Seedance 2.0</div>
+        <div class="hint">Сначала выбери обычный Seedance 2.0 или Preview.</div>
       </div>
 
       <div class="card">
+        <h3>Модель Seedance</h3>
+        <div id="seedancePreviewModelWrap">
+          <div class="seg" role="radiogroup" aria-label="Модель Seedance Preview">
+            <input id="seed_preview" type="radio" name="seedance_model" value="preview" checked>
+            <label for="seed_preview">
+              <span class="name">Preview</span>
+              <span class="desc">Максимальное качество</span>
+            </label>
+
+            <input id="seed_fast" type="radio" name="seedance_model" value="fast">
+            <label for="seed_fast">
+              <span class="name">Fast</span>
+              <span class="desc">Быстрее / дешевле</span>
+            </label>
+          </div>
+          <div class="hint">Preview: текущая реализация бота.</div>
+        </div>
+
+        <div id="seedanceKieModelWrap" style="display:none;">
+          <div class="seg" role="radiogroup" aria-label="Модель Seedance 2.0">
+            <input id="seed_kie_standard" type="radio" name="seedance_kie_model" value="seedance-kie" checked>
+            <label for="seed_kie_standard">
+              <span class="name">Seedance 2.0</span>
+              <span class="desc">720p • как на сайте</span>
+            </label>
+
+            <input id="seed_kie_fast" type="radio" name="seedance_kie_model" value="seedance-kie-fast">
+            <label for="seed_kie_fast">
+              <span class="name">Seedance 2.0 Fast</span>
+              <span class="desc">480p • быстрее / дешевле</span>
+            </label>
+          </div>
+          <div class="hint">Обычный Seedance 2.0: Standard = 720p, Fast = 480p.</div>
+        </div>
+      </div>
+
+      <div id="seedancePreviewFlowCard" class="card">
         <h3>Режим</h3>
-        <div class="seg" role="radiogroup" aria-label="Режим Seedance">
+        <div class="seg" role="radiogroup" aria-label="Режим Seedance Preview">
           <input id="seed_flow_text" type="radio" name="seedance_flow" value="text" checked>
           <label for="seed_flow_text">
             <span class="name">Text → Video</span>
@@ -847,6 +884,25 @@
           </label>
         </div>
         <div class="hint">Для Image → Video: после сохранения пришли 1–9 фото в чат, затем промпт.</div>
+      </div>
+
+      <div id="seedanceKieFlowCard" class="card" style="display:none;">
+        <h3>Режим</h3>
+        <div class="seg" role="radiogroup" aria-label="Режим Seedance 2.0">
+          <input id="seed_kie_flow_text" type="radio" name="seedance_kie_flow" value="text" checked>
+          <label for="seed_kie_flow_text">
+            <span class="name">Text → Video</span>
+            <span class="desc">Только промпт</span>
+          </label>
+
+          <input id="seed_kie_flow_image" type="radio" name="seedance_kie_flow" value="image">
+          <label for="seed_kie_flow_image">
+            <span class="name">Image → Video</span>
+            <span class="desc">Промпт + референсы</span>
+          </label>
+        </div>
+        <div class="hint">Для обычного Seedance 2.0 в боте доступны Text → Video и Image → Video.</div>
+        <div class="hint">В режиме Image → Video: после сохранения пришли 1–7 фото в чат, затем промпт. Audio, first frame и last frame в боте не используются.</div>
       </div>
 
       <div class="card">
@@ -863,10 +919,11 @@
         <select id="seedance_aspect" aria-label="Формат Seedance">
           <option value="16:9">16:9 (YouTube)</option>
           <option value="9:16">9:16 (Reels)</option>
+          <option value="1:1">1:1</option>
           <option value="4:3">4:3</option>
           <option value="3:4">3:4</option>
         </select>
-        <div class="hint">Если используешь референсы, формат референс‑картинки может переопределить этот параметр.</div>
+        <div id="seedanceAspectHint" class="hint">Если используешь референсы, формат референс‑картинки может переопределить этот параметр.</div>
       </div>
     </div>
 
@@ -909,6 +966,36 @@
     // Grok getters
     function getGrokFlow(){ return qs('input[name="grok_flow"]:checked')?.value || "text"; }
     function getGrokProviderMode(){ return qs('#grok_mode')?.value || "normal"; }
+
+    // Seedance getters
+    function getSeedanceVariant(){ return qs('input[name="seedance_variant"]:checked')?.value || "preview"; }
+    function getSeedancePreviewModel(){ return qs('input[name="seedance_model"]:checked')?.value || "preview"; }
+    function getSeedanceKieModel(){ return qs('input[name="seedance_kie_model"]:checked')?.value || "seedance-kie"; }
+    function getSeedanceKieFlow(){ return qs('input[name="seedance_kie_flow"]:checked')?.value || "text"; }
+
+    function updateSeedanceUI(){
+      const variant = getSeedanceVariant();
+      const previewModelWrap = qs('#seedancePreviewModelWrap');
+      const kieModelWrap = qs('#seedanceKieModelWrap');
+      const previewFlowCard = qs('#seedancePreviewFlowCard');
+      const kieFlowCard = qs('#seedanceKieFlowCard');
+      const aspectHint = qs('#seedanceAspectHint');
+      const aspectSelect = qs('#seedance_aspect');
+
+      if (previewModelWrap) previewModelWrap.style.display = (variant === 'preview') ? 'block' : 'none';
+      if (kieModelWrap) kieModelWrap.style.display = (variant === 'kie') ? 'block' : 'none';
+      if (previewFlowCard) previewFlowCard.style.display = (variant === 'preview') ? 'block' : 'none';
+      if (kieFlowCard) kieFlowCard.style.display = (variant === 'kie') ? 'block' : 'none';
+
+      if (variant === 'kie'){
+        if (aspectSelect && ['4:3','3:4'].includes(aspectSelect.value)){
+          aspectSelect.value = '16:9';
+        }
+        if (aspectHint) aspectHint.textContent = 'Для обычного Seedance 2.0 доступны форматы 16:9 / 9:16 / 1:1, как на сайте.';
+      } else {
+        if (aspectHint) aspectHint.textContent = 'Если используешь референсы, формат референс‑картинки может переопределить этот параметр.';
+      }
+    }
 
     function updateKlingUI(){
       let flow = getFlow();
@@ -1082,6 +1169,8 @@
         updateKlingUI();
       } else if (provider === 'veo') {
         setVeoAdvancedEnabled();
+      } else if (provider === 'seedance') {
+        updateSeedanceUI();
       }
       updateCostUI();
     }
@@ -1091,6 +1180,10 @@
     qsa('input[name="flow"]').forEach(el => el.addEventListener('change', () => { updateKlingUI(); updateCostUI(); }));
     qsa('input[name="mode"]').forEach(el => el.addEventListener('change', () => { updateTokenRateHint(); updateCostUI(); }));
     qsa('input[name="kling_version"]').forEach(el => el.addEventListener('change', () => { updateKlingUI(); updateTokenRateHint(); updateCostUI(); }));
+    qsa('input[name="seedance_variant"]').forEach(el => el.addEventListener('change', () => { updateSeedanceUI(); updateCostUI(); }));
+    qsa('input[name="seedance_model"]').forEach(el => el.addEventListener('change', () => { updateCostUI(); }));
+    qsa('input[name="seedance_kie_model"]').forEach(el => el.addEventListener('change', () => { updateCostUI(); }));
+    qsa('input[name="seedance_flow"]').forEach(el => el.addEventListener('change', () => { updateCostUI(); }));
 qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () => {
       updateVeoPriceHint();
       setVeoAdvancedEnabled();
@@ -1164,8 +1257,19 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
       const provider = getProvider();
 
       if (provider === 'seedance'){
-        const model = (qs('input[name="seedance_model"]:checked')?.value || 'preview');
+        const variant = getSeedanceVariant();
         const seconds = parseInt((qs('#seedance_duration')?.value || "5"), 10);
+
+        if (variant === 'kie'){
+          const model = getSeedanceKieModel();
+          const priceMap = (model === 'seedance-kie-fast')
+            ? {5: 5, 10: 10, 15: 15}
+            : {5: 10, 10: 20, 15: 30};
+          const tokens = priceMap[seconds] || (model === 'seedance-kie-fast' ? 5 : 10);
+          return { known:true, tokens, note:'' };
+        }
+
+        const model = getSeedancePreviewModel();
         let rate = (model === 'fast') ? 1 : 2;
         const tokens = rate * seconds;
         return { known:true, tokens, note:'' };
@@ -1337,19 +1441,34 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
             aspect_ratio
           };
         } else if (provider === 'seedance'){
-          const seedance_model = (qs('input[name="seedance_model"]:checked')?.value || 'preview');
-          const flow = (qs('input[name="seedance_flow"]:checked')?.value || 'text');
+          const variant = getSeedanceVariant();
           const duration = parseInt((qs('#seedance_duration')?.value || "5"), 10);
           const aspect_ratio = (qs('#seedance_aspect')?.value || "16:9");
 
-          payload = {
-            type: "seedance_settings",
-            provider: "seedance",
-            seedance_model,
-            flow,
-            duration,
-            aspect_ratio
-          };
+          if (variant === 'kie'){
+            payload = {
+              type: "seedance_settings",
+              provider: "seedance_kie",
+              seedance_variant: "kie",
+              seedance_model: getSeedanceKieModel(),
+              flow: getSeedanceKieFlow(),
+              duration,
+              aspect_ratio
+            };
+          } else {
+            const seedance_model = getSeedancePreviewModel();
+            const flow = (qs('input[name="seedance_flow"]:checked')?.value || 'text');
+
+            payload = {
+              type: "seedance_settings",
+              provider: "seedance",
+              seedance_variant: "preview",
+              seedance_model,
+              flow,
+              duration,
+              aspect_ratio
+            };
+          }
         } else if (provider === 'sora') {
           const duration = parseInt((qs('#sora_duration')?.value || "4"), 10);
           const aspect_ratio = (qs('#sora_aspect')?.value || "16:9");
