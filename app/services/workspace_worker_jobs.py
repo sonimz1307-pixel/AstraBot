@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from nano_banana_2_piapi import handle_nano_banana_2
+from nano_banana_pro_new_kie import handle_nano_banana_pro_new
 from billing_db import add_tokens
 from grok_video_replicate import (
     GrokVideoError,
@@ -394,7 +395,8 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
     charge_tokens = int(job.get("charge_tokens") or 0)
     charge_ref_id = str(job.get("charge_ref_id") or "")
 
-    source_image = await _download_optional_bytes(job.get("source_image_url"))
+    source_image_urls = [str(item or "").strip() for item in (job.get("source_image_urls") or []) if str(item or "").strip()]
+    source_image = None if (provider == "nano_banana_pro_new" and source_image_urls) else await _download_optional_bytes(job.get("source_image_url"))
     base_image = await _download_optional_bytes(job.get("base_image_url"))
 
     ww._update_workspace_image_generation(
@@ -516,6 +518,17 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
                 safety_level=safety_level,
             )
             engine = "nano_banana_pro"
+        elif provider == "nano_banana_pro_new":
+            out_bytes, ext = await ww._workspace_run_nano_banana_pro_new_site(
+                user_id=user_id,
+                prompt=run_prompt,
+                source_image_bytes=source_image,
+                source_filename=job.get("source_filename"),
+                source_image_urls=source_image_urls,
+                resolution=resolution,
+                aspect_ratio=aspect_ratio,
+            )
+            engine = "nano_banana_pro_new_kie"
         else:
             raise RuntimeError(f"Unsupported workspace image provider: {provider}")
 
