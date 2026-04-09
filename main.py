@@ -30,6 +30,7 @@ from billing_db import (
     grant_welcome_bonus_once,
 )
 from nano_banana import run_nano_banana
+from nano_banana_pro_new_kie import nano_banana_pro_new_cost
 from topaz_pricing import (
     get_photo_preset_tokens,
     get_photo_preset_settings,
@@ -230,6 +231,7 @@ def _is_nav_or_menu_text(t: str) -> bool:
         "статистика", "рассылка",
         # submenus you use in keyboards
         "фото/афиши", "нейро фотосессии", "картинка+картинка", "2 фото", "nano banana", "nano banana 2",
+        "nano banana pro", "nano banana pro new", "nano banana pro - new",
         "seedream", "апскейл", "апскейл фото", "апскейл видео",
         "topaz фото • standard • 2 токена", "topaz фото • detail • 3 токена", "topaz фото • max • 4 токена",
         "topaz видео • hd smooth • 1 токен / 5 сек",
@@ -913,6 +915,27 @@ def _nano_banana_pro_aspect_inline_kb(current: str = "9:16") -> dict:
     return {"inline_keyboard": [row]}
 
 
+def _nano_banana_pro_new_inline_kb(current_aspect: str = "9:16", current_resolution: str = "2K", refs_count: int = 0) -> dict:
+    res_values = (("2K", "1 ток."), ("4K", "2 ток."))
+    res_row = []
+    for value, price in res_values:
+        label = f"{value} • {price}"
+        text = f"✅ {label}" if value == current_resolution else label
+        res_row.append({"text": text, "callback_data": f"nbpn:res:{value}"})
+
+    aspect_values = ("1:1", "4:5", "9:16", "16:9")
+    aspect_row = []
+    for value in aspect_values:
+        text = f"✅ {value}" if value == current_aspect else value
+        aspect_row.append({"text": text, "callback_data": f"nbpn:aspect:{value}"})
+
+    action_row = [{"text": f"✅ Готово ({refs_count}/8)" if refs_count else "✅ Готово", "callback_data": "nbpn:done"}]
+    if refs_count:
+        action_row.append({"text": "🗑 Очистить фото", "callback_data": "nbpn:clear"})
+
+    return {"inline_keyboard": [res_row, aspect_row, action_row]}
+
+
 def _nano_banana_2_aspect_inline_kb(current: str = "9:16") -> dict:
     values = ("1:1", "4:5", "9:16", "16:9")
     row = []
@@ -1244,6 +1267,16 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
             "aspect_ratio": "9:16",
         }
 
+    elif mode == "nano_banana_pro_new":
+        st["nano_banana_pro_new"] = {
+            "step": "need_photo",
+            "photo_bytes": None,
+            "photo_file_id": None,
+            "photo_file_ids": [],
+            "resolution": "2K",
+            "aspect_ratio": "9:16",
+        }
+
     elif mode == "nano_banana_2":
         st["nano_banana_2"] = {
             "step": "need_photo",
@@ -1288,6 +1321,7 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
         st.pop("two_photos", None)
         st.pop("nano_banana", None)
         st.pop("nano_banana_pro", None)
+        st.pop("nano_banana_pro_new", None)
         st.pop("nano_banana_2", None)
         st.pop("topaz_photo", None)
         st.pop("topaz_video", None)
@@ -1729,8 +1763,9 @@ def _photo_future_menu_keyboard() -> dict:
         "keyboard": [
             [{"text": "Фото/Афиши"}, {"text": "Нейро фотосессии"}],
             [{"text": "🍌 Nano Banana"}, {"text": "🍌 Nano Banana 2"}],
-            [{"text": "🍌 Nano Banana Pro"}, {"text": "Seedream"}],
-            [{"text": "Апскейл"}, {"text": "⬅️ Назад"}],
+            [{"text": "🍌 Nano Banana Pro"}, {"text": "🍌 Nano Banana Pro - NEW"}],
+            [{"text": "Seedream"}, {"text": "Апскейл"}],
+            [{"text": "⬅️ Назад"}],
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False,
@@ -3810,6 +3845,103 @@ async def webhook(secret: str, request: Request):
                 chat_id,
                 f"✅ Формат Nano Banana Pro: {aspect_ratio}\nТеперь пришли фото или сразу напиши текст.",
                 reply_markup=_nano_banana_pro_aspect_inline_kb(aspect_ratio),
+            )
+            return {"ok": True}
+
+        if chat_id and user_id and data.startswith("nbpn:res:"):
+            resolution = data.split(":", 2)[2].strip().upper()
+            if resolution not in ("2K", "4K"):
+                return {"ok": True}
+
+            st = _ensure_state(chat_id, user_id)
+            nbpn = st.get("nano_banana_pro_new") or {
+                "step": "need_photo",
+                "photo_bytes": None,
+                "photo_file_id": None,
+                "photo_file_ids": [],
+                "resolution": "2K",
+                "aspect_ratio": "9:16",
+            }
+            nbpn["resolution"] = resolution
+            st["nano_banana_pro_new"] = nbpn
+            st["ts"] = _now()
+
+            refs_count = len([x for x in (nbpn.get("photo_file_ids") or []) if str(x or "").strip()])
+            await tg_send_message(
+                chat_id,
+                f"✅ Nano Banana Pro - NEW: {resolution} • {nano_banana_pro_new_cost(resolution)} ток.\nФормат: {nbpn.get('aspect_ratio') or '9:16'}\nФото: {refs_count}/8\nМожно прислать до 8 фото. Когда закончишь — нажми «Готово» или просто отправь prompt текстом.",
+                reply_markup=_nano_banana_pro_new_inline_kb(nbpn.get("aspect_ratio") or "9:16", resolution, refs_count),
+            )
+            return {"ok": True}
+
+        if chat_id and user_id and data.startswith("nbpn:aspect:"):
+            aspect_ratio = data.split(":", 2)[2].strip()
+            if aspect_ratio not in ("1:1", "4:5", "9:16", "16:9"):
+                return {"ok": True}
+
+            st = _ensure_state(chat_id, user_id)
+            nbpn = st.get("nano_banana_pro_new") or {
+                "step": "need_photo",
+                "photo_bytes": None,
+                "photo_file_id": None,
+                "photo_file_ids": [],
+                "resolution": "2K",
+                "aspect_ratio": "9:16",
+            }
+            nbpn["aspect_ratio"] = aspect_ratio
+            st["nano_banana_pro_new"] = nbpn
+            st["ts"] = _now()
+
+            current_resolution = str(nbpn.get("resolution") or "2K").upper() or "2K"
+            refs_count = len([x for x in (nbpn.get("photo_file_ids") or []) if str(x or "").strip()])
+            await tg_send_message(
+                chat_id,
+                f"✅ Формат Nano Banana Pro - NEW: {aspect_ratio}\nResolution: {current_resolution} • {nano_banana_pro_new_cost(current_resolution)} ток.\nФото: {refs_count}/8\nМожно прислать до 8 фото. Когда закончишь — нажми «Готово» или просто отправь prompt текстом.",
+                reply_markup=_nano_banana_pro_new_inline_kb(aspect_ratio, current_resolution, refs_count),
+            )
+            return {"ok": True}
+
+        if chat_id and user_id and data == "nbpn:done":
+            st = _ensure_state(chat_id, user_id)
+            nbpn = st.get("nano_banana_pro_new") or {}
+            refs = [x for x in (nbpn.get("photo_file_ids") or []) if str(x or "").strip()]
+            current_resolution = str(nbpn.get("resolution") or "2K").upper() or "2K"
+            current_aspect = nbpn.get("aspect_ratio") or "9:16"
+            if not refs:
+                await tg_send_message(
+                    chat_id,
+                    "Сначала пришли хотя бы одно фото или сразу текст для генерации без фото.",
+                    reply_markup=_nano_banana_pro_new_inline_kb(current_aspect, current_resolution, 0),
+                )
+                return {"ok": True}
+            nbpn["step"] = "need_prompt"
+            st["nano_banana_pro_new"] = nbpn
+            st["ts"] = _now()
+            await tg_send_message(
+                chat_id,
+                f"✅ Фото зафиксированы: {len(refs)}/8\nТеперь пришли prompt одним сообщением. Цена: {nano_banana_pro_new_cost(current_resolution)} ток.",
+                reply_markup=_nano_banana_pro_new_inline_kb(current_aspect, current_resolution, len(refs)),
+            )
+            return {"ok": True}
+
+        if chat_id and user_id and data == "nbpn:clear":
+            st = _ensure_state(chat_id, user_id)
+            nbpn = st.get("nano_banana_pro_new") or {}
+            current_resolution = str(nbpn.get("resolution") or "2K").upper() or "2K"
+            current_aspect = nbpn.get("aspect_ratio") or "9:16"
+            st["nano_banana_pro_new"] = {
+                "step": "need_photo",
+                "photo_bytes": None,
+                "photo_file_id": None,
+                "photo_file_ids": [],
+                "resolution": current_resolution,
+                "aspect_ratio": current_aspect,
+            }
+            st["ts"] = _now()
+            await tg_send_message(
+                chat_id,
+                "🗑 Фото очищены. Можешь прислать новые фото, до 8 штук, или сразу текст для генерации без фото.",
+                reply_markup=_nano_banana_pro_new_inline_kb(current_aspect, current_resolution, 0),
             )
             return {"ok": True}
 
@@ -6412,6 +6544,29 @@ async def webhook(secret: str, request: Request):
         )
         return {"ok": True}
 
+
+    if incoming_text in ("🍌 Nano Banana Pro - NEW", "Nano Banana Pro - NEW", "Nano Banana Pro NEW"):
+        _set_mode(chat_id, user_id, "nano_banana_pro_new")
+        await tg_send_message(
+            chat_id,
+            "🍌 Nano Banana Pro - NEW — новая ветка через KIE.\n\n"
+            "Вариант A (фото→фото):\n"
+            "• Можно добавить до 8 фото-референсов.\n"
+            "• Когда закончил — нажми «Готово» или просто отправь prompt текстом.\n\n"
+            "Вариант B (текст→картинка):\n"
+            "• Просто пришли текст без фото — сгенерирую картинку.\n\n"
+            "Цена зависит от resolution:\n"
+            "• 2K = 1 токен\n"
+            "• 4K = 2 токена",
+            reply_markup=_photo_future_menu_keyboard(),
+        )
+        await tg_send_message(
+            chat_id,
+            "Выбери resolution и формат Nano Banana Pro - NEW:",
+            reply_markup=_nano_banana_pro_new_inline_kb("9:16", "2K", 0),
+        )
+        return {"ok": True}
+
     if incoming_text in ("🖼 Апскейл фото", "Апскейл фото"):
         _set_mode(chat_id, user_id, "topaz_photo")
         await tg_send_message(
@@ -6581,6 +6736,7 @@ async def webhook(secret: str, request: Request):
             "• 🔊 Озвучить текст: профессиональная AI-озвучка.\n"
             "• 🍌 Nano Banana 2: генерация или редактирование изображений через PiAPI.\n"
             "• 🍌 Nano Banana Pro: продвинутый AI-редактор изображений.\n"
+            "• 🍌 Nano Banana Pro - NEW: новая ветка через KIE с выбором 2K / 4K.\n"
             "• 💰 Баланс: токены, пополнение, история операций.\n"
             "• 🔄 Сбросить генерацию — если зациклилась/зависла\n• /reset — сбросить текущий режим\n",
             reply_markup=_help_menu_for(user_id),
@@ -6801,8 +6957,116 @@ async def webhook(secret: str, request: Request):
                     reply_markup=_photo_future_menu_keyboard(),
                 )
                 return {"ok": True}
-                
-# ---- KLING Image → Video: step=need_image ----
+
+        # ---- NANO BANANA PRO - NEW (KIE): ждём фото ----
+        if st.get("mode") == "nano_banana_pro_new":
+            nbpn = st.get("nano_banana_pro_new") or {}
+            photo_ids = [str(item or "").strip() for item in (nbpn.get("photo_file_ids") or []) if str(item or "").strip()]
+            if len(photo_ids) >= 8:
+                current_aspect = (nbpn.get("aspect_ratio") or "9:16")
+                current_resolution = str(nbpn.get("resolution") or "2K").upper() or "2K"
+                await tg_send_message(
+                    chat_id,
+                    "Уже загружено 8/8 фото. Нажми «Готово», очисти фото или сразу отправь prompt текстом.",
+                    reply_markup=_nano_banana_pro_new_inline_kb(current_aspect, current_resolution, len(photo_ids)),
+                )
+                return {"ok": True}
+
+            photo_ids.append(file_id)
+            nbpn["photo_bytes"] = img_bytes
+            nbpn["photo_file_id"] = file_id
+            nbpn["photo_file_ids"] = photo_ids
+            nbpn["step"] = "collect_refs"
+            st["nano_banana_pro_new"] = nbpn
+            st["ts"] = _now()
+            current_aspect = (nbpn.get("aspect_ratio") or "9:16")
+            current_resolution = str(nbpn.get("resolution") or "2K").upper() or "2K"
+            current_cost = nano_banana_pro_new_cost(current_resolution)
+            await tg_send_message(
+                chat_id,
+                f"Фото #{len(photo_ids)} из 8 принял ✅\nResolution: {current_resolution}\nФормат: {current_aspect}\n\nМожешь прислать ещё фото, нажать «Готово» или сразу отправить prompt текстом.\nСтоимость: {current_cost} токен(а).",
+                reply_markup=_nano_banana_pro_new_inline_kb(current_aspect, current_resolution, len(photo_ids)),
+            )
+            return {"ok": True}
+
+        if st.get("mode") == "topaz_photo":
+            tpz = st.get("topaz_photo") or {}
+            preset_slug = str(tpz.get("preset_slug") or "").strip().lower()
+            if not preset_slug:
+                await tg_send_message(
+                    chat_id,
+                    "Сначала выбери пресет для Topaz Фото.",
+                    reply_markup=_topaz_photo_presets_keyboard(),
+                )
+                return {"ok": True}
+
+            cost = int(get_photo_preset_tokens(preset_slug))
+            ensure_user_row(user_id)
+            try:
+                bal = float(get_balance(user_id) or 0)
+            except Exception:
+                bal = 0
+
+            if bal < cost:
+                await tg_send_message(
+                    chat_id,
+                    f"Недостаточно токенов 😕\nНужно: {cost} токен(а) для Topaz Фото.",
+                    reply_markup=_topup_packs_kb(),
+                )
+                return {"ok": True}
+
+            job_id = uuid4().hex
+            charged = False
+            try:
+                try:
+                    add_tokens(user_id, -cost, reason="topaz_image_upscale")
+                except TypeError:
+                    add_tokens(user_id, -int(cost), reason="topaz_image_upscale")
+                charged = True
+
+                await tg_send_message(
+                    chat_id,
+                    f"🖼 Topaz Фото ({preset_slug}) — запускаю…",
+                    reply_markup=_photo_future_menu_keyboard(),
+                )
+
+                await enqueue_job(
+                    {
+                        "job_id": job_id,
+                        "type": "topaz_image_upscale",
+                        "chat_id": int(chat_id),
+                        "user_id": int(user_id),
+                        "photo_file_id": str(file_id or ""),
+                        "preset_slug": preset_slug,
+                        "charge_tokens": int(cost),
+                        "refund_reason": "topaz_image_upscale_refund",
+                        "reply_markup": _photo_future_menu_keyboard(),
+                    },
+                    queue_name=TOPAZ_PHOTO_QUEUE_NAME,
+                )
+            except Exception as e:
+                if charged:
+                    try:
+                        try:
+                            add_tokens(user_id, int(cost), reason="topaz_image_upscale_refund")
+                        except TypeError:
+                            add_tokens(user_id, int(cost), reason="topaz_image_upscale_refund")
+                    except Exception:
+                        pass
+                await tg_send_message(
+                    chat_id,
+                    f"❌ Не удалось запустить Topaz Фото: {e}\nТокены возвращены.",
+                    reply_markup=_photo_future_menu_keyboard(),
+                )
+                return {"ok": True}
+
+            st["topaz_photo"] = {"step": "choose_preset", "preset_slug": None}
+            st["ts"] = _now()
+            return {"ok": True}
+
+
+# ---- KLING Image → Video: accept start image as document ----
+    # ---- KLING Image → Video: step=need_image ----
         if st.get("mode") == "kling_i2v":
             ki = st.get("kling_i2v") or {}
             step = (ki.get("step") or "need_image")
@@ -7443,6 +7707,26 @@ async def webhook(secret: str, request: Request):
                 )
                 return {"ok": True}
 
+        # ---- NANO BANANA PRO - NEW (KIE): ждём фото ----
+        if st.get("mode") == "nano_banana_pro_new":
+            nbpn = st.get("nano_banana_pro_new") or {}
+            step = (nbpn.get("step") or "need_photo")
+            if step == "need_photo":
+                nbpn["photo_bytes"] = img_bytes
+                nbpn["photo_file_id"] = file_id
+                nbpn["step"] = "need_prompt"
+                st["nano_banana_pro_new"] = nbpn
+                st["ts"] = _now()
+                current_resolution = str(nbpn.get("resolution") or "2K").upper() or "2K"
+                current_cost = nano_banana_pro_new_cost(current_resolution)
+                current_aspect = (nbpn.get("aspect_ratio") or "9:16")
+                await tg_send_message(
+                    chat_id,
+                    f"Фото принял ✅\nResolution: {current_resolution}\nФормат: {current_aspect}\nТеперь напиши одним сообщением, что изменить (фон/стиль/детали).\n\nСтоимость: {current_cost} токен(а).",
+                    reply_markup=_photo_future_menu_keyboard(),
+                )
+                return {"ok": True}
+
         if st.get("mode") == "topaz_photo":
             tpz = st.get("topaz_photo") or {}
             preset_slug = str(tpz.get("preset_slug") or "").strip().lower()
@@ -7641,7 +7925,7 @@ async def webhook(secret: str, request: Request):
             if nav_text in ("⬅ Назад", "Назад") or nav_text.startswith("/"):
                 # обработается выше в общих обработчиках (/reset, /start, Назад)
                 pass
-            elif nav_text in ("Фото будущего", "📸 Фото будущего", "Фото/Афиши", "Нейро фотосессии", "2 фото", "Картинка+Картинка", "Seedream", "Seedream 4.5", "Апскейл", "🍌 Nano Banana", "🍌 Nano Banana 2", "🍌 Nano Banana Pro", "Текст→Картинка", "🖼 Апскейл фото", "🎬 Апскейл видео", "🧠 ИИ (чат)", "ИИ (чат)", "🧠 ИИ чат"):
+            elif nav_text in ("Фото будущего", "📸 Фото будущего", "Фото/Афиши", "Нейро фотосессии", "2 фото", "Картинка+Картинка", "Seedream", "Seedream 4.5", "Апскейл", "🍌 Nano Banana", "🍌 Nano Banana 2", "🍌 Nano Banana Pro", "🍌 Nano Banana Pro - NEW", "Текст→Картинка", "🖼 Апскейл фото", "🎬 Апскейл видео", "🧠 ИИ (чат)", "ИИ (чат)", "🧠 ИИ чат"):
                 # навигация по меню — тоже не промпт
                 pass
             else:
@@ -8163,7 +8447,202 @@ async def webhook(secret: str, request: Request):
             st["ts"] = _now()
 
             return {"ok": True}
-            
+
+        # NANO BANANA PRO - NEW (KIE): текст→картинка ИЛИ фото→фото
+        if st.get("mode") == "nano_banana_pro_new":
+            nbpn = st.get("nano_banana_pro_new") or {}
+            step = (nbpn.get("step") or "need_photo")
+
+            nav_text = (incoming_text or "").strip()
+            selected_resolution = str(nbpn.get("resolution") or "2K").upper() or "2K"
+            cost = nano_banana_pro_new_cost(selected_resolution)
+            photo_ids = [str(item or "").strip() for item in (nbpn.get("photo_file_ids") or []) if str(item or "").strip()]
+            has_refs = bool(photo_ids or str(nbpn.get("photo_file_id") or "").strip() or nbpn.get("photo_bytes"))
+
+            if step != "need_prompt" and not has_refs:
+                if (not nav_text) or _is_nav_or_menu_text(nav_text):
+                    await tg_send_message(
+                        chat_id,
+                        "🍌 Nano Banana Pro - NEW:\n"
+                        "• Пришли фото (для редактирования)\n"
+                        "ИЛИ\n"
+                        "• Пришли текст (для генерации картинки без фото).\n\n"
+                        f"Текущий resolution: {selected_resolution} • {cost} ток.",
+                        reply_markup=_photo_future_menu_keyboard(),
+                    )
+                    return {"ok": True}
+
+                user_prompt = nav_text
+                ensure_user_row(user_id)
+                try:
+                    bal = float(get_balance(user_id) or 0)
+                except Exception:
+                    bal = 0
+
+                if bal < cost:
+                    await tg_send_message(
+                        chat_id,
+                        f"Недостаточно токенов 😕\nНужно: {cost} токен(а) для Nano Banana Pro - NEW ({selected_resolution}).",
+                        reply_markup=_topup_packs_kb(),
+                    )
+                    return {"ok": True}
+
+                nano_banana_pro_new_charged = False
+                job_id = uuid4().hex
+                try:
+                    try:
+                        add_tokens(user_id, -cost, reason="nano_banana_pro_new")
+                    except TypeError:
+                        add_tokens(user_id, -int(cost), reason="nano_banana_pro_new")
+                    nano_banana_pro_new_charged = True
+
+                    await tg_send_message(
+                        chat_id,
+                        f"🍌 Nano Banana Pro - NEW ({selected_resolution}, текст→картинка) — запускаю…",
+                        reply_markup=_photo_future_menu_keyboard(),
+                    )
+
+                    await enqueue_job({
+                        "job_id": job_id,
+                        "type": "nano_banana_pro_new",
+                        "chat_id": int(chat_id),
+                        "user_id": int(user_id),
+                        "prompt": user_prompt,
+                        "photo_file_id": "",
+                        "resolution": selected_resolution,
+                        "aspect_ratio": (nbpn.get("aspect_ratio") or "9:16"),
+                        "output_format": "png",
+                        "cost": cost,
+                    }, queue_name="gen")
+                except Exception as e:
+                    if nano_banana_pro_new_charged:
+                        try:
+                            try:
+                                add_tokens(user_id, cost, reason="nano_banana_pro_new_refund")
+                            except TypeError:
+                                add_tokens(user_id, int(cost), reason="nano_banana_pro_new_refund")
+                        except Exception:
+                            pass
+                    try:
+                        await tg_send_message(
+                            chat_id,
+                            f"❌ Не удалось запустить Nano Banana Pro - NEW: {e}\nТокены возвращены.",
+                            reply_markup=_photo_future_menu_keyboard(),
+                        )
+                    except Exception:
+                        pass
+                    return {"ok": True}
+
+                st["nano_banana_pro_new"] = {
+                    "step": "need_photo",
+                    "photo_bytes": None,
+                    "photo_file_id": None,
+                    "photo_file_ids": [],
+                    "resolution": selected_resolution,
+                    "aspect_ratio": (nbpn.get("aspect_ratio") or "9:16"),
+                }
+                st["ts"] = _now()
+                return {"ok": True}
+
+            src_bytes = nbpn.get("photo_bytes")
+
+            if not src_bytes:
+                st["nano_banana_pro_new"] = {
+                    "step": "need_photo",
+                    "photo_bytes": None,
+                    "photo_file_id": None,
+                    "photo_file_ids": [],
+                    "resolution": selected_resolution,
+                    "aspect_ratio": (nbpn.get("aspect_ratio") or "9:16"),
+                }
+                st["ts"] = _now()
+
+                await tg_send_message(
+                    chat_id,
+                    "Фото не найдено. Пришли фото ещё раз.",
+                    reply_markup=_photo_future_menu_keyboard(),
+                )
+                return {"ok": True}
+
+            user_prompt = nav_text
+            if not user_prompt:
+                await tg_send_message(
+                    chat_id,
+                    "Напиши текстом, что изменить (фон/стиль/детали).",
+                    reply_markup=_photo_future_menu_keyboard(),
+                )
+                return {"ok": True}
+
+            ensure_user_row(user_id)
+            try:
+                bal = float(get_balance(user_id) or 0)
+            except Exception:
+                bal = 0
+
+            if bal < cost:
+                await tg_send_message(
+                    chat_id,
+                    f"Недостаточно токенов 😕\nНужно: {cost} токен(а) для Nano Banana Pro - NEW ({selected_resolution}).",
+                    reply_markup=_topup_packs_kb(),
+                )
+                return {"ok": True}
+
+            nano_banana_pro_new_charged = False
+            job_id = uuid4().hex
+            try:
+                try:
+                    add_tokens(user_id, -cost, reason="nano_banana_pro_new")
+                except TypeError:
+                    add_tokens(user_id, -int(cost), reason="nano_banana_pro_new")
+                nano_banana_pro_new_charged = True
+
+                await tg_send_message(
+                    chat_id,
+                    f"🍌 Nano Banana Pro - NEW ({selected_resolution}) — запускаю…",
+                )
+
+                await enqueue_job({
+                    "job_id": job_id,
+                    "type": "nano_banana_pro_new",
+                    "chat_id": int(chat_id),
+                    "user_id": int(user_id),
+                    "prompt": user_prompt,
+                    "photo_file_id": (nbpn.get("photo_file_id") or ""),
+                    "photo_file_ids": [str(item or "").strip() for item in (nbpn.get("photo_file_ids") or []) if str(item or "").strip()][:8],
+                    "resolution": selected_resolution,
+                    "aspect_ratio": (nbpn.get("aspect_ratio") or "match_input_image"),
+                    "output_format": "png",
+                    "cost": cost,
+                }, queue_name="gen")
+            except Exception as e:
+                if nano_banana_pro_new_charged:
+                    try:
+                        try:
+                            add_tokens(user_id, cost, reason="nano_banana_pro_new_refund")
+                        except TypeError:
+                            add_tokens(user_id, int(cost), reason="nano_banana_pro_new_refund")
+                    except Exception:
+                        pass
+                try:
+                    await tg_send_message(
+                        chat_id,
+                        f"❌ Не удалось запустить Nano Banana Pro - NEW: {e}\nТокены возвращены.",
+                        reply_markup=_photo_future_menu_keyboard(),
+                    )
+                except Exception:
+                    pass
+                return {"ok": True}
+
+            st["nano_banana_pro_new"] = {
+                "step": "need_photo",
+                "photo_bytes": None,
+                "resolution": selected_resolution,
+                "aspect_ratio": (nbpn.get("aspect_ratio") or "9:16"),
+            }
+            st["ts"] = _now()
+
+            return {"ok": True}
+
         # TWO PHOTOS: после 2 фото — пользователь пишет инструкцию
         if st.get("mode") == "two_photos":
             tp = st.get("two_photos") or {}
