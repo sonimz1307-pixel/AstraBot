@@ -4687,30 +4687,33 @@ async def webhook(secret: str, request: Request):
 
         
 
-                # ----- WebApp data (Seedance 2 preview settings) -----
-        # Expected: {type:"seedance_settings", provider:"seedance", seedance_model:"preview|fast",
-        # flow:"text|image", duration:5|10|15, aspect_ratio:"16:9|9:16|4:3|3:4"}
+                # ----- WebApp data (Seedance 2.0 / Preview settings) -----
+        # Expected preview: {type:"seedance_settings", provider:"seedance", seedance_model:"preview|fast", flow:"text|image", ...}
+        # Expected regular: {type:"seedance_settings", provider:"seedance_kie", seedance_model:"seedance-kie|seedance-kie-fast", flow:"text|image", ...}
+        seedance_provider_raw = str(payload.get("provider") or provider_raw or "").lower().strip()
+        seedance_type_raw = str(payload.get("type") or "").lower().strip()
+        seedance_model_raw = str(payload.get("seedance_model") or payload.get("model") or payload.get("preset") or "").lower().strip()
+        seedance_variant_raw = str(payload.get("seedance_variant") or payload.get("variant") or "").lower().strip()
+        seedance_task_type_raw = str(payload.get("task_type") or payload.get("taskType") or "").lower().strip()
+
         is_seedance = (
-            (str(payload.get("type") or "").lower().strip() in ("seedance_settings", "seedance2_settings", "seedance_2_settings"))
-            or (str(payload.get("provider") or provider_raw or "").lower().strip() == "seedance")
-            or (str(payload.get("task_type") or payload.get("taskType") or "").lower().strip().startswith("seedance-2-"))
-        ) and (str(payload.get("provider") or provider_raw or "seedance").lower().strip() in ("seedance", "seedance2", "seedance_2"))
+            seedance_type_raw in ("seedance_settings", "seedance2_settings", "seedance_2_settings")
+            or seedance_provider_raw in ("seedance", "seedance2", "seedance_2", "seedance_kie", "seedance-kie")
+            or seedance_model_raw in ("preview", "fast", "seedance-2-preview", "seedance-2-fast-preview", "seedance-kie", "seedance-kie-fast")
+            or seedance_task_type_raw in ("seedance-2-preview", "seedance-2-fast-preview", "seedance-2", "seedance-2-fast")
+        )
 
         if is_seedance:
-            seedance_model = str(payload.get("seedance_model") or payload.get("model") or payload.get("preset") or "preview").lower().strip()
-            if seedance_model not in ("preview", "fast", "seedance-2-preview", "seedance-2-fast-preview"):
-                seedance_model = "preview"
-            # normalize to task_type
-            if seedance_model in ("seedance-2-fast-preview",):
-                task_type = "seedance-2-fast-preview"
-                seedance_model = "fast"
-            elif seedance_model in ("seedance-2-preview",):
-                task_type = "seedance-2-preview"
-                seedance_model = "preview"
-            else:
-                task_type = "seedance-2-fast-preview" if seedance_model == "fast" else "seedance-2-preview"
+            provider_kind = "seedance"
+            if (
+                seedance_provider_raw in ("seedance_kie", "seedance-kie")
+                or seedance_variant_raw == "kie"
+                or seedance_model_raw in ("seedance-kie", "seedance-kie-fast")
+                or seedance_task_type_raw in ("seedance-2", "seedance-2-fast")
+            ):
+                provider_kind = "seedance_kie"
 
-            flow = str(payload.get("flow") or payload.get("gen_mode") or payload.get("mode") or "text").lower().strip()
+            flow = str(payload.get("flow") or payload.get("gen_mode") or payload.get("mode") or ("text" if provider_kind == "seedance_kie" else "text")).lower().strip()
             if flow not in ("text", "image"):
                 flow = "text"
 
@@ -4722,15 +4725,42 @@ async def webhook(secret: str, request: Request):
                 duration = 5
 
             aspect_ratio = str(payload.get("aspect_ratio") or "16:9").strip()
-            if aspect_ratio not in ("16:9", "9:16", "4:3", "3:4"):
-                aspect_ratio = "16:9"
+            if provider_kind == "seedance_kie":
+                if aspect_ratio not in ("16:9", "9:16", "1:1"):
+                    aspect_ratio = "16:9"
+                seedance_model = seedance_model_raw or "seedance-kie"
+                if seedance_model not in ("seedance-kie", "seedance-kie-fast", "seedance-2", "seedance-2-fast"):
+                    seedance_model = "seedance-kie"
+                if seedance_model == "seedance-2-fast":
+                    seedance_model = "seedance-kie-fast"
+                elif seedance_model == "seedance-2":
+                    seedance_model = "seedance-kie"
+                task_type = "seedance-2-fast" if seedance_model == "seedance-kie-fast" else "seedance-2"
+                max_images = 7
+            else:
+                if aspect_ratio not in ("16:9", "9:16", "1:1", "4:3", "3:4"):
+                    aspect_ratio = "16:9"
+                seedance_model = seedance_model_raw or "preview"
+                if seedance_model not in ("preview", "fast", "seedance-2-preview", "seedance-2-fast-preview"):
+                    seedance_model = "preview"
+                if seedance_model in ("seedance-2-fast-preview",):
+                    task_type = "seedance-2-fast-preview"
+                    seedance_model = "fast"
+                elif seedance_model in ("seedance-2-preview",):
+                    task_type = "seedance-2-preview"
+                    seedance_model = "preview"
+                else:
+                    task_type = "seedance-2-fast-preview" if seedance_model == "fast" else "seedance-2-preview"
+                max_images = 9
 
             st["seedance_settings"] = {
+                "provider_kind": provider_kind,
                 "seedance_model": seedance_model,
                 "task_type": task_type,
                 "flow": flow,
                 "duration": duration,
                 "aspect_ratio": aspect_ratio,
+                "max_images": max_images,
             }
             st["ts"] = _now()
 
@@ -4740,7 +4770,9 @@ async def webhook(secret: str, request: Request):
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
-                    "✅ Настройки Seedance 2.0 сохранены.\n\nТеперь пришли ТЕКСТ (промпт), что должно быть в видео.",
+                    ("✅ Настройки Seedance 2.0 сохранены.\n\nТеперь пришли ТЕКСТ (промпт), что должно быть в видео."
+                     if provider_kind == "seedance_kie" else
+                     "✅ Настройки Seedance 2.0 Preview сохранены.\n\nТеперь пришли ТЕКСТ (промпт), что должно быть в видео."),
                     reply_markup=_help_menu_for(user_id),
                 )
                 return {"ok": True}
@@ -4752,10 +4784,20 @@ async def webhook(secret: str, request: Request):
                     "prompt": None,
                 }
                 st["ts"] = _now()
+                if provider_kind == "seedance_kie":
+                    msg = (
+                        "✅ Настройки Seedance 2.0 сохранены.\n\nТеперь пришли 1–7 ФОТО (референсы).\n"
+                        "Когда все фото отправишь — напиши «Готово», и я попрошу промпт.\n"
+                        "В этом режиме в боте доступны только photo references — без audio, first frame и last frame."
+                    )
+                else:
+                    msg = (
+                        "✅ Настройки Seedance 2.0 Preview сохранены.\n\nТеперь пришли 1–9 ФОТО (референсы).\n"
+                        "Когда все фото отправишь — напиши «Готово», и я попрошу промпт."
+                    )
                 await tg_send_message(
                     chat_id,
-                    "✅ Настройки Seedance 2.0 сохранены.\n\nТеперь пришли 1–9 ФОТО (референсы).\n"
-                    "Когда все фото отправишь — напиши «Готово», и я попрошу промпт.",
+                    msg,
                     reply_markup=_help_menu_for(user_id),
                 )
                 return {"ok": True}
@@ -5844,9 +5886,12 @@ async def webhook(secret: str, request: Request):
             return {"ok": True}
 
         settings = st.get("seedance_settings") or {}
-        task_type = str(settings.get("task_type") or "seedance-2-preview").strip()
+        provider_kind = str(settings.get("provider_kind") or "seedance").strip() or "seedance"
+        seedance_model = str(settings.get("seedance_model") or ("seedance-kie" if provider_kind == "seedance_kie" else "preview")).strip()
+        task_type = str(settings.get("task_type") or ("seedance-2" if provider_kind == "seedance_kie" else "seedance-2-preview")).strip()
         duration = int(settings.get("duration") or 5)
         aspect_ratio = str(settings.get("aspect_ratio") or "16:9").strip()
+        max_images = int(settings.get("max_images") or (7 if provider_kind == "seedance_kie" else 9))
 
         # Если это i2v, но мы ещё собираем фото — обрабатываем «Готово»
         if st.get("mode") == "seedance_i2v":
@@ -5871,7 +5916,7 @@ async def webhook(secret: str, request: Request):
                 # если пользователь написал что-то другое, пока мы ждём фото — подсказка
                 await tg_send_message(
                     chat_id,
-                    "Я сейчас жду фото-референсы (1–9).\nОтправь фото или напиши «Готово», когда закончил.",
+                    f"Я сейчас жду фото-референсы (1–{max_images}).\nОтправь фото или напиши «Готово», когда закончил.",
                     reply_markup=_help_menu_for(user_id),
                 )
                 return {"ok": True}
@@ -5882,12 +5927,19 @@ async def webhook(secret: str, request: Request):
             return {"ok": True}
 
         # ---- SEEDANCE BILLING ----
-        # По умолчанию: preview=2 ток/сек, fast=1 ток/сек (можно переопределить env)
-        rate_preview = int(os.getenv("SEEDANCE_TOKENS_PER_SEC_PREVIEW", "2") or 2)
-        rate_fast = int(os.getenv("SEEDANCE_TOKENS_PER_SEC_FAST", "1") or 1)
-        is_fast = ("fast" in task_type)
-        rate = rate_fast if is_fast else rate_preview
-        cost_tokens = int(max(0, rate * int(duration)))
+        if provider_kind == "seedance_kie":
+            if seedance_model == "seedance-kie-fast":
+                price_map = {5: 5, 10: 10, 15: 15}
+            else:
+                price_map = {5: 10, 10: 20, 15: 30}
+            cost_tokens = int(price_map.get(int(duration), 5 if seedance_model == "seedance-kie-fast" else 10))
+        else:
+            # По умолчанию: preview=2 ток/сек, fast=1 ток/сек (можно переопределить env)
+            rate_preview = int(os.getenv("SEEDANCE_TOKENS_PER_SEC_PREVIEW", "2") or 2)
+            rate_fast = int(os.getenv("SEEDANCE_TOKENS_PER_SEC_FAST", "1") or 1)
+            is_fast = ("fast" in task_type)
+            rate = rate_fast if is_fast else rate_preview
+            cost_tokens = int(max(0, rate * int(duration)))
 
         _busy_start(int(user_id), "Seedance видео")
         seedance_charged = False
@@ -5939,6 +5991,8 @@ async def webhook(secret: str, request: Request):
                 "type": "seedance_video",
                 "chat_id": int(chat_id),
                 "user_id": int(user_id),
+                "provider_kind": provider_kind,
+                "seedance_model": seedance_model,
                 "task_type": task_type,
                 "prompt": prompt,
                 "duration": int(duration),
@@ -5948,11 +6002,12 @@ async def webhook(secret: str, request: Request):
 
             if st.get("mode") == "seedance_i2v":
                 si = st.get("seedance_i2v") or {}
-                job["image_file_ids"] = list(si.get("image_file_ids") or [])[:9]
-                
-            se = st.get("seedance_extend") or {}
-            se["task_type"] = task_type
-            st["seedance_extend"] = se
+                job["image_file_ids"] = list(si.get("image_file_ids") or [])[:max_images]
+
+            if provider_kind != "seedance_kie":
+                se = st.get("seedance_extend") or {}
+                se["task_type"] = task_type
+                st["seedance_extend"] = se
             
             # очистим контекст, чтобы любой следующий текст не перезапускал генерацию
             st.pop("seedance_t2v", None)
@@ -7183,20 +7238,21 @@ async def webhook(secret: str, request: Request):
             if step == "need_images":
                 # собираем до 9 фото (file_id), байты не храним
                 imgs = list(si.get("image_file_ids") or [])
+                limit = int((st.get("seedance_settings") or {}).get("max_images") or 9)
                 if file_id and (file_id not in imgs):
                     imgs.append(file_id)
-                imgs = imgs[:9]
+                imgs = imgs[:limit]
                 si["image_file_ids"] = imgs
                 st["seedance_i2v"] = si
                 st["ts"] = _now()
 
-                if len(imgs) >= 9:
+                if len(imgs) >= limit:
                     si["step"] = "need_prompt"
                     st["seedance_i2v"] = si
                     st["ts"] = _now()
                     await tg_send_message(
                         chat_id,
-                        "Получил 9/9 фото ✅ Теперь пришли ТЕКСТ (промпт), что должно происходить в видео.",
+                        f"Получил {limit}/{limit} фото ✅ Теперь пришли ТЕКСТ (промпт), что должно происходить в видео.",
                         reply_markup=_help_menu_for(user_id),
                     )
                     return {"ok": True}
@@ -7204,7 +7260,7 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(
                     chat_id,
                     f"Фото #{len(imgs)} получил ✅\n"
-                    "Пришли ещё фото (до 9) или напиши «Готово», чтобы перейти к промпту.",
+                    f"Пришли ещё фото (до {limit}) или напиши «Готово», чтобы перейти к промпту.",
                     reply_markup=_help_menu_for(user_id),
                 )
                 return {"ok": True}
