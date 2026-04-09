@@ -86,6 +86,7 @@ from songwriter_prompt import SONGWRITER_SYSTEM_PROMPT
 from queue_redis import enqueue_job
 from nano_banana import run_nano_banana
 from nano_banana_pro import handle_nano_banana_pro
+from nano_banana_pro_new_kie import handle_nano_banana_pro_new, normalize_nano_banana_pro_new_aspect_ratio, normalize_nano_banana_pro_new_resolution
 from switchx_service import SwitchXClient, SwitchXError
 from topaz_image_replicate import TopazImageParams, run_topaz_image_upscale
 from topaz_pricing import get_photo_preset_settings, get_photo_preset_tokens
@@ -2364,6 +2365,8 @@ def _workspace_image_cost(provider: str, mode: str, preset_slug: str = "", resol
         return 2 if resolution_key == "4K" else 1
     if provider_key == "nano_banana_pro":
         return 2
+    if provider_key == "nano_banana_pro_new":
+        return 2 if resolution_key == "4K" else 1
     if provider_key == "seedream":
         return 0 if mode_key in {"text_to_image", "t2i"} else 1
     if provider_key == "photosession":
@@ -2393,6 +2396,8 @@ def _workspace_image_charge_reason(provider: str, mode: str) -> Optional[str]:
         return "nano_banana_2"
     if provider_key == "nano_banana_pro":
         return "nano_banana_pro"
+    if provider_key == "nano_banana_pro_new":
+        return "nano_banana_pro_new"
     if provider_key == "seedream":
         if mode_key in {"single", "seedream_45", "seedream_single"}:
             return "seedream_45_single"
@@ -4107,6 +4112,57 @@ def _workspace_nano_banana_pro_safety(value: Any) -> str:
     return level
 
 
+def _workspace_nano_banana_pro_new_resolution(value: Any) -> str:
+    return normalize_nano_banana_pro_new_resolution(value, default="2K")
+
+
+def _workspace_nano_banana_pro_new_aspect_ratio(value: Any, default: str = "16:9") -> str:
+    return normalize_nano_banana_pro_new_aspect_ratio(value, default=default)
+
+
+async def _workspace_run_nano_banana_pro_new_site(
+    *,
+    user_id: int,
+    prompt: str,
+    source_image_bytes: Optional[bytes],
+    source_filename: Optional[str],
+    source_image_urls: Optional[list[str]] = None,
+    resolution: str,
+    aspect_ratio: Optional[str],
+) -> tuple[bytes, str]:
+    clean_prompt = str(prompt or "").strip()
+    if not clean_prompt:
+        raise RuntimeError("Empty prompt")
+
+    normalized_urls = [str(item or "").strip() for item in (source_image_urls or []) if str(item or "").strip()][:8]
+    if normalized_urls:
+        normalized_aspect = _workspace_nano_banana_pro_new_aspect_ratio(aspect_ratio, default="match_input_image")
+        if normalized_aspect == "match_input_image":
+            normalized_aspect = None
+    elif source_image_bytes:
+        normalized_urls = [_upload_workspace_input_image(
+            int(user_id),
+            source_image_bytes,
+            filename=source_filename,
+            slot="nano_banana_pro_new_source",
+        )]
+        normalized_aspect = _workspace_nano_banana_pro_new_aspect_ratio(aspect_ratio, default="match_input_image")
+        if normalized_aspect == "match_input_image":
+            normalized_aspect = None
+    else:
+        normalized_aspect = _workspace_nano_banana_pro_new_aspect_ratio(aspect_ratio, default="16:9")
+        if normalized_aspect == "match_input_image":
+            normalized_aspect = "16:9"
+
+    return await handle_nano_banana_pro_new(
+        clean_prompt,
+        source_image_urls=normalized_urls,
+        resolution=_workspace_nano_banana_pro_new_resolution(resolution),
+        output_format="png",
+        aspect_ratio=normalized_aspect,
+    )
+
+
 async def _workspace_run_nano_banana_pro_site(
     *,
     user_id: int,
@@ -5083,13 +5139,28 @@ async def workspace_image_run(
     if provider != "topaz_photo" and not prompt:
         raise HTTPException(status_code=400, detail="Missing prompt")
 
-    supported = {"nano_banana", "nano_banana_2", "nano_banana_pro", "seedream", "posters", "photosession", "two_images", "text_to_image", "topaz_photo"}
+    supported = {"nano_banana", "nano_banana_2", "nano_banana_pro", "nano_banana_pro_new", "seedream", "posters", "photosession", "two_images", "text_to_image", "topaz_photo"}
     if provider not in supported:
         raise HTTPException(status_code=400, detail=f"Provider {provider} is not supported in /image/run")
 
-    source_upload = form.get("source_image")
+    source_uploads_raw = [item for item in form.getlist("source_image") if item]
     base_upload = form.get("base_image")
-    source_image = await _read_optional_upload_bytes(source_upload)
+    source_image_uploads: list[tuple[Any, bytes, Optional[str]]] = []
+    source_upload = source_uploads_raw[0] if source_uploads_raw else None
+    source_image: Optional[bytes] = None
+
+    if provider == "nano_banana_pro_new":
+        for upload in source_uploads_raw[:8]:
+            raw = await _read_optional_upload_bytes(upload)
+            if raw:
+                source_image_uploads.append((upload, raw, getattr(upload, "filename", None)))
+        if source_image_uploads:
+            source_upload = source_image_uploads[0][0]
+            source_image = source_image_uploads[0][1]
+    else:
+        source_upload = source_uploads_raw[0] if source_uploads_raw else form.get("source_image")
+        source_image = await _read_optional_upload_bytes(source_upload)
+
     base_image = await _read_optional_upload_bytes(base_upload)
 
     if provider == "nano_banana" and not source_image:
@@ -5098,6 +5169,8 @@ async def workspace_image_run(
         raise HTTPException(status_code=400, detail="Для Nano Banana 2 Image→Image нужен source image.")
     if provider == "nano_banana_pro" and mode == "image_to_image" and not source_image:
         raise HTTPException(status_code=400, detail="Для Image→Image нужен source image.")
+    if provider == "nano_banana_pro_new" and mode == "image_to_image" and not source_image_uploads:
+        raise HTTPException(status_code=400, detail="Для Nano Banana Pro - NEW Image→Image нужен хотя бы 1 reference image.")
     if provider == "seedream" and mode in {"single", "seedream_45", "seedream_single"} and not source_image:
         raise HTTPException(status_code=400, detail="Для Seedream 4.5 нужен source image.")
     if provider == "seedream" and mode in {"image_to_image", "i2i"} and (not source_image or not base_image):
@@ -5111,7 +5184,7 @@ async def workspace_image_run(
     if provider == "topaz_photo" and not source_image:
         raise HTTPException(status_code=400, detail="Для Topaz Photo Upscale нужен source image.")
 
-    if provider in {"nano_banana_2", "nano_banana_pro", "text_to_image", "seedream"} and mode in {"text_to_image", "t2i"} and aspect_ratio == "match_input_image":
+    if provider in {"nano_banana_2", "nano_banana_pro", "nano_banana_pro_new", "text_to_image", "seedream"} and mode in {"text_to_image", "t2i"} and aspect_ratio == "match_input_image":
         aspect_ratio = "9:16" if provider == "seedream" else "16:9"
 
     run_prompt = _build_workspace_image_prompt(
@@ -5164,7 +5237,11 @@ async def workspace_image_run(
                 add_tokens(uid, -int(cost), reason=reason)
             charged = True
 
-        source_image_url = _upload_workspace_input_image(uid, source_image, filename=getattr(source_upload, "filename", None), slot="workspace_image_source") if source_image else None
+        source_image_urls = []
+        if provider == "nano_banana_pro_new":
+            for index, (_upload_obj, raw_bytes, upload_name) in enumerate(source_image_uploads[:8], start=1):
+                source_image_urls.append(_upload_workspace_input_image(uid, raw_bytes, filename=upload_name, slot=f"workspace_image_source_{index}"))
+        source_image_url = source_image_urls[0] if source_image_urls else (_upload_workspace_input_image(uid, source_image, filename=getattr(source_upload, "filename", None), slot="workspace_image_source") if source_image else None)
         base_image_url = _upload_workspace_input_image(uid, base_image, filename=getattr(base_upload, "filename", None), slot="workspace_image_base") if base_image else None
 
         await enqueue_job(
@@ -5186,6 +5263,7 @@ async def workspace_image_run(
                 "mood_preset": mood_preset,
                 "preset_slug": preset_slug,
                 "source_image_url": source_image_url,
+                "source_image_urls": source_image_urls,
                 "base_image_url": base_image_url,
                 "source_filename": getattr(source_upload, "filename", None),
                 "base_filename": getattr(base_upload, "filename", None),
