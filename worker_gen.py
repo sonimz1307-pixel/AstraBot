@@ -106,32 +106,117 @@ async def register_dl2k_slot(chat_id: int, user_id: int, image_bytes: bytes) -> 
         return None
     return None
 
-async def tg_send_photo_bytes(chat_id: int, photo_bytes: bytes, *, caption: Optional[str] = None, reply_markup: Optional[dict] = None) -> None:
+def _detect_image_ext_from_bytes(payload: bytes, fallback: str = "jpg") -> str:
+    head = bytes(payload[:16] if payload else b"")
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "jpg"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "webp"
+    return (str(fallback or "jpg").strip().lower().lstrip(".") or "jpg")
+
+
+def _image_mime_type(ext: str) -> str:
+    raw = str(ext or "jpg").strip().lower().lstrip(".") or "jpg"
+    if raw == "jpeg":
+        raw = "jpg"
+    if raw == "png":
+        return "image/png"
+    if raw == "webp":
+        return "image/webp"
+    return "image/jpeg"
+
+
+async def _tg_post_multipart(method: str, *, data: dict, files: dict, timeout: float = 60.0) -> dict:
+    if not TG_API:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN not set")
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.post(f"{TG_API}/{method}", data=data, files=files)
+    try:
+        payload = r.json()
+    except Exception:
+        payload = {}
+    if r.status_code >= 400 or not payload.get("ok"):
+        detail = None
+        if isinstance(payload, dict):
+            detail = payload.get("description") or payload.get("error")
+        detail = detail or (r.text[:400] if hasattr(r, "text") else "") or f"Telegram {method} failed with HTTP {r.status_code}"
+        raise RuntimeError(detail)
+    return payload if isinstance(payload, dict) else {}
+
+
+async def tg_send_photo_bytes(
+    chat_id: int,
+    photo_bytes: bytes,
+    *,
+    caption: Optional[str] = None,
+    reply_markup: Optional[dict] = None,
+    filename: Optional[str] = None,
+    mime_type: Optional[str] = None,
+) -> Optional[int]:
     if not TG_API:
         print("TELEGRAM_BOT_TOKEN not set; cannot send photo")
-        return
+        return None
+
+    ext = _detect_image_ext_from_bytes(photo_bytes, fallback="jpg")
+    if ext == "jpeg":
+        ext = "jpg"
+    safe_filename = str(filename or f"result.{ext}").strip() or f"result.{ext}"
+    safe_mime = str(mime_type or _image_mime_type(ext)).strip() or _image_mime_type(ext)
+
+    # Telegram sendPhoto is fragile for large PNG/WEBP and large originals.
+    # For non-JPEG or big files, send as document right away.
+    if ext != "jpg" or len(photo_bytes or b"") > 9_500_000:
+        return await tg_send_document_bytes(
+            chat_id,
+            photo_bytes,
+            filename=safe_filename,
+            caption=caption,
+            reply_markup=reply_markup,
+        )
+
     data = {"chat_id": str(chat_id)}
     if caption:
         data["caption"] = caption
     if reply_markup is not None:
         data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
-    files = {"photo": ("result.jpg", photo_bytes, "image/jpeg")}
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        await client.post(f"{TG_API}/sendPhoto", data=data, files=files)
+    files = {"photo": (safe_filename, photo_bytes, safe_mime)}
 
-async def tg_send_document_bytes(chat_id: int, doc_bytes: bytes, *, filename: str = "file.jpg", caption: Optional[str] = None, reply_markup: Optional[dict] = None) -> None:
+    try:
+        payload = await _tg_post_multipart("sendPhoto", data=data, files=files, timeout=60.0)
+        return int((payload.get("result") or {}).get("message_id") or 0) or None
+    except Exception as e:
+        print(f"sendPhoto failed, fallback to sendDocument: {e}")
+        return await tg_send_document_bytes(
+            chat_id,
+            photo_bytes,
+            filename=safe_filename,
+            caption=caption,
+            reply_markup=reply_markup,
+        )
+
+
+async def tg_send_document_bytes(
+    chat_id: int,
+    doc_bytes: bytes,
+    *,
+    filename: str = "file.jpg",
+    caption: Optional[str] = None,
+    reply_markup: Optional[dict] = None,
+) -> Optional[int]:
     """Send a document (keeps original quality, unlike photo)."""
     if not TG_API:
         print("TELEGRAM_BOT_TOKEN not set; cannot send document")
-        return
+        return None
     data = {"chat_id": str(chat_id)}
     if caption:
         data["caption"] = caption
     if reply_markup is not None:
         data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
-    files = {"document": (filename, doc_bytes)}
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        await client.post(f"{TG_API}/sendDocument", data=data, files=files)
+    files = {"document": (filename, doc_bytes, "application/octet-stream")}
+    payload = await _tg_post_multipart("sendDocument", data=data, files=files, timeout=60.0)
+    return int((payload.get("result") or {}).get("message_id") or 0) or None
 
 
 async def tg_send_video_bytes(
@@ -960,13 +1045,20 @@ async def handle_job(job: Dict[str, Any]) -> None:
                 dl_label = "⬇️ Скачать оригинал 4К" if resolution == "4K" else "⬇️ Скачать оригинал 2К"
                 reply_markup = {"inline_keyboard": [[{"text": dl_label, "callback_data": f"dl2k:{token}"}]]}
 
+            await tg_send_photo_bytes(
+                chat_id,
+                out_bytes,
+                caption="🍌 Nano Banana Pro - NEW — готово",
+                reply_markup=reply_markup,
+                filename=f"nano_banana_pro_new.{ext or 'jpg'}",
+                mime_type=_image_mime_type(ext or 'jpg'),
+            )
+
             if msg_id:
                 try:
                     await tg_edit_message_text(chat_id, msg_id, "✅ Nano Banana Pro - NEW: готово")
                 except Exception:
                     pass
-
-            await tg_send_photo_bytes(chat_id, out_bytes, caption="🍌 Nano Banana Pro - NEW — готово", reply_markup=reply_markup)
             return
 
         except Exception as e:
