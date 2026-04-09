@@ -13,6 +13,7 @@ from nano_banana_pro import handle_nano_banana_pro
 from nano_banana_pro_new_kie import handle_nano_banana_pro_new
 from nano_banana_2_piapi import handle_nano_banana_2
 from billing_db import add_tokens
+from seedance_kie import run_seedance_kie_image_to_video, run_seedance_kie_text_to_video
 
 # --- Telegram ---
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # must be set in Render env
@@ -1230,7 +1231,9 @@ async def handle_job(job: Dict[str, Any]) -> None:
 # --- SEEDANCE 2 (PiAPI) --- 
     elif job_type == "seedance_video":
         prompt = str(job.get("prompt") or "").strip()
-        task_type = str(job.get("task_type") or "seedance-2-preview").strip()
+        provider_kind = str(job.get("provider_kind") or "seedance").strip() or "seedance"
+        seedance_model = str(job.get("seedance_model") or "").strip()
+        task_type = str(job.get("task_type") or ("seedance-2" if provider_kind == "seedance_kie" else "seedance-2-preview")).strip()
         duration = int(job.get("duration") or 5)
         aspect_ratio = str(job.get("aspect_ratio") or "16:9").strip()
         image_file_ids = job.get("image_file_ids") or []
@@ -1269,7 +1272,57 @@ async def handle_job(job: Dict[str, Any]) -> None:
         prog_task = asyncio.create_task(_progress_loop_seedance())
 
         try:
-            # Convert reference images to public URLs (download from Telegram -> upload to Supabase public bucket)
+            if provider_kind == "seedance_kie":
+                reference_images: list[bytes] = []
+                if isinstance(image_file_ids, list):
+                    for fid in image_file_ids[:7]:
+                        if not isinstance(fid, str) or not fid.strip():
+                            continue
+                        b, _ext = await tg_download_file_bytes(fid.strip())
+                        if b:
+                            reference_images.append(b)
+                if not seedance_model:
+                    seedance_model = "seedance-kie-fast" if task_type == "seedance-2-fast" else "seedance-kie"
+
+                if reference_images:
+                    url = await run_seedance_kie_image_to_video(
+                        user_id=int(user_id),
+                        model=seedance_model,
+                        prompt=prompt,
+                        duration=duration,
+                        aspect_ratio=aspect_ratio,
+                        reference_images=reference_images,
+                        start_frame=None,
+                        last_frame=None,
+                        reference_audios=None,
+                    )
+                else:
+                    url = await run_seedance_kie_text_to_video(
+                        model=seedance_model,
+                        prompt=prompt,
+                        duration=duration,
+                        aspect_ratio=aspect_ratio,
+                    )
+
+                stop.set()
+                try:
+                    await prog_task
+                except Exception:
+                    pass
+
+                if msg_id:
+                    try:
+                        await tg_edit_message_text(chat_id, msg_id, "✅ Seedance 2.0: готово. Отправляю видео…")
+                    except Exception:
+                        pass
+
+                try:
+                    await tg_send_video_from_url(chat_id, url, caption="🎬 Seedance 2.0 видео")
+                except Exception:
+                    await tg_send_message(chat_id, f"✅ Seedance 2.0 готово!\n🎬 {url}")
+                return
+
+            # Preview / legacy path
             image_urls: Optional[list[str]] = None
             if isinstance(image_file_ids, list) and image_file_ids:
                 image_urls = []
@@ -1295,7 +1348,7 @@ async def handle_job(job: Dict[str, Any]) -> None:
 
             if isinstance(created, dict):
                 task_id = (created.get('task_id') or ((created.get('data') or {}).get('task_id')))
-            
+
             if not task_id:
                 raise RuntimeError(f"Seedance: PiAPI didn't return task_id: {json.dumps(created, ensure_ascii=False)[:800]}")
 
@@ -1309,7 +1362,7 @@ async def handle_job(job: Dict[str, Any]) -> None:
 
             st = _seedance_status_lower(done)
             if st == "failed":
-                err = (done.get('error') or {}) if isinstance(done, dict) else {};
+                err = (done.get('error') or {}) if isinstance(done, dict) else {}
                 if (not err) and isinstance(done.get('data'), dict):
                     err = (done.get('data') or {}).get('error') or {}
                 msg = ""
@@ -1349,7 +1402,7 @@ async def handle_job(job: Dict[str, Any]) -> None:
 
             recovered = False
             recovery_error = None
-            if task_id:
+            if provider_kind != "seedance_kie" and task_id:
                 print(f"Seedance: exception after task creation, trying recovery task_id={task_id}: {e}")
                 for _ in range(max(0, SEEDANCE_RECOVERY_CHECKS)):
                     try:
@@ -1393,7 +1446,6 @@ async def handle_job(job: Dict[str, Any]) -> None:
             if recovery_error:
                 final_error += f"\nRecovery check: {recovery_error}"
 
-            # refund on failure if charged
             if charge_tokens > 0:
                 try:
                     add_tokens(user_id, int(charge_tokens), reason="seedance_video_refund", meta={"error": final_error[:300], "task_id": task_id or ""})
