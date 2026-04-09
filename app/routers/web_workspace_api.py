@@ -568,6 +568,7 @@ SUNOAPI_CALLBACK_SECRET = os.getenv("SUNOAPI_CALLBACK_SECRET", "").strip()
 SUNOAPI_POLL_TIMEOUT_SEC = int(os.getenv("SUNOAPI_POLL_TIMEOUT_SEC", "600"))
 PIAPI_POLL_TIMEOUT_SEC = int(os.getenv("PIAPI_POLL_TIMEOUT_SEC", "300"))
 WORKSPACE_MUSIC_COST_TOKENS = max(0, int(os.getenv("WORKSPACE_MUSIC_COST_TOKENS", "2") or "2"))
+WORKSPACE_UDIO_COST_TOKENS = max(0, int(os.getenv("WORKSPACE_UDIO_COST_TOKENS", "0") or "0"))
 WORKSPACE_MUSIC_UPLOAD_SIGNED_TTL_SEC = max(3600, int(os.getenv("WORKSPACE_MUSIC_UPLOAD_SIGNED_TTL_SEC", "86400") or "86400"))
 _MUSIC_ALLOWED_SUNO_MODELS = {"V4", "V4_5", "V4_5PLUS", "V4_5ALL", "V5"}
 _MUSIC_ALLOWED_PERSONA_MODELS = {"style_persona", "voice_persona"}
@@ -3861,6 +3862,8 @@ def _workspace_music_prompt_text(payload: MusicGenerateIn, ai: str, mode: str) -
 
 
 def _workspace_music_cost_tokens(payload: MusicGenerateIn, ai: str, backend: str) -> int:
+    if ai == "udio":
+        return int(WORKSPACE_UDIO_COST_TOKENS)
     return int(WORKSPACE_MUSIC_COST_TOKENS)
 
 
@@ -4527,19 +4530,17 @@ async def _run_workspace_music_provider(payload: MusicGenerateIn, ai: str, backe
     if status != "completed":
         err = ((data.get("error") or {}).get("message")) or "unknown error"
         raise RuntimeError(f"PiAPI status: {status}. {err}")
-    out = data.get("output") or []
-    if isinstance(out, dict):
-        out = [out]
+    tracks_raw = _workspace_sunoapi_extract_tracks(done)
     tracks = []
-    for idx, item in enumerate(out[:2], start=1):
+    for idx, item in enumerate(tracks_raw[:2], start=1):
         if not isinstance(item, dict):
             continue
         tracks.append({
-            "provider_track_id": item.get("id") or item.get("task_id") or item.get("song_id"),
+            "provider_track_id": item.get("id") or item.get("task_id") or item.get("song_id") or item.get("audioId") or item.get("songId"),
             "title": item.get("title") or payload.title or f"Track {idx}",
             "audio_url": _workspace_extract_audio_url(item),
             "video_url": _workspace_pick_first_url(item.get("video_url") or item.get("video") or item.get("mp4") or item.get("videoUrl")),
-            "cover_url": _workspace_pick_first_url(item.get("image_url") or item.get("cover_url") or item.get("cover")),
+            "cover_url": _workspace_pick_first_url(item.get("image_url") or item.get("image") or item.get("cover_url") or item.get("cover")),
             "lyrics": item.get("lyrics"),
             "payload_json": item,
         })
