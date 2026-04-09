@@ -8119,7 +8119,7 @@ async def webhook(secret: str, request: Request):
                         "photo_file_id": "",
                         "resolution": (nb2.get("resolution") or "2K"),
                         "aspect_ratio": (nb2.get("aspect_ratio") or "9:16"),
-                        "output_format": "jpg",
+                        "output_format": "png",
                         "cost": cost,
                     }, queue_name="gen")
                 except Exception as e:
@@ -8218,7 +8218,7 @@ async def webhook(secret: str, request: Request):
                     "photo_file_id": (nb2.get("photo_file_id") or ""),
                     "resolution": (nb2.get("resolution") or "2K"),
                     "aspect_ratio": (nb2.get("aspect_ratio") or "match_input_image"),
-                    "output_format": "jpg",
+                    "output_format": "png",
                     "cost": cost,
                 }, queue_name="gen")
             except Exception as e:
@@ -8415,7 +8415,7 @@ async def webhook(secret: str, request: Request):
                     "resolution": (nbp.get("resolution") or "2K"),
                     "aspect_ratio": (nbp.get("aspect_ratio") or "match_input_image"),
                     "safety_level": (nbp.get("safety_level") or "high"),
-                    "output_format": "jpg",
+                    "output_format": "png",
                     "cost": cost,
                 }, queue_name="gen")
             except Exception as e:
@@ -8511,7 +8511,7 @@ async def webhook(secret: str, request: Request):
                         "photo_file_id": "",
                         "resolution": selected_resolution,
                         "aspect_ratio": (nbpn.get("aspect_ratio") or "9:16"),
-                        "output_format": "png",
+                        "output_format": "jpg",
                         "cost": cost,
                     }, queue_name="gen")
                 except Exception as e:
@@ -8611,7 +8611,7 @@ async def webhook(secret: str, request: Request):
                     "photo_file_ids": [str(item or "").strip() for item in (nbpn.get("photo_file_ids") or []) if str(item or "").strip()][:8],
                     "resolution": selected_resolution,
                     "aspect_ratio": (nbpn.get("aspect_ratio") or "match_input_image"),
-                    "output_format": "png",
+                    "output_format": "jpg",
                     "cost": cost,
                 }, queue_name="gen")
             except Exception as e:
