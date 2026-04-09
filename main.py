@@ -4140,7 +4140,7 @@ async def webhook(secret: str, request: Request):
                 return {"ok": True}
 
             try:
-                await tg_send_document_bytes(chat_id, b, filename=f"original_2k.{meta.get('ext','png')}", caption="⬇️ Оригинал 2К (без сжатия)")
+                await tg_send_document_bytes(chat_id, b, filename=f"original.{meta.get('ext','png')}", caption="⬇️ Оригинал (без сжатия)")
             except Exception:
                 await tg_send_message(chat_id, "Не смог отправить оригинал файлом. Попробуй ещё раз.")
             return {"ok": True}
