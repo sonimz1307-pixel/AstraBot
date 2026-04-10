@@ -3299,7 +3299,7 @@ async def workspace_video_run(
     if not prompt and provider != "seedance":
         raise HTTPException(status_code=400, detail="Missing prompt")
 
-    supported = {"kling", "veo", "grok", "seedance", "seedance_kie", "sora", "switchx"}
+    supported = {"kling", "veo", "grok", "seedance", "seedance_kie", "sora", "switchx", "pixverse_c1"}
     if provider not in supported:
         raise HTTPException(status_code=400, detail=f"Provider {provider} is not supported in /video/run yet")
 
