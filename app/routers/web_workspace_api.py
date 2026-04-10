@@ -81,6 +81,20 @@ from seedance_kie import (
     run_seedance_kie_text_to_video,
     seedance_kie_tokens_for_duration,
 )
+from pixverse_c1 import (
+    PixVerseC1Error,
+    create_pixverse_c1_fusion,
+    create_pixverse_c1_image_to_video,
+    create_pixverse_c1_text_to_video,
+    create_pixverse_c1_transition,
+    normalize_pixverse_c1_aspect_ratio,
+    normalize_pixverse_c1_duration,
+    normalize_pixverse_c1_mode,
+    normalize_pixverse_c1_quality,
+    pixverse_c1_tokens_for_duration,
+    upload_pixverse_image,
+    wait_for_pixverse_video,
+)
 from kling3_pricing import calculate_kling3_price
 from songwriter_prompt import SONGWRITER_SYSTEM_PROMPT
 from queue_redis import enqueue_job
@@ -1052,6 +1066,8 @@ def _normalize_workspace_video_resolution(provider: str, model: str, resolution:
     if provider == "seedance_kie":
         normalized_model = normalize_seedance_kie_model(model)
         return "480p" if normalized_model == "seedance-kie-fast" else "720p"
+    if provider == "pixverse_c1":
+        return normalize_pixverse_c1_quality(value or "720p")
     if value in {"720", "720p"}:
         return "720"
     if value in {"1080", "1080p"}:
@@ -1547,6 +1563,72 @@ async def _run_workspace_video_job(
                     provider_mode=provider_mode,
                 )
 
+        elif provider == "pixverse_c1":
+            pixverse_video_id = ""
+            normalized_quality = normalize_pixverse_c1_quality(resolution)
+            normalized_duration = normalize_pixverse_c1_duration(duration)
+            normalized_mode = normalize_pixverse_c1_mode(mode)
+            normalized_aspect_ratio = normalize_pixverse_c1_aspect_ratio(aspect_ratio)
+            if normalized_mode == "image_to_video":
+                if not start_frame:
+                    raise RuntimeError("Для PixVerse C1 Image→Video нужен start_frame")
+                uploaded = await upload_pixverse_image(image_bytes=start_frame, filename_hint="pixverse_start_frame")
+                pixverse_video_id = await create_pixverse_c1_image_to_video(
+                    prompt=prompt,
+                    duration=normalized_duration,
+                    quality=normalized_quality,
+                    start_frame_img_id=int(uploaded["img_id"]),
+                    generate_audio=True,
+                )
+            elif normalized_mode == "transition":
+                if not start_frame or not last_frame:
+                    raise RuntimeError("Для PixVerse C1 Transition нужны первый и последний кадр")
+                first_uploaded = await upload_pixverse_image(image_bytes=start_frame, filename_hint="pixverse_first_frame")
+                last_uploaded = await upload_pixverse_image(image_bytes=last_frame, filename_hint="pixverse_last_frame")
+                pixverse_video_id = await create_pixverse_c1_transition(
+                    prompt=prompt,
+                    duration=normalized_duration,
+                    quality=normalized_quality,
+                    first_frame_img_id=int(first_uploaded["img_id"]),
+                    last_frame_img_id=int(last_uploaded["img_id"]),
+                    generate_audio=True,
+                )
+            elif normalized_mode == "fusion":
+                refs_payload: List[Dict[str, Any]] = []
+                for idx, raw in enumerate((reference_images or [])[:7], start=1):
+                    if not raw:
+                        continue
+                    uploaded = await upload_pixverse_image(image_bytes=raw, filename_hint=f"pixverse_ref_{idx}")
+                    refs_payload.append(
+                        {
+                            "img_id": int(uploaded["img_id"]),
+                            "ref_name": f"image{idx}",
+                            "type": "subject",
+                        }
+                    )
+                if not refs_payload:
+                    raise RuntimeError("Для PixVerse C1 Fusion нужен хотя бы один reference image")
+                pixverse_video_id = await create_pixverse_c1_fusion(
+                    prompt=prompt,
+                    duration=normalized_duration,
+                    quality=normalized_quality,
+                    aspect_ratio=normalized_aspect_ratio,
+                    image_references=refs_payload,
+                    generate_audio=True,
+                )
+            else:
+                pixverse_video_id = await create_pixverse_c1_text_to_video(
+                    prompt=prompt,
+                    duration=normalized_duration,
+                    quality=normalized_quality,
+                    aspect_ratio=normalized_aspect_ratio,
+                    generate_audio=True,
+                )
+            if not pixverse_video_id:
+                raise RuntimeError("PixVerse C1 не вернул video_id")
+            _update_workspace_generation(generation_id, {"task_id": str(pixverse_video_id), "status": "processing"})
+            provider_video_url = await wait_for_pixverse_video(pixverse_video_id)
+
         elif provider == "seedance_kie":
             if mode == "image_to_video" and not (reference_images or start_frame or last_frame):
                 raise RuntimeError("Для Seedance 2.0 Image→Video нужен хотя бы один image reference")
@@ -1725,7 +1807,7 @@ async def _run_workspace_video_job(
             user_id=user_id,
             provider_video_url=provider_video_url,
         )
-    except (Kling3Error, KlingFlowError, VeoFlowError, GrokVideoError, SwitchXError, ValueError, RuntimeError, TimeoutError) as e:
+    except (Kling3Error, KlingFlowError, VeoFlowError, GrokVideoError, PixVerseC1Error, SwitchXError, ValueError, RuntimeError, TimeoutError) as e:
         _mark_workspace_generation_failed(generation_id, str(e), error_code="provider_error")
         if int(charge_tokens or 0) > 0:
             try:
@@ -3108,6 +3190,26 @@ def _workspace_video_charge_spec(
             },
         }
 
+    if provider == "pixverse_c1":
+        normalized_mode = normalize_pixverse_c1_mode(mode)
+        normalized_duration = normalize_pixverse_c1_duration(duration)
+        normalized_quality = normalize_pixverse_c1_quality(resolution)
+        tokens = int(pixverse_c1_tokens_for_duration(normalized_quality, normalized_duration))
+        return {
+            "tokens": tokens,
+            "charge_reason": "pixverse_c1_video",
+            "refund_reason": "pixverse_c1_video_refund",
+            "meta": {
+                "origin": "workspace_video",
+                "provider": provider,
+                "model": "c1",
+                "mode": normalized_mode,
+                "duration": normalized_duration,
+                "resolution": normalized_quality,
+                "generate_audio": True,
+            },
+        }
+
     if provider == "seedance_kie":
         normalized_model = normalize_seedance_kie_model(model)
         normalized_duration = normalize_seedance_kie_duration(duration)
@@ -3291,6 +3393,42 @@ async def workspace_video_run(
             reference_images = []
             reference_audios = []
             start_frame = None
+            last_frame = None
+    if provider == "pixverse_c1":
+        model = "c1"
+        mode = normalize_pixverse_c1_mode(mode)
+        duration = normalize_pixverse_c1_duration(duration)
+        resolution = _normalize_workspace_video_resolution(provider, model, resolution)
+        enable_audio = True
+        if mode in {"text_to_video", "fusion"}:
+            aspect_ratio = normalize_pixverse_c1_aspect_ratio(aspect_ratio)
+        else:
+            aspect_ratio = normalize_pixverse_c1_aspect_ratio(aspect_ratio)
+        if mode == "image_to_video":
+            if not start_frame:
+                raise HTTPException(status_code=400, detail="Для PixVerse C1 Image→Video нужен start frame.")
+            reference_images = []
+            reference_audios = []
+            last_frame = None
+        elif mode == "transition":
+            if not start_frame or not last_frame:
+                raise HTTPException(status_code=400, detail="Для PixVerse C1 Transition нужны первый и последний кадр.")
+            reference_images = []
+            reference_audios = []
+        elif mode == "fusion":
+            if not reference_images:
+                raise HTTPException(status_code=400, detail="Для PixVerse C1 Fusion нужен хотя бы один reference image.")
+            if len(reference_images) > 7:
+                raise HTTPException(status_code=400, detail="Для PixVerse C1 Fusion доступно максимум 7 reference images.")
+            reference_audios = []
+            start_frame = None
+            end_frame = None
+            last_frame = None
+        else:
+            reference_images = []
+            reference_audios = []
+            start_frame = None
+            end_frame = None
             last_frame = None
     if provider == "seedance" and mode == "image_to_video" and not reference_images:
         raise HTTPException(status_code=400, detail="Для Seedance Image→Video нужен хотя бы один reference image.")
