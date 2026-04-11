@@ -84,6 +84,16 @@ def normalize_seedance_kie_aspect_ratio(value: Any, default: str = "16:9") -> st
     return default
 
 
+
+
+def _looks_like_mp3(data: bytes) -> bool:
+    head = bytes((data or b"")[:64])
+    if head.startswith(b"ID3"):
+        return True
+    if len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0:
+        return True
+    return False
+
 def _auth_headers() -> Dict[str, str]:
     if not PIAPI_API_KEY:
         raise SeedanceKieError("PIAPI API key is not configured. Set PIAPI_API_KEY or PIAPI_KEY.")
@@ -163,12 +173,28 @@ async def _request_json(method: str, path: str, *, payload: Optional[Dict[str, A
     url = f"{PIAPI_BASE_URL}{path}"
     async with httpx.AsyncClient(timeout=60.0) as client:
         resp = await client.request(method.upper(), url, headers=_auth_headers(), json=payload)
-    if resp.status_code >= 300:
-        raise SeedanceKieError(f"PiAPI request failed ({resp.status_code}): {resp.text[:800]}")
+    parsed: Optional[Dict[str, Any]] = None
     try:
-        data = resp.json()
-    except Exception as exc:
-        raise SeedanceKieError("PiAPI returned invalid JSON") from exc
+        candidate = resp.json()
+        if isinstance(candidate, dict):
+            parsed = candidate
+    except Exception:
+        parsed = None
+    if resp.status_code >= 300:
+        if parsed:
+            task_id = _extract_task_id(parsed)
+            status = _extract_status(parsed) or "unknown"
+            detail = _extract_error(parsed) or str(resp.text[:800] or "PiAPI request failed").strip()
+            suffix = f" [task_id={task_id}; status={status}]" if task_id else ""
+            raise SeedanceKieError(f"PiAPI request failed ({resp.status_code}){suffix}: {detail}")
+        raise SeedanceKieError(f"PiAPI request failed ({resp.status_code}): {resp.text[:800]}")
+    if parsed is None:
+        try:
+            data = resp.json()
+        except Exception as exc:
+            raise SeedanceKieError("PiAPI returned invalid JSON") from exc
+    else:
+        data = parsed
     code = data.get("code") if isinstance(data, dict) else None
     if code not in (None, 0, 200, "0", "200"):
         raise SeedanceKieError(_extract_error(data) or f"PiAPI returned error code {code}")
@@ -304,7 +330,7 @@ def _guess_ext(data: bytes, default: str = "bin") -> str:
         brand = head[8:12]
         if brand in {b"M4A ", b"M4B ", b"isom", b"mp42", b"M4P ", b"qt  "}:
             return "m4a"
-    if head.startswith(b"ID3"):
+    if _looks_like_mp3(head):
         return "mp3"
     return default
 
@@ -325,6 +351,6 @@ def _guess_mime(ext_or_name: str, data: bytes) -> str:
         return "audio/ogg"
     if name.endswith(".m4a") or name == "m4a":
         return "audio/mp4"
-    if name.endswith(".mp3") or name == "mp3" or data.startswith(b"ID3"):
+    if name.endswith(".mp3") or name == "mp3" or _looks_like_mp3(data):
         return "audio/mpeg"
     return "application/octet-stream"
