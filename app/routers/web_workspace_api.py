@@ -173,7 +173,7 @@ def _probe_seedance_audio_duration_seconds(raw: bytes, ext: str) -> float:
             tmp_path = tmp.name
         try:
             meta = probe_media(tmp_path)
-            duration = float(meta.get("duration_sec") or 0.0)
+            duration = float(meta.get("duration") or meta.get("duration_sec") or 0.0)
             if duration > 0:
                 return duration
         except Exception:
