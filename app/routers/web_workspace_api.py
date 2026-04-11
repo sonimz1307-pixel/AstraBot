@@ -7,6 +7,9 @@ import mimetypes
 import os
 import re
 import tempfile
+import subprocess
+import shutil
+import wave
 import zipfile
 import asyncio
 import time
@@ -132,8 +135,117 @@ TOPAZ_IMAGE_RETRY_DELAY_SEC = max(0.25, float(os.getenv("TOPAZ_IMAGE_RETRY_DELAY
 
 WORKSPACE_MEDIA_QUEUE_NAME = (os.getenv("WORKSPACE_MEDIA_QUEUE_NAME", "workspace_media") or "workspace_media").strip() or "workspace_media"
 WORKSPACE_IMAGE_QUEUE_NAME = (os.getenv("WORKSPACE_IMAGE_QUEUE_NAME", "workspace_image") or "workspace_image").strip() or "workspace_image"
+SEEDANCE_AUDIO_MAX_DURATION_SEC = 15.0
+SEEDANCE_AUDIO_ALLOWED_EXTS = {"mp3", "wav"}
+SEEDANCE_AUDIO_ALLOWED_MIME_TYPES = {"audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/wave"}
 SWITCHX_TOKENS_PER_SEC_720 = max(1, int(os.getenv("SWITCHX_TOKENS_PER_SEC_720", "1") or "1"))
 SWITCHX_TOKENS_PER_SEC_1080 = max(1, int(os.getenv("SWITCHX_TOKENS_PER_SEC_1080", "2") or "2"))
+
+
+def _guess_seedance_audio_ext(*, filename: Any = None, content_type: Any = None, raw: bytes = b"") -> str:
+    name = str(filename or "").strip().lower()
+    if name.endswith(".mp3"):
+        return "mp3"
+    if name.endswith(".wav"):
+        return "wav"
+    ctype = str(content_type or "").strip().lower()
+    if ctype in {"audio/mpeg", "audio/mp3"}:
+        return "mp3"
+    if ctype in {"audio/wav", "audio/x-wav", "audio/wave"}:
+        return "wav"
+    head = bytes((raw or b"")[:32])
+    if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
+        return "wav"
+    if head.startswith(b"ID3"):
+        return "mp3"
+    if len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0:
+        return "mp3"
+    return ""
+
+
+def _probe_seedance_audio_duration_seconds(raw: bytes, ext: str) -> float:
+    suffix = f".{(ext or 'bin').strip('.').lower() or 'bin'}"
+    tmp_path: Optional[str] = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(raw)
+            tmp.flush()
+            tmp_path = tmp.name
+        try:
+            meta = probe_media(tmp_path)
+            duration = float(meta.get("duration_sec") or 0.0)
+            if duration > 0:
+                return duration
+        except Exception:
+            pass
+        if ext == "wav":
+            with wave.open(tmp_path, "rb") as wav_file:
+                frames = float(wav_file.getnframes() or 0)
+                rate = float(wav_file.getframerate() or 0)
+                return (frames / rate) if rate > 0 else 0.0
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+    return 0.0
+
+
+def _normalize_seedance_audio_bytes(raw: bytes, ext: str) -> bytes:
+    normalized_ext = str(ext or "").strip().lower()
+    if normalized_ext != "wav":
+        return raw
+    if not shutil.which("ffmpeg"):
+        return raw
+    src_path: Optional[str] = None
+    dst_path: Optional[str] = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as src:
+            src.write(raw)
+            src.flush()
+            src_path = src.name
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as dst:
+            dst_path = dst.name
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", src_path,
+                "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2",
+                dst_path,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            return raw
+        with open(dst_path, "rb") as fh:
+            return fh.read() or raw
+    except Exception:
+        return raw
+    finally:
+        for path in (src_path, dst_path):
+            if path:
+                try:
+                    os.unlink(path)
+                except Exception:
+                    pass
+
+
+def _prepare_seedance_audio_file(upload: Any, raw: bytes) -> tuple[bytes, str, float]:
+    ext = _guess_seedance_audio_ext(
+        filename=getattr(upload, "filename", None),
+        content_type=getattr(upload, "content_type", None),
+        raw=raw,
+    )
+    if ext not in SEEDANCE_AUDIO_ALLOWED_EXTS:
+        raise HTTPException(status_code=400, detail="Для Seedance 2.0 audio refs доступны только MP3 или WAV.")
+    normalized_raw = _normalize_seedance_audio_bytes(raw, ext)
+    duration_sec = _probe_seedance_audio_duration_seconds(normalized_raw, ext)
+    if duration_sec <= 0:
+        raise HTTPException(status_code=400, detail="Не удалось определить длительность audio reference для Seedance 2.0.")
+    if duration_sec > SEEDANCE_AUDIO_MAX_DURATION_SEC:
+        raise HTTPException(status_code=400, detail="Для Seedance 2.0 audio reference должен быть не длиннее 15 секунд.")
+    return normalized_raw, ext, duration_sec
 
 
 CHAT_MODEL_LABEL_DEFAULT = "gpt-4o-mini"
@@ -3346,10 +3458,17 @@ async def workspace_video_run(
         if raw:
             reference_images.append(raw)
     reference_audios: List[bytes] = []
-    for af in ref_audio_files:
+    reference_audio_names: List[str] = []
+    reference_audio_types: List[str] = []
+    for idx, af in enumerate(ref_audio_files, start=1):
         raw = await af.read()
-        if raw:
-            reference_audios.append(raw)
+        if not raw:
+            continue
+        normalized_audio, normalized_ext, _duration_sec = _prepare_seedance_audio_file(af, raw)
+        reference_audios.append(normalized_audio)
+        base_name = Path(str(getattr(af, "filename", None) or f"seedance_ref_audio_{idx}")).stem or f"seedance_ref_audio_{idx}"
+        reference_audio_names.append(f"{base_name}.{normalized_ext}")
+        reference_audio_types.append("audio/mpeg" if normalized_ext == "mp3" else "audio/wav")
 
     source_upload_row: Optional[Dict[str, Any]] = None
     if provider == "switchx" and not source_video_upload_id and source_video:
@@ -3525,8 +3644,8 @@ async def workspace_video_run(
         for idx, raw in enumerate(reference_audios):
             upload_row = create_workspace_upload_record(
                 user_id=uid,
-                filename=getattr(ref_audio_files[idx], "filename", None) or f"seedance_ref_audio_{idx + 1}.bin",
-                content_type=getattr(ref_audio_files[idx], "content_type", None) or "application/octet-stream",
+                filename=reference_audio_names[idx] if idx < len(reference_audio_names) else f"seedance_ref_audio_{idx + 1}.wav",
+                content_type=reference_audio_types[idx] if idx < len(reference_audio_types) else "audio/wav",
                 raw_bytes=raw,
             )
             upload_id = str(upload_row.get("id") or "").strip()
