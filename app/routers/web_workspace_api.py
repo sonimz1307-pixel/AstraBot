@@ -81,8 +81,10 @@ from seedance_kie import (
     normalize_seedance_kie_mode,
     normalize_seedance_kie_model,
     run_seedance_kie_image_to_video,
+    run_seedance_kie_omni_reference,
     run_seedance_kie_text_to_video,
     seedance_kie_tokens_for_duration,
+    seedance_kie_video_reference_surcharge,
 )
 from pixverse_c1 import (
     PixVerseC1Error,
@@ -138,6 +140,9 @@ WORKSPACE_IMAGE_QUEUE_NAME = (os.getenv("WORKSPACE_IMAGE_QUEUE_NAME", "workspace
 SEEDANCE_AUDIO_MAX_DURATION_SEC = 15.0
 SEEDANCE_AUDIO_ALLOWED_EXTS = {"mp3", "wav"}
 SEEDANCE_AUDIO_ALLOWED_MIME_TYPES = {"audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/wave"}
+SEEDANCE_VIDEO_ALLOWED_EXTS = {"mp4", "mov"}
+SEEDANCE_VIDEO_ALLOWED_MIME_TYPES = {"video/mp4", "video/quicktime"}
+SEEDANCE_VIDEO_TOTAL_MAX_DURATION_SEC = 15.4
 SWITCHX_TOKENS_PER_SEC_720 = max(1, int(os.getenv("SWITCHX_TOKENS_PER_SEC_720", "1") or "1"))
 SWITCHX_TOKENS_PER_SEC_1080 = max(1, int(os.getenv("SWITCHX_TOKENS_PER_SEC_1080", "2") or "2"))
 
@@ -246,6 +251,66 @@ def _prepare_seedance_audio_file(upload: Any, raw: bytes) -> tuple[bytes, str, f
     if duration_sec > SEEDANCE_AUDIO_MAX_DURATION_SEC:
         raise HTTPException(status_code=400, detail="Для Seedance 2.0 audio reference должен быть не длиннее 15 секунд.")
     return normalized_raw, ext, duration_sec
+
+
+def _guess_seedance_video_ext(*, filename: Any = None, content_type: Any = None, raw: bytes = b"") -> str:
+    name = str(filename or "").strip().lower()
+    if name.endswith(".mp4"):
+        return "mp4"
+    if name.endswith(".mov"):
+        return "mov"
+    ctype = str(content_type or "").strip().lower()
+    if ctype == "video/mp4":
+        return "mp4"
+    if ctype == "video/quicktime":
+        return "mov"
+    head = bytes((raw or b"")[:32])
+    if len(head) >= 12 and head[4:8] == b"ftyp":
+        brand = head[8:12]
+        if brand == b"qt  ":
+            return "mov"
+        return "mp4"
+    return ""
+
+
+def _probe_seedance_video_duration_seconds(raw: bytes, ext: str) -> float:
+    suffix = f".{(ext or 'bin').strip('.').lower() or 'bin'}"
+    tmp_path: Optional[str] = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(raw)
+            tmp.flush()
+            tmp_path = tmp.name
+        try:
+            meta = probe_media(tmp_path)
+            duration = float(meta.get("duration") or meta.get("duration_sec") or 0.0)
+            if duration > 0:
+                return duration
+        except Exception:
+            pass
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+    return 0.0
+
+
+def _prepare_seedance_video_file(upload: Any, raw: bytes) -> tuple[bytes, str, float]:
+    ext = _guess_seedance_video_ext(
+        filename=getattr(upload, "filename", None),
+        content_type=getattr(upload, "content_type", None),
+        raw=raw,
+    )
+    if ext not in SEEDANCE_VIDEO_ALLOWED_EXTS:
+        raise HTTPException(status_code=400, detail="Для Seedance 2.0 video refs доступны только MP4 или MOV.")
+    duration_sec = _probe_seedance_video_duration_seconds(raw, ext)
+    if duration_sec <= 0:
+        raise HTTPException(status_code=400, detail="Не удалось определить длительность video reference для Seedance 2.0.")
+    if duration_sec > SEEDANCE_VIDEO_TOTAL_MAX_DURATION_SEC:
+        raise HTTPException(status_code=400, detail="Для Seedance 2.0 video reference не должен быть длиннее 15.4 секунды.")
+    return raw, ext, duration_sec
 
 
 CHAT_MODEL_LABEL_DEFAULT = "gpt-4o-mini"
@@ -1562,6 +1627,7 @@ async def _run_workspace_video_job(
     motion_video: Optional[bytes],
     reference_images: List[bytes],
     reference_audio_clips: List[bytes],
+    reference_video_clips: List[bytes],
     source_video_upload_id: Optional[str] = None,
     reference_image_url: Optional[str] = None,
     switchx_alpha_mode: Optional[str] = None,
@@ -1754,6 +1820,17 @@ async def _run_workspace_video_job(
                     start_frame=start_frame,
                     last_frame=last_frame,
                     reference_images=reference_images,
+                    reference_audios=reference_audio_clips,
+                )
+            elif mode == "omni_reference":
+                provider_video_url = await run_seedance_kie_omni_reference(
+                    user_id=user_id,
+                    model=model,
+                    prompt=prompt,
+                    duration=duration,
+                    aspect_ratio=aspect_ratio,
+                    reference_images=reference_images,
+                    reference_videos=reference_video_clips,
                     reference_audios=reference_audio_clips,
                 )
             else:
@@ -3210,6 +3287,7 @@ def _workspace_video_charge_spec(
     resolution: str,
     enable_audio: bool,
     quality: str,
+    has_seedance_video_reference: bool = False,
 ) -> Dict[str, Any]:
     duration = max(1, int(duration or 0))
 
@@ -3324,8 +3402,11 @@ def _workspace_video_charge_spec(
 
     if provider == "seedance_kie":
         normalized_model = normalize_seedance_kie_model(model)
+        normalized_mode = normalize_seedance_kie_mode(mode)
         normalized_duration = normalize_seedance_kie_duration(duration)
-        tokens = int(seedance_kie_tokens_for_duration(normalized_model, normalized_duration))
+        base_tokens = int(seedance_kie_tokens_for_duration(normalized_model, normalized_duration))
+        video_ref_surcharge = int(seedance_kie_video_reference_surcharge(normalized_model)) if normalized_mode == "omni_reference" and has_seedance_video_reference else 0
+        tokens = base_tokens + video_ref_surcharge
         return {
             "tokens": tokens,
             "charge_reason": "seedance_kie_video",
@@ -3334,10 +3415,13 @@ def _workspace_video_charge_spec(
                 "origin": "workspace_video",
                 "provider": provider,
                 "model": normalized_model,
-                "mode": normalize_seedance_kie_mode(mode),
+                "mode": normalized_mode,
                 "duration": normalized_duration,
                 "resolution": ("480p" if normalized_model == "seedance-kie-fast" else "720p"),
                 "generate_audio": True,
+                "base_tokens": base_tokens,
+                "video_reference_surcharge_tokens": video_ref_surcharge,
+                "has_video_reference": bool(has_seedance_video_reference),
             },
         }
 
@@ -3424,6 +3508,7 @@ async def workspace_video_run(
     switchx_select_mask_file = form.get("switchx_select_mask")
     ref_files = [f for f in form.getlist("reference_images") if getattr(f, "filename", None)]
     ref_audio_files = [f for f in form.getlist("reference_audios") if getattr(f, "filename", None)]
+    ref_video_files = [f for f in form.getlist("reference_videos") if getattr(f, "filename", None)]
     source_video_upload_id = str(form.get("source_video_upload_id") or "").strip()
     direct_reference_image_url = str(form.get("reference_image_url") or "").strip()
     switchx_alpha_mode = _normalize_switchx_alpha_mode(form.get("switchx_alpha_mode"))
@@ -3470,6 +3555,21 @@ async def workspace_video_run(
         reference_audio_names.append(f"{base_name}.{normalized_ext}")
         reference_audio_types.append("audio/mpeg" if normalized_ext == "mp3" else "audio/wav")
 
+    reference_videos: List[bytes] = []
+    reference_video_names: List[str] = []
+    reference_video_types: List[str] = []
+    reference_video_total_duration_sec = 0.0
+    for idx, vf in enumerate(ref_video_files, start=1):
+        raw = await vf.read()
+        if not raw:
+            continue
+        normalized_video, normalized_ext, duration_sec = _prepare_seedance_video_file(vf, raw)
+        reference_videos.append(normalized_video)
+        base_name = Path(str(getattr(vf, "filename", None) or f"seedance_ref_video_{idx}")).stem or f"seedance_ref_video_{idx}"
+        reference_video_names.append(f"{base_name}.{normalized_ext}")
+        reference_video_types.append("video/mp4" if normalized_ext == "mp4" else "video/quicktime")
+        reference_video_total_duration_sec += float(duration_sec or 0.0)
+
     source_upload_row: Optional[Dict[str, Any]] = None
     if provider == "switchx" and not source_video_upload_id and source_video:
         source_upload_row = create_workspace_upload_record(
@@ -3508,9 +3608,26 @@ async def workspace_video_run(
                 raise HTTPException(status_code=400, detail="Для Seedance 2.0 доступно максимум 7 image references суммарно.")
             if len(reference_audios) > 3:
                 raise HTTPException(status_code=400, detail="Для Seedance 2.0 доступно максимум 3 audio references.")
+            reference_videos = []
+        elif mode == "omni_reference":
+            total_refs = len(reference_images) + len(reference_videos) + len(reference_audios)
+            if total_refs < 1:
+                raise HTTPException(status_code=400, detail="Для Seedance 2.0 Omni Reference нужен хотя бы один reference.")
+            if total_refs > 12:
+                raise HTTPException(status_code=400, detail="Для Seedance 2.0 Omni Reference доступно максимум 12 refs суммарно.")
+            if len(reference_audios) > 3:
+                raise HTTPException(status_code=400, detail="Для Seedance 2.0 доступно максимум 3 audio references.")
+            if reference_audios and not (reference_images or reference_videos):
+                raise HTTPException(status_code=400, detail="Для Seedance 2.0 Omni Reference audio-only не поддерживается: нужен хотя бы один image или video reference.")
+            if reference_video_total_duration_sec > SEEDANCE_VIDEO_TOTAL_MAX_DURATION_SEC:
+                raise HTTPException(status_code=400, detail="Для Seedance 2.0 суммарная длина всех video references должна быть не больше 15.4 секунды.")
+            start_frame = None
+            end_frame = None
+            last_frame = None
         else:
             reference_images = []
             reference_audios = []
+            reference_videos = []
             start_frame = None
             last_frame = None
     if provider == "pixverse_c1":
@@ -3595,6 +3712,7 @@ async def workspace_video_run(
         resolution=resolution,
         enable_audio=enable_audio,
         quality=quality,
+        has_seedance_video_reference=bool(reference_videos),
     )
     cost_tokens = int(charge.get("tokens") or 0)
     charge_reason = str(charge.get("charge_reason") or "")
@@ -3652,6 +3770,18 @@ async def workspace_video_run(
             if upload_id:
                 reference_audio_upload_ids.append(upload_id)
 
+        reference_video_upload_ids: List[str] = []
+        for idx, raw in enumerate(reference_videos):
+            upload_row = create_workspace_upload_record(
+                user_id=uid,
+                filename=reference_video_names[idx] if idx < len(reference_video_names) else f"seedance_ref_video_{idx + 1}.mp4",
+                content_type=reference_video_types[idx] if idx < len(reference_video_types) else "video/mp4",
+                raw_bytes=raw,
+            )
+            upload_id = str(upload_row.get("id") or "").strip()
+            if upload_id:
+                reference_video_upload_ids.append(upload_id)
+
         motion_video_upload_id = None
         if motion_video:
             uploaded_motion = create_workspace_upload_record(
@@ -3704,6 +3834,7 @@ async def workspace_video_run(
             "switchx_alpha_mode": switchx_alpha_mode if provider == "switchx" else None,
             "switchx_select_mask_url": switchx_select_mask_url,
             "reference_audio_upload_ids": reference_audio_upload_ids,
+            "reference_video_upload_ids": reference_video_upload_ids,
             "charge_tokens": int(cost_tokens) if charged else 0,
             "charge_ref_id": charge_ref_id,
             "refund_reason": refund_reason,
