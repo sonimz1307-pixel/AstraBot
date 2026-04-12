@@ -136,6 +136,13 @@ async def process_workspace_video_job(job: Dict[str, Any]) -> None:
             continue
         reference_audio_clips.append(await _download_bytes(_workspace_upload_url(user_id, target_id), timeout=600.0))
 
+    reference_video_clips: List[bytes] = []
+    for upload_id in job.get("reference_video_upload_ids") or []:
+        target_id = str(upload_id or "").strip()
+        if not target_id:
+            continue
+        reference_video_clips.append(await _download_bytes(_workspace_upload_url(user_id, target_id), timeout=600.0))
+
     print("[switchx worker job]", {
         "generation_id": generation_id,
         "provider": str(job.get("provider") or "").strip(),
@@ -165,6 +172,7 @@ async def process_workspace_video_job(job: Dict[str, Any]) -> None:
         motion_video=motion_video,
         reference_images=reference_images,
         reference_audio_clips=reference_audio_clips,
+        reference_video_clips=reference_video_clips,
         source_video_upload_id=str(job.get("source_video_upload_id") or "").strip() or None,
         reference_image_url=str(job.get("reference_image_url") or "").strip() or None,
         switchx_alpha_mode=str(job.get("switchx_alpha_mode") or "").strip() or None,
