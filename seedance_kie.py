@@ -18,6 +18,10 @@ PIAPI_SEEDANCE_POLL_SECONDS = float(os.getenv("PIAPI_SEEDANCE_POLL_SECONDS", "6"
 SEEDANCE_KIE_ALLOWED_MODELS = {"seedance-kie", "seedance-kie-fast"}
 SEEDANCE_KIE_ALLOWED_DURATIONS = (5, 10, 15)
 SEEDANCE_KIE_ALLOWED_ASPECT_RATIOS = ("16:9", "9:16", "1:1")
+SEEDANCE_KIE_VIDEO_REFERENCE_SURCHARGE = {
+    "seedance-kie": 20,
+    "seedance-kie-fast": 13,
+}
 SEEDANCE_KIE_TOKEN_MAP = {
     "seedance-kie": {5: 10, 10: 20, 15: 30},
     "seedance-kie-fast": {5: 5, 10: 10, 15: 15},
@@ -46,6 +50,8 @@ def normalize_seedance_kie_model(value: Any, default: str = "seedance-kie") -> s
 
 def normalize_seedance_kie_mode(value: Any, default: str = "text_to_video") -> str:
     raw = str(value or default).strip().lower()
+    if raw in {"omni", "omni_reference", "omni-reference", "reference", "refs"}:
+        return "omni_reference"
     if raw in {"image", "image_to_video", "i2v", "image2video"}:
         return "image_to_video"
     return "text_to_video"
@@ -67,6 +73,11 @@ def seedance_kie_tokens_for_duration(model: Any, duration: Any) -> int:
     normalized_model = normalize_seedance_kie_model(model)
     normalized_duration = normalize_seedance_kie_duration(duration)
     return int(SEEDANCE_KIE_TOKEN_MAP[normalized_model][normalized_duration])
+
+
+def seedance_kie_video_reference_surcharge(model: Any) -> int:
+    normalized_model = normalize_seedance_kie_model(model)
+    return int(SEEDANCE_KIE_VIDEO_REFERENCE_SURCHARGE[normalized_model])
 
 
 def seedance_kie_resolution(model: Any) -> str:
@@ -312,6 +323,49 @@ async def run_seedance_kie_image_to_video(
     return await _run_seedance_task(model=normalized_model, input_payload=input_payload)
 
 
+async def run_seedance_kie_omni_reference(
+    *,
+    user_id: int,
+    model: Any,
+    prompt: str,
+    duration: Any,
+    aspect_ratio: Any = "16:9",
+    reference_images: Sequence[bytes] | None = None,
+    reference_videos: Sequence[bytes] | None = None,
+    reference_audios: Sequence[bytes] | None = None,
+) -> str:
+    normalized_model = normalize_seedance_kie_model(model)
+    clean_prompt = str(prompt or "").strip()
+    if not clean_prompt:
+        raise SeedanceKieError("Seedance prompt is required")
+
+    image_refs = list(reference_images or [])[:12]
+    video_refs = list(reference_videos or [])[:12]
+    audio_refs = list(reference_audios or [])[:3]
+    if not image_refs and not video_refs and not audio_refs:
+        raise SeedanceKieError("Seedance Omni Reference requires at least one reference")
+    if audio_refs and not (image_refs or video_refs):
+        raise SeedanceKieError("Seedance Omni Reference does not support audio-only input")
+
+    image_urls = await _upload_files(int(user_id), image_refs, "image")
+    video_urls = await _upload_files(int(user_id), video_refs, "video")
+    audio_urls = await _upload_files(int(user_id), audio_refs, "audio")
+
+    input_payload: Dict[str, Any] = {
+        "prompt": clean_prompt,
+        "mode": "omni_reference",
+        "duration": normalize_seedance_kie_duration(duration),
+        "aspect_ratio": normalize_seedance_kie_aspect_ratio(aspect_ratio),
+    }
+    if image_urls:
+        input_payload["image_urls"] = image_urls
+    if video_urls:
+        input_payload["video_urls"] = video_urls
+    if audio_urls:
+        input_payload["audio_urls"] = audio_urls
+    return await _run_seedance_task(model=normalized_model, input_payload=input_payload)
+
+
 def _guess_ext(data: bytes, default: str = "bin") -> str:
     head = bytes((data or b"")[:32])
     if head.startswith(b"\x89PNG"):
@@ -328,8 +382,12 @@ def _guess_ext(data: bytes, default: str = "bin") -> str:
         return "wav"
     if len(head) >= 12 and head[4:8] == b"ftyp":
         brand = head[8:12]
-        if brand in {b"M4A ", b"M4B ", b"isom", b"mp42", b"M4P ", b"qt  "}:
+        if brand == b"qt  ":
+            return "mov"
+        if brand in {b"M4A ", b"M4B ", b"M4P "}:
             return "m4a"
+        if brand in {b"isom", b"iso2", b"mp41", b"mp42", b"avc1", b"MSNV", b"dash"}:
+            return "mp4"
     if _looks_like_mp3(head):
         return "mp3"
     return default
@@ -351,6 +409,10 @@ def _guess_mime(ext_or_name: str, data: bytes) -> str:
         return "audio/ogg"
     if name.endswith(".m4a") or name == "m4a":
         return "audio/mp4"
+    if name.endswith(".mp4") or name == "mp4":
+        return "video/mp4"
+    if name.endswith(".mov") or name == "mov":
+        return "video/quicktime"
     if name.endswith(".mp3") or name == "mp3" or _looks_like_mp3(data):
         return "audio/mpeg"
     return "application/octet-stream"
