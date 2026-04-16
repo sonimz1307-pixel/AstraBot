@@ -20,6 +20,13 @@ from grok_video_replicate import (
     run_grok_text_to_video,
 )
 from app.routers import web_workspace_api as ww
+from app.services.legnext_midjourney import (
+    LegnextMidjourneyError,
+    create_midjourney_diffusion,
+    create_midjourney_reroll,
+    create_midjourney_variation,
+    get_midjourney_job,
+)
 from app.services.video_editor_service import (
     build_workspace_video_access_urls,
     get_workspace_upload_row,
@@ -387,6 +394,64 @@ async def process_workspace_tts_job(job: Dict[str, Any]) -> None:
         ww._mark_workspace_voice_generation_failed(generation_id, str(e), error_code="provider_error")
 
 
+async def _wait_for_midjourney_job(job_id: str, *, poll_interval_sec: float = 3.0, timeout_sec: float = 900.0) -> Dict[str, Any]:
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    while True:
+        payload = await get_midjourney_job(job_id)
+        status = str(payload.get("status") or "").strip().lower()
+        if status in {"completed", "failed"}:
+            return payload
+        if (loop.time() - started) >= timeout_sec:
+            raise LegnextMidjourneyError(f"Midjourney polling timeout for job {job_id}")
+        await asyncio.sleep(poll_interval_sec)
+
+
+async def _process_midjourney_workspace_image_job(job: Dict[str, Any]) -> Dict[str, Any]:
+    action = str(job.get("mj_action") or "generate").strip().lower() or "generate"
+    run_prompt = str(job.get("run_prompt") or "").strip()
+    source_task_id = str(job.get("source_task_id") or "").strip()
+    variation_type_name = str(job.get("variation_type") or "subtle").strip().lower()
+    selected_image_no = job.get("selected_image_no")
+
+    if action == "generate":
+        created = await create_midjourney_diffusion(text=run_prompt)
+    elif action == "reroll":
+        if not source_task_id:
+            raise LegnextMidjourneyError("Midjourney reroll requires source_task_id")
+        created = await create_midjourney_reroll(job_id=source_task_id)
+    elif action == "variation":
+        if not source_task_id:
+            raise LegnextMidjourneyError("Midjourney variation requires source_task_id")
+        if selected_image_no is None:
+            raise LegnextMidjourneyError("Midjourney variation requires selected_image_no")
+        variation_type = 1 if variation_type_name == "strong" else 0
+        created = await create_midjourney_variation(
+            job_id=source_task_id,
+            image_no=int(selected_image_no),
+            variation_type=variation_type,
+        )
+    else:
+        raise LegnextMidjourneyError(f"Unsupported Midjourney action: {action}")
+
+    provider_task_id = str(created.get("job_id") or "").strip()
+    if not provider_task_id:
+        raise LegnextMidjourneyError("Midjourney API did not return job_id")
+
+    final_payload = await _wait_for_midjourney_job(provider_task_id)
+    status = str(final_payload.get("status") or "").strip().lower()
+    if status != "completed":
+        error = final_payload.get("error") or {}
+        message = str(error.get("message") or error.get("raw_message") or final_payload.get("detail") or f"Midjourney task finished with status {status}")
+        raise LegnextMidjourneyError(message)
+
+    return {
+        "provider_task_id": provider_task_id,
+        "final_payload": final_payload,
+    }
+
+
+
 async def process_workspace_image_job(job: Dict[str, Any]) -> None:
     generation_id = str(job.get("generation_id") or "").strip()
     user_id = int(job.get("user_id") or 0)
@@ -422,9 +487,59 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
         after_image_url: Optional[str] = None
         compare_mode = False
 
+        if provider == "midjourney":
+            mj_result = await _process_midjourney_workspace_image_job(job)
+            final_payload = mj_result["final_payload"]
+            output = final_payload.get("output") or {}
+            available_actions = output.get("available_actions") or {}
+            provider_task_id = str(mj_result.get("provider_task_id") or "").strip()
+            image_urls = [str(item or "").strip() for item in (output.get("image_urls") or []) if str(item or "").strip()]
+            single_image_url = str(output.get("image_url") or "").strip()
+            if not image_urls and single_image_url:
+                image_urls = [single_image_url]
+            if not image_urls:
+                raise LegnextMidjourneyError("Midjourney completed without image URLs")
+
+            uploaded_urls: List[str] = []
+            storage_paths: List[str] = []
+            total_size = 0
+            mime_type = "image/jpeg"
+            for remote_url in image_urls:
+                out_bytes, ext = await ww._download_workspace_image_bytes(remote_url)
+                total_size += len(out_bytes or b"")
+                mime_type = ww._workspace_image_content_type(ext)
+                output_path = ww._workspace_image_output_path(user_id, ext)
+                uploaded_url = ww.upload_bytes_to_supabase(output_path, out_bytes, mime_type)
+                uploaded_urls.append(uploaded_url)
+                storage_paths.append(output_path)
+
+            image_url = uploaded_urls[0]
+            after_image_url = image_url
+            now_iso = ww._utc_now_iso()
+            ww._update_workspace_image_generation(
+                generation_id,
+                {
+                    "status": "completed",
+                    "provider_task_id": provider_task_id,
+                    "storage_path": storage_paths[0] if storage_paths else None,
+                    "storage_paths_json": storage_paths,
+                    "image_url": image_url,
+                    "image_urls_json": uploaded_urls,
+                    "download_url": image_url,
+                    "file_size_bytes": total_size,
+                    "mime_type": mime_type,
+                    "error_code": None,
+                    "error_message": None,
+                    "after_image_url": after_image_url,
+                    "available_actions_json": available_actions,
+                    "updated_at": now_iso,
+                    "completed_at": now_iso,
+                },
+            )
+            return
+
         if provider == "nano_banana":
             out_bytes, ext = await ww.run_nano_banana(source_image, run_prompt, output_format="jpg", aspect_ratio=aspect_ratio)
-            engine = "nano_banana"
         elif provider == "nano_banana_2":
             out_bytes, ext = await handle_nano_banana_2(
                 source_image,
@@ -434,7 +549,6 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
                 aspect_ratio=aspect_ratio,
                 source_image_url=str(job.get("source_image_url") or "").strip() or None,
             )
-            engine = "nano_banana_2"
         elif provider == "seedream":
             from main import ark_edit_image, ark_text_to_image
 
@@ -463,7 +577,6 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
                     source_image_url=source_url,
                 )
             ext = ww._workspace_detect_image_ext(out_bytes, default="jpg")
-            engine = "modelark_seedream"
         elif provider == "photosession":
             from main import ark_edit_image
 
@@ -480,13 +593,11 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
                 source_image_url=source_url,
             )
             ext = ww._workspace_detect_image_ext(out_bytes, default="jpg")
-            engine = "modelark_seedream"
         elif provider == "text_to_image":
             from main import ark_text_to_image
 
             out_bytes = await ark_text_to_image(run_prompt, size=ww._workspace_ark_size(resolution))
             ext = ww._workspace_detect_image_ext(out_bytes, default="jpg")
-            engine = "modelark_seedream"
         elif provider == "topaz_photo":
             preset_settings = ww.get_photo_preset_settings(preset_slug)
             source_url = await ww._upload_workspace_topaz_input_image(
@@ -508,7 +619,6 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
                 )
             )
             out_bytes, ext = await ww._download_workspace_image_bytes(topaz_result.output_url)
-            engine = "topaz_photo_replicate"
             before_image_url = source_url
             compare_mode = True
         elif provider in {"two_images", "nano_banana_pro"}:
@@ -525,7 +635,6 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
                 aspect_ratio=aspect_ratio,
                 safety_level=safety_level,
             )
-            engine = "nano_banana_pro"
         elif provider == "nano_banana_pro_new":
             out_bytes, ext = await ww._workspace_run_nano_banana_pro_new_site(
                 user_id=user_id,
@@ -536,7 +645,6 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
                 resolution=resolution,
                 aspect_ratio=aspect_ratio,
             )
-            engine = "nano_banana_pro_new_kie"
         else:
             raise RuntimeError(f"Unsupported workspace image provider: {provider}")
 
