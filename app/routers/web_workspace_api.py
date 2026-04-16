@@ -110,6 +110,15 @@ from switchx_service import SwitchXClient, SwitchXError
 from topaz_image_replicate import TopazImageParams, run_topaz_image_upscale
 from topaz_pricing import get_photo_preset_settings, get_photo_preset_tokens
 from yookassa_flow import create_yookassa_payment
+from app.services.legnext_midjourney import (
+    LegnextMidjourneyError,
+    build_midjourney_v7_prompt,
+    create_midjourney_diffusion,
+    create_midjourney_reroll,
+    create_midjourney_variation,
+    get_midjourney_job,
+    normalize_midjourney_speed_mode,
+)
 from app.services.video_editor_service import (
     VIDEO_EDIT_QUEUE_NAME,
     MAX_AUDIO_CLIPS,
@@ -845,7 +854,28 @@ def _upload_workspace_music_source_file(*, file_bytes: bytes, filename: str, con
         raise RuntimeError("Could not build public URL for uploaded audio")
     return {"storage_path": storage_path, "upload_url": signed_url, "mime_type": content_type or "application/octet-stream", "size_bytes": len(file_bytes)}
 
-_WORKSPACE_IMAGE_OPTIONAL_COLUMNS = {"preset_slug", "source_image_url", "before_image_url", "after_image_url", "compare_mode"}
+_WORKSPACE_IMAGE_OPTIONAL_COLUMNS = {
+    "preset_slug",
+    "source_image_url",
+    "before_image_url",
+    "after_image_url",
+    "compare_mode",
+    "provider_task_id",
+    "image_urls_json",
+    "storage_paths_json",
+    "available_actions_json",
+    "parent_generation_id",
+    "action_type",
+    "selected_image_no",
+    "negative_prompt",
+    "mj_stylize",
+    "mj_chaos",
+    "mj_raw",
+    "mj_speed_mode",
+    "mj_seed",
+    "style_ref_urls_json",
+    "omni_ref_url",
+}
 
 _WORKSPACE_VIDEOS_BUCKET = (os.getenv("WORKSPACE_VIDEOS_BUCKET", "workspace-videos") or "workspace-videos").strip() or "workspace-videos"
 _WORKSPACE_VOICE_BUCKET = (os.getenv("SUPABASE_BUCKET") or _WORKSPACE_VIDEOS_BUCKET).strip() or _WORKSPACE_VIDEOS_BUCKET
@@ -2095,6 +2125,14 @@ class TTSGenerateIn(BaseModel):
     use_speaker_boost: Optional[bool] = None
 
 
+class WorkspaceImageActionIn(BaseModel):
+    generation_id: str
+    action: str
+    image_no: Optional[int] = None
+    variation_type: Optional[str] = None
+    speed_mode: Optional[str] = None
+
+
 class SongwriterPayload(BaseModel):
     text: str = Field("", description="Current user message")
     history: Optional[List[ChatTurn]] = None
@@ -2371,11 +2409,69 @@ async def _download_workspace_image_bytes(url: str) -> tuple[bytes, str]:
     return raw, ext
 
 
+def _workspace_json_field(value: Any, default: Any) -> Any:
+    if value is None:
+        return default
+    if isinstance(value, (list, dict)):
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return default
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return default
+        if isinstance(default, list):
+            return parsed if isinstance(parsed, list) else default
+        if isinstance(default, dict):
+            return parsed if isinstance(parsed, dict) else default
+        return parsed
+    return default
+
+
+def _workspace_boolish(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _workspace_speed_mode(value: Any, default: str = "fast") -> str:
+    return normalize_midjourney_speed_mode(value, default=default)
+
+
+def _workspace_midjourney_action_cost(action_type: str, speed_mode: str) -> int:
+    action = str(action_type or "generate").strip().lower() or "generate"
+    speed = _workspace_speed_mode(speed_mode)
+    if action in {"variation", "variation_subtle", "variation_strong"}:
+        return 2 if speed == "turbo" else 1
+    if action == "reroll":
+        return 2 if speed == "turbo" else 1
+    return 2 if speed == "turbo" else 1
+
+
+def _workspace_midjourney_action_reason(action_type: str) -> str:
+    action = str(action_type or "generate").strip().lower() or "generate"
+    if action in {"variation", "variation_subtle", "variation_strong"}:
+        return "workspace_midjourney_variation"
+    if action == "reroll":
+        return "workspace_midjourney_reroll"
+    return "workspace_midjourney_generate"
+
+
+
 def _serialize_workspace_image_generation(row: Dict[str, Any]) -> Dict[str, Any]:
-    image_url = _first_nonempty(row.get("download_url"), row.get("image_url"), row.get("after_image_url"))
+    image_urls = _workspace_json_field(row.get("image_urls_json"), [])
+    if not image_urls:
+        image_urls = [str(item or "").strip() for item in (row.get("image_urls") or []) if str(item or "").strip()]
+    image_url = _first_nonempty(row.get("download_url"), row.get("image_url"), row.get("after_image_url"), image_urls[0] if image_urls else None)
     before_image_url = _first_nonempty(row.get("before_image_url"), row.get("source_image_url"))
     after_image_url = _first_nonempty(row.get("after_image_url"), image_url)
     compare_mode = bool(row.get("compare_mode")) and bool(before_image_url and after_image_url)
+    available_actions = _workspace_json_field(row.get("available_actions_json"), {})
+    style_ref_urls = _workspace_json_field(row.get("style_ref_urls_json"), [])
+    storage_paths = _workspace_json_field(row.get("storage_paths_json"), [])
+    speed_mode = _workspace_speed_mode(row.get("mj_speed_mode"), default="fast")
     return {
         "id": row.get("id"),
         "user_id": row.get("user_id"),
@@ -2396,7 +2492,9 @@ def _serialize_workspace_image_generation(row: Dict[str, Any]) -> Dict[str, Any]
         "after_image_url": after_image_url,
         "compare_mode": compare_mode,
         "storage_path": row.get("storage_path"),
+        "storage_paths": storage_paths,
         "image_url": image_url,
+        "image_urls": image_urls,
         "download_url": image_url,
         "file_size_bytes": row.get("file_size_bytes"),
         "mime_type": row.get("mime_type"),
@@ -2408,6 +2506,19 @@ def _serialize_workspace_image_generation(row: Dict[str, Any]) -> Dict[str, Any]
         "updated_at": row.get("updated_at"),
         "completed_at": row.get("completed_at"),
         "has_storage_file": bool(str(row.get("storage_path") or "").strip() or image_url),
+        "provider_task_id": row.get("provider_task_id"),
+        "available_actions": available_actions,
+        "parent_generation_id": row.get("parent_generation_id"),
+        "action_type": row.get("action_type"),
+        "selected_image_no": row.get("selected_image_no"),
+        "negative_prompt": row.get("negative_prompt"),
+        "mj_stylize": row.get("mj_stylize"),
+        "mj_chaos": row.get("mj_chaos"),
+        "mj_raw": _workspace_boolish(row.get("mj_raw")),
+        "mj_speed_mode": speed_mode,
+        "mj_seed": row.get("mj_seed"),
+        "style_ref_urls": style_ref_urls,
+        "omni_ref_url": row.get("omni_ref_url"),
     }
 
 
@@ -2621,10 +2732,12 @@ def _build_workspace_image_prompt(
             "Combine important traits from both into one coherent final image."
         )
         return f"{prefix} {base}".strip()
+    if provider == "midjourney":
+        return base
     return base
 
 
-def _workspace_image_cost(provider: str, mode: str, preset_slug: str = "", resolution: str = "2K") -> int:
+def _workspace_image_cost(provider: str, mode: str, preset_slug: str = "", resolution: str = "2K", speed_mode: str = "fast", action_type: str = "generate") -> int:
     provider_key = str(provider or "").strip().lower()
     mode_key = str(mode or "").strip().lower()
     preset_key = str(preset_slug or "").strip().lower()
@@ -2653,11 +2766,13 @@ def _workspace_image_cost(provider: str, mode: str, preset_slug: str = "", resol
         return 0
     if provider_key == "text_to_image":
         return 0
+    if provider_key == "midjourney":
+        return _workspace_midjourney_action_cost(action_type, speed_mode)
 
     raise HTTPException(status_code=400, detail=f"Unsupported image provider: {provider_key} / {mode_key}")
 
 
-def _workspace_image_charge_reason(provider: str, mode: str) -> Optional[str]:
+def _workspace_image_charge_reason(provider: str, mode: str, action_type: str = "generate") -> Optional[str]:
     provider_key = str(provider or "").strip().lower()
     mode_key = str(mode or "").strip().lower()
 
@@ -2681,6 +2796,8 @@ def _workspace_image_charge_reason(provider: str, mode: str) -> Optional[str]:
         return "two_photos"
     if provider_key == "topaz_photo":
         return "workspace_topaz_photo"
+    if provider_key == "midjourney":
+        return _workspace_midjourney_action_reason(action_type)
 
     return None
 
@@ -5477,9 +5594,13 @@ async def workspace_image_history_delete_item(
 
         bucket_name = (os.getenv("SUPABASE_BUCKET") or "").strip()
         storage_path = str(row.get("storage_path") or "").strip()
-        if storage_path and bucket_name:
+        storage_paths = _workspace_json_field(row.get("storage_paths_json"), [])
+        paths_to_delete = [str(item or "").strip() for item in storage_paths if str(item or "").strip()]
+        if storage_path and storage_path not in paths_to_delete:
+            paths_to_delete.append(storage_path)
+        if paths_to_delete and bucket_name:
             try:
-                supabase.storage.from_(bucket_name).remove([storage_path])
+                supabase.storage.from_(bucket_name).remove(paths_to_delete)
             except Exception:
                 pass
 
@@ -5517,6 +5638,12 @@ async def workspace_image_run(
     style_preset = str(form.get("style_preset") or "").strip()
     mood_preset = str(form.get("mood_preset") or "").strip()
     preset_slug = str(form.get("preset_slug") or "standard").strip().lower() or "standard"
+    negative_prompt = str(form.get("negative_prompt") or "").strip()
+    mj_stylize_raw = form.get("mj_stylize")
+    mj_chaos_raw = form.get("mj_chaos")
+    mj_raw = _workspace_boolish(form.get("mj_raw"))
+    mj_speed_mode = _workspace_speed_mode(form.get("mj_speed_mode") or form.get("speed_mode") or "fast")
+    mj_seed = str(form.get("mj_seed") or "").strip()
 
     if not provider:
         raise HTTPException(status_code=400, detail="Missing provider")
@@ -5527,7 +5654,7 @@ async def workspace_image_run(
     if provider != "topaz_photo" and not prompt:
         raise HTTPException(status_code=400, detail="Missing prompt")
 
-    supported = {"nano_banana", "nano_banana_2", "nano_banana_pro", "nano_banana_pro_new", "seedream", "posters", "photosession", "two_images", "text_to_image", "topaz_photo"}
+    supported = {"nano_banana", "nano_banana_2", "nano_banana_pro", "nano_banana_pro_new", "seedream", "posters", "photosession", "two_images", "text_to_image", "topaz_photo", "midjourney"}
     if provider not in supported:
         raise HTTPException(status_code=400, detail=f"Provider {provider} is not supported in /image/run")
 
@@ -5551,6 +5678,12 @@ async def workspace_image_run(
 
     base_image = await _read_optional_upload_bytes(base_upload)
 
+    style_ref_uploads_raw = [item for item in form.getlist("style_ref_image") if item]
+    style_ref_urls: list[str] = []
+    omni_ref_upload = form.get("omni_ref_image")
+    omni_ref_image = await _read_optional_upload_bytes(omni_ref_upload)
+    omni_ref_url = None
+
     if provider == "nano_banana" and not source_image:
         raise HTTPException(status_code=400, detail="Для Nano Banana нужен source image.")
     if provider == "nano_banana_2" and mode == "image_to_image" and not source_image:
@@ -5571,9 +5704,21 @@ async def workspace_image_run(
         raise HTTPException(status_code=400, detail="Для режима Картинка + Картинка нужны base image и source image.")
     if provider == "topaz_photo" and not source_image:
         raise HTTPException(status_code=400, detail="Для Topaz Photo Upscale нужен source image.")
+    if provider == "midjourney":
+        mode = "text_to_image"
+        model = model or "midjourney-v7"
 
     if provider in {"nano_banana_2", "nano_banana_pro", "nano_banana_pro_new", "text_to_image", "seedream"} and mode in {"text_to_image", "t2i"} and aspect_ratio == "match_input_image":
         aspect_ratio = "9:16" if provider == "seedream" else "16:9"
+
+    try:
+        mj_stylize = max(0, min(1000, int(mj_stylize_raw if mj_stylize_raw not in {None, ""} else 100)))
+    except Exception:
+        mj_stylize = 100
+    try:
+        mj_chaos = max(0, min(100, int(mj_chaos_raw if mj_chaos_raw not in {None, ""} else 0)))
+    except Exception:
+        mj_chaos = 0
 
     run_prompt = _build_workspace_image_prompt(
         provider=provider,
@@ -5583,6 +5728,26 @@ async def workspace_image_run(
         style_preset=style_preset,
         mood_preset=mood_preset,
     )
+    if provider == "midjourney":
+        for index, upload in enumerate(style_ref_uploads_raw[:4], start=1):
+            raw = await _read_optional_upload_bytes(upload)
+            if not raw:
+                continue
+            style_ref_urls.append(_upload_workspace_input_image(uid, raw, filename=getattr(upload, "filename", None), slot=f"workspace_midjourney_style_{index}"))
+        omni_ref_url = _upload_workspace_input_image(uid, omni_ref_image, filename=getattr(omni_ref_upload, "filename", None), slot="workspace_midjourney_omni") if omni_ref_image else None
+        run_prompt = build_midjourney_v7_prompt(
+            prompt=prompt,
+            aspect_ratio=aspect_ratio or "1:1",
+            stylize=mj_stylize,
+            chaos=mj_chaos,
+            raw_mode=mj_raw,
+            negative_prompt=negative_prompt,
+            seed=mj_seed,
+            speed_mode=mj_speed_mode,
+            style_ref_urls=style_ref_urls,
+            omni_ref_url=omni_ref_url,
+        )
+
     if provider != "topaz_photo" and not run_prompt:
         raise HTTPException(status_code=400, detail="Empty prompt")
 
@@ -5591,12 +5756,12 @@ async def workspace_image_run(
         bal = float(get_balance(uid) or 0)
     except Exception:
         bal = 0
-    cost = int(_workspace_image_cost(provider, mode, preset_slug, resolution))
+    cost = int(_workspace_image_cost(provider, mode, preset_slug, resolution, speed_mode=mj_speed_mode, action_type="generate"))
     if cost > 0 and bal < cost:
         raise HTTPException(status_code=402, detail=f"Недостаточно токенов. Нужно: {cost} ток.")
 
     charged = False
-    reason = _workspace_image_charge_reason(provider, mode)
+    reason = _workspace_image_charge_reason(provider, mode, action_type="generate")
     ref_id = uuid4().hex if cost > 0 and reason else ""
     generation_id = _insert_workspace_image_generation(
         {
@@ -5613,6 +5778,15 @@ async def workspace_image_run(
             "style_preset": style_preset,
             "mood_preset": mood_preset,
             "preset_slug": preset_slug if provider == "topaz_photo" else None,
+            "negative_prompt": negative_prompt if provider == "midjourney" else None,
+            "mj_stylize": mj_stylize if provider == "midjourney" else None,
+            "mj_chaos": mj_chaos if provider == "midjourney" else None,
+            "mj_raw": mj_raw if provider == "midjourney" else None,
+            "mj_speed_mode": mj_speed_mode if provider == "midjourney" else None,
+            "mj_seed": mj_seed if provider == "midjourney" else None,
+            "style_ref_urls_json": style_ref_urls if provider == "midjourney" else None,
+            "omni_ref_url": omni_ref_url if provider == "midjourney" else None,
+            "action_type": "generate" if provider == "midjourney" else None,
             "origin": "workspace_image",
         }
     )
@@ -5655,6 +5829,15 @@ async def workspace_image_run(
                 "base_image_url": base_image_url,
                 "source_filename": getattr(source_upload, "filename", None),
                 "base_filename": getattr(base_upload, "filename", None),
+                "negative_prompt": negative_prompt,
+                "mj_stylize": mj_stylize,
+                "mj_chaos": mj_chaos,
+                "mj_raw": mj_raw,
+                "mj_speed_mode": mj_speed_mode,
+                "mj_seed": mj_seed,
+                "style_ref_urls": style_ref_urls,
+                "omni_ref_url": omni_ref_url if provider == "midjourney" else None,
+                "mj_action": "generate" if provider == "midjourney" else None,
                 "charge_tokens": int(cost if charged else 0),
                 "charge_ref_id": ref_id,
                 "refund_reason": f"{reason}_refund" if reason else "workspace_image_refund",
@@ -5700,6 +5883,196 @@ async def workspace_image_run(
                 pass
         _mark_workspace_image_generation_failed(generation_id, str(e), error_code="queue_error")
         raise HTTPException(status_code=500, detail=f"Image generation failed: {e}")
+
+
+@router.post("/image/action")
+async def workspace_image_action(
+    payload: WorkspaceImageActionIn,
+    user: Dict[str, Any] = Depends(get_current_workspace_user),
+) -> Dict[str, Any]:
+    uid = int(user["telegram_user_id"])
+    generation_id_text = str(payload.generation_id or "").strip()
+    if not generation_id_text:
+        raise HTTPException(status_code=400, detail="Missing generation_id")
+
+    action = str(payload.action or "").strip().lower()
+    if action not in {"reroll", "variation"}:
+        raise HTTPException(status_code=400, detail="Unsupported action")
+
+    if supabase is None:
+        raise HTTPException(status_code=500, detail="Supabase is not configured")
+
+    try:
+        resp = (
+            supabase.table(_WORKSPACE_IMAGE_GENERATIONS_TABLE)
+            .select("*")
+            .eq("id", generation_id_text)
+            .eq("user_id", str(uid))
+            .is_("deleted_at", "null")
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(resp, "data", None) or []
+        if not rows or not isinstance(rows[0], dict):
+            raise HTTPException(status_code=404, detail="Image generation not found")
+        source_row = rows[0]
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Image generation load failed: {e}")
+
+    if str(source_row.get("provider") or "").strip().lower() != "midjourney":
+        raise HTTPException(status_code=400, detail="Actions are currently supported only for Midjourney")
+
+    source_task_id = str(source_row.get("provider_task_id") or "").strip()
+    if not source_task_id:
+        raise HTTPException(status_code=400, detail="Source Midjourney task id is missing. Apply SQL migration and regenerate the image.")
+
+    image_no = None if payload.image_no is None else int(payload.image_no)
+    if action == "variation" and image_no not in {0, 1, 2, 3}:
+        raise HTTPException(status_code=400, detail="variation requires image_no 0..3")
+
+    variation_type = str(payload.variation_type or "subtle").strip().lower()
+    if action == "variation" and variation_type not in {"subtle", "strong"}:
+        raise HTTPException(status_code=400, detail="variation_type must be subtle or strong")
+
+    speed_mode = _workspace_speed_mode(payload.speed_mode or source_row.get("mj_speed_mode") or "fast")
+    prompt = str(source_row.get("prompt") or "").strip()
+    aspect_ratio = str(source_row.get("aspect_ratio") or "1:1").strip() or "1:1"
+    negative_prompt = str(source_row.get("negative_prompt") or "").strip()
+    mj_stylize = source_row.get("mj_stylize")
+    mj_chaos = source_row.get("mj_chaos")
+    mj_raw = _workspace_boolish(source_row.get("mj_raw"))
+    mj_seed = str(source_row.get("mj_seed") or "").strip()
+    style_ref_urls = _workspace_json_field(source_row.get("style_ref_urls_json"), [])
+    omni_ref_url = str(source_row.get("omni_ref_url") or "").strip() or None
+
+    ensure_user_row(uid)
+    try:
+        bal = float(get_balance(uid) or 0)
+    except Exception:
+        bal = 0
+
+    cost = int(_workspace_image_cost("midjourney", "text_to_image", "", "2K", speed_mode=speed_mode, action_type=action))
+    reason = _workspace_image_charge_reason("midjourney", "text_to_image", action_type=action)
+    if cost > 0 and bal < cost:
+        raise HTTPException(status_code=402, detail=f"Недостаточно токенов. Нужно: {cost} ток.")
+
+    charged = False
+    ref_id = uuid4().hex if cost > 0 and reason else ""
+    new_generation_id = _insert_workspace_image_generation(
+        {
+            "user_id": str(uid),
+            "provider": "midjourney",
+            "model": str(source_row.get("model") or "midjourney-v7"),
+            "mode": "text_to_image",
+            "prompt": prompt,
+            "status": "queued",
+            "resolution": source_row.get("resolution") or "2K",
+            "aspect_ratio": aspect_ratio,
+            "negative_prompt": negative_prompt,
+            "mj_stylize": mj_stylize,
+            "mj_chaos": mj_chaos,
+            "mj_raw": mj_raw,
+            "mj_speed_mode": speed_mode,
+            "mj_seed": mj_seed,
+            "style_ref_urls_json": style_ref_urls,
+            "omni_ref_url": omni_ref_url,
+            "parent_generation_id": generation_id_text,
+            "action_type": action,
+            "selected_image_no": image_no,
+            "origin": "workspace_image",
+        }
+    )
+
+    try:
+        if cost > 0 and reason:
+            try:
+                add_tokens(uid, -cost, reason=reason, ref_id=ref_id, meta={"origin": "workspace_image", "provider": "midjourney", "action": action})
+            except TypeError:
+                add_tokens(uid, -int(cost), reason=reason)
+            charged = True
+
+        await enqueue_job(
+            {
+                "job_id": uuid4().hex,
+                "kind": "workspace_image_run",
+                "generation_id": new_generation_id,
+                "user_id": uid,
+                "provider": "midjourney",
+                "model": str(source_row.get("model") or "midjourney-v7"),
+                "mode": "text_to_image",
+                "prompt": prompt,
+                "run_prompt": build_midjourney_v7_prompt(
+                    prompt=prompt,
+                    aspect_ratio=aspect_ratio,
+                    stylize=mj_stylize,
+                    chaos=mj_chaos,
+                    raw_mode=mj_raw,
+                    negative_prompt=negative_prompt,
+                    seed=mj_seed,
+                    speed_mode=speed_mode,
+                    style_ref_urls=style_ref_urls,
+                    omni_ref_url=omni_ref_url,
+                ),
+                "aspect_ratio": aspect_ratio,
+                "negative_prompt": negative_prompt,
+                "mj_stylize": mj_stylize,
+                "mj_chaos": mj_chaos,
+                "mj_raw": mj_raw,
+                "mj_speed_mode": speed_mode,
+                "mj_seed": mj_seed,
+                "style_ref_urls": style_ref_urls,
+                "omni_ref_url": omni_ref_url,
+                "mj_action": action,
+                "source_task_id": source_task_id,
+                "selected_image_no": image_no,
+                "variation_type": variation_type,
+                "charge_tokens": int(cost if charged else 0),
+                "charge_ref_id": ref_id,
+                "refund_reason": f"{reason}_refund" if reason else "workspace_image_refund",
+                "origin": "workspace_image",
+            },
+            queue_name=WORKSPACE_IMAGE_QUEUE_NAME,
+        )
+
+        try:
+            balance_tokens = int(get_balance(uid) or 0)
+        except Exception:
+            balance_tokens = None
+        return {
+            "ok": True,
+            "generation_id": new_generation_id,
+            "provider": "midjourney",
+            "action": action,
+            "tokens_required": cost,
+            "status": "queued",
+            "status_text": "Midjourney задача поставлена в очередь. Результат появится в рабочей зоне автоматически.",
+            "balance_tokens": balance_tokens,
+        }
+    except HTTPException:
+        if charged:
+            try:
+                try:
+                    add_tokens(uid, cost, reason=f"{reason}_refund", ref_id=ref_id or uuid4().hex, meta={"origin": "workspace_image", "stage": "route_http_exception"})
+                except TypeError:
+                    add_tokens(uid, int(cost), reason=f"{reason}_refund")
+            except Exception:
+                pass
+        _mark_workspace_image_generation_failed(new_generation_id, "Queueing failed", error_code="queue_error")
+        raise
+    except Exception as e:
+        if charged:
+            try:
+                try:
+                    add_tokens(uid, cost, reason=f"{reason}_refund", ref_id=ref_id or uuid4().hex, meta={"origin": "workspace_image", "error": str(e)})
+                except TypeError:
+                    add_tokens(uid, int(cost), reason=f"{reason}_refund")
+            except Exception:
+                pass
+        _mark_workspace_image_generation_failed(new_generation_id, str(e), error_code="queue_error")
+        raise HTTPException(status_code=500, detail=f"Image action failed: {e}")
+
 
 
 @router.post("/tts/generate")
