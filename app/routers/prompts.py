@@ -61,7 +61,7 @@ def items(group_id: str = Query(..., description="prompt_groups.id")) -> Dict[st
     try:
         r = (
             supabase.table("prompt_items")
-            .select("id,group_id,title,preview_url,prompt_text,model_hint,is_pro,sort_order")
+            .select("id,group_id,title,preview_url,video_url,prompt_text,model_hint,is_pro,sort_order")
             .eq("group_id", group_id)
             .order("sort_order", desc=False)
             .order("title", desc=False)
