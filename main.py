@@ -1244,10 +1244,10 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
         st["t2i"] = {"step": "need_prompt", "aspect_ratio": "9:16", "model": "seedream_45"}
 
     elif mode == "gpt_image_2_t2i":
-        st["gpt_image_2_t2i"] = {"step": "need_prompt"}
+        st["gpt_image_2_t2i"] = {"step": "need_prompt", "size": "1024x1024"}
 
     elif mode == "gpt_image_2_i2i":
-        st["gpt_image_2_i2i"] = {"step": "need_image", "photo_bytes": None, "photo_file_id": None}
+        st["gpt_image_2_i2i"] = {"step": "need_image", "photo_bytes": None, "photo_file_id": None, "size": "1024x1024"}
 
     elif mode == "two_photos":
         # 2 фото: multi-image (если эндпоинт поддерживает)
@@ -2857,17 +2857,24 @@ async def openai_edit_image(
 
 async def openai_generate_image_v2(
     prompt: str,
-    size: str,
+    size: str = "1024x1024",
 ) -> bytes:
     """Text-to-image via OpenAI Images API (gpt-image-2)."""
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY не задан в переменных окружения.")
 
-    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
-    data = {"model": "gpt-image-2", "prompt": prompt, "size": size, "n": "1"}
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {"model": "gpt-image-2", "prompt": prompt, "size": size, "n": 1}
 
     async with httpx.AsyncClient(timeout=300) as client:
-        r = await client.post("https://api.openai.com/v1/images/generations", headers=headers, data=data)
+        r = await client.post(
+            "https://api.openai.com/v1/images/generations",
+            headers=headers,
+            json=payload,
+        )
 
     if r.status_code != 200:
         raise RuntimeError(f"Ошибка Images Generations API ({r.status_code}): {r.text[:2000]}")
@@ -2882,10 +2889,10 @@ async def openai_generate_image_v2(
 async def openai_edit_image_v2(
     source_image_bytes: bytes,
     prompt: str,
-    size: str,
+    size: str = "1024x1024",
     mask_png_bytes: Optional[bytes] = None,
 ) -> bytes:
-    """Image-to-image edit via OpenAI Images API (gpt-image-2)."""
+    """Image-to-image via OpenAI Images API (gpt-image-2)."""
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY не задан в переменных окружения.")
 
@@ -6839,7 +6846,7 @@ async def webhook(secret: str, request: Request):
         if str(st.get("photo_submenu") or "").strip().lower() == "gpt_image_2":
             _set_mode(chat_id, user_id, "gpt_image_2_t2i")
             st.pop("photo_submenu", None)
-            st["gpt_image_2_t2i"] = {"step": "need_prompt"}
+            st["gpt_image_2_t2i"] = {"step": "need_prompt", "size": "1024x1024"}
             await tg_send_message(
                 chat_id,
                 "GPT Image 2.0 • режим «Текст→Картинка».\nНапиши одним сообщением, что нужно сгенерировать.",
@@ -6854,7 +6861,7 @@ async def webhook(secret: str, request: Request):
         await tg_send_message(
             chat_id,
             "Seedream 4.5 • режим «Текст→Картинка».\n"
-"Напиши одним сообщением, что нужно сгенерировать.\n"
+            "Напиши одним сообщением, что нужно сгенерировать.\n"
             "Промпт уйдёт как есть, без внутренней обвязки.",
             reply_markup=_photo_future_menu_keyboard(),
         )
@@ -6868,7 +6875,7 @@ async def webhook(secret: str, request: Request):
     if incoming_text == "Картинка→Картинка":
         _set_mode(chat_id, user_id, "gpt_image_2_i2i")
         st.pop("photo_submenu", None)
-        st["gpt_image_2_i2i"] = {"step": "need_image", "photo_bytes": None, "photo_file_id": None}
+        st["gpt_image_2_i2i"] = {"step": "need_image", "photo_bytes": None, "photo_file_id": None, "size": "1024x1024"}
         await tg_send_message(
             chat_id,
             "GPT Image 2.0 • режим «Картинка→Картинка».\n1) Пришли одно фото.\n2) Потом одним сообщением напиши, что нужно изменить.",
@@ -9181,7 +9188,7 @@ async def webhook(secret: str, request: Request):
         if st.get("mode") == "gpt_image_2_t2i":
             gi2 = st.get("gpt_image_2_t2i") or {}
             if (gi2.get("step") or "need_prompt") != "need_prompt":
-                st["gpt_image_2_t2i"] = {"step": "need_prompt"}
+                st["gpt_image_2_t2i"] = {"step": "need_prompt", "size": str(gi2.get("size") or "1024x1024")}
 
             user_prompt = incoming_text.strip()
             if not user_prompt:
@@ -9199,8 +9206,9 @@ async def webhook(secret: str, request: Request):
                 await tg_send_chat_action(chat_id, "upload_photo")
 
             try:
+                size = str(gi2.get("size") or "1024x1024")
                 _busy_start(int(user_id), "GPT Image 2.0 T2I")
-                img_bytes = await openai_generate_image_v2(prompt=user_prompt, size=IMG_SIZE_DEFAULT)
+                img_bytes = await openai_generate_image_v2(prompt=user_prompt, size=size)
 
                 _dl_set_bytes(chat_id, user_id, token, img_bytes)
 
@@ -9229,7 +9237,7 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(chat_id, f"Ошибка GPT Image 2.0: {e}", reply_markup=_main_menu_for(user_id))
             finally:
                 _busy_end(int(user_id))
-                st["gpt_image_2_t2i"] = {"step": "need_prompt"}
+                st["gpt_image_2_t2i"] = {"step": "need_prompt", "size": str((st.get("gpt_image_2_t2i") or {}).get("size") or gi2.get("size") or "1024x1024")}
                 st["ts"] = _now()
             return {"ok": True}
 
@@ -9259,8 +9267,9 @@ async def webhook(secret: str, request: Request):
                 await tg_send_chat_action(chat_id, "upload_photo")
 
             try:
+                size = str(gi2.get("size") or "1024x1024")
                 _busy_start(int(user_id), "GPT Image 2.0 I2I")
-                out_bytes = await openai_edit_image_v2(photo_bytes, user_prompt, IMG_SIZE_DEFAULT, mask_png_bytes=None)
+                out_bytes = await openai_edit_image_v2(photo_bytes, user_prompt, size=size, mask_png_bytes=None)
 
                 _dl_set_bytes(chat_id, user_id, token, out_bytes)
 
@@ -9289,7 +9298,7 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(chat_id, f"Ошибка GPT Image 2.0: {e}", reply_markup=_main_menu_for(user_id))
             finally:
                 _busy_end(int(user_id))
-                st["gpt_image_2_i2i"] = {"step": "need_image", "photo_bytes": None, "photo_file_id": None}
+                st["gpt_image_2_i2i"] = {"step": "need_image", "photo_bytes": None, "photo_file_id": None, "size": str((st.get("gpt_image_2_i2i") or {}).get("size") or gi2.get("size") or "1024x1024")}
                 st["ts"] = _now()
             return {"ok": True}
 
