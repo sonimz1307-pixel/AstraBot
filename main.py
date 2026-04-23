@@ -238,6 +238,7 @@ def _is_nav_or_menu_text(t: str) -> bool:
         "topaz видео • full hd • 2 токена / 5 сек",
         "topaz видео • full hd smooth • 3 токена / 5 сек",
         "афиша: ярко", "афиша: кино",
+        "gpt image 2.0", "картинка→картинка",
         "текст→картинка",
         "🔄 сбросить генерацию".lower(),
     }
@@ -1242,6 +1243,12 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
         # Text-to-image: Seedream/ModelArk endpoint (text-to-image)
         st["t2i"] = {"step": "need_prompt", "aspect_ratio": "9:16", "model": "seedream_45"}
 
+    elif mode == "gpt_image_2_t2i":
+        st["gpt_image_2_t2i"] = {"step": "need_prompt"}
+
+    elif mode == "gpt_image_2_i2i":
+        st["gpt_image_2_i2i"] = {"step": "need_image", "photo_bytes": None, "photo_file_id": None}
+
     elif mode == "two_photos":
         # 2 фото: multi-image (если эндпоинт поддерживает)
         st["two_photos"] = {
@@ -1318,6 +1325,8 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
         st.pop("poster", None)
         st.pop("photosession", None)
         st.pop("t2i", None)
+        st.pop("gpt_image_2_t2i", None)
+        st.pop("gpt_image_2_i2i", None)
         st.pop("two_photos", None)
         st.pop("nano_banana", None)
         st.pop("nano_banana_pro", None)
@@ -1761,10 +1770,23 @@ def _help_menu_for(user_id: int) -> dict:
 def _photo_future_menu_keyboard() -> dict:
     return {
         "keyboard": [
-            [{"text": "Фото/Афиши"}, {"text": "Нейро фотосессии"}],
+            [{"text": "GPT Image 2.0"}, {"text": "Нейро фотосессии"}],
             [{"text": "🍌 Nano Banana"}, {"text": "🍌 Nano Banana 2"}],
             [{"text": "🍌 Nano Banana Pro"}, {"text": "🍌 Nano Banana Pro - NEW"}],
             [{"text": "Seedream"}, {"text": "Апскейл"}],
+            [{"text": "⬅️ Назад"}],
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+        "selective": False,
+    }
+
+
+def _photo_gpt_image_2_menu_keyboard() -> dict:
+    return {
+        "keyboard": [
+            [{"text": "Текст→Картинка"}],
+            [{"text": "Картинка→Картинка"}],
             [{"text": "⬅️ Назад"}],
         ],
         "resize_keyboard": True,
@@ -2828,6 +2850,62 @@ async def openai_edit_image(
 
     resp = r.json()
     b64_img = resp["data"][0].get("b64_json")
+    if not b64_img:
+        raise RuntimeError("Images Edit API вернул ответ без b64_json.")
+    return base64.b64decode(b64_img)
+
+
+async def openai_generate_image_v2(
+    prompt: str,
+    size: str,
+) -> bytes:
+    """Text-to-image via OpenAI Images API (gpt-image-2)."""
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY не задан в переменных окружения.")
+
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+    data = {"model": "gpt-image-2", "prompt": prompt, "size": size, "n": "1"}
+
+    async with httpx.AsyncClient(timeout=300) as client:
+        r = await client.post("https://api.openai.com/v1/images/generations", headers=headers, data=data)
+
+    if r.status_code != 200:
+        raise RuntimeError(f"Ошибка Images Generations API ({r.status_code}): {r.text[:2000]}")
+
+    resp = r.json()
+    b64_img = (resp.get("data") or [{}])[0].get("b64_json")
+    if not b64_img:
+        raise RuntimeError("Images Generations API вернул ответ без b64_json.")
+    return base64.b64decode(b64_img)
+
+
+async def openai_edit_image_v2(
+    source_image_bytes: bytes,
+    prompt: str,
+    size: str,
+    mask_png_bytes: Optional[bytes] = None,
+) -> bytes:
+    """Image-to-image edit via OpenAI Images API (gpt-image-2)."""
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY не задан в переменных окружения.")
+
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+
+    ext, mime = _detect_image_type(source_image_bytes)
+    files = {"image": (f"source.{ext}", source_image_bytes, mime)}
+    if mask_png_bytes:
+        files["mask"] = ("mask.png", mask_png_bytes, "image/png")
+
+    data = {"model": "gpt-image-2", "prompt": prompt, "size": size, "n": "1"}
+
+    async with httpx.AsyncClient(timeout=300) as client:
+        r = await client.post("https://api.openai.com/v1/images/edits", headers=headers, data=data, files=files)
+
+    if r.status_code != 200:
+        raise RuntimeError(f"Ошибка Images Edit API ({r.status_code}): {r.text[:2000]}")
+
+    resp = r.json()
+    b64_img = (resp.get("data") or [{}])[0].get("b64_json")
     if not b64_img:
         raise RuntimeError("Images Edit API вернул ответ без b64_json.")
     return base64.b64decode(b64_img)
@@ -5350,7 +5428,7 @@ async def webhook(secret: str, request: Request):
 
     if incoming_text == "⬅️ Назад":
         submenu = str(st.get("photo_submenu") or "").strip().lower()
-        if submenu in ("seedream", "upscale"):
+        if submenu in ("seedream", "upscale", "gpt_image_2"):
             st.pop("photo_submenu", None)
             st["ts"] = _now()
             await tg_send_message(chat_id, "📸 Фото будущего — выбери режим:", reply_markup=_photo_future_menu_keyboard())
@@ -5396,7 +5474,7 @@ async def webhook(secret: str, request: Request):
             "Привет!\n"
             "Режимы:\n"
             "• «ИИ (чат)» — вопросы/анализ фото/решение задач.\n"
-            "• «Фото будущего» — фото-режимы (Афиши / Нейро фотосессии / 2 фото).\n",
+            "• «Фото будущего» — фото-режимы (GPT Image 2.0 / Нейро фотосессии / Seedream / Nano Banana).\n",
             reply_markup=_help_menu_for(user_id),
         )
         return {"ok": True}
@@ -5644,6 +5722,16 @@ async def webhook(secret: str, request: Request):
         )
         return {"ok": True}
 
+    if incoming_text in ("GPT Image 2.0", "Фото/Афиши"):
+        st["photo_submenu"] = "gpt_image_2"
+        st["ts"] = _now()
+        await tg_send_message(
+            chat_id,
+            "✨ GPT Image 2.0 — выбери режим:\n• Текст→Картинка\n• Картинка→Картинка",
+            reply_markup=_photo_gpt_image_2_menu_keyboard(),
+        )
+        return {"ok": True}
+
     if incoming_text == "Seedream":
         st["photo_submenu"] = "seedream"
         st["ts"] = _now()
@@ -5713,19 +5801,6 @@ async def webhook(secret: str, request: Request):
             reply_markup=_help_menu_for(user_id),
         )
         return {"ok": True}
-    if incoming_text == "Фото/Афиши":
-        _set_mode(chat_id, user_id, "poster")
-        await tg_send_message(
-            chat_id,
-            "Режим «Фото/Афиши».\n"
-            "1) Пришли фото.\n"
-            "2) Потом одним сообщением:\n"
-            "   • если хочешь афишу — напиши надпись/цену/стиль (или слово 'афиша')\n"
-            "   • если хочешь обычную картинку — просто опиши сцену (или напиши 'без текста').\n",
-            reply_markup=_poster_menu_keyboard((st.get("poster") or {}).get("light", "bright")),
-        )
-        return {"ok": True}
-
     handled = False
 
     if incoming_text:
@@ -6761,6 +6836,17 @@ async def webhook(secret: str, request: Request):
         return {"ok": True}
 
     if incoming_text == "Текст→Картинка":
+        if str(st.get("photo_submenu") or "").strip().lower() == "gpt_image_2":
+            _set_mode(chat_id, user_id, "gpt_image_2_t2i")
+            st.pop("photo_submenu", None)
+            st["gpt_image_2_t2i"] = {"step": "need_prompt"}
+            await tg_send_message(
+                chat_id,
+                "GPT Image 2.0 • режим «Текст→Картинка».\nНапиши одним сообщением, что нужно сгенерировать.",
+                reply_markup=_photo_future_menu_keyboard(),
+            )
+            return {"ok": True}
+
         # Text-to-image mode (no input photo required)
         _set_mode(chat_id, user_id, "t2i")
         st.pop("photo_submenu", None)
@@ -6768,7 +6854,7 @@ async def webhook(secret: str, request: Request):
         await tg_send_message(
             chat_id,
             "Seedream 4.5 • режим «Текст→Картинка».\n"
-            "Напиши одним сообщением, что нужно сгенерировать.\n"
+"Напиши одним сообщением, что нужно сгенерировать.\n"
             "Промпт уйдёт как есть, без внутренней обвязки.",
             reply_markup=_photo_future_menu_keyboard(),
         )
@@ -6776,6 +6862,17 @@ async def webhook(secret: str, request: Request):
             chat_id,
             "Выбери формат Seedream 4.5:",
             reply_markup=_seedream_aspect_inline_kb("t2i", "9:16"),
+        )
+        return {"ok": True}
+
+    if incoming_text == "Картинка→Картинка":
+        _set_mode(chat_id, user_id, "gpt_image_2_i2i")
+        st.pop("photo_submenu", None)
+        st["gpt_image_2_i2i"] = {"step": "need_image", "photo_bytes": None, "photo_file_id": None}
+        await tg_send_message(
+            chat_id,
+            "GPT Image 2.0 • режим «Картинка→Картинка».\n1) Пришли одно фото.\n2) Потом одним сообщением напиши, что нужно изменить.",
+            reply_markup=_photo_future_menu_keyboard(),
         )
         return {"ok": True}
     if incoming_text == "Помощь":
@@ -6812,6 +6909,29 @@ async def webhook(secret: str, request: Request):
             img_bytes = await tg_download_file_bytes(file_path)
         except Exception as e:
             await tg_send_message(chat_id, f"Ошибка при загрузке фото: {e}", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+
+        if st.get("mode") == "gpt_image_2_i2i":
+            gi2 = st.get("gpt_image_2_i2i") or {}
+            step = (gi2.get("step") or "need_image")
+            if step == "need_image":
+                gi2["photo_bytes"] = img_bytes
+                gi2["photo_file_id"] = file_id
+                gi2["step"] = "need_prompt"
+                st["gpt_image_2_i2i"] = gi2
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    "Фото принял ✅ Теперь напиши одним сообщением, что нужно изменить через GPT Image 2.0.",
+                    reply_markup=_photo_future_menu_keyboard(),
+                )
+                return {"ok": True}
+
+            await tg_send_message(
+                chat_id,
+                "Фото уже получено ✅ Теперь жду ТЕКСТ, что нужно изменить.",
+                reply_markup=_photo_future_menu_keyboard(),
+            )
             return {"ok": True}
 
         if st.get("mode") == "seedream_single":
@@ -9056,6 +9176,122 @@ async def webhook(secret: str, request: Request):
 
             return {"ok": True}
 
+
+        # GPT Image 2.0: text-to-image
+        if st.get("mode") == "gpt_image_2_t2i":
+            gi2 = st.get("gpt_image_2_t2i") or {}
+            if (gi2.get("step") or "need_prompt") != "need_prompt":
+                st["gpt_image_2_t2i"] = {"step": "need_prompt"}
+
+            user_prompt = incoming_text.strip()
+            if not user_prompt:
+                await tg_send_message(chat_id, "Напиши описание для генерации.", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            placeholder = _make_blur_placeholder(None)
+            token = _dl_init_slot(chat_id, user_id)
+            msg_id = await tg_send_photo_bytes_return_message_id(chat_id, placeholder, caption="GPT Image 2.0: генерация изображения…", reply_markup=_dl_keyboard(token))
+            stop = asyncio.Event()
+            prog_task = None
+            if msg_id is not None:
+                prog_task = asyncio.create_task(_progress_caption_updater(chat_id, msg_id, "GPT Image 2.0: генерация изображения…", stop))
+            else:
+                await tg_send_chat_action(chat_id, "upload_photo")
+
+            try:
+                _busy_start(int(user_id), "GPT Image 2.0 T2I")
+                img_bytes = await openai_generate_image_v2(prompt=user_prompt, size=IMG_SIZE_DEFAULT)
+
+                _dl_set_bytes(chat_id, user_id, token, img_bytes)
+
+                stop.set()
+                if prog_task:
+                    try:
+                        await prog_task
+                    except Exception:
+                        pass
+
+                if msg_id is not None:
+                    try:
+                        await tg_edit_message_media_photo(chat_id, msg_id, img_bytes, caption="Готово. GPT Image 2.0", reply_markup=_dl_keyboard(token))
+                    except Exception:
+                        await tg_send_photo_bytes(chat_id, img_bytes, caption="Готово. GPT Image 2.0")
+                else:
+                    await tg_send_photo_bytes(chat_id, img_bytes, caption="Готово. GPT Image 2.0")
+
+            except Exception as e:
+                stop.set()
+                if prog_task:
+                    try:
+                        await prog_task
+                    except Exception:
+                        pass
+                await tg_send_message(chat_id, f"Ошибка GPT Image 2.0: {e}", reply_markup=_main_menu_for(user_id))
+            finally:
+                _busy_end(int(user_id))
+                st["gpt_image_2_t2i"] = {"step": "need_prompt"}
+                st["ts"] = _now()
+            return {"ok": True}
+
+        # GPT Image 2.0: image-to-image
+        if st.get("mode") == "gpt_image_2_i2i":
+            gi2 = st.get("gpt_image_2_i2i") or {}
+            step = (gi2.get("step") or "need_image")
+            photo_bytes = gi2.get("photo_bytes")
+
+            if step == "need_image" or not photo_bytes:
+                await tg_send_message(chat_id, "Сначала пришли фото для GPT Image 2.0 → Картинка→Картинка.", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            user_prompt = incoming_text.strip()
+            if not user_prompt:
+                await tg_send_message(chat_id, "Напиши, что нужно изменить на фото.", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            placeholder = _make_blur_placeholder(photo_bytes)
+            token = _dl_init_slot(chat_id, user_id)
+            msg_id = await tg_send_photo_bytes_return_message_id(chat_id, placeholder, caption="GPT Image 2.0: редактирование изображения…", reply_markup=_dl_keyboard(token))
+            stop = asyncio.Event()
+            prog_task = None
+            if msg_id is not None:
+                prog_task = asyncio.create_task(_progress_caption_updater(chat_id, msg_id, "GPT Image 2.0: редактирование изображения…", stop))
+            else:
+                await tg_send_chat_action(chat_id, "upload_photo")
+
+            try:
+                _busy_start(int(user_id), "GPT Image 2.0 I2I")
+                out_bytes = await openai_edit_image_v2(photo_bytes, user_prompt, IMG_SIZE_DEFAULT, mask_png_bytes=None)
+
+                _dl_set_bytes(chat_id, user_id, token, out_bytes)
+
+                stop.set()
+                if prog_task:
+                    try:
+                        await prog_task
+                    except Exception:
+                        pass
+
+                if msg_id is not None:
+                    try:
+                        await tg_edit_message_media_photo(chat_id, msg_id, out_bytes, caption="Готово. GPT Image 2.0", reply_markup=_dl_keyboard(token))
+                    except Exception:
+                        await tg_send_photo_bytes(chat_id, out_bytes, caption="Готово. GPT Image 2.0")
+                else:
+                    await tg_send_photo_bytes(chat_id, out_bytes, caption="Готово. GPT Image 2.0")
+
+            except Exception as e:
+                stop.set()
+                if prog_task:
+                    try:
+                        await prog_task
+                    except Exception:
+                        pass
+                await tg_send_message(chat_id, f"Ошибка GPT Image 2.0: {e}", reply_markup=_main_menu_for(user_id))
+            finally:
+                _busy_end(int(user_id))
+                st["gpt_image_2_i2i"] = {"step": "need_image", "photo_bytes": None, "photo_file_id": None}
+                st["ts"] = _now()
+            return {"ok": True}
 
         # T2I flow: генерация Seedream по одному тексту (без входного фото)
         if st.get("mode") == "t2i":
