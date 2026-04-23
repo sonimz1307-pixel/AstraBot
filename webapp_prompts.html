@@ -323,11 +323,15 @@ body:before{
   aspect-ratio: 4 / 3;
   background: rgba(255,255,255,.03);
 }
-.mPreviewInner img{
+.mPreviewInner img,
+.mPreviewInner video{
   width:100%; height:100%;
   object-fit:contain;
   display:block;
   background: rgba(0,0,0,.20);
+}
+.mPreviewInner video{
+  display:none;
 }
 .mPreviewHint{
   position:absolute;
@@ -442,7 +446,8 @@ body:before{
       <div class="mPreview" id="mPreview" style="display:none;">
         <div class="mPreviewInner">
           <img id="mImg" alt="preview"/>
-          <div class="mPreviewHint">🔍 Нажми на фото — открыть крупно</div>
+          <video id="mVideo" controls playsinline preload="metadata"></video>
+          <div class="mPreviewHint" id="mPreviewHint">🔍 Нажми на фото — открыть крупно</div>
         </div>
       </div>
       <div style="height:12px"></div>
@@ -492,6 +497,8 @@ const mTitle=document.getElementById("mTitle");
 const mHint=document.getElementById("mHint");
 const mPreview=document.getElementById("mPreview");
 const mImg=document.getElementById("mImg");
+const mVideo=document.getElementById("mVideo");
+const mPreviewHint=document.getElementById("mPreviewHint");
 const imgModal=document.getElementById("imgModal");
 const imgModalImg=document.getElementById("imgModalImg");
 const mPrompt=document.getElementById("mPrompt");
@@ -622,22 +629,45 @@ function openPrompt(p){
   mHint.textContent=p.model_hint?("Подходит для: "+p.model_hint):"";
   mPrompt.textContent=p.prompt_text||"";
 
-  const url = (p.preview_url||"").trim();
-  if(url){
-    mImg.src = url;
+  const previewUrl = (p.preview_url||"").trim();
+  const videoUrl = (p.video_url||p.provider_video_url||"").trim();
+
+  mImg.style.display = "none";
+  mVideo.style.display = "none";
+  mImg.removeAttribute("src");
+  mVideo.pause();
+  mVideo.removeAttribute("src");
+  mVideo.load();
+
+  if(videoUrl){
+    mVideo.src = videoUrl;
+    mVideo.style.display = "block";
+    mPreviewHint.textContent = "▶ Видео из video_url";
+    mPreviewHint.style.display = "";
+    mPreview.style.display = "";
+  }else if(previewUrl){
+    mImg.src = previewUrl;
+    mImg.style.display = "block";
+    mPreviewHint.textContent = "🔍 Нажми на фото — открыть крупно";
+    mPreviewHint.style.display = "";
     mPreview.style.display = "";
   }else{
-    mImg.removeAttribute("src");
     mPreview.style.display = "none";
+    mPreviewHint.style.display = "none";
   }
 
   modal.classList.add("open");
 }
-function closeModal(){modal.classList.remove("open"); imgModal.classList.remove("open");}
+function closeModal(){
+  mVideo.pause();
+  modal.classList.remove("open");
+  imgModal.classList.remove("open");
+}
 mClose.onclick=closeModal; mClose2.onclick=closeModal;
 modal.onclick=(e)=>{if(e.target===modal) closeModal();};
 
 mImg.onclick=()=>{
+  if(mImg.style.display === "none") return;
   const src=(mImg.getAttribute("src")||"").trim();
   if(!src) return;
   imgModalImg.src = src;
