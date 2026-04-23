@@ -399,8 +399,6 @@ def _resolve_workspace_chat_model(requested_model: Any, mode: str) -> Dict[str, 
     requested = str(requested_model or "").strip()
     if mode_value == "prompt_builder":
         return {"label": PROMPT_MODEL_LABEL, "actual": PROMPT_BUILDER_MODEL}
-    if requested == PROMPT_MODEL_LABEL:
-        return {"label": PROMPT_MODEL_LABEL, "actual": PROMPT_BUILDER_MODEL}
     if requested in {OPENAI_CHAT_MODEL, PROMPT_BUILDER_MODEL}:
         return {"label": requested, "actual": requested}
     return {"label": CHAT_MODEL_LABEL_DEFAULT, "actual": OPENAI_CHAT_MODEL}
@@ -2737,6 +2735,23 @@ def _build_workspace_image_prompt(
     return base
 
 
+
+def _workspace_gpt_image_2_size(aspect_ratio: Any, mode: str = "text_to_image") -> str:
+    ratio = str(aspect_ratio or "").strip()
+    mode_value = str(mode or "").strip().lower()
+    if mode_value == "image_to_image" and ratio == "match_input_image":
+        return "1024x1024"
+    mapping = {
+        "1:1": "1024x1024",
+        "4:5": "1024x1280",
+        "9:16": "864x1536",
+        "16:9": "1536x864",
+        "3:4": "1024x1360",
+        "4:3": "1360x1024",
+    }
+    return mapping.get(ratio, "1024x1024")
+
+
 def _workspace_image_cost(provider: str, mode: str, preset_slug: str = "", resolution: str = "2K", speed_mode: str = "fast", action_type: str = "generate") -> int:
     provider_key = str(provider or "").strip().lower()
     mode_key = str(mode or "").strip().lower()
@@ -2765,6 +2780,8 @@ def _workspace_image_cost(provider: str, mode: str, preset_slug: str = "", resol
     if provider_key == "posters":
         return 0
     if provider_key == "text_to_image":
+        return 0
+    if provider_key == "gpt_image_2":
         return 0
     if provider_key == "midjourney":
         return _workspace_midjourney_action_cost(action_type, speed_mode)
@@ -2796,6 +2813,8 @@ def _workspace_image_charge_reason(provider: str, mode: str, action_type: str = 
         return "two_photos"
     if provider_key == "topaz_photo":
         return "workspace_topaz_photo"
+    if provider_key == "gpt_image_2":
+        return None
     if provider_key == "midjourney":
         return _workspace_midjourney_action_reason(action_type)
 
@@ -3083,8 +3102,6 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
         temperature = payload.temperature
         max_tokens = payload.max_tokens
         resolved_model = _resolve_workspace_chat_model(payload.model, mode)
-
-    mode = "prompt_builder" if resolved_model["label"] == PROMPT_MODEL_LABEL else mode
 
     if not text_value and not files:
         raise HTTPException(status_code=400, detail="Введите текст или прикрепите хотя бы один файл.")
@@ -5654,7 +5671,7 @@ async def workspace_image_run(
     if provider != "topaz_photo" and not prompt:
         raise HTTPException(status_code=400, detail="Missing prompt")
 
-    supported = {"nano_banana", "nano_banana_2", "nano_banana_pro", "nano_banana_pro_new", "seedream", "posters", "photosession", "two_images", "text_to_image", "topaz_photo", "midjourney"}
+    supported = {"nano_banana", "nano_banana_2", "nano_banana_pro", "nano_banana_pro_new", "seedream", "posters", "photosession", "two_images", "text_to_image", "gpt_image_2", "topaz_photo", "midjourney"}
     if provider not in supported:
         raise HTTPException(status_code=400, detail=f"Provider {provider} is not supported in /image/run")
 
@@ -5700,6 +5717,8 @@ async def workspace_image_run(
         raise HTTPException(status_code=400, detail="Для Photo Edit нужен source image.")
     if provider == "photosession" and not source_image:
         raise HTTPException(status_code=400, detail="Для нейро фотосессии нужен source image.")
+    if provider == "gpt_image_2" and mode == "image_to_image" and not source_image:
+        raise HTTPException(status_code=400, detail="Для GPT Image 2.0 Image→Image нужен source image.")
     if provider == "two_images" and (not source_image or not base_image):
         raise HTTPException(status_code=400, detail="Для режима Картинка + Картинка нужны base image и source image.")
     if provider == "topaz_photo" and not source_image:
