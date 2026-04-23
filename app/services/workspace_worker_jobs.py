@@ -598,6 +598,18 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
 
             out_bytes = await ark_text_to_image(run_prompt, size=ww._workspace_ark_size(resolution))
             ext = ww._workspace_detect_image_ext(out_bytes, default="jpg")
+        elif provider == "gpt_image_2":
+            from main import openai_edit_image_v2, openai_generate_image_v2
+
+            size = ww._workspace_gpt_image_2_size(job.get("aspect_ratio"), job.get("mode"))
+            gpt_mode = str(job.get("mode") or "").strip().lower()
+            if gpt_mode == "image_to_image":
+                if not source_image:
+                    raise RuntimeError("GPT Image 2.0 Image→Image requires source image")
+                out_bytes = await openai_edit_image_v2(source_image, run_prompt, size=size, mask_png_bytes=None)
+            else:
+                out_bytes = await openai_generate_image_v2(prompt=run_prompt, size=size)
+            ext = ww._workspace_detect_image_ext(out_bytes, default="png")
         elif provider == "topaz_photo":
             preset_settings = ww.get_photo_preset_settings(preset_slug)
             source_url = await ww._upload_workspace_topaz_input_image(
