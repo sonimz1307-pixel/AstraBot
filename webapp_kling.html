@@ -69,6 +69,10 @@
     .seg.cols3{
       grid-template-columns: 1fr 1fr 1fr;
     }
+    .seg.cols4{
+      grid-template-columns: 1fr 1fr;
+    }
+    @media (min-width:560px){ .seg.cols4{ grid-template-columns: 1fr 1fr 1fr 1fr; } }
     .seg input{ display:none; }
     .seg label{
       cursor:pointer;
@@ -134,6 +138,52 @@
     select option{
       background: #05070d;
       color: #ffffff;
+    }
+
+    /* Textarea / prompt input */
+    textarea{
+      width:100%;
+      min-height:96px;
+      padding: 14px 16px;
+      border-radius: 16px;
+      border:1px solid rgba(255,255,255,.14);
+      background: linear-gradient(180deg, rgba(4,8,18,.96), rgba(10,16,30,.98));
+      color: #eef4ff;
+      outline:none;
+      font-size: 14px;
+      line-height: 1.5;
+      font-family: inherit;
+      resize: vertical;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.03), inset 0 0 0 1px rgba(255,255,255,.02);
+      transition: border-color .15s ease, box-shadow .15s ease, background .15s ease, transform .06s ease;
+    }
+    textarea::placeholder{
+      color: #8ea2cc;
+    }
+    textarea:hover{
+      border-color: rgba(255,255,255,.22);
+      background: linear-gradient(180deg, rgba(7,12,24,.98), rgba(12,19,35,1));
+    }
+    textarea:focus{
+      border-color: rgba(46,166,255,.75);
+      background: linear-gradient(180deg, rgba(8,14,28,1), rgba(12,21,40,1));
+      box-shadow: 0 0 0 3px rgba(46,166,255,.14), inset 0 1px 0 rgba(255,255,255,.04);
+    }
+    textarea::-webkit-scrollbar{
+      width:10px;
+    }
+    textarea::-webkit-scrollbar-thumb{
+      background: rgba(255,255,255,.14);
+      border-radius: 999px;
+      border:2px solid rgba(0,0,0,0);
+      background-clip: padding-box;
+    }
+    .field-title{
+      margin: 12px 0 8px;
+      font-size: 13px;
+      font-weight: 700;
+      color: #dfe8ff;
+      letter-spacing: .2px;
     }
 
     .hint{
@@ -247,6 +297,99 @@
       animation:none;
     }
 
+    /* Small action buttons inside dynamic blocks */
+    .mini{
+      appearance:none;
+      -webkit-appearance:none;
+      border:1px solid rgba(46,166,255,.32);
+      border-radius:999px;
+      padding:10px 14px;
+      min-height:38px;
+      background: linear-gradient(180deg, rgba(46,166,255,.20), rgba(31,111,235,.10));
+      color:#dceaff;
+      font-family:inherit;
+      font-size:13px;
+      font-weight:800;
+      line-height:1;
+      cursor:pointer;
+      box-shadow: 0 8px 18px rgba(0,0,0,.26), inset 0 1px 0 rgba(255,255,255,.05);
+      transition: transform .08s ease, border-color .15s ease, background .15s ease, box-shadow .15s ease, color .15s ease;
+      white-space:nowrap;
+    }
+    .mini:hover{
+      border-color: rgba(46,166,255,.62);
+      background: linear-gradient(180deg, rgba(46,166,255,.30), rgba(31,111,235,.16));
+      box-shadow: 0 10px 22px rgba(46,166,255,.12), 0 8px 18px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.08);
+      color:#ffffff;
+    }
+    .mini:focus-visible{
+      outline:none;
+      border-color: rgba(46,166,255,.78);
+      box-shadow: 0 0 0 3px rgba(46,166,255,.16), 0 10px 22px rgba(46,166,255,.12);
+    }
+    .mini:active{
+      transform: translateY(1px) scale(.99);
+    }
+    #k3n_add_shot_btn{
+      border-color: rgba(46,166,255,.45);
+      background: linear-gradient(180deg, rgba(46,166,255,.28), rgba(31,111,235,.14));
+    }
+    #k3n_remove_shot_btn{
+      border-color: rgba(255,120,120,.26);
+      background: linear-gradient(180deg, rgba(255,120,120,.13), rgba(255,120,120,.06));
+      color:#ffd9d9;
+    }
+    #k3n_remove_shot_btn:hover{
+      border-color: rgba(255,120,120,.48);
+      background: linear-gradient(180deg, rgba(255,120,120,.20), rgba(255,120,120,.09));
+      box-shadow: 0 10px 22px rgba(255,80,80,.10), 0 8px 18px rgba(0,0,0,.28);
+    }
+
+    .mini-input{
+      width:100%;
+      margin-top:8px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border:1px solid rgba(255,255,255,.14);
+      background: rgba(0,0,0,.20);
+      color: var(--text);
+      outline:none;
+    }
+    .mini-input::placeholder{ color: rgba(220,230,255,.55); }
+    .filepick{
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      width:100%;
+      margin-top:8px;
+      padding: 12px 14px;
+      min-height:42px;
+      border-radius: 14px;
+      border:1px dashed rgba(46,166,255,.34);
+      background: linear-gradient(180deg, rgba(46,166,255,.10), rgba(255,255,255,.025));
+      color: #bcd4ff;
+      font-size:13px;
+      font-weight:800;
+      transition: border-color .15s ease, background .15s ease, color .15s ease, box-shadow .15s ease, transform .08s ease;
+    }
+    .filepick:hover{
+      border-color: rgba(46,166,255,.62);
+      background: linear-gradient(180deg, rgba(46,166,255,.18), rgba(255,255,255,.04));
+      color:#ffffff;
+      box-shadow: 0 10px 22px rgba(46,166,255,.10);
+    }
+    .filepick:active{
+      transform: translateY(1px) scale(.99);
+    }
+    .upload-status{
+      margin-top:6px;
+      font-size:11px;
+      line-height:1.3;
+      color: rgba(190,205,240,.82);
+      word-break: break-word;
+    }
+    .upload-status.good{ color:#8df0a5; }
+    .upload-status.bad{ color:#ff9a9a; }
 
     .toast{
       margin-top:10px;
@@ -453,7 +596,7 @@
     <div id="klingBlock">
       <div class="card">
         <h3>Kling — версия</h3>
-        <div class="seg cols3" role="radiogroup" aria-label="Версия Kling">
+        <div class="seg cols4" role="radiogroup" aria-label="Версия Kling">
           <input id="kling_v16" type="radio" name="kling_version" value="1_6" checked>
           <label for="kling_v16">
             <span class="name">1.6</span>
@@ -469,10 +612,16 @@
           <input id="kling_v30" type="radio" name="kling_version" value="3_0">
           <label for="kling_v30">
             <span class="name">PRO 3.0</span>
-            <span class="desc">720/1080 + audio</span>
+            <span class="desc">PiAPI старый</span>
+          </label>
+
+          <input id="kling_v30_new" type="radio" name="kling_version" value="3_0_new">
+          <label for="kling_v30_new">
+            <span class="name">3.0 - New</span>
+            <span class="desc">KIE / shots / refs</span>
           </label>
         </div>
-        <div class="hint">1.6 — legacy ветка. 2.5 Turbo Pro — новый Replicate режим. 3.0 — отдельная premium версия.</div>
+        <div class="hint">1.6 / 2.5 / старый 3.0 остаются как есть. Kling 3.0 - New — новая KIE-ветка для тестов.</div>
       </div>
 
       <div class="card" id="kling3Options" style="display:none;">
@@ -565,6 +714,52 @@
         </div>
 
         <div class="hint">Эти настройки применяются только если выбран Kling PRO 3.0.</div>
+      </div>
+      <div class="card" id="kling3NewOptions" style="display:none;">
+        <h3>Kling 3.0 - New — KIE</h3>
+        <div class="seg cols3" role="radiogroup" aria-label="Kling 3.0 New mode">
+          <input id="k3n_mode_text" type="radio" name="kling3_new_gen_mode" value="text_to_video" checked>
+          <label for="k3n_mode_text"><span class="name">Text</span><span class="desc">только prompt</span></label>
+          <input id="k3n_mode_image" type="radio" name="kling3_new_gen_mode" value="image_to_video">
+          <label for="k3n_mode_image"><span class="name">Image</span><span class="desc">start/end frame</span></label>
+          <input id="k3n_mode_multi" type="radio" name="kling3_new_gen_mode" value="multi_shot">
+          <label for="k3n_mode_multi"><span class="name">Multi-shot</span><span class="desc">shots + elements</span></label>
+        </div>
+
+        <div style="margin-top:14px;"><label class="badge" style="display:inline-block;margin-bottom:8px;">Качество</label></div>
+        <div class="seg cols3" role="radiogroup" aria-label="Kling 3.0 New quality">
+          <input id="k3n_mode_std" type="radio" name="kling3_new_quality" value="std" checked>
+          <label for="k3n_mode_std"><span class="name">Standard</span><span class="desc">1 / 1.5 ток/сек</span></label>
+          <input id="k3n_mode_pro" type="radio" name="kling3_new_quality" value="pro">
+          <label for="k3n_mode_pro"><span class="name">Pro</span><span class="desc">1.5 / 2 ток/сек</span></label>
+          <input id="k3n_mode_4k" type="radio" name="kling3_new_quality" value="4K">
+          <label for="k3n_mode_4k"><span class="name">4K</span><span class="desc">5 / 6 ток/сек</span></label>
+        </div>
+
+        <div class="row" style="margin-top:12px;">
+          <div style="flex:1; min-width: 160px;">
+            <label class="badge" style="display:inline-block;margin-bottom:8px;">Формат</label>
+            <select id="kling3_new_aspect"><option value="16:9">16:9</option><option value="9:16">9:16</option><option value="1:1">1:1</option></select>
+          </div>
+          <div style="flex:1; min-width: 160px;" id="kling3NewDurationWrap">
+            <label class="badge" style="display:inline-block;margin-bottom:8px;">Длительность</label>
+            <select id="kling3_new_duration"><option value="3">3</option><option value="5" selected>5</option><option value="10">10</option><option value="15">15</option></select>
+          </div>
+        </div>
+
+        <div class="toggle" style="margin-top:12px;">
+          <div class="left"><div class="tname">Audio</div><div class="tdesc">Включить звук. Цена зависит от качества.</div></div>
+          <input id="kling3_new_audio" type="checkbox">
+        </div>
+
+        <div id="kling3NewShotsWrap" style="display:none; margin-top:12px;">
+          <h3>Multi-shot scenes</h3>
+          <div class="hint">Заполни минимум 2 шота. Сумма 3–15 сек. Основной prompt для Multi-shot не нужен: используются только shot prompt. Image element можно загрузить прямо внутри каждого shot — на 1 element нужно минимум 2 фото и максимум 4 фото, имя вставится в prompt как @name.</div>
+          <div id="kling3NewShotsFields"></div>
+        </div>
+
+        <div id="kling3NewElementsWrap" style="display:none; margin-top:12px;"></div>
+        <div class="hint">После сохранения: Text → пришли prompt; Image → пришли стартовое фото, опционально второй кадр, затем prompt; Multi-shot → основной prompt не нужен, заполни только shot-блоки, при желании пришли общий стартовый кадр, затем отправь в боте сообщением: «СТАРТ». Elements уже будут загружены автоматически.</div>
       </div>
       <div class="card" id="klingFlowCard">
         <h3 id="klingFlowTitle">Тип генерации</h3>
@@ -957,6 +1152,283 @@
     function getKling3Aspect(){ return qs('#kling3_aspect')?.value || "16:9"; }
     function getKling3PreferMultiShots(){ return !!qs('#kling3_multishot')?.checked; }
     function getKling25Aspect(){ return qs('#kling25_aspect')?.value || "16:9"; }
+    function getKling3NewGenMode(){ return qs('input[name="kling3_new_gen_mode"]:checked')?.value || "text_to_video"; }
+    function getKling3NewQuality(){ return qs('input[name="kling3_new_quality"]:checked')?.value || "std"; }
+    function getKling3NewAspect(){ return qs('#kling3_new_aspect')?.value || "16:9"; }
+    function getKling3NewDuration(){ return parseInt((qs('#kling3_new_duration')?.value || "5"), 10); }
+    function getKling3NewAudio(){ return !!qs('#kling3_new_audio')?.checked; }
+
+    function getK3NShotStore(){
+      if (!Array.isArray(window.__k3n_shots_store)) {
+        window.__k3n_shots_store = Array.from({length:5}, () => ({ prompt:'', duration:'3' }));
+      }
+      while (window.__k3n_shots_store.length < 5) window.__k3n_shots_store.push({ prompt:'', duration:'3' });
+      return window.__k3n_shots_store;
+    }
+
+    function getK3NShotCount(){
+      const raw = parseInt(window.__k3n_shot_count || 2, 10);
+      return Math.max(2, Math.min(5, raw || 2));
+    }
+
+    function syncK3NShotStoreFromDom(){
+      const store = getK3NShotStore();
+      for (let i=1; i<=5; i++){
+        const promptEl = qs(`#k3n_shot_${i}_prompt`);
+        const durationEl = qs(`#k3n_shot_${i}_duration`);
+        if (promptEl) store[i-1].prompt = promptEl.value || '';
+        if (durationEl) store[i-1].duration = String(durationEl.value || '3');
+      }
+    }
+
+    function addK3NShot(){
+      syncK3NShotStoreFromDom();
+      window.__k3n_shot_count = Math.min(5, getK3NShotCount() + 1);
+      const wrap = qs('#kling3NewShotsFields');
+      if (wrap) wrap.dataset.ready = '';
+      renderKling3NewEditors();
+      updateCostUI();
+    }
+
+    function removeLastK3NShot(){
+      syncK3NShotStoreFromDom();
+      const count = getK3NShotCount();
+      if (count <= 2) return;
+      const store = getK3NShotStore();
+      store[count - 1] = { prompt:'', duration:'3' };
+      const elements = getKling3NewElementStore();
+      window.__k3n_elements_store = elements.filter(el => Number(el.shotIndex || 0) !== count);
+      window.__k3n_shot_count = count - 1;
+      const wrap = qs('#kling3NewShotsFields');
+      if (wrap) wrap.dataset.ready = '';
+      renderKling3NewEditors();
+      updateCostUI();
+    }
+
+    function getKling3NewShots(){
+      syncK3NShotStoreFromDom();
+      const store = getK3NShotStore();
+      const count = getK3NShotCount();
+      const shots = [];
+      for (let i=1; i<=count; i++){
+        const item = store[i-1] || {};
+        const prompt = String(item.prompt || '').trim();
+        const duration = parseInt(String(item.duration || '3'), 10);
+        if (prompt) shots.push({ prompt, duration: Math.max(1, Math.min(12, duration || 3)) });
+      }
+      return shots;
+    }
+    function getTelegramUserId(){
+      try{
+        const unsafe = window.Telegram?.WebApp?.initDataUnsafe || {};
+        return parseInt(unsafe?.user?.id || unsafe?.receiver?.id || 0, 10) || 0;
+      }catch(_){ return 0; }
+    }
+
+    function getKling3NewElementStore(){
+      if (!Array.isArray(window.__k3n_elements_store)) window.__k3n_elements_store = [];
+      return window.__k3n_elements_store;
+    }
+
+    function appendK3NToken(text, token){
+      const src = String(text || '').trim();
+      if (!src) return token;
+      if (src.includes(token)) return src;
+      return `${src} ${token}`.trim();
+    }
+
+    function renderK3NShotElements(i){
+      const wrap = qs(`#k3n_shot_${i}_elements`);
+      if (!wrap) return;
+      const tokens = getKling3NewElementStore().filter(el => Number(el.shotIndex || 0) === i);
+      if (!tokens.length){
+        wrap.innerHTML = '<div class="hint">Элементы для этого shot можно загрузить прямо здесь. На 1 element нужно 2–4 фото. Имя вставится в prompt автоматически.</div>';
+        return;
+      }
+      wrap.innerHTML = tokens.map(el => `<span class="badge" style="margin-right:6px; display:inline-block; margin-top:6px;">@${el.name} · ${el.element_input_video_urls?.length ? 'video' : ((el.element_input_urls || []).length + ' img')}</span>`).join('');
+    }
+
+    async function attachK3NShotElement(i, files, kind){
+      const picked = Array.from(files || []);
+      if (!picked.length) return;
+      if (kind === 'image') {
+        const bad = picked.filter(file => {
+          const type = String(file?.type || '').toLowerCase();
+          const name = String(file?.name || '').toLowerCase();
+          return !(['image/jpeg', 'image/jpg', 'image/png'].includes(type) || /\.(jpe?g|png)$/.test(name));
+        });
+        if (bad.length) throw new Error('Для image element доступны только JPG/PNG. WEBP не отправляем в KIE.');
+      }
+      const store = getKling3NewElementStore();
+      if (store.length >= 3) throw new Error('Лимит: максимум 3 elements на один multi-shot ролик.');
+      const shotIndex = Number(i || 0);
+      const localCount = store.filter(el => Number(el.shotIndex || 0) === shotIndex).length + 1;
+      const name = `shot${shotIndex}_el${localCount}`;
+      const urls = [];
+      for (const file of picked){
+        urls.push(await uploadKling3NewOneFile(file, `shot_${shotIndex}_${kind}`));
+      }
+      const item = {
+        shotIndex,
+        name,
+        description: `Shot ${shotIndex} element ${localCount}`,
+      };
+      if (kind === 'video') item.element_input_video_urls = [urls[0]].filter(Boolean);
+      else item.element_input_urls = urls;
+      store.push(item);
+      const promptEl = qs(`#k3n_shot_${shotIndex}_prompt`);
+      if (promptEl) {
+        promptEl.value = appendK3NToken(promptEl.value, `@${name}`);
+        const store = getK3NShotStore();
+        store[shotIndex - 1].prompt = promptEl.value || '';
+      }
+      renderK3NShotElements(shotIndex);
+    }
+
+    function getKling3NewElements(){
+      if (getKling3NewGenMode() === 'multi_shot') {
+        return getKling3NewElementStore().map((el) => ({
+          name: String(el.name || '').trim(),
+          description: String(el.description || el.name || '').trim(),
+          element_input_urls: Array.isArray(el.element_input_urls) ? el.element_input_urls.slice(0,4) : [],
+          element_input_video_urls: Array.isArray(el.element_input_video_urls) ? el.element_input_video_urls.slice(0,1) : [],
+        }));
+      }
+      return [];
+    }
+
+    function validateKling3NewElements(elements){
+      for (const el of (elements || [])){
+        const imgs = el.element_input_urls || [];
+        const vids = el.element_input_video_urls || [];
+        if (vids.length) continue;
+        if (imgs.length > 0 && (imgs.length < 2 || imgs.length > 4)){
+          throw new Error(`Element @${el.name}: для image element нужно 2–4 фото. Либо добавь 2–4 фото, либо используй 1 видео.`);
+        }
+      }
+    }
+
+    function setKling3NewUploadStatus(i, text, cls=''){
+      const el = qs(`#k3n_shot_${i}_status`) || qs(`#k3n_el_${i}_status`);
+      if (!el) return;
+      el.className = `upload-status ${cls}`.trim();
+      el.textContent = text || '';
+    }
+
+    async function uploadKling3NewOneFile(file, slot){
+      const type = String(file?.type || '').toLowerCase();
+      const name = String(file?.name || '').toLowerCase();
+      if (type.startsWith('image/') && !(['image/jpeg', 'image/jpg', 'image/png'].includes(type) || /\.(jpe?g|png)$/.test(name))) {
+        throw new Error('Для image element доступны только JPG/PNG. WEBP не отправляем в KIE.');
+      }
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('telegram_user_id', String(getTelegramUserId() || 0));
+      fd.append('slot', slot || 'element');
+      const res = await fetch('/api/kling3-kie/upload-reference', { method:'POST', body: fd });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.detail || data.message || `Upload failed: ${res.status}`);
+      return data.public_url || data.url;
+    }
+
+    async function uploadKling3NewElementFiles(){
+      if (!(getProvider() === 'kling' && getKlingVersion() === '3_0_new')) return;
+      if (getKling3NewGenMode() === 'multi_shot') return;
+      for (let i=1; i<=3; i++){
+        const name = (qs(`#k3n_el_${i}_name`)?.value || '').trim().replace(/^@+/, '');
+        const imgInput = qs(`#k3n_el_${i}_images`);
+        const videoInput = qs(`#k3n_el_${i}_video`);
+        if (!imgInput && !videoInput) continue;
+        const imageFiles = Array.from(imgInput?.files || []).slice(0,4);
+        const videoFiles = Array.from(videoInput?.files || []).slice(0,1);
+        if (!imageFiles.length && !videoFiles.length) continue;
+        if (!name){
+          throw new Error(`Element ${i}: сначала укажи name без @`);
+        }
+        setKling3NewUploadStatus(i, `Загружаю файлы элемента ${i}...`);
+        const imageUrls = [];
+        for (const file of imageFiles){
+          imageUrls.push(await uploadKling3NewOneFile(file, `element_${i}_image`));
+        }
+        const videoUrls = [];
+        for (const file of videoFiles){
+          videoUrls.push(await uploadKling3NewOneFile(file, `element_${i}_video`));
+        }
+        imgInput.dataset.urls = JSON.stringify(imageUrls);
+        videoInput.dataset.urls = JSON.stringify(videoUrls);
+        const count = imageUrls.length + videoUrls.length;
+        setKling3NewUploadStatus(i, `Готово: загружено ${count} файл(ов), ссылки добавлены автоматически.`, 'good');
+      }
+    }
+
+    function renderKling3NewEditors(){
+      const shotWrap = qs('#kling3NewShotsWrap');
+      const shotFields = qs('#kling3NewShotsFields');
+      const elementWrap = qs('#kling3NewElementsWrap');
+      const durationWrap = qs('#kling3NewDurationWrap');
+      const isMulti = getKling3NewGenMode() === 'multi_shot';
+      if (durationWrap) durationWrap.style.display = isMulti ? 'none' : 'block';
+      if (shotWrap) shotWrap.style.display = isMulti ? 'block' : 'none';
+      if (elementWrap) elementWrap.style.display = 'none';
+      if (!shotFields || !isMulti) return;
+
+      const store = getK3NShotStore();
+      const shotCount = getK3NShotCount();
+      shotFields.innerHTML = `
+        <div style="display:flex; gap:8px; align-items:center; justify-content:space-between; margin-bottom:10px; flex-wrap:wrap;">
+          <div class="hint">Показываем ${shotCount} shot. Минимум 2, максимум 5.</div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            ${shotCount < 5 ? '<button type="button" class="mini" id="k3n_add_shot_btn">+ Добавить shot</button>' : ''}
+            ${shotCount > 2 ? '<button type="button" class="mini" id="k3n_remove_shot_btn">− Удалить shot</button>' : ''}
+          </div>
+        </div>
+        ${Array.from({length:shotCount}, (_,idx) => {
+          const n = idx + 1;
+          const saved = store[idx] || { prompt:'', duration:'3' };
+          return `<div class="card" style="box-shadow:none;">
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:6px;"><b>Shot ${n}</b><span class="hint">Сейчас доступны только image elements (мин. 2 фото, макс. 4 фото)</span></div>
+            <div>Duration</div>
+            <select id="k3n_shot_${n}_duration">${Array.from({length:12},(_,i)=>`<option value="${i+1}" ${String(saved.duration || '3')===String(i+1)?'selected':''}>${i+1} sec</option>`).join('')}</select>
+            <div class="field-title">Prompt</div>
+            <textarea id="k3n_shot_${n}_prompt" rows="3" placeholder="Camera move, action, @element_name...">${String(saved.prompt || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</textarea>
+            <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;">
+              <label class="filepick" style="margin:0; cursor:pointer;">+ Фото element (2–4)
+                <input id="k3n_shot_${n}_images" type="file" accept="image/jpeg,image/png" multiple style="display:none;">
+              </label>
+            </div>
+            <div id="k3n_shot_${n}_status" class="upload-status"></div>
+            <div id="k3n_shot_${n}_elements" style="margin-top:6px;"></div>
+          </div>`;
+        }).join('')}`;
+
+      const addBtn = qs('#k3n_add_shot_btn');
+      const removeBtn = qs('#k3n_remove_shot_btn');
+      if (addBtn) addBtn.addEventListener('click', addK3NShot);
+      if (removeBtn) removeBtn.addEventListener('click', removeLastK3NShot);
+
+      for (let i=1; i<=shotCount; i++){
+        const promptEl = qs(`#k3n_shot_${i}_prompt`);
+        const durationEl = qs(`#k3n_shot_${i}_duration`);
+        if (promptEl) promptEl.addEventListener('input', () => { getK3NShotStore()[i-1].prompt = promptEl.value || ''; updateCostUI(); });
+        if (durationEl) durationEl.addEventListener('change', () => { getK3NShotStore()[i-1].duration = String(durationEl.value || '3'); updateCostUI(); });
+        const img = qs(`#k3n_shot_${i}_images`);
+        if (img) img.addEventListener('change', async (e) => {
+          try{
+            const files = Array.from(e.target.files || []).slice(0,4);
+            if (files.length < 2) throw new Error('Для image element нужно выбрать 2–4 фото.');
+            setKling3NewUploadStatus(i, 'Загружаю image element...');
+            await attachK3NShotElement(i, files, 'image');
+            setKling3NewUploadStatus(i, 'Готово: элемент добавлен и вставлен в prompt.', 'good');
+          }catch(err){
+            setKling3NewUploadStatus(i, err?.message || String(err), 'bad');
+          }finally{
+            try{ e.target.value = ''; }catch(_){ }
+          }
+        });
+        renderK3NShotElements(i);
+      }
+    }
+
 
 
     // Veo getters
@@ -1003,6 +1475,7 @@
 
       const durCard = qs('#durationCard');
       const kling3Options = qs('#kling3Options');
+      const kling3NewOptions = qs('#kling3NewOptions');
       const flowCard = qs('#klingFlowCard');
       const legacyModeCard = qs('#klingLegacyModeCard');
       const aspectCard = qs('#kling25AspectCard');
@@ -1027,6 +1500,7 @@
         if (flowCard) flowCard.style.display = 'block';
         if (legacyModeCard) legacyModeCard.style.display = 'block';
         if (kling3Options) kling3Options.style.display = 'none';
+        if (kling3NewOptions) kling3NewOptions.style.display = 'none';
         if (flowHint) flowHint.textContent = 'Для Motion Control(Avatar) длительность задаётся референс-видео (3–30 сек). Image → Video — оживление фото.';
         return;
       }
@@ -1046,21 +1520,34 @@
         if (flowCard) flowCard.style.display = 'block';
         if (legacyModeCard) legacyModeCard.style.display = 'none';
         if (kling3Options) kling3Options.style.display = 'none';
+        if (kling3NewOptions) kling3NewOptions.style.display = 'none';
         if (flowHint) flowHint.textContent = 'Kling 2.5 Turbo Pro: Text → Video по одному промпту или Image → Video по стартовому фото.';
         return;
       }
 
       if (durCard) durCard.style.display = 'none';
       if (aspectCard) aspectCard.style.display = 'none';
-      if (kling3Options) kling3Options.style.display = 'block';
       if (flowCard) flowCard.style.display = 'none';
       if (legacyModeCard) legacyModeCard.style.display = 'none';
+      if (version === '3_0_new'){
+        if (kling3Options) kling3Options.style.display = 'none';
+        if (kling3NewOptions) kling3NewOptions.style.display = 'block';
+        renderKling3NewEditors();
+        return;
+      }
+      if (kling3NewOptions) kling3NewOptions.style.display = 'none';
+      if (kling3Options) kling3Options.style.display = 'block';
     }
 
     function updateTokenRateHint(){
       const version = getKlingVersion();
       const el = qs('#tokenRateHint');
       if (!el) return;
+
+      if (version === '3_0_new'){
+        el.innerHTML = 'Kling 3.0 - New / KIE: Standard 1/1.5 ток/сек, Pro 1.5/2 ток/сек, 4K 5/6 ток/сек. Multi-shot: сумма шотов 3–15 сек.';
+        return;
+      }
 
       if (version === '3_0'){
         el.innerHTML = 'Kling PRO 3.0: <b>720p и 1080p = 2 токена/сек</b>. <b>Audio = +1 токен/сек</b> сверху. Длительность 3–15 сек.';
@@ -1180,6 +1667,8 @@
     qsa('input[name="flow"]').forEach(el => el.addEventListener('change', () => { updateKlingUI(); updateCostUI(); }));
     qsa('input[name="mode"]').forEach(el => el.addEventListener('change', () => { updateTokenRateHint(); updateCostUI(); }));
     qsa('input[name="kling_version"]').forEach(el => el.addEventListener('change', () => { updateKlingUI(); updateTokenRateHint(); updateCostUI(); }));
+    qsa('input[name="kling3_new_gen_mode"]').forEach(el => el.addEventListener('change', () => { renderKling3NewEditors(); updateCostUI(); }));
+    qsa('input[name="kling3_new_quality"]').forEach(el => el.addEventListener('change', () => { updateCostUI(); }));
     qsa('input[name="seedance_variant"]').forEach(el => el.addEventListener('change', () => { updateSeedanceUI(); updateCostUI(); }));
     qsa('input[name="seedance_model"]').forEach(el => el.addEventListener('change', () => { updateCostUI(); }));
     qsa('input[name="seedance_kie_model"]').forEach(el => el.addEventListener('change', () => { updateCostUI(); }));
@@ -1316,6 +1805,19 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
           return { known:true, tokens: seconds, note:'' };
         }
 
+        if (kling_version === '3_0_new'){
+          const quality = getKling3NewQuality();
+          const enable_audio = getKling3NewAudio();
+          let seconds = getKling3NewDuration();
+          if (getKling3NewGenMode() === 'multi_shot'){
+            const shots = getKling3NewShots();
+            seconds = shots.reduce((sum, sh) => sum + (parseInt(sh.duration, 10) || 3), 0) || 5;
+          }
+          const table = { std: { off:1, on:1.5 }, pro: { off:1.5, on:2 }, '4K': { off:5, on:6 } };
+          const rate = table[quality]?.[enable_audio ? 'on' : 'off'] || 1;
+          return { known:true, tokens: Math.max(1, Math.ceil(seconds * rate)), note:'' };
+        }
+
         // Kling PRO 3.0
         const enable_audio = !!qs('#kling3_audio')?.checked;
         const seconds = parseInt((qs('#kling3_duration')?.value || "5"), 10);
@@ -1368,7 +1870,7 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
 
     const saveBtn = qs('#saveBtn');
     if (saveBtn){
-      saveBtn.addEventListener('click', (e) => {
+      saveBtn.addEventListener('click', async (e) => {
         e.preventDefault();
 
         const provider = getProvider();
@@ -1401,6 +1903,43 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
             if (flow === 't2v'){
               payload.aspect_ratio = getKling25Aspect();
             }
+          } else if (kling_version === '3_0_new') {
+            try{
+              saveBtn.disabled = true;
+              saveBtn.textContent = 'Загружаю refs...';
+              await uploadKling3NewElementFiles();
+            }catch(err){
+              alert('Не удалось загрузить element/ref файлы: ' + (err?.message || err));
+              saveBtn.disabled = false;
+              updateCostUI();
+              return;
+            }
+            const gen_mode = getKling3NewGenMode();
+            const shots = getKling3NewShots();
+            const totalShotDuration = shots.reduce((sum, sh) => sum + (parseInt(sh.duration, 10) || 3), 0);
+            const klingElements = getKling3NewElements();
+            try{
+              validateKling3NewElements(klingElements);
+            }catch(err){
+              alert(err?.message || err);
+              saveBtn.disabled = false;
+              updateCostUI();
+              return;
+            }
+            payload = {
+              type: "kling3_kie_settings",
+              provider: "kling",
+              kling_version,
+              model: "kling-3.0-new",
+              mode: getKling3NewQuality(),
+              resolution: getKling3NewQuality(),
+              enable_audio: getKling3NewAudio(),
+              duration: gen_mode === 'multi_shot' ? Math.max(3, Math.min(15, totalShotDuration || 5)) : getKling3NewDuration(),
+              gen_mode,
+              aspect_ratio: getKling3NewAspect(),
+              multi_shots: gen_mode === 'multi_shot' ? shots : [],
+              kling_elements: klingElements
+            };
           } else {
             // Kling PRO 3.0 settings (PiAPI)
             const resolution = getKling3Resolution(); // "720" | "1080"
@@ -1518,6 +2057,8 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
           }, 150);
         } else {
           showToast();
+          saveBtn.disabled = false;
+          updateCostUI();
         }
       });
     }
