@@ -1237,6 +1237,61 @@
       return `${src} ${token}`.trim();
     }
 
+    function escapeK3NHtml(value){
+      return String(value || '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function escapeK3NRegExp(value){
+      return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    function removeK3NToken(text, token){
+      const safeToken = escapeK3NRegExp(String(token || '').trim());
+      if (!safeToken) return String(text || '').trim();
+      return String(text || '')
+        .replace(new RegExp(`(^|\\s)${safeToken}(?=\\s|$)`, 'g'), ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+
+    function removeK3NShotElement(shotIndex, name){
+      const cleanName = String(name || '').trim();
+      if (!cleanName) return;
+      const store = getKling3NewElementStore();
+      const idx = store.findIndex(el => Number(el.shotIndex || 0) === Number(shotIndex || 0) && String(el.name || '') === cleanName);
+      if (idx < 0) return;
+      store.splice(idx, 1);
+      const promptEl = qs(`#k3n_shot_${shotIndex}_prompt`);
+      if (promptEl) {
+        promptEl.value = removeK3NToken(promptEl.value, `@${cleanName}`);
+        const shotStore = getK3NShotStore();
+        shotStore[Number(shotIndex || 1) - 1].prompt = promptEl.value || '';
+      }
+      renderK3NShotElements(shotIndex);
+      updateCostUI();
+    }
+
+    function removeK3NShotElementImage(shotIndex, name, imageIndex){
+      const cleanName = String(name || '').trim();
+      const refIndex = Number(imageIndex || 0);
+      const store = getKling3NewElementStore();
+      const item = store.find(el => Number(el.shotIndex || 0) === Number(shotIndex || 0) && String(el.name || '') === cleanName);
+      if (!item || !Array.isArray(item.element_input_urls)) return;
+      if (refIndex < 0 || refIndex >= item.element_input_urls.length) return;
+      item.element_input_urls.splice(refIndex, 1);
+      if (!item.element_input_urls.length) {
+        removeK3NShotElement(shotIndex, cleanName);
+        return;
+      }
+      renderK3NShotElements(shotIndex);
+      updateCostUI();
+    }
+
     function renderK3NShotElements(i){
       const wrap = qs(`#k3n_shot_${i}_elements`);
       if (!wrap) return;
@@ -1245,12 +1300,38 @@
         wrap.innerHTML = '<div class="hint">Элементы для этого shot можно загрузить прямо здесь. На 1 element нужно 2–4 фото. Имя вставится в prompt автоматически.</div>';
         return;
       }
-      wrap.innerHTML = tokens.map(el => `<span class="badge" style="margin-right:6px; display:inline-block; margin-top:6px;">@${el.name} · ${el.element_input_video_urls?.length ? 'video' : ((el.element_input_urls || []).length + ' img')}</span>`).join('');
+      wrap.innerHTML = tokens.map(el => {
+        const name = escapeK3NHtml(el.name || '');
+        const isVideo = !!(el.element_input_video_urls || []).length;
+        const imageCount = (el.element_input_urls || []).length;
+        const refButtons = isVideo ? '' : `<div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:6px;">${(el.element_input_urls || []).map((_, idx) => `<button type="button" class="mini" data-k3n-remove-ref="1" data-shot-index="${i}" data-element-name="${name}" data-ref-index="${idx}">Удалить фото ${idx + 1}</button>`).join('')}</div>`;
+        return `<div style="margin-top:8px; padding:10px; border:1px solid rgba(170,190,255,.16); border-radius:14px; background:rgba(255,255,255,.025);">
+          <div style="display:flex; gap:8px; align-items:center; justify-content:space-between; flex-wrap:wrap;">
+            <span class="badge">@${name} · ${isVideo ? 'video' : `${imageCount} img`}</span>
+            <button type="button" class="mini" data-k3n-remove-element="1" data-shot-index="${i}" data-element-name="${name}">Удалить element</button>
+          </div>
+          ${refButtons}
+        </div>`;
+      }).join('');
+
+      wrap.querySelectorAll('[data-k3n-remove-element]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          removeK3NShotElement(Number(btn.dataset.shotIndex || i), btn.dataset.elementName || '');
+        });
+      });
+      wrap.querySelectorAll('[data-k3n-remove-ref]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          removeK3NShotElementImage(Number(btn.dataset.shotIndex || i), btn.dataset.elementName || '', Number(btn.dataset.refIndex || 0));
+        });
+      });
     }
 
     async function attachK3NShotElement(i, files, kind){
       const picked = Array.from(files || []);
       if (!picked.length) return;
+      const store = getKling3NewElementStore();
+      const shotIndex = Number(i || 0);
+
       if (kind === 'image') {
         const bad = picked.filter(file => {
           const type = String(file?.type || '').toLowerCase();
@@ -1258,10 +1339,50 @@
           return !(['image/jpeg', 'image/jpg', 'image/png'].includes(type) || /\.(jpe?g|png)$/.test(name));
         });
         if (bad.length) throw new Error('Для image element доступны только JPG/PNG. WEBP не отправляем в KIE.');
+
+        const imageElementsForShot = store.filter(el =>
+          Number(el.shotIndex || 0) === shotIndex &&
+          !(el.element_input_video_urls || []).length
+        );
+        let item = [...imageElementsForShot].reverse().find(el => ((el.element_input_urls || []).length < 4));
+        let created = false;
+
+        if (item) {
+          const currentCount = (item.element_input_urls || []).length;
+          if (currentCount + picked.length > 4) {
+            throw new Error(`Element @${item.name}: максимум 4 фото. Сейчас ${currentCount}, можно добавить ещё ${4 - currentCount}.`);
+          }
+        } else {
+          if (store.length >= 3) throw new Error('Лимит: максимум 3 elements на один multi-shot ролик.');
+          const localCount = imageElementsForShot.length + 1;
+          item = {
+            shotIndex,
+            name: `shot${shotIndex}_el${localCount}`,
+            description: `Shot ${shotIndex} element ${localCount}`,
+            element_input_urls: [],
+          };
+          store.push(item);
+          created = true;
+        }
+
+        for (const file of picked){
+          const url = await uploadKling3NewOneFile(file, `shot_${shotIndex}_image`);
+          item.element_input_urls.push(url);
+        }
+
+        if (created) {
+          const promptEl = qs(`#k3n_shot_${shotIndex}_prompt`);
+          if (promptEl) {
+            promptEl.value = appendK3NToken(promptEl.value, `@${item.name}`);
+            const shotStore = getK3NShotStore();
+            shotStore[shotIndex - 1].prompt = promptEl.value || '';
+          }
+        }
+        renderK3NShotElements(shotIndex);
+        return item;
       }
-      const store = getKling3NewElementStore();
+
       if (store.length >= 3) throw new Error('Лимит: максимум 3 elements на один multi-shot ролик.');
-      const shotIndex = Number(i || 0);
       const localCount = store.filter(el => Number(el.shotIndex || 0) === shotIndex).length + 1;
       const name = `shot${shotIndex}_el${localCount}`;
       const urls = [];
@@ -1274,15 +1395,15 @@
         description: `Shot ${shotIndex} element ${localCount}`,
       };
       if (kind === 'video') item.element_input_video_urls = [urls[0]].filter(Boolean);
-      else item.element_input_urls = urls;
       store.push(item);
       const promptEl = qs(`#k3n_shot_${shotIndex}_prompt`);
       if (promptEl) {
         promptEl.value = appendK3NToken(promptEl.value, `@${name}`);
-        const store = getK3NShotStore();
-        store[shotIndex - 1].prompt = promptEl.value || '';
+        const shotStore = getK3NShotStore();
+        shotStore[shotIndex - 1].prompt = promptEl.value || '';
       }
       renderK3NShotElements(shotIndex);
+      return item;
     }
 
     function getKling3NewElements(){
@@ -1415,10 +1536,11 @@
         if (img) img.addEventListener('change', async (e) => {
           try{
             const files = Array.from(e.target.files || []).slice(0,4);
-            if (files.length < 2) throw new Error('Для image element нужно выбрать 2–4 фото.');
+            if (!files.length) return;
             setKling3NewUploadStatus(i, 'Загружаю image element...');
-            await attachK3NShotElement(i, files, 'image');
-            setKling3NewUploadStatus(i, 'Готово: элемент добавлен и вставлен в prompt.', 'good');
+            const item = await attachK3NShotElement(i, files, 'image');
+            const count = (item?.element_input_urls || []).length;
+            setKling3NewUploadStatus(i, count >= 2 ? `Готово: @${item.name} содержит ${count}/4 фото.` : `Фото добавлено: @${item.name} содержит ${count}/4. Для запуска нужно минимум 2 фото.`, count >= 2 ? 'good' : '');
           }catch(err){
             setKling3NewUploadStatus(i, err?.message || String(err), 'bad');
           }finally{
