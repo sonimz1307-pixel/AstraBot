@@ -101,6 +101,16 @@ from pixverse_c1 import (
     wait_for_pixverse_video,
 )
 from kling3_pricing import calculate_kling3_price
+from kling3_kie_flow import normalize_kling3_kie_elements, upload_kling3_kie_input_bytes
+from kling3_kie_pricing import (
+    calculate_kling3_kie_price,
+    kling3_kie_billable_seconds,
+    normalize_kling3_kie_aspect_ratio,
+    normalize_kling3_kie_duration,
+    normalize_kling3_kie_generation_mode,
+    normalize_kling3_kie_mode,
+    normalize_kling3_kie_shots,
+)
 from songwriter_prompt import SONGWRITER_SYSTEM_PROMPT
 from queue_redis import enqueue_job
 from nano_banana import run_nano_banana
@@ -145,6 +155,7 @@ TOPAZ_IMAGE_CREATE_RETRIES = max(1, int(os.getenv("TOPAZ_IMAGE_CREATE_RETRIES", 
 TOPAZ_IMAGE_RETRY_DELAY_SEC = max(0.25, float(os.getenv("TOPAZ_IMAGE_RETRY_DELAY_SEC", "1.5") or "1.5"))
 
 WORKSPACE_MEDIA_QUEUE_NAME = (os.getenv("WORKSPACE_MEDIA_QUEUE_NAME", "workspace_media") or "workspace_media").strip() or "workspace_media"
+KLING3_KIE_QUEUE_NAME = (os.getenv("KLING3_KIE_QUEUE_NAME", "kling3_kie") or "kling3_kie").strip() or "kling3_kie"
 WORKSPACE_IMAGE_QUEUE_NAME = (os.getenv("WORKSPACE_IMAGE_QUEUE_NAME", "workspace_image") or "workspace_image").strip() or "workspace_image"
 SEEDANCE_AUDIO_MAX_DURATION_SEC = 15.0
 SEEDANCE_AUDIO_ALLOWED_EXTS = {"mp3", "wav"}
@@ -1262,8 +1273,27 @@ def _parse_form_int(value: Any, default: int) -> int:
         return int(default)
 
 
+def _parse_json_list_form(value: Any) -> List[Dict[str, Any]]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    text = str(value or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return []
+    if isinstance(parsed, list):
+        return [item for item in parsed if isinstance(item, dict)]
+    return []
+
+
 def _normalize_workspace_video_resolution(provider: str, model: str, resolution: Any) -> str:
     value = str(resolution or "").strip().lower()
+    if provider == "kling" and model == "kling-3.0-new":
+        return normalize_kling3_kie_mode(resolution or "pro")
     if provider == "veo":
         return "1080p" if model == "veo-3.1-pro" else "720p"
     if provider == "grok":
@@ -3422,10 +3452,38 @@ def _workspace_video_charge_spec(
     enable_audio: bool,
     quality: str,
     has_seedance_video_reference: bool = False,
+    kling3_kie_multi_shots: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     duration = max(1, int(duration or 0))
 
     if provider == "kling":
+        if model == "kling-3.0-new":
+            normalized_mode = normalize_kling3_kie_mode(resolution or "pro")
+            normalized_generation_mode = normalize_kling3_kie_generation_mode(mode)
+            shots = normalize_kling3_kie_shots(kling3_kie_multi_shots or []) if normalized_generation_mode == "multi_shot" else []
+            bill_seconds = kling3_kie_billable_seconds(duration=duration, multi_shots=shots if shots else None)
+            tokens = int(calculate_kling3_kie_price(
+                mode=normalized_mode,
+                enable_audio=bool(enable_audio),
+                duration=bill_seconds,
+                multi_shots=shots if shots else None,
+            ))
+            return {
+                "tokens": tokens,
+                "charge_reason": "kling3_kie_create",
+                "refund_reason": "kling3_kie_refund",
+                "meta": {
+                    "origin": "workspace_video",
+                    "provider": provider,
+                    "model": "Kling 3.0 - New",
+                    "provider_model": model,
+                    "generation_mode": normalized_generation_mode,
+                    "duration": bill_seconds,
+                    "mode": normalized_mode,
+                    "enable_audio": bool(enable_audio),
+                    "multi_shots": len(shots),
+                },
+            }
         if model == "kling-3.0":
             tokens = int(calculate_kling3_price(
                 resolution=str(resolution or "720").replace("p", ""),
@@ -3619,6 +3677,8 @@ async def workspace_video_run(
     provider_mode = str(form.get("provider_mode") or form.get("grok_provider_mode") or "normal").strip().lower() or "normal"
     enable_audio = _parse_form_bool(form.get("enable_audio"))
     quality = str(form.get("quality") or "pro").strip().lower() or "pro"
+    kling3_kie_multi_shots = normalize_kling3_kie_shots(_parse_json_list_form(form.get("multi_shots_json") or form.get("multi_prompt") or form.get("multi_shots")))
+    kling3_kie_elements = _parse_json_list_form(form.get("kling_elements_json") or form.get("kling_elements"))
 
     if not provider:
         raise HTTPException(status_code=400, detail="Missing provider")
@@ -3716,6 +3776,22 @@ async def workspace_video_run(
 
     if provider == "kling" and mode in {"image_to_video", "multi_shot"} and model in {"kling-1.6", "kling-2.5", "kling-3.0"} and not start_frame:
         raise HTTPException(status_code=400, detail="Для Image→Video нужен start frame.")
+    if provider == "kling" and model == "kling-3.0-new":
+        mode = normalize_kling3_kie_generation_mode(mode)
+        resolution = normalize_kling3_kie_mode(resolution or "pro")
+        duration = normalize_kling3_kie_duration(duration)
+        aspect_ratio = normalize_kling3_kie_aspect_ratio(aspect_ratio)
+        if mode == "image_to_video" and not start_frame:
+            raise HTTPException(status_code=400, detail="Для Kling 3.0 - New Image→Video нужен start frame.")
+        if mode == "multi_shot":
+            if len(kling3_kie_multi_shots) < 2:
+                raise HTTPException(status_code=400, detail="Для Kling 3.0 - New Multi-shot нужно минимум 2 шота.")
+            total_ms = sum(int(item.get("duration") or 0) for item in kling3_kie_multi_shots)
+            if total_ms < 3 or total_ms > 15:
+                raise HTTPException(status_code=400, detail="Суммарная длительность Multi-shot должна быть 3–15 сек.")
+            duration = total_ms
+            end_frame = None
+            last_frame = None
     if provider == "veo" and mode == "image_to_video" and not start_frame:
         raise HTTPException(status_code=400, detail="Для Veo Image→Video нужен start frame.")
     if provider == "grok":
@@ -3847,6 +3923,7 @@ async def workspace_video_run(
         enable_audio=enable_audio,
         quality=quality,
         has_seedance_video_reference=bool(reference_videos),
+        kling3_kie_multi_shots=kling3_kie_multi_shots,
     )
     cost_tokens = int(charge.get("tokens") or 0)
     charge_reason = str(charge.get("charge_reason") or "")
@@ -3942,6 +4019,31 @@ async def workspace_video_run(
                 "prompt_len": len(str(prompt or "")),
             }, flush=True)
 
+        if provider == "kling" and model == "kling-3.0-new":
+            enriched_elements: List[Dict[str, Any]] = []
+            for idx, element in enumerate(kling3_kie_elements[:3]):
+                if not isinstance(element, dict):
+                    continue
+                item = dict(element)
+                image_urls = [str(u or "").strip() for u in (item.get("element_input_urls") or item.get("image_urls") or []) if str(u or "").strip()]
+                video_urls = [str(u or "").strip() for u in (item.get("element_input_video_urls") or item.get("video_urls") or []) if str(u or "").strip()]
+                for upload in form.getlist(f"kling_element_images_{idx}"):
+                    if not getattr(upload, "filename", None):
+                        continue
+                    raw = await upload.read()
+                    if raw:
+                        image_urls.append(upload_kling3_kie_input_bytes(raw, filename=getattr(upload, "filename", None), content_type=getattr(upload, "content_type", None), prefix="kling3-kie/elements"))
+                for upload in form.getlist(f"kling_element_videos_{idx}"):
+                    if not getattr(upload, "filename", None):
+                        continue
+                    raw = await upload.read()
+                    if raw:
+                        video_urls.append(upload_kling3_kie_input_bytes(raw, filename=getattr(upload, "filename", None), content_type=getattr(upload, "content_type", None), prefix="kling3-kie/elements"))
+                item["element_input_urls"] = image_urls[:4]
+                item["element_input_video_urls"] = video_urls[:1]
+                enriched_elements.append(item)
+            kling3_kie_elements = normalize_kling3_kie_elements(enriched_elements)
+
         job = {
             "job_id": uuid4().hex,
             "kind": "workspace_video_run",
@@ -3974,7 +4076,14 @@ async def workspace_video_run(
             "refund_reason": refund_reason,
             "origin": "workspace",
         }
-        await enqueue_job(job, queue_name=WORKSPACE_MEDIA_QUEUE_NAME)
+        if provider == "kling" and model == "kling-3.0-new":
+            job["kind"] = "workspace_kling3_kie_run"
+            job["kie_mode"] = resolution
+            job["multi_shots"] = kling3_kie_multi_shots
+            job["kling_elements"] = kling3_kie_elements
+            job["mode"] = mode
+        target_queue = KLING3_KIE_QUEUE_NAME if (provider == "kling" and model == "kling-3.0-new") else WORKSPACE_MEDIA_QUEUE_NAME
+        await enqueue_job(job, queue_name=target_queue)
 
         try:
             balance_tokens = int(get_balance(uid) or 0)
