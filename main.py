@@ -40,6 +40,7 @@ from topaz_pricing import (
 from yookassa_flow import create_yookassa_payment
 from kling3_pricing import calculate_kling3_price
 from kling3_telegram_handler import handle_kling3_wait_prompt
+from kling3_kie_telegram_handler import handle_kling3_kie_wait_prompt
 from grok_video_replicate import (
     grok_tokens_for_duration,
     normalize_grok_aspect_ratio,
@@ -70,6 +71,7 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory="static"), name="static")
 from app.routers.leads import router as leads_router
 from app.routers.kling3 import router as kling3_router
+from app.routers.kling3_kie import router as kling3_kie_router
 from app.routers.admin_top import router as admin_top_router
 from app.routers.prompts import router as prompts_router
 from app.routers.prompts_admin import router as prompts_admin_router
@@ -79,6 +81,7 @@ from app.routers.video_editor_v2 import router as video_editor_v2_router, page_r
 from app.routers.site_builder_api import router as site_builder_router
 app.include_router(leads_router, prefix="/api/leads", tags=["leads"])
 app.include_router(kling3_router, prefix="/api/kling3", tags=["kling3"])
+app.include_router(kling3_kie_router, prefix="/api/kling3-kie", tags=["kling3-kie"])
 app.include_router(admin_top_router, prefix="/api/admin", tags=["admin"])
 app.include_router(prompts_router, prefix="/api/prompts", tags=["prompts"])
 app.include_router(prompts_admin_router, prefix="/api/prompts_admin", tags=["prompts_admin"])
@@ -5161,6 +5164,100 @@ async def webhook(secret: str, request: Request):
                 )
             return {"ok": True}
             
+        # ----- Kling 3.0 - New (KIE) -----
+        if str(payload.get("type") or "").lower().strip() == "kling3_kie_settings":
+            kie_mode = str(payload.get("mode") or payload.get("kie_mode") or payload.get("resolution") or "std").strip()
+            if kie_mode.lower() in ("standard", "720", "720p"):
+                kie_mode = "std"
+            elif kie_mode.lower() in ("1080", "1080p"):
+                kie_mode = "pro"
+            elif kie_mode.lower() == "4k":
+                kie_mode = "4K"
+            elif kie_mode not in ("std", "pro", "4K"):
+                kie_mode = "std"
+
+            enable_audio = bool(payload.get("enable_audio", payload.get("sound", False)))
+            try:
+                duration = int(payload.get("duration") or 5)
+            except Exception:
+                duration = 5
+            duration = max(3, min(15, duration))
+
+            aspect_ratio = str(payload.get("aspect_ratio") or "16:9").strip()
+            if aspect_ratio not in ("16:9", "9:16", "1:1"):
+                aspect_ratio = "16:9"
+
+            gen_mode = str(payload.get("gen_mode") or payload.get("mode_type") or "text_to_video").strip()
+            mode_aliases = {
+                "t2v": "text_to_video",
+                "text": "text_to_video",
+                "text_to_video": "text_to_video",
+                "i2v": "image_to_video",
+                "image": "image_to_video",
+                "image_to_video": "image_to_video",
+                "multishot": "multi_shot",
+                "multi-shot": "multi_shot",
+                "multi_shot": "multi_shot",
+            }
+            gen_mode = mode_aliases.get(gen_mode, "text_to_video")
+
+            multi_shots = payload.get("multi_shots") or []
+            if not isinstance(multi_shots, list):
+                multi_shots = []
+            clean_shots = []
+            for item in multi_shots[:5]:
+                if not isinstance(item, dict):
+                    continue
+                ptxt = str(item.get("prompt") or "").strip()
+                if not ptxt:
+                    continue
+                try:
+                    d = int(item.get("duration") or 3)
+                except Exception:
+                    d = 3
+                clean_shots.append({"prompt": ptxt[:500], "duration": max(1, min(12, d))})
+
+            elements = payload.get("kling_elements") or []
+            if not isinstance(elements, list):
+                elements = []
+
+            prev = st.get("kling3_kie_settings") or {}
+            st["kling3_kie_settings"] = {
+                "kie_mode": kie_mode,
+                "resolution": kie_mode,
+                "enable_audio": enable_audio,
+                "duration": duration,
+                "aspect_ratio": aspect_ratio,
+                "gen_mode": gen_mode,
+                "multi_shots": clean_shots,
+                "kling_elements": elements,
+                "start_image_bytes": prev.get("start_image_bytes"),
+                "end_image_bytes": prev.get("end_image_bytes"),
+            }
+            st["ts"] = _now()
+            _set_mode(chat_id, user_id, "kling3_kie_wait_multishot_action" if gen_mode == "multi_shot" else "kling3_kie_wait_prompt")
+
+            if gen_mode == "image_to_video":
+                next_block = "Дальше:\n• Пришли стартовое фото\n• Можно прислать второй кадр как финальный\n• Затем пришли prompt"
+            elif gen_mode == "multi_shot":
+                next_block = "Дальше:\n• Основной prompt не нужен\n• Можно прислать общий стартовый кадр (необязательно)\n• Когда всё готово — отправь сообщением: СТАРТ\n• Элементы уже используются внутри shot prompt через @name"
+            else:
+                next_block = "Дальше:\n• Пришли текстовый prompt"
+
+                next_block = "Дальше:\n• Пришли текстовый prompt"
+
+            await tg_send_message(
+                chat_id,
+                "✅ Kling 3.0 - New настройки сохранены.\n"
+                f"Режим: {gen_mode}\n"
+                f"Качество: {kie_mode} • {duration} сек • {'Audio ON' if enable_audio else 'Audio OFF'}\n"
+                f"Формат: {aspect_ratio}\n"
+                f"Шотов: {len(clean_shots)} • Elements: {len(elements)}\n\n"
+                f"{next_block}",
+                reply_markup=_help_menu_for(user_id),
+            )
+            return {"ok": True}
+
         # ----- Kling PRO 3.0 -----
         if str(payload.get("type") or "").lower().strip() == "kling3_settings":
 
@@ -5811,6 +5908,24 @@ async def webhook(secret: str, request: Request):
     handled = False
 
     if incoming_text:
+
+        handled = await handle_kling3_kie_wait_prompt(
+            chat_id=chat_id,
+            user_id=user_id,
+            incoming_text=incoming_text,
+            st=st,
+            deps={
+                "tg_send_message": tg_send_message,
+                "_main_menu_for": _main_menu_for,
+                "_is_nav_or_menu_text": _is_nav_or_menu_text,
+                "_set_mode": _set_mode,
+                "_now": _now,
+                "sb_clear_user_state": sb_clear_user_state,
+                "queue_name": os.getenv("KLING3_KIE_QUEUE_NAME", "kling3_kie"),
+            },
+        )
+        if handled:
+            return {"ok": True}
 
         handled = await handle_kling3_wait_prompt(
         chat_id=chat_id,
@@ -7305,6 +7420,44 @@ async def webhook(secret: str, request: Request):
             await tg_send_message(
                 chat_id,
                 "Стартовое фото уже есть ✅ Теперь жду ТЕКСТ для Grok.",
+                reply_markup=_help_menu_for(user_id),
+            )
+            return {"ok": True}
+
+        # ---- KLING 3.0 - New: приём общего стартового/последнего кадра через фото ----
+        if st.get("mode") in ("kling3_kie_wait_prompt", "kling3_kie_wait_multishot_action"):
+            ks3n = st.get("kling3_kie_settings") or {}
+            gen_mode = str(ks3n.get("gen_mode") or "text_to_video")
+
+            if gen_mode not in ("image_to_video", "multi_shot"):
+                await tg_send_message(
+                    chat_id,
+                    "Для Kling 3.0 - New в режиме Text→Video фото не нужно. Пришли текстовый prompt.",
+                    reply_markup=_help_menu_for(user_id),
+                )
+                return {"ok": True}
+
+            if not ks3n.get("start_image_bytes"):
+                ks3n["start_image_bytes"] = img_bytes
+                st["kling3_kie_settings"] = ks3n
+                st["ts"] = _now()
+                if gen_mode == "multi_shot":
+                    msg = "Общий стартовый кадр получил ✅\nОсновной prompt не нужен. Когда будешь готов — отправь сообщением: СТАРТ\nLast frame в Multi-shot не используется."
+                else:
+                    msg = "Стартовый кадр получил ✅\nЕсли хочешь — пришли ещё одно фото как последний кадр. Потом пришли prompt."
+                await tg_send_message(chat_id, msg, reply_markup=_help_menu_for(user_id))
+                return {"ok": True}
+
+            if gen_mode == "image_to_video" and not ks3n.get("end_image_bytes"):
+                ks3n["end_image_bytes"] = img_bytes
+                st["kling3_kie_settings"] = ks3n
+                st["ts"] = _now()
+                await tg_send_message(chat_id, "Последний кадр получил ✅\nТеперь пришли prompt.", reply_markup=_help_menu_for(user_id))
+                return {"ok": True}
+
+            await tg_send_message(
+                chat_id,
+                "Стартовый кадр уже сохранён ✅\nЕсли всё готово — отправь сообщением: СТАРТ",
                 reply_markup=_help_menu_for(user_id),
             )
             return {"ok": True}
