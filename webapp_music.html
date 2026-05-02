@@ -412,20 +412,6 @@
           <br/><b>Лучше пометки писать по-английски</b>: <code class="inline">[Verse]</code>, <code class="inline">[Chorus]</code>, <code class="inline">[Bridge]</code>.
         </div>
       </div>
-<div id="wrapProvider">
-  <label>Сервер генерации Suno (стоимость: 2 токена)</label>
-  <div class="seg" role="tablist" aria-label="Выбор сервера">
-    <button id="provSunoApi" class="segbtn" type="button" role="tab" aria-selected="true">SunoAPI</button>
-    <button id="provPiApi" class="segbtn" type="button" role="tab" aria-selected="false">PiAPI</button>
-    <button id="provAuto" class="segbtn" type="button" role="tab" aria-selected="false">Авто</button>
-  </div>
-  <div class="hint" style="margin-top:8px">
-    <b>SunoAPI</b> — основной и более стабильный для Suno. <b>PiAPI</b> — запасной. <b>Авто</b> — сначала SunoAPI, при ошибке пробует PiAPI.
-  </div>
-</div>
-
-
-
       <details id="wrapGuide">
         <summary>Как получить «вау»-результат (кратко)</summary>
         <div class="dcontent">
@@ -596,7 +582,8 @@
     // AI selection (Suno / Udio)
     // -----------------------------
     let ai = localStorage.getItem("music_ai") || "suno"; // default suno
-    let provider = localStorage.getItem("music_provider") || "sunoapi"; // sunoapi | piapi | auto
+    let provider = "sunoapi"; // всегда SunoAPI по умолчанию
+    try { localStorage.setItem("music_provider", "sunoapi"); } catch(e){}
     const aiSuno = document.getElementById('aiSuno');
     const aiUdio = document.getElementById('aiUdio');
     const aiNote = document.getElementById('aiNote');
@@ -607,35 +594,6 @@
 
 
 
-const wrapProvider = document.getElementById('wrapProvider');
-const provSunoApi = document.getElementById('provSunoApi');
-const provPiApi = document.getElementById('provPiApi');
-const provAuto = document.getElementById('provAuto');
-
-    function forceReflow(){ document.body.offsetHeight; }
-
-    
-function setProvider(v){
-  provider = v;
-  localStorage.setItem("music_provider", v);
-
-  const isSunoApi = (v === "sunoapi");
-  const isPiApi = (v === "piapi");
-  const isAuto = (v === "auto");
-
-  provSunoApi.classList.toggle('active', isSunoApi);
-  provPiApi.classList.toggle('active', isPiApi);
-  provAuto.classList.toggle('active', isAuto);
-
-  provSunoApi.setAttribute('aria-selected', isSunoApi ? 'true' : 'false');
-  provPiApi.setAttribute('aria-selected', isPiApi ? 'true' : 'false');
-  provAuto.setAttribute('aria-selected', isAuto ? 'true' : 'false');
-  forceReflow();
-}
-
-provSunoApi.addEventListener('click', () => setProvider("sunoapi"));
-provPiApi.addEventListener('click', () => setProvider("piapi"));
-provAuto.addEventListener('click', () => setProvider("auto"));
 
 function setAI(v){
       ai = v;
@@ -658,7 +616,6 @@ function setAI(v){
       aiUdio.setAttribute('aria-selected', !isSuno ? 'true' : 'false');
 
       if (!isSuno){
-        wrapProvider.classList.add('hidden');
         wrapTitle.classList.add('hidden');
         wrapTags.classList.add('hidden');
         wrapGuide.classList.add('hidden');
@@ -669,7 +626,6 @@ function setAI(v){
       requestAnimationFrame(() => { try { document.body.offsetHeight; } catch(e) {} });
         aiNote.style.display = "block";
       } else {
-        wrapProvider.classList.remove('hidden');
         wrapTitle.classList.remove('hidden');
         wrapTags.classList.remove('hidden');
         wrapGuide.classList.remove('hidden');
@@ -723,8 +679,6 @@ function refreshSongwriterOpenButtons(){
     // Apply AI UI on load
     setAI(ai);
 
-
-    setProvider(provider);
     // -----------------------------
     // Chips -> add to tags
     // -----------------------------
@@ -800,7 +754,7 @@ function refreshSongwriterOpenButtons(){
         title: title || "",
         tags: tags || "",
         make_instrumental: !!make_instrumental,
-        provider: (ai === "suno" ? provider : "piapi")
+        provider: (ai === "suno" ? "sunoapi" : "piapi")
       };
 
       if (mode === "idea") {
