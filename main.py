@@ -651,6 +651,9 @@ WEBAPP_PROMPTS_URL = os.getenv("WEBAPP_PROMPTS_URL", "https://astrabot-tchj.onre
 WEBAPP_PROMPTS_ADMIN_URL = os.getenv("WEBAPP_PROMPTS_ADMIN_URL", "https://astrabot-tchj.onrender.com/webapp/prompts_admin")
 SORA_QUEUE_NAME = os.getenv("SORA_QUEUE_NAME", "sora").strip() or "sora"
 TOPAZ_PHOTO_QUEUE_NAME = os.getenv("TOPAZ_PHOTO_QUEUE_NAME", "topaz_photo").strip() or "topaz_photo"
+GPT_IMAGE2_QUEUE_NAME = os.getenv("GPT_IMAGE2_QUEUE_NAME", "gpt_image2").strip() or "gpt_image2"
+SEEDREAM_T2I_QUEUE_NAME = os.getenv("SEEDREAM_T2I_QUEUE_NAME", "seedream_t2i").strip() or "seedream_t2i"
+NANO_BANANA_QUEUE_NAME = os.getenv("NANO_BANANA_QUEUE_NAME", "nano_banana").strip() or "nano_banana"
 TOPAZ_VIDEO_QUEUE_NAME = os.getenv("TOPAZ_VIDEO_QUEUE_NAME", "topaz_video").strip() or "topaz_video"
 # --- YooKassa (cards/SBP) ---
 YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "").strip()
@@ -1267,7 +1270,7 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
 
     elif mode == "nano_banana":
         # Nano Banana (Replicate): image editing
-        st["nano_banana"] = {"step": "need_photo", "photo_bytes": None}
+        st["nano_banana"] = {"step": "need_photo", "photo_bytes": None, "photo_file_id": None}
         
     elif mode == "nano_banana_pro":
         st["nano_banana_pro"] = {
@@ -7209,6 +7212,7 @@ async def webhook(secret: str, request: Request):
             step = (nb.get("step") or "need_photo")
             if step == "need_photo":
                 nb["photo_bytes"] = img_bytes
+                nb["photo_file_id"] = file_id
                 nb["step"] = "need_prompt"
                 st["nano_banana"] = nb
                 st["ts"] = _now()
@@ -8256,13 +8260,10 @@ async def webhook(secret: str, request: Request):
 
         # ---- NANO BANANA: текст после фото ----
         if st.get("mode") == "nano_banana":
-            # Важно: системные команды и кнопки навигации не считаем промптом
             nav_text = (incoming_text or "").strip()
             if nav_text in ("⬅ Назад", "Назад") or nav_text.startswith("/"):
-                # обработается выше в общих обработчиках (/reset, /start, Назад)
                 pass
             elif nav_text in ("Фото будущего", "📸 Фото будущего", "Фото/Афиши", "Нейро фотосессии", "2 фото", "Картинка+Картинка", "Seedream", "Seedream 4.5", "Апскейл", "🍌 Nano Banana", "🍌 Nano Banana 2", "🍌 Nano Banana Pro", "🍌 Nano Banana Pro - NEW", "Текст→Картинка", "🖼 Апскейл фото", "🎬 Апскейл видео", "🧠 ИИ (чат)", "ИИ (чат)", "🧠 ИИ чат"):
-                # навигация по меню — тоже не промпт
                 pass
             else:
                 nb = st.get("nano_banana") or {}
@@ -8276,8 +8277,8 @@ async def webhook(secret: str, request: Request):
                     )
                     return {"ok": True}
 
-                src_bytes = nb.get("photo_bytes")
-                if not src_bytes:
+                photo_file_id = str(nb.get("photo_file_id") or "").strip()
+                if not photo_file_id:
                     await tg_send_message(
                         chat_id,
                         "Не хватает фото. Открой «Фото будущего» → «🍌 Nano Banana» и пришли фото заново.",
@@ -8294,14 +8295,13 @@ async def webhook(secret: str, request: Request):
                     )
                     return {"ok": True}
 
-                # Биллинг: 1 генерация = 1 токен
                 ensure_user_row(user_id)
                 try:
                     bal = float(get_balance(user_id) or 0)
                 except Exception:
                     bal = 0
 
-                cost = 1.0  # при необходимости можно сделать float (0.5/1.5) при поддержке дробных балансов в БД
+                cost = 1.0
                 if bal < cost:
                     await tg_send_message(
                         chat_id,
@@ -8310,85 +8310,47 @@ async def webhook(secret: str, request: Request):
                     )
                     return {"ok": True}
 
-                nano_banana_charged = False
-                placeholder = _make_blur_placeholder(src_bytes)
-                token = _dl_init_slot(chat_id, user_id)
-                msg_id = None
-
+                charge_ref_id = uuid4().hex
+                charged = False
                 try:
-                    # списываем токен ДО запроса
                     try:
-                        add_tokens(user_id, -cost, reason="nano_banana")
+                        add_tokens(user_id, -cost, reason="nano_banana", ref_id=charge_ref_id)
                     except TypeError:
-                        # если billing_db принимает только int
                         add_tokens(user_id, -int(cost), reason="nano_banana")
-                    nano_banana_charged = True
+                    charged = True
 
-                    # Placeholder + кнопка "Скачать оригинал"
-                    msg_id = await tg_send_photo_bytes_return_message_id(
-                        chat_id,
-                        placeholder,
-                        caption="🍌 Nano Banana — генерирую…",
-                        reply_markup=_dl_keyboard(token),
-                    )
-
-                    _busy_start(int(user_id), "Nano Banana")
-                    out_bytes, ext = await run_nano_banana(src_bytes, user_prompt, output_format="jpg")
-
-                    # сохраняем оригинал для скачивания (отдадим как document без сжатия)
-                    _dl_set_bytes(chat_id, user_id, token, out_bytes)
-
-                    # пытаемся заменить placeholder на результат в том же сообщении
-                    if msg_id is not None:
-                        try:
-                            await tg_edit_message_media_photo(
-                                chat_id,
-                                msg_id,
-                                out_bytes,
-                                caption="🍌 Nano Banana — готово",
-                                reply_markup=_dl_keyboard(token),
-                            )
-                        except Exception:
-                            # если edit не сработал — отправим отдельным фото с кнопкой
-                            await tg_send_photo_bytes(
-                                chat_id,
-                                out_bytes,
-                                caption="🍌 Nano Banana — готово",
-                                reply_markup=_dl_keyboard(token),
-                            )
-                    else:
-                        await tg_send_photo_bytes(
-                            chat_id,
-                            out_bytes,
-                            caption="🍌 Nano Banana — готово",
-                            reply_markup=_dl_keyboard(token),
-                        )
-
+                    await enqueue_job({
+                        "job_id": uuid4().hex,
+                        "type": "nano_banana",
+                        "chat_id": int(chat_id),
+                        "user_id": int(user_id),
+                        "prompt": user_prompt,
+                        "photo_file_id": photo_file_id,
+                        "cost": int(cost),
+                        "charge_ref_id": charge_ref_id,
+                    }, queue_name=NANO_BANANA_QUEUE_NAME)
                 except Exception as e:
-                    # возврат токена при ошибке после списания
-                    if nano_banana_charged:
+                    if charged:
                         try:
                             try:
-                                add_tokens(user_id, cost, reason="nano_banana_refund")
+                                add_tokens(user_id, cost, reason="nano_banana_refund", ref_id=charge_ref_id)
                             except TypeError:
                                 add_tokens(user_id, int(cost), reason="nano_banana_refund")
                         except Exception:
                             pass
-                    # НЕ сбрасываем фото: пользователь может просто поменять текст и повторить
-                    try:
-                        await tg_send_message(
-                            chat_id,
-                            f"Ошибка Nano Banana: {e}\nТокены возвращены.",
-                            reply_markup=_photo_future_menu_keyboard(),
-                        )
-                    except Exception:
-                        pass
-                    _busy_end(int(user_id))
+                    await tg_send_message(
+                        chat_id,
+                        f"❌ Не удалось поставить Nano Banana в очередь: {e}\nТокены возвращены.",
+                        reply_markup=_photo_future_menu_keyboard(),
+                    )
                     return {"ok": True}
 
-                # reset state (после успеха)
-                _busy_end(int(user_id))
-                st["nano_banana"] = {"step": "need_photo", "photo_bytes": None}
+                await tg_send_message(
+                    chat_id,
+                    "✅ Nano Banana: запрос принят. Пришлю результат, как будет готово.",
+                    reply_markup=_photo_future_menu_keyboard(),
+                )
+                st["nano_banana"] = {"step": "need_photo", "photo_bytes": None, "photo_file_id": None}
                 st["ts"] = _now()
                 return {"ok": True}
 
@@ -9348,59 +9310,36 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(chat_id, "Напиши описание для генерации.", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
-            placeholder = _make_blur_placeholder(None)
-            token = _dl_init_slot(chat_id, user_id)
-            msg_id = await tg_send_photo_bytes_return_message_id(chat_id, placeholder, caption="GPT Image 2.0: генерация изображения…", reply_markup=_dl_keyboard(token))
-            stop = asyncio.Event()
-            prog_task = None
-            if msg_id is not None:
-                prog_task = asyncio.create_task(_progress_caption_updater(chat_id, msg_id, "GPT Image 2.0: генерация изображения…", stop))
-            else:
-                await tg_send_chat_action(chat_id, "upload_photo")
-
             try:
                 size = str(gi2.get("size") or "1024x1024")
-                _busy_start(int(user_id), "GPT Image 2.0 T2I")
-                img_bytes = await openai_generate_image_v2(prompt=user_prompt, size=size)
-
-                _dl_set_bytes(chat_id, user_id, token, img_bytes)
-
-                stop.set()
-                if prog_task:
-                    try:
-                        await prog_task
-                    except Exception:
-                        pass
-
-                if msg_id is not None:
-                    try:
-                        await tg_edit_message_media_photo(chat_id, msg_id, img_bytes, caption="Готово. GPT Image 2.0", reply_markup=_dl_keyboard(token))
-                    except Exception:
-                        await tg_send_photo_bytes(chat_id, img_bytes, caption="Готово. GPT Image 2.0")
-                else:
-                    await tg_send_photo_bytes(chat_id, img_bytes, caption="Готово. GPT Image 2.0")
-
+                await enqueue_job({
+                    "job_id": uuid4().hex,
+                    "type": "gpt_image_2_t2i",
+                    "chat_id": int(chat_id),
+                    "user_id": int(user_id),
+                    "prompt": user_prompt,
+                    "size": size,
+                }, queue_name=GPT_IMAGE2_QUEUE_NAME)
             except Exception as e:
-                stop.set()
-                if prog_task:
-                    try:
-                        await prog_task
-                    except Exception:
-                        pass
-                await tg_send_message(chat_id, f"Ошибка GPT Image 2.0: {e}", reply_markup=_main_menu_for(user_id))
-            finally:
-                _busy_end(int(user_id))
-                st["gpt_image_2_t2i"] = {"step": "need_prompt", "size": str((st.get("gpt_image_2_t2i") or {}).get("size") or gi2.get("size") or "1024x1024")}
-                st["ts"] = _now()
+                await tg_send_message(chat_id, f"❌ Не удалось поставить GPT Image 2.0 в очередь: {e}", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            await tg_send_message(
+                chat_id,
+                "✅ GPT Image 2.0: запрос принят. Пришлю результат, как будет готово.",
+                reply_markup=_main_menu_for(user_id),
+            )
+            st["gpt_image_2_t2i"] = {"step": "need_prompt", "size": str((st.get("gpt_image_2_t2i") or {}).get("size") or gi2.get("size") or "1024x1024")}
+            st["ts"] = _now()
             return {"ok": True}
 
         # GPT Image 2.0: image-to-image
         if st.get("mode") == "gpt_image_2_i2i":
             gi2 = st.get("gpt_image_2_i2i") or {}
             step = (gi2.get("step") or "need_image")
-            photo_bytes = gi2.get("photo_bytes")
+            photo_file_id = str(gi2.get("photo_file_id") or "").strip()
 
-            if step == "need_image" or not photo_bytes:
+            if step == "need_image" or not photo_file_id:
                 await tg_send_message(chat_id, "Сначала пришли фото для GPT Image 2.0 → Картинка→Картинка.", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
@@ -9409,50 +9348,28 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(chat_id, "Напиши, что нужно изменить на фото.", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
-            placeholder = _make_blur_placeholder(photo_bytes)
-            token = _dl_init_slot(chat_id, user_id)
-            msg_id = await tg_send_photo_bytes_return_message_id(chat_id, placeholder, caption="GPT Image 2.0: редактирование изображения…", reply_markup=_dl_keyboard(token))
-            stop = asyncio.Event()
-            prog_task = None
-            if msg_id is not None:
-                prog_task = asyncio.create_task(_progress_caption_updater(chat_id, msg_id, "GPT Image 2.0: редактирование изображения…", stop))
-            else:
-                await tg_send_chat_action(chat_id, "upload_photo")
-
             try:
                 size = str(gi2.get("size") or "1024x1024")
-                _busy_start(int(user_id), "GPT Image 2.0 I2I")
-                out_bytes = await openai_edit_image_v2(photo_bytes, user_prompt, size=size, mask_png_bytes=None)
-
-                _dl_set_bytes(chat_id, user_id, token, out_bytes)
-
-                stop.set()
-                if prog_task:
-                    try:
-                        await prog_task
-                    except Exception:
-                        pass
-
-                if msg_id is not None:
-                    try:
-                        await tg_edit_message_media_photo(chat_id, msg_id, out_bytes, caption="Готово. GPT Image 2.0", reply_markup=_dl_keyboard(token))
-                    except Exception:
-                        await tg_send_photo_bytes(chat_id, out_bytes, caption="Готово. GPT Image 2.0")
-                else:
-                    await tg_send_photo_bytes(chat_id, out_bytes, caption="Готово. GPT Image 2.0")
-
+                await enqueue_job({
+                    "job_id": uuid4().hex,
+                    "type": "gpt_image_2_i2i",
+                    "chat_id": int(chat_id),
+                    "user_id": int(user_id),
+                    "prompt": user_prompt,
+                    "size": size,
+                    "photo_file_id": photo_file_id,
+                }, queue_name=GPT_IMAGE2_QUEUE_NAME)
             except Exception as e:
-                stop.set()
-                if prog_task:
-                    try:
-                        await prog_task
-                    except Exception:
-                        pass
-                await tg_send_message(chat_id, f"Ошибка GPT Image 2.0: {e}", reply_markup=_main_menu_for(user_id))
-            finally:
-                _busy_end(int(user_id))
-                st["gpt_image_2_i2i"] = {"step": "need_image", "photo_bytes": None, "photo_file_id": None, "size": str((st.get("gpt_image_2_i2i") or {}).get("size") or gi2.get("size") or "1024x1024")}
-                st["ts"] = _now()
+                await tg_send_message(chat_id, f"❌ Не удалось поставить GPT Image 2.0 в очередь: {e}", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            await tg_send_message(
+                chat_id,
+                "✅ GPT Image 2.0: запрос принят. Пришлю результат, как будет готово.",
+                reply_markup=_main_menu_for(user_id),
+            )
+            st["gpt_image_2_i2i"] = {"step": "need_image", "photo_bytes": None, "photo_file_id": None, "size": str((st.get("gpt_image_2_i2i") or {}).get("size") or gi2.get("size") or "1024x1024")}
+            st["ts"] = _now()
             return {"ok": True}
 
         # T2I flow: генерация Seedream по одному тексту (без входного фото)
@@ -9467,55 +9384,31 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(chat_id, "Напиши описание для генерации (без фото).", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
-            # Placeholder + fake progress
-            placeholder = _make_blur_placeholder(None)
-            token = _dl_init_slot(chat_id, user_id)
-            msg_id = await tg_send_photo_bytes_return_message_id(chat_id, placeholder, caption="Генерация изображения…", reply_markup=_dl_keyboard(token))
-            stop = asyncio.Event()
-            prog_task = None
-            if msg_id is not None:
-                prog_task = asyncio.create_task(_progress_caption_updater(chat_id, msg_id, "Генерация изображения…", stop))
-            else:
-                await tg_send_chat_action(chat_id, "upload_photo")
-
             try:
                 aspect_ratio = str(t2i.get("aspect_ratio") or "9:16")
                 model = _seedream_model_for_bot()
                 size = _seedream_size_for_aspect_ratio(aspect_ratio)
-
-                _busy_start(int(user_id), "Seedream T2I")
-                img_bytes = await ark_text_to_image(prompt=user_prompt, size=size, model=model)
-
-                _dl_set_bytes(chat_id, user_id, token, img_bytes)
-
-                stop.set()
-                if prog_task:
-                    try:
-                        await prog_task
-                    except Exception:
-                        pass
-
-                if msg_id is not None:
-                    try:
-                        await tg_edit_message_media_photo(chat_id, msg_id, img_bytes, caption="Готово.", reply_markup=_dl_keyboard(token))
-                    except Exception:
-                        await tg_send_photo_bytes(chat_id, img_bytes, caption="Готово.")
-                else:
-                    await tg_send_photo_bytes(chat_id, img_bytes, caption="Готово.")
-
+                await enqueue_job({
+                    "job_id": uuid4().hex,
+                    "type": "seedream_t2i",
+                    "chat_id": int(chat_id),
+                    "user_id": int(user_id),
+                    "prompt": user_prompt,
+                    "size": size,
+                    "seedream_model": model,
+                    "aspect_ratio": aspect_ratio,
+                }, queue_name=SEEDREAM_T2I_QUEUE_NAME)
             except Exception as e:
-                stop.set()
-                if prog_task:
-                    try:
-                        await prog_task
-                    except Exception:
-                        pass
-                await tg_send_message(chat_id, f"Ошибка T2I: {e}", reply_markup=_main_menu_for(user_id))
-            finally:
-                _busy_end(int(user_id))
-                # остаёмся в режиме t2i, чтобы можно было генерировать дальше без повторного выбора
-                st["t2i"] = {"step": "need_prompt", "aspect_ratio": str(t2i.get("aspect_ratio") or "9:16"), "model": "seedream_45"}
-                st["ts"] = _now()
+                await tg_send_message(chat_id, f"❌ Не удалось поставить Seedream в очередь: {e}", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            await tg_send_message(
+                chat_id,
+                f"✅ Seedream: запрос принят ({aspect_ratio}). Пришлю результат, как будет готово.",
+                reply_markup=_main_menu_for(user_id),
+            )
+            st["t2i"] = {"step": "need_prompt", "aspect_ratio": str(t2i.get("aspect_ratio") or "9:16"), "model": "seedream_45"}
+            st["ts"] = _now()
             return {"ok": True}
 
 
