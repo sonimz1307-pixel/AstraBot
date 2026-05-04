@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -23,6 +24,7 @@ from replicate_common import ReplicateError, download_bytes
 from topaz_image_replicate import TopazImageParams, run_topaz_image_upscale
 from topaz_video_replicate import TopazVideoParams, run_topaz_video_upscale
 from topaz_pricing import get_photo_preset_settings, get_video_preset_settings
+from nano_banana import run_nano_banana
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else None
@@ -33,6 +35,9 @@ MUSIC_CONCURRENCY = int(os.getenv("MUSIC_CONCURRENCY", "3"))
 SORA_CONCURRENCY = int(os.getenv("SORA_CONCURRENCY", "2"))
 TOPAZ_PHOTO_CONCURRENCY = int(os.getenv("TOPAZ_PHOTO_CONCURRENCY", "1"))
 TOPAZ_VIDEO_CONCURRENCY = int(os.getenv("TOPAZ_VIDEO_CONCURRENCY", "1"))
+GPT_IMAGE2_CONCURRENCY = int(os.getenv("GPT_IMAGE2_CONCURRENCY", "3"))
+SEEDREAM_T2I_CONCURRENCY = int(os.getenv("SEEDREAM_T2I_CONCURRENCY", "3"))
+NANO_BANANA_CONCURRENCY = int(os.getenv("NANO_BANANA_CONCURRENCY", "3"))
 SWITCHX_TIMEOUT_SEC = int(os.getenv("SWITCHX_TIMEOUT_SEC", "3600"))
 SORA_TIMEOUT_SEC = int(os.getenv("SORA_TIMEOUT_SEC", "1800"))
 SORA_POLL_SEC = float(os.getenv("SORA_POLL_SEC", "10"))
@@ -45,18 +50,27 @@ SWITCHX_QUEUE_NAME = os.getenv("SWITCHX_QUEUE_NAME", "switchx").strip() or "swit
 SORA_QUEUE_NAME = os.getenv("SORA_QUEUE_NAME", "sora").strip() or "sora"
 TOPAZ_PHOTO_QUEUE_NAME = os.getenv("TOPAZ_PHOTO_QUEUE_NAME", "topaz_photo").strip() or "topaz_photo"
 TOPAZ_VIDEO_QUEUE_NAME = os.getenv("TOPAZ_VIDEO_QUEUE_NAME", "topaz_video").strip() or "topaz_video"
+GPT_IMAGE2_QUEUE_NAME = os.getenv("GPT_IMAGE2_QUEUE_NAME", "gpt_image2").strip() or "gpt_image2"
+SEEDREAM_T2I_QUEUE_NAME = os.getenv("SEEDREAM_T2I_QUEUE_NAME", "seedream_t2i").strip() or "seedream_t2i"
+NANO_BANANA_QUEUE_NAME = os.getenv("NANO_BANANA_QUEUE_NAME", "nano_banana").strip() or "nano_banana"
 
 switchx_sem = asyncio.Semaphore(SWITCHX_CONCURRENCY)
 music_sem = asyncio.Semaphore(MUSIC_CONCURRENCY)
 sora_sem = asyncio.Semaphore(SORA_CONCURRENCY)
 topaz_photo_sem = asyncio.Semaphore(TOPAZ_PHOTO_CONCURRENCY)
 topaz_video_sem = asyncio.Semaphore(TOPAZ_VIDEO_CONCURRENCY)
+gpt_image2_sem = asyncio.Semaphore(GPT_IMAGE2_CONCURRENCY)
+seedream_t2i_sem = asyncio.Semaphore(SEEDREAM_T2I_CONCURRENCY)
+nano_banana_sem = asyncio.Semaphore(NANO_BANANA_CONCURRENCY)
 
 MUSIC_JOB_TYPES = {"music", "music_piapi", "music_suno"}
 SORA_JOB_TYPES = {"sora_video"}
 TOPAZ_PHOTO_JOB_TYPES = {"topaz_image_upscale"}
 TOPAZ_VIDEO_JOB_TYPES = {"topaz_video_upscale"}
-SUPPORTED_JOB_TYPES = {JOB_TYPE_SWITCHX, *MUSIC_JOB_TYPES, *SORA_JOB_TYPES, *TOPAZ_PHOTO_JOB_TYPES, *TOPAZ_VIDEO_JOB_TYPES}
+GPT_IMAGE2_JOB_TYPES = {"gpt_image_2_t2i", "gpt_image_2_i2i"}
+SEEDREAM_T2I_JOB_TYPES = {"seedream_t2i"}
+NANO_BANANA_JOB_TYPES = {"nano_banana"}
+SUPPORTED_JOB_TYPES = {JOB_TYPE_SWITCHX, *MUSIC_JOB_TYPES, *SORA_JOB_TYPES, *TOPAZ_PHOTO_JOB_TYPES, *TOPAZ_VIDEO_JOB_TYPES, *GPT_IMAGE2_JOB_TYPES, *SEEDREAM_T2I_JOB_TYPES, *NANO_BANANA_JOB_TYPES}
 
 PIAPI_API_KEY = os.getenv("PIAPI_API_KEY", "").strip()
 PIAPI_BASE_URL = os.getenv("PIAPI_BASE_URL", "https://api.piapi.ai").rstrip("/")
@@ -68,6 +82,8 @@ if SUNOAPI_BASE_URL.rstrip("/") == "https://api.sunoapi.org":
 SUNOAPI_CALLBACK_URL = os.getenv("SUNOAPI_CALLBACK_URL", "").strip()
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip()
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
+MAIN_INTERNAL_URL = os.getenv("MAIN_INTERNAL_URL", "").strip().rstrip("/")
+INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "").strip()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
@@ -230,6 +246,118 @@ async def tg_send_document_bytes(
         if r.status_code >= 300:
             raise RuntimeError(f"Telegram sendDocument failed: {r.status_code} {r.text[:500]}")
 
+
+
+async def register_dl2k_slot(chat_id: int, user_id: int, image_bytes: bytes) -> Optional[str]:
+    if not MAIN_INTERNAL_URL or not image_bytes:
+        return None
+    headers = {}
+    if INTERNAL_API_KEY:
+        headers["x-internal-key"] = INTERNAL_API_KEY
+    payload = {
+        "chat_id": int(chat_id),
+        "user_id": int(user_id),
+        "bytes_b64": base64.b64encode(image_bytes).decode("ascii"),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.post(f"{MAIN_INTERNAL_URL}/internal/dl2k", json=payload, headers=headers)
+        if r.status_code != 200:
+            return None
+        j = r.json()
+        if j.get("ok") and j.get("token"):
+            return str(j["token"])
+    except Exception:
+        return None
+    return None
+
+
+def _detect_image_ext_from_bytes(payload: bytes, fallback: str = "jpg") -> str:
+    head = bytes(payload[:16] if payload else b"")
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "jpg"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "webp"
+    return (str(fallback or "jpg").strip().lower().lstrip(".") or "jpg")
+
+
+def _image_mime_type(ext: str) -> str:
+    raw = str(ext or "jpg").strip().lower().lstrip(".") or "jpg"
+    if raw == "jpeg":
+        raw = "jpg"
+    if raw == "png":
+        return "image/png"
+    if raw == "webp":
+        return "image/webp"
+    return "image/jpeg"
+
+
+async def _tg_post_multipart(method: str, *, data: dict, files: dict, timeout: float = 60.0) -> dict:
+    if not TG_API:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN not set")
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.post(f"{TG_API}/{method}", data=data, files=files)
+    try:
+        payload = r.json()
+    except Exception:
+        payload = {}
+    if r.status_code >= 400 or not payload.get("ok"):
+        detail = None
+        if isinstance(payload, dict):
+            detail = payload.get("description") or payload.get("error")
+        detail = detail or (r.text[:400] if hasattr(r, "text") else "") or f"Telegram {method} failed with HTTP {r.status_code}"
+        raise RuntimeError(detail)
+    return payload if isinstance(payload, dict) else {}
+
+
+async def tg_send_photo_bytes(
+    chat_id: int,
+    photo_bytes: bytes,
+    *,
+    caption: Optional[str] = None,
+    reply_markup: Optional[dict] = None,
+    filename: Optional[str] = None,
+    mime_type: Optional[str] = None,
+) -> Optional[int]:
+    ext = _detect_image_ext_from_bytes(photo_bytes, fallback="jpg")
+    if ext == "jpeg":
+        ext = "jpg"
+    safe_filename = str(filename or f"result.{ext}").strip() or f"result.{ext}"
+    safe_mime = str(mime_type or _image_mime_type(ext)).strip() or _image_mime_type(ext)
+    if ext != "jpg" or len(photo_bytes or b"") > 9_500_000:
+        return await tg_send_document_bytes(chat_id, photo_bytes, filename=safe_filename, caption=caption, reply_markup=reply_markup)
+    data = {"chat_id": str(chat_id)}
+    if caption:
+        data["caption"] = caption
+    if reply_markup is not None:
+        data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+    files = {"photo": (safe_filename, photo_bytes, safe_mime)}
+    try:
+        payload = await _tg_post_multipart("sendPhoto", data=data, files=files, timeout=60.0)
+        return int((payload.get("result") or {}).get("message_id") or 0) or None
+    except Exception as e:
+        print(f"sendPhoto failed, fallback to sendDocument: {e}")
+        return await tg_send_document_bytes(chat_id, photo_bytes, filename=safe_filename, caption=caption, reply_markup=reply_markup)
+
+
+async def _progress_loop(chat_id: int, msg_id: Optional[int], label: str, stop: asyncio.Event, step_sec: float = 3.0) -> None:
+    if not msg_id:
+        return
+    seq = [10, 25, 45, 65, 85, 95]
+    i = 0
+    while not stop.is_set():
+        pct = seq[min(i, len(seq) - 1)]
+        i += 1
+        try:
+            await tg_edit_message_text(chat_id, msg_id, f"⏳ {label}: обработка… {pct}%")
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=step_sec)
+        except asyncio.TimeoutError:
+            continue
 
 
 def _ext_from_url(url: str, default: str = "bin") -> str:
@@ -1367,6 +1495,171 @@ async def handle_topaz_video_job(job: Dict[str, Any]) -> None:
 
 
 
+async def handle_gpt_image2_job(job: Dict[str, Any]) -> None:
+    job_type = str(job.get("type") or "").strip()
+    chat_id = int(job.get("chat_id") or 0)
+    user_id = int(job.get("user_id") or 0)
+    prompt = str(job.get("prompt") or "").strip()
+    size = str(job.get("size") or "1024x1024").strip() or "1024x1024"
+    photo_file_id = str(job.get("photo_file_id") or "").strip()
+
+    if not chat_id or not user_id:
+        raise RuntimeError("gpt_image_2 job missing chat_id/user_id")
+    if not prompt:
+        raise RuntimeError("gpt_image_2 job missing prompt")
+    if job_type == "gpt_image_2_i2i" and not photo_file_id:
+        raise RuntimeError("gpt_image_2_i2i job missing photo_file_id")
+
+    label = "GPT Image 2.0"
+    msg_id = await tg_send_message(chat_id, f"⏳ {label}: начинаю обработку…")
+    stop = asyncio.Event()
+    prog_task = asyncio.create_task(_progress_loop(chat_id, msg_id, label, stop))
+    try:
+        from main import openai_generate_image_v2, openai_edit_image_v2
+        if job_type == "gpt_image_2_t2i":
+            out_bytes = await openai_generate_image_v2(prompt=prompt, size=size)
+        else:
+            source_bytes, _ = await tg_download_file_bytes(photo_file_id)
+            out_bytes = await openai_edit_image_v2(source_bytes, prompt, size=size, mask_png_bytes=None)
+
+        stop.set()
+        try:
+            await prog_task
+        except Exception:
+            pass
+        if msg_id:
+            try:
+                await tg_edit_message_text(chat_id, msg_id, f"✅ {label}: готово.")
+            except Exception:
+                pass
+        token = await register_dl2k_slot(chat_id, user_id, out_bytes)
+        reply_markup = None
+        if token:
+            reply_markup = {"inline_keyboard": [[{"text": "⬇️ Скачать оригинал 2К", "callback_data": f"dl2k:{token}"}]]}
+        await tg_send_photo_bytes(chat_id, out_bytes, caption=f"✅ Готово ({label})", reply_markup=reply_markup)
+    except Exception as e:
+        stop.set()
+        try:
+            await prog_task
+        except Exception:
+            pass
+        err = str(e)[:800]
+        print("gpt_image2 failed:", err)
+        if msg_id:
+            try:
+                await tg_edit_message_text(chat_id, msg_id, f"❌ Ошибка {label}.\n{err}")
+                return
+            except Exception:
+                pass
+        await tg_send_message(chat_id, f"❌ Ошибка {label}.\n{err}")
+
+
+async def handle_seedream_t2i_job(job: Dict[str, Any]) -> None:
+    chat_id = int(job.get("chat_id") or 0)
+    user_id = int(job.get("user_id") or 0)
+    prompt = str(job.get("prompt") or "").strip()
+    size = str(job.get("size") or "2K").strip() or "2K"
+    seedream_model = str(job.get("seedream_model") or "").strip() or None
+    if not chat_id or not user_id:
+        raise RuntimeError("seedream_t2i job missing chat_id/user_id")
+    if not prompt:
+        raise RuntimeError("seedream_t2i job missing prompt")
+    msg_id = await tg_send_message(chat_id, "⏳ Seedream: начинаю обработку…")
+    stop = asyncio.Event()
+    prog_task = asyncio.create_task(_progress_loop(chat_id, msg_id, "Seedream", stop))
+    try:
+        from main import ark_text_to_image
+        out_bytes = await ark_text_to_image(prompt=prompt, size=size, model=seedream_model)
+        stop.set()
+        try:
+            await prog_task
+        except Exception:
+            pass
+        if msg_id:
+            try:
+                await tg_edit_message_text(chat_id, msg_id, "✅ Seedream: готово.")
+            except Exception:
+                pass
+        token = await register_dl2k_slot(chat_id, user_id, out_bytes)
+        reply_markup = None
+        if token:
+            reply_markup = {"inline_keyboard": [[{"text": "⬇️ Скачать оригинал 2К", "callback_data": f"dl2k:{token}"}]]}
+        await tg_send_photo_bytes(chat_id, out_bytes, caption="✅ Готово (Seedream)", reply_markup=reply_markup)
+    except Exception as e:
+        stop.set()
+        try:
+            await prog_task
+        except Exception:
+            pass
+        err = str(e)[:800]
+        print("seedream_t2i failed:", err)
+        if msg_id:
+            try:
+                await tg_edit_message_text(chat_id, msg_id, f"❌ Ошибка Seedream.\n{err}")
+                return
+            except Exception:
+                pass
+        await tg_send_message(chat_id, f"❌ Ошибка Seedream.\n{err}")
+
+
+async def handle_nano_banana_job(job: Dict[str, Any]) -> None:
+    chat_id = int(job.get("chat_id") or 0)
+    user_id = int(job.get("user_id") or 0)
+    prompt = str(job.get("prompt") or "").strip()
+    photo_file_id = str(job.get("photo_file_id") or "").strip()
+    cost = int(job.get("cost") or 1)
+    charge_ref_id = str(job.get("charge_ref_id") or "").strip() or None
+    if not chat_id or not user_id:
+        raise RuntimeError("nano_banana job missing chat_id/user_id")
+    if not prompt:
+        raise RuntimeError("nano_banana job missing prompt")
+    if not photo_file_id:
+        raise RuntimeError("nano_banana job missing photo_file_id")
+    msg_id = await tg_send_message(chat_id, "⏳ Nano Banana: начинаю обработку…")
+    stop = asyncio.Event()
+    prog_task = asyncio.create_task(_progress_loop(chat_id, msg_id, "Nano Banana", stop))
+    try:
+        source_bytes, _ = await tg_download_file_bytes(photo_file_id)
+        out_bytes, ext = await run_nano_banana(source_bytes, prompt, output_format="jpg")
+        stop.set()
+        try:
+            await prog_task
+        except Exception:
+            pass
+        if msg_id:
+            try:
+                await tg_edit_message_text(chat_id, msg_id, "✅ Nano Banana: готово.")
+            except Exception:
+                pass
+        token = await register_dl2k_slot(chat_id, user_id, out_bytes)
+        reply_markup = None
+        if token:
+            reply_markup = {"inline_keyboard": [[{"text": "⬇️ Скачать оригинал 2К", "callback_data": f"dl2k:{token}"}]]}
+        await tg_send_photo_bytes(chat_id, out_bytes, caption="🍌 Nano Banana — готово", reply_markup=reply_markup, filename=f"result.{ext or 'jpg'}")
+    except Exception as e:
+        stop.set()
+        try:
+            await prog_task
+        except Exception:
+            pass
+        err = str(e)[:800]
+        print("nano_banana failed:", err)
+        try:
+            try:
+                add_tokens(user_id, int(cost), reason="nano_banana_refund", ref_id=charge_ref_id, meta={"error": err[:300]})
+            except TypeError:
+                add_tokens(user_id, int(cost), reason="nano_banana_refund")
+        except Exception:
+            pass
+        if msg_id:
+            try:
+                await tg_edit_message_text(chat_id, msg_id, f"❌ Ошибка Nano Banana.\n{err}\nТокены возвращены.")
+                return
+            except Exception:
+                pass
+        await tg_send_message(chat_id, f"❌ Ошибка Nano Banana.\n{err}\nТокены возвращены.")
+
+
 async def handle_job(job: Dict[str, Any]) -> None:
     job_type = str(job.get("type") or job.get("job_type") or "").strip()
 
@@ -1395,6 +1688,21 @@ async def handle_job(job: Dict[str, Any]) -> None:
             await handle_topaz_video_job(job)
         return
 
+    if job_type in GPT_IMAGE2_JOB_TYPES:
+        async with gpt_image2_sem:
+            await handle_gpt_image2_job(job)
+        return
+
+    if job_type in SEEDREAM_T2I_JOB_TYPES:
+        async with seedream_t2i_sem:
+            await handle_seedream_t2i_job(job)
+        return
+
+    if job_type in NANO_BANANA_JOB_TYPES:
+        async with nano_banana_sem:
+            await handle_nano_banana_job(job)
+        return
+
     print("Unknown job type:", job_type)
 
 
@@ -1405,7 +1713,7 @@ async def worker_loop() -> None:
         except Exception as e:
             print("Generation job failed:", e)
 
-    queue_names = [MUSIC_QUEUE_NAME, SWITCHX_QUEUE_NAME, SORA_QUEUE_NAME, TOPAZ_PHOTO_QUEUE_NAME, TOPAZ_VIDEO_QUEUE_NAME]
+    queue_names = [MUSIC_QUEUE_NAME, SWITCHX_QUEUE_NAME, SORA_QUEUE_NAME, TOPAZ_PHOTO_QUEUE_NAME, TOPAZ_VIDEO_QUEUE_NAME, GPT_IMAGE2_QUEUE_NAME, SEEDREAM_T2I_QUEUE_NAME, NANO_BANANA_QUEUE_NAME]
 
     while True:
         job = await dequeue_job(timeout_sec=10, queue_names=queue_names)
@@ -1430,7 +1738,10 @@ def main() -> None:
         f"sora_concurrency={SORA_CONCURRENCY} "
         f"topaz_photo_concurrency={TOPAZ_PHOTO_CONCURRENCY} "
         f"topaz_video_concurrency={TOPAZ_VIDEO_CONCURRENCY} "
-        f"queues={[MUSIC_QUEUE_NAME, SWITCHX_QUEUE_NAME, SORA_QUEUE_NAME, TOPAZ_PHOTO_QUEUE_NAME, TOPAZ_VIDEO_QUEUE_NAME]}"
+        f"gpt_image2_concurrency={GPT_IMAGE2_CONCURRENCY} "
+        f"seedream_t2i_concurrency={SEEDREAM_T2I_CONCURRENCY} "
+        f"nano_banana_concurrency={NANO_BANANA_CONCURRENCY} "
+        f"queues={[MUSIC_QUEUE_NAME, SWITCHX_QUEUE_NAME, SORA_QUEUE_NAME, TOPAZ_PHOTO_QUEUE_NAME, TOPAZ_VIDEO_QUEUE_NAME, GPT_IMAGE2_QUEUE_NAME, SEEDREAM_T2I_QUEUE_NAME, NANO_BANANA_QUEUE_NAME]}"
     )
     asyncio.run(worker_loop())
 
