@@ -15,6 +15,7 @@ from typing import Optional, Literal, Dict, Any, Tuple, List
 import httpx
 from queue_redis import enqueue_job
 from chat_file_text import extract_file_text
+from chat_memory_redis import reset_tg_chat_memory
 from kie_claude_chat import (
     KIE_CLAUDE_DISPLAY_NAME,
     KIE_CLAUDE_HISTORY_MESSAGES,
@@ -116,6 +117,10 @@ if UVICORN_LOGGER.level > logging.INFO:
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WORKSPACE_MEDIA_QUEUE_NAME = (os.getenv("WORKSPACE_MEDIA_QUEUE_NAME", "workspace_media") or "workspace_media").strip() or "workspace_media"
+
+CHAT_WORKER_ENABLED = (os.getenv("CHAT_WORKER_ENABLED", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
+TG_CHAT_OPENAI_QUEUE_NAME = (os.getenv("TG_CHAT_OPENAI_QUEUE_NAME", "tg_chat_openai") or "tg_chat_openai").strip() or "tg_chat_openai"
+TG_CHAT_CLAUDE_QUEUE_NAME = (os.getenv("TG_CHAT_CLAUDE_QUEUE_NAME", "tg_chat_claude") or "tg_chat_claude").strip() or "tg_chat_claude"
 
 BALANCE_BANNER_PATH = os.getenv("BALANCE_BANNER_PATH", "").strip()
 
@@ -1929,6 +1934,58 @@ def _ai_chat_model_key(st: Dict[str, Any]) -> str:
     return "claude"
 
 
+def _tg_chat_queue_for_model(model_key: str) -> str:
+    return TG_CHAT_OPENAI_QUEUE_NAME if str(model_key or "").strip().lower() == "openai" else TG_CHAT_CLAUDE_QUEUE_NAME
+
+
+async def _enqueue_tg_ai_chat_job(
+    *,
+    chat_id: int,
+    user_id: int,
+    text: str,
+    model_key: str,
+    file_meta: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Queue a Telegram GPT/Claude chat request so main.py does not wait for the model."""
+    if not CHAT_WORKER_ENABLED:
+        return False
+
+    status_message_id: Optional[int] = None
+    try:
+        status_message_id = await tg_send_message(chat_id, "⏳ Думаю...")
+    except Exception:
+        status_message_id = None
+
+    job: Dict[str, Any] = {
+        "kind": "tg_ai_chat",
+        "chat_id": int(chat_id),
+        "user_id": int(user_id),
+        "text": str(text or ""),
+        "model_key": "openai" if model_key == "openai" else "claude",
+        "model": OPENAI_CHAT_MODEL if model_key == "openai" else KIE_CLAUDE_MODEL_ID,
+        "system_prompt": CLAUDE_TEXT_SYSTEM_PROMPT,
+        "reply_markup": _main_menu_for(user_id),
+    }
+    if status_message_id:
+        job["status_message_id"] = int(status_message_id)
+    if file_meta:
+        job["file"] = file_meta
+
+    try:
+        await enqueue_job(job, queue_name=_tg_chat_queue_for_model(model_key))
+        return True
+    except Exception as e:
+        try:
+            await tg_send_message(
+                chat_id,
+                f"❌ Очередь чата недоступна: {e}",
+                reply_markup=_main_menu_for(user_id),
+            )
+        except Exception:
+            pass
+        return False
+
+
 def _ai_prompt_root_inline_kb() -> dict:
     return {
         "inline_keyboard": [
@@ -2191,14 +2248,21 @@ async def tg_send_audio_bytes(
         if r.status_code >= 400:
             raise RuntimeError(f"Telegram sendAudio HTTP {r.status_code}: {r.text[:1200]}")
 
-async def tg_send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None):
+async def tg_send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None) -> Optional[int]:
     if not TELEGRAM_BOT_TOKEN:
-        return
+        return None
     payload = {"chat_id": chat_id, "text": text}
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
     async with httpx.AsyncClient(timeout=30) as client:
-        await client.post(f"{TELEGRAM_API_BASE}/sendMessage", json=payload)
+        r = await client.post(f"{TELEGRAM_API_BASE}/sendMessage", json=payload)
+    try:
+        j = r.json()
+        if isinstance(j, dict) and j.get("ok") and j.get("result"):
+            return int((j.get("result") or {}).get("message_id") or 0) or None
+    except Exception:
+        pass
+    return None
         
 
 async def _admin_broadcast_send(admin_chat_id: int, text: str) -> Tuple[int, int]:
@@ -4573,6 +4637,10 @@ async def webhook(secret: str, request: Request):
             sb_clear_user_state(user_id)
         except Exception:
             pass
+        try:
+            await reset_tg_chat_memory(chat_id, user_id)
+        except Exception:
+            pass
         await tg_send_message(chat_id, "✅ Сброс выполнен. Возвращаю в главное меню.", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
 
@@ -4591,28 +4659,6 @@ async def webhook(secret: str, request: Request):
             await tg_send_message(chat_id, "Файл больше 10 МБ. Для бесплатного Claude можно отправлять файлы до 10 МБ.", reply_markup=_main_menu_for(user_id))
             return {"ok": True}
 
-        try:
-            await tg_send_chat_action(chat_id, "typing")
-            file_path = await tg_get_file_path(file_id)
-            raw = await tg_download_file_bytes(file_path)
-        except Exception as e:
-            await tg_send_message(chat_id, f"Не смог загрузить файл из Telegram: {e}", reply_markup=_main_menu_for(user_id))
-            return {"ok": True}
-
-        kind, extracted, notice = extract_file_text(raw, filename, mime_type)
-        extracted = (extracted or "")[:AI_CHAT_FILE_TEXT_MAX_CHARS]
-
-        if not incoming_text:
-            incoming_text = "Проанализируй приложенный файл и дай краткий полезный вывод."
-
-        file_context = f"Пользователь приложил файл: {filename} · {kind} · {max(1, round(len(raw) / 1024))} KB"
-        if notice:
-            file_context += f"\nЗаметка: {notice}"
-        if extracted:
-            file_context += f"\n\nИзвлечённый текст файла, первые {min(len(extracted), AI_CHAT_FILE_TEXT_MAX_CHARS)} символов:\n{extracted}"
-        else:
-            file_context += "\n\nТекст из файла извлечь не удалось. Ответь пользователю честно и попроси прислать текстовый/PDF/DOCX файл, если нужен анализ содержимого."
-
         if st.get("ai_chat_mode") != "chat":
             await tg_send_message(
                 chat_id,
@@ -4621,37 +4667,22 @@ async def webhook(secret: str, request: Request):
             )
             return {"ok": True}
 
-        try:
-            await _ai_maybe_summarize(st)
-        except Exception:
-            pass
-        summary = _ai_summary_get(st)
-        hist = _ai_hist_get(st)[-AI_CHAT_HISTORY_MAX:]
-        user_payload = f"{incoming_text}\n\n{file_context}"
+        queued = await _enqueue_tg_ai_chat_job(
+            chat_id=chat_id,
+            user_id=user_id,
+            text=incoming_text or "Проанализируй приложенный файл и дай краткий полезный вывод.",
+            model_key=_ai_chat_model_key(st),
+            file_meta={
+                "filename": filename,
+                "file_id": file_id,
+                "mime_type": mime_type,
+                "size_bytes": size_bytes,
+            },
+        )
+        if queued:
+            return {"ok": True}
 
-        if _ai_chat_model_key(st) == "openai":
-            answer = await openai_chat_answer(
-                user_text=user_payload,
-                system_prompt=CLAUDE_TEXT_SYSTEM_PROMPT,
-                history=hist,
-                temperature=0.4,
-                max_completion_tokens=1500,
-                model=OPENAI_CHAT_MODEL,
-            )
-        else:
-            answer = await kie_claude_answer(
-                user_text=user_payload,
-                system_prompt=CLAUDE_TEXT_SYSTEM_PROMPT,
-                history=hist,
-                summary=summary,
-                max_tokens=1500,
-                thinking=True,
-            )
-
-        memory_user = incoming_text + f"\n📎 Файл: {filename} ({kind}, {max(1, round(len(raw) / 1024))} KB)"
-        _ai_hist_add(st, "user", memory_user)
-        _ai_hist_add(st, "assistant", answer)
-        await tg_send_message(chat_id, answer, reply_markup=_main_menu_for(user_id))
+        await tg_send_message(chat_id, "❌ Не удалось поставить чат в очередь. Проверь REDIS_URL и worker_chat.py.", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
 
     # Execution guard: while a long generation is running, ignore accidental navigation/button texts
@@ -9837,41 +9868,16 @@ async def webhook(secret: str, request: Request):
                 )
                 return {"ok": True}
 
-            # update summary if we have enough trimmed messages
-            try:
-                await _ai_maybe_summarize(st)
-            except Exception:
-                pass
+            queued = await _enqueue_tg_ai_chat_job(
+                chat_id=chat_id,
+                user_id=user_id,
+                text=incoming_text,
+                model_key=_ai_chat_model_key(st),
+            )
+            if queued:
+                return {"ok": True}
 
-            summary = _ai_summary_get(st)
-            hist = _ai_hist_get(st)
-
-            history_for_model: List[Dict[str, str]] = hist[-AI_CHAT_HISTORY_MAX:]
-
-            if _ai_chat_model_key(st) == "openai":
-                answer = await openai_chat_answer(
-                    user_text=incoming_text,
-                    system_prompt=CLAUDE_TEXT_SYSTEM_PROMPT,
-                    history=history_for_model,
-                    temperature=0.4,
-                    max_completion_tokens=1500,
-                    model=OPENAI_CHAT_MODEL,
-                )
-            else:
-                answer = await kie_claude_answer(
-                    user_text=incoming_text,
-                    system_prompt=CLAUDE_TEXT_SYSTEM_PROMPT,
-                    history=history_for_model,
-                    summary=summary,
-                    max_tokens=1500,
-                    thinking=True,
-                )
-
-            # store ONLY chat dialog
-            _ai_hist_add(st, "user", incoming_text)
-            _ai_hist_add(st, "assistant", answer)
-
-            await tg_send_message(chat_id, answer, reply_markup=_main_menu_for(user_id))
+            await tg_send_message(chat_id, "❌ Не удалось поставить чат в очередь. Проверь REDIS_URL и worker_chat.py.", reply_markup=_main_menu_for(user_id))
             return {"ok": True}
 
         # fallback (should not happen): answer with Claude without memory
