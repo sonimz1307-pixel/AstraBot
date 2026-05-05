@@ -677,6 +677,7 @@ def _yookassa_enabled() -> bool:
     return bool(YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY)
 PIAPI_API_KEY = os.getenv("PIAPI_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
 PROMPT_BUILDER_MODEL = os.getenv("PROMPT_BUILDER_MODEL", "gpt-5.4").strip() or "gpt-5.4"
 PROMPT_BUILDER_MAX_IMAGES = int(os.getenv("PROMPT_BUILDER_MAX_IMAGES", "9") or 9)
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change_me")
@@ -1359,6 +1360,7 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
         st.pop("grok_t2v", None)
         st.pop("grok_i2v", None)
         st.pop("ai_chat_mode", None)
+        st.pop("ai_chat_model", None)
         st.pop("ai_prompt", None)
 
 
@@ -1903,11 +1905,28 @@ def _ai_chat_mode_inline_kb() -> dict:
     return {
         "inline_keyboard": [
             [
-                {"text": "💬 Чат", "callback_data": "aichat:mode:chat"},
+                {"text": "💬 Claude Sonnet", "callback_data": "aichat:model:claude"},
+                {"text": "💬 ChatGPT", "callback_data": "aichat:model:openai"},
+            ],
+            [
                 {"text": "🪄 Промт", "callback_data": "aichat:mode:prompt"},
-            ]
+            ],
         ]
     }
+
+
+def _ai_chat_model_title(model: str) -> str:
+    model = (model or "claude").strip().lower()
+    if model in ("openai", "chatgpt", "gpt"):
+        return "ChatGPT"
+    return "Claude Sonnet"
+
+
+def _ai_chat_model_key(st: Dict[str, Any]) -> str:
+    model = str((st or {}).get("ai_chat_model") or "claude").strip().lower()
+    if model in ("openai", "chatgpt", "gpt"):
+        return "openai"
+    return "claude"
 
 
 def _ai_prompt_root_inline_kb() -> dict:
@@ -1922,7 +1941,7 @@ def _ai_prompt_root_inline_kb() -> dict:
                 {"text": "✨ Универсальный", "callback_data": "aichat:prompt_root:universal"},
             ],
             [
-                {"text": "💬 Чат", "callback_data": "aichat:mode:chat"},
+                {"text": "↩️ ИИ-меню", "callback_data": "aichat:mode:menu"},
             ],
         ]
     }
@@ -1944,7 +1963,7 @@ def _ai_prompt_video_inline_kb() -> dict:
             ],
             [
                 {"text": "↩️ Разделы", "callback_data": "aichat:prompt_reset"},
-                {"text": "💬 Чат", "callback_data": "aichat:mode:chat"},
+                {"text": "↩️ ИИ-меню", "callback_data": "aichat:mode:menu"},
             ],
         ]
     }
@@ -1983,7 +2002,7 @@ def _ai_prompt_tools_inline_kb(pb: Optional[Dict[str, Any]] = None) -> dict:
                 {"text": "🔁 Выбрать заново", "callback_data": "aichat:prompt_reset"},
             ],
             [
-                {"text": "💬 Чат", "callback_data": "aichat:mode:chat"},
+                {"text": "↩️ ИИ-меню", "callback_data": "aichat:mode:menu"},
             ],
         ]
     }
@@ -4143,13 +4162,28 @@ async def webhook(secret: str, request: Request):
             st = _ensure_state(chat_id, user_id)
             parts = data.split(":")
 
-            if data == "aichat:mode:chat":
+            if data == "aichat:mode:menu":
                 _set_mode(chat_id, user_id, "chat")
-                st["ai_chat_mode"] = "chat"
+                st["ai_chat_mode"] = "menu"
+                st["ai_prompt"] = _new_ai_prompt_state()
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
-                    "💬 Режим чата включён. Можешь писать вопрос или прислать фото для анализа.",
+                    "🤖 ИИ помощник. Выбери модель чата или генератор промтов:",
+                    reply_markup=_ai_chat_mode_inline_kb(),
+                )
+                return {"ok": True}
+
+            if data in ("aichat:model:claude", "aichat:model:openai", "aichat:mode:chat"):
+                _set_mode(chat_id, user_id, "chat")
+                model = "openai" if data == "aichat:model:openai" else "claude"
+                st["ai_chat_mode"] = "chat"
+                st["ai_chat_model"] = model
+                st["ai_prompt"] = _new_ai_prompt_state()
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    f"💬 Режим чата включён: {_ai_chat_model_title(model)}.\nМожешь писать вопрос или прислать фото для анализа.",
                     reply_markup=_ai_chat_mode_inline_kb(),
                 )
                 return {"ok": True}
@@ -4157,6 +4191,7 @@ async def webhook(secret: str, request: Request):
             if data == "aichat:mode:prompt":
                 _set_mode(chat_id, user_id, "chat")
                 st["ai_chat_mode"] = "prompt"
+                st.pop("ai_chat_model", None)
                 st["ai_prompt"] = _new_ai_prompt_state()
                 st["ts"] = _now()
                 await tg_send_message(
@@ -4541,7 +4576,7 @@ async def webhook(secret: str, request: Request):
         await tg_send_message(chat_id, "✅ Сброс выполнен. Возвращаю в главное меню.", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
 
-    # ---------------- Документы для Claude в режиме ИИ-чата ----------------
+    # ---------------- Документы в режиме ИИ-чата ----------------
     document = message.get("document") or {}
     if document and st.get("mode") == "chat":
         filename = str(document.get("file_name") or "file").strip() or "file"
@@ -4578,21 +4613,40 @@ async def webhook(secret: str, request: Request):
         else:
             file_context += "\n\nТекст из файла извлечь не удалось. Ответь пользователю честно и попроси прислать текстовый/PDF/DOCX файл, если нужен анализ содержимого."
 
+        if st.get("ai_chat_mode") != "chat":
+            await tg_send_message(
+                chat_id,
+                "Файл получил, но сначала выбери модель чата: Claude Sonnet или ChatGPT.",
+                reply_markup=_ai_chat_mode_inline_kb(),
+            )
+            return {"ok": True}
+
         try:
             await _ai_maybe_summarize(st)
         except Exception:
             pass
         summary = _ai_summary_get(st)
         hist = _ai_hist_get(st)[-AI_CHAT_HISTORY_MAX:]
+        user_payload = f"{incoming_text}\n\n{file_context}"
 
-        answer = await kie_claude_answer(
-            user_text=f"{incoming_text}\n\n{file_context}",
-            system_prompt=CLAUDE_TEXT_SYSTEM_PROMPT,
-            history=hist,
-            summary=summary,
-            max_tokens=1500,
-            thinking=True,
-        )
+        if _ai_chat_model_key(st) == "openai":
+            answer = await openai_chat_answer(
+                user_text=user_payload,
+                system_prompt=CLAUDE_TEXT_SYSTEM_PROMPT,
+                history=hist,
+                temperature=0.4,
+                max_completion_tokens=1500,
+                model=OPENAI_CHAT_MODEL,
+            )
+        else:
+            answer = await kie_claude_answer(
+                user_text=user_payload,
+                system_prompt=CLAUDE_TEXT_SYSTEM_PROMPT,
+                history=hist,
+                summary=summary,
+                max_tokens=1500,
+                thinking=True,
+            )
 
         memory_user = incoming_text + f"\n📎 Файл: {filename} ({kind}, {max(1, round(len(raw) / 1024))} KB)"
         _ai_hist_add(st, "user", memory_user)
@@ -5937,12 +5991,21 @@ async def webhook(secret: str, request: Request):
 
     if incoming_text in ("ИИ (чат)", "🧠 ИИ (чат)", "🧠 ИИ чат"):
         _set_mode(chat_id, user_id, "chat")
-        st["ai_chat_mode"] = "chat"
+        st["ai_chat_mode"] = "menu"
         st["ai_prompt"] = _new_ai_prompt_state()
         st["ts"] = _now()
         await tg_send_message(
             chat_id,
-            "🤖 ИИ помощник включён.\n\nВыбери режим ниже: обычный чат или генератор промтов.",
+            "🤖 ИИ помощник включён.\n\nВыбери модель чата или генератор промтов.",
+            reply_markup=_ai_chat_mode_inline_kb(),
+        )
+        return {"ok": True}
+
+
+    if st.get("mode") == "chat" and st.get("ai_chat_mode") == "menu" and incoming_text and not _is_nav_or_menu_text(incoming_text):
+        await tg_send_message(
+            chat_id,
+            "Сначала выбери модель чата: Claude Sonnet или ChatGPT. Либо выбери 🪄 Промт.",
             reply_markup=_ai_chat_mode_inline_kb(),
         )
         return {"ok": True}
@@ -9766,6 +9829,14 @@ async def webhook(secret: str, request: Request):
                 
         # CHAT: обычный текстовый ответ (с памятью только для режима ИИ-чата)
         if st.get("mode") == "chat":
+            if st.get("ai_chat_mode") != "chat":
+                await tg_send_message(
+                    chat_id,
+                    "Сначала выбери модель чата: Claude Sonnet или ChatGPT. Либо выбери 🪄 Промт.",
+                    reply_markup=_ai_chat_mode_inline_kb(),
+                )
+                return {"ok": True}
+
             # update summary if we have enough trimmed messages
             try:
                 await _ai_maybe_summarize(st)
@@ -9777,14 +9848,24 @@ async def webhook(secret: str, request: Request):
 
             history_for_model: List[Dict[str, str]] = hist[-AI_CHAT_HISTORY_MAX:]
 
-            answer = await kie_claude_answer(
-                user_text=incoming_text,
-                system_prompt=CLAUDE_TEXT_SYSTEM_PROMPT,
-                history=history_for_model,
-                summary=summary,
-                max_tokens=1500,
-                thinking=True,
-            )
+            if _ai_chat_model_key(st) == "openai":
+                answer = await openai_chat_answer(
+                    user_text=incoming_text,
+                    system_prompt=CLAUDE_TEXT_SYSTEM_PROMPT,
+                    history=history_for_model,
+                    temperature=0.4,
+                    max_completion_tokens=1500,
+                    model=OPENAI_CHAT_MODEL,
+                )
+            else:
+                answer = await kie_claude_answer(
+                    user_text=incoming_text,
+                    system_prompt=CLAUDE_TEXT_SYSTEM_PROMPT,
+                    history=history_for_model,
+                    summary=summary,
+                    max_tokens=1500,
+                    thinking=True,
+                )
 
             # store ONLY chat dialog
             _ai_hist_add(st, "user", incoming_text)
@@ -9793,7 +9874,7 @@ async def webhook(secret: str, request: Request):
             await tg_send_message(chat_id, answer, reply_markup=_main_menu_for(user_id))
             return {"ok": True}
 
-        # fallback (should not happen): if not in chat mode, just answer without memory
+        # fallback (should not happen): answer with Claude without memory
         answer = await kie_claude_answer(
             user_text=incoming_text,
             system_prompt=CLAUDE_TEXT_SYSTEM_PROMPT,
