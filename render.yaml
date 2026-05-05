@@ -6,3 +6,11 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: bash start.sh
     autoDeploy: true
+
+  - type: worker
+    name: astrabot-chat-worker
+    env: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python worker_chat.py
+    autoDeploy: true
