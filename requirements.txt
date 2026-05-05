@@ -8,3 +8,4 @@ aiohttp
 requests>=2.31.0
 python-multipart
 redis>=5.0.0
+pypdf>=4.3.1
