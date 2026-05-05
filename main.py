@@ -14,6 +14,14 @@ from typing import Optional, Literal, Dict, Any, Tuple, List
 
 import httpx
 from queue_redis import enqueue_job
+from chat_file_text import extract_file_text
+from kie_claude_chat import (
+    KIE_CLAUDE_DISPLAY_NAME,
+    KIE_CLAUDE_HISTORY_MESSAGES,
+    KIE_CLAUDE_MODEL_ID,
+    kie_claude_answer,
+    kie_claude_summarize_dialogue,
+)
 from fastapi import FastAPI, Request, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -1054,10 +1062,12 @@ STATE_TTL_SECONDS = int(os.getenv("STATE_TTL_SECONDS", "1800"))  # 30 минут
 STATE: Dict[Tuple[int, int], Dict[str, Any]] = {}
 
 # ---------------- AI chat memory (in-RAM, only for mode=chat) ----------------
-AI_CHAT_HISTORY_MAX = int(os.getenv("AI_CHAT_HISTORY_MAX", "10"))  # last N messages (user+assistant)
+AI_CHAT_HISTORY_MAX = int(os.getenv("AI_CHAT_HISTORY_MAX", str(KIE_CLAUDE_HISTORY_MESSAGES)))  # last N messages (user+assistant)
 AI_CHAT_TTL_SECONDS = int(os.getenv("AI_CHAT_TTL_SECONDS", "7200"))  # 2 hours
-AI_CHAT_SUMMARY_MAX_CHARS = int(os.getenv("AI_CHAT_SUMMARY_MAX_CHARS", "800"))
+AI_CHAT_SUMMARY_MAX_CHARS = int(os.getenv("AI_CHAT_SUMMARY_MAX_CHARS", "5000"))
 AI_CHAT_SUMMARY_BATCH = int(os.getenv("AI_CHAT_SUMMARY_BATCH", "10"))  # summarize each N trimmed messages
+AI_CHAT_FILE_MAX_BYTES = int(os.getenv("AI_CHAT_FILE_MAX_BYTES", str(10 * 1024 * 1024)))
+AI_CHAT_FILE_TEXT_MAX_CHARS = int(os.getenv("AI_CHAT_FILE_TEXT_MAX_CHARS", "50000"))
 
 PosterStep = Literal["need_photo", "need_prompt"]
 
@@ -1206,14 +1216,14 @@ async def _ai_build_summary_chunk(chunk: List[Dict[str, str]], prev_summary: str
         + "\n\nВерни обновленное краткое резюме (без воды)."
     )
 
-    out = await openai_chat_answer(
-        user_text=user,
-        system_prompt=sys,
-        image_bytes=None,
-        temperature=0.2,
-        max_tokens=250,
-    )
-    return (out or "").strip()
+    try:
+        return await kie_claude_summarize_dialogue(
+            messages=chunk,
+            previous_summary=prev_summary,
+            max_chars=AI_CHAT_SUMMARY_MAX_CHARS,
+        )
+    except Exception:
+        return (prev_summary or "")[:AI_CHAT_SUMMARY_MAX_CHARS]
 
 
 async def _ai_maybe_summarize(st: Dict[str, Any]):
@@ -2561,6 +2571,13 @@ VISION_GENERAL_SYSTEM_PROMPT = (
 DEFAULT_TEXT_SYSTEM_PROMPT = (
     "Ты полезный ассистент для Telegram. Не используй LaTeX/TeX. "
     "Если нужна математика — пиши формулы обычным текстом."
+)
+
+CLAUDE_TEXT_SYSTEM_PROMPT = (
+    "Ты Claude Sonnet 4.6 внутри AstraBot. Отвечай на русском, кратко и по делу. "
+    "Рассуждение включено, но не раскрывай внутренние рассуждения — сразу давай готовый ответ. "
+    "Интернет выключен. Если нужны актуальные данные, честно скажи, что без интернета их нельзя проверить. "
+    "Файлы анализируй только по тексту, который передал backend. Не используй LaTeX/TeX."
 )
 
 VISION_DEFAULT_USER_PROMPT = (
@@ -4522,6 +4539,65 @@ async def webhook(secret: str, request: Request):
         except Exception:
             pass
         await tg_send_message(chat_id, "✅ Сброс выполнен. Возвращаю в главное меню.", reply_markup=_main_menu_for(user_id))
+        return {"ok": True}
+
+    # ---------------- Документы для Claude в режиме ИИ-чата ----------------
+    document = message.get("document") or {}
+    if document and st.get("mode") == "chat":
+        filename = str(document.get("file_name") or "file").strip() or "file"
+        file_id = str(document.get("file_id") or "").strip()
+        mime_type = str(document.get("mime_type") or "application/octet-stream").strip()
+        size_bytes = int(document.get("file_size") or 0)
+
+        if not file_id:
+            await tg_send_message(chat_id, "Не смог прочитать file_id файла. Отправь файл ещё раз.", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+        if size_bytes > AI_CHAT_FILE_MAX_BYTES:
+            await tg_send_message(chat_id, "Файл больше 10 МБ. Для бесплатного Claude можно отправлять файлы до 10 МБ.", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+
+        try:
+            await tg_send_chat_action(chat_id, "typing")
+            file_path = await tg_get_file_path(file_id)
+            raw = await tg_download_file_bytes(file_path)
+        except Exception as e:
+            await tg_send_message(chat_id, f"Не смог загрузить файл из Telegram: {e}", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+
+        kind, extracted, notice = extract_file_text(raw, filename, mime_type)
+        extracted = (extracted or "")[:AI_CHAT_FILE_TEXT_MAX_CHARS]
+
+        if not incoming_text:
+            incoming_text = "Проанализируй приложенный файл и дай краткий полезный вывод."
+
+        file_context = f"Пользователь приложил файл: {filename} · {kind} · {max(1, round(len(raw) / 1024))} KB"
+        if notice:
+            file_context += f"\nЗаметка: {notice}"
+        if extracted:
+            file_context += f"\n\nИзвлечённый текст файла, первые {min(len(extracted), AI_CHAT_FILE_TEXT_MAX_CHARS)} символов:\n{extracted}"
+        else:
+            file_context += "\n\nТекст из файла извлечь не удалось. Ответь пользователю честно и попроси прислать текстовый/PDF/DOCX файл, если нужен анализ содержимого."
+
+        try:
+            await _ai_maybe_summarize(st)
+        except Exception:
+            pass
+        summary = _ai_summary_get(st)
+        hist = _ai_hist_get(st)[-AI_CHAT_HISTORY_MAX:]
+
+        answer = await kie_claude_answer(
+            user_text=f"{incoming_text}\n\n{file_context}",
+            system_prompt=CLAUDE_TEXT_SYSTEM_PROMPT,
+            history=hist,
+            summary=summary,
+            max_tokens=1500,
+            thinking=True,
+        )
+
+        memory_user = incoming_text + f"\n📎 Файл: {filename} ({kind}, {max(1, round(len(raw) / 1024))} KB)"
+        _ai_hist_add(st, "user", memory_user)
+        _ai_hist_add(st, "assistant", answer)
+        await tg_send_message(chat_id, answer, reply_markup=_main_menu_for(user_id))
         return {"ok": True}
 
     # Execution guard: while a long generation is running, ignore accidental navigation/button texts
@@ -9699,22 +9775,15 @@ async def webhook(secret: str, request: Request):
             summary = _ai_summary_get(st)
             hist = _ai_hist_get(st)
 
-            history_for_model: List[Dict[str, str]] = []
-            if summary:
-                history_for_model.append({
-                    "role": "system",
-                    "content": f"Краткое резюме диалога (для контекста):\n{summary}",
-                })
-            # last N messages
-            history_for_model.extend(hist)
+            history_for_model: List[Dict[str, str]] = hist[-AI_CHAT_HISTORY_MAX:]
 
-            answer = await openai_chat_answer(
+            answer = await kie_claude_answer(
                 user_text=incoming_text,
-                system_prompt=DEFAULT_TEXT_SYSTEM_PROMPT,
-                image_bytes=None,
-                temperature=0.6,
-                max_tokens=700,
+                system_prompt=CLAUDE_TEXT_SYSTEM_PROMPT,
                 history=history_for_model,
+                summary=summary,
+                max_tokens=1500,
+                thinking=True,
             )
 
             # store ONLY chat dialog
@@ -9725,12 +9794,13 @@ async def webhook(secret: str, request: Request):
             return {"ok": True}
 
         # fallback (should not happen): if not in chat mode, just answer without memory
-        answer = await openai_chat_answer(
+        answer = await kie_claude_answer(
             user_text=incoming_text,
-            system_prompt=DEFAULT_TEXT_SYSTEM_PROMPT,
-            image_bytes=None,
-            temperature=0.6,
-            max_tokens=700,
+            system_prompt=CLAUDE_TEXT_SYSTEM_PROMPT,
+            history=[],
+            summary="",
+            max_tokens=1500,
+            thinking=True,
         )
         await tg_send_message(chat_id, answer, reply_markup=_main_menu_for(user_id))
         return {"ok": True}
