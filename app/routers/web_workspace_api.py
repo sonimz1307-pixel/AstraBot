@@ -25,6 +25,16 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, Upload
 from pydantic import BaseModel, Field
 
 from ai_chat import openai_chat_answer
+from chat_file_text import extract_file_text
+from kie_claude_chat import (
+    KIE_CLAUDE_DISPLAY_NAME,
+    KIE_CLAUDE_HISTORY_MESSAGES,
+    KIE_CLAUDE_MODEL_ID,
+    KIE_CLAUDE_SUMMARY_MAX_CHARS,
+    is_kie_claude_model,
+    kie_claude_answer,
+    kie_claude_summarize_dialogue,
+)
 from app.routers.prompts import categories as prompts_categories
 from app.routers.prompts import groups as prompts_groups
 from app.routers.prompts import items as prompts_items
@@ -335,11 +345,12 @@ def _prepare_seedance_video_file(upload: Any, raw: bytes) -> tuple[bytes, str, f
 
 CHAT_MODEL_LABEL_DEFAULT = "gpt-4o-mini"
 PROMPT_MODEL_LABEL = "gpt-5.4"
-MAX_CHAT_ATTACHMENTS = 6
+MAX_CHAT_ATTACHMENTS = 5
 MAX_CHAT_IMAGE_ATTACHMENTS = 4
-MAX_CHAT_ATTACHMENT_BYTES = 8 * 1024 * 1024
-MAX_CHAT_ATTACHMENT_TEXT_PER_FILE = 12000
-MAX_CHAT_ATTACHMENT_TEXT_TOTAL = 28000
+MAX_CHAT_ATTACHMENT_BYTES = 10 * 1024 * 1024
+MAX_CHAT_ATTACHMENT_TEXT_PER_FILE = 50000
+MAX_CHAT_ATTACHMENT_TEXT_TOTAL = 50000
+MAX_CHAT_SUMMARY_CHARS = KIE_CLAUDE_SUMMARY_MAX_CHARS
 _TEXT_ATTACHMENT_EXTS = {
     ".txt", ".md", ".csv", ".json", ".js", ".ts", ".tsx", ".jsx", ".py", ".html", ".css",
     ".xml", ".yml", ".yaml", ".sql", ".ini", ".cfg", ".log", ".rtf", ".sh", ".bat"
@@ -405,11 +416,47 @@ def _sanitize_chat_history(value: Any) -> List[Dict[str, str]]:
     return out
 
 
+
+def _sanitize_chat_summary(value: Any) -> str:
+    text = str(value or "").replace("\x00", "").strip()
+    if len(text) > MAX_CHAT_SUMMARY_CHARS:
+        return text[:MAX_CHAT_SUMMARY_CHARS]
+    return text
+
+
+def _dedupe_latest_user_from_history(history: List[Dict[str, str]], latest_text: str) -> List[Dict[str, str]]:
+    if not history:
+        return []
+    latest = str(latest_text or "").strip()
+    if latest and history[-1].get("role") == "user" and str(history[-1].get("content") or "").strip() == latest:
+        return history[:-1]
+    return history
+
+
+async def _prepare_workspace_claude_memory(history: List[Dict[str, str]], summary: str) -> Dict[str, Any]:
+    cleaned = [m for m in (history or []) if isinstance(m, dict) and m.get("role") in ("user", "assistant") and str(m.get("content") or "").strip()]
+    current_summary = _sanitize_chat_summary(summary)
+    recent = cleaned[-KIE_CLAUDE_HISTORY_MESSAGES:]
+    overflow = cleaned[:-KIE_CLAUDE_HISTORY_MESSAGES]
+    if overflow:
+        try:
+            current_summary = await kie_claude_summarize_dialogue(
+                messages=overflow,
+                previous_summary=current_summary,
+                max_chars=MAX_CHAT_SUMMARY_CHARS,
+            )
+        except Exception:
+            current_summary = _sanitize_chat_summary(current_summary)
+    return {"summary": _sanitize_chat_summary(current_summary), "history": recent}
+
+
 def _resolve_workspace_chat_model(requested_model: Any, mode: str) -> Dict[str, str]:
     mode_value = _normalize_chat_mode_value(mode)
     requested = str(requested_model or "").strip()
     if mode_value == "prompt_builder":
         return {"label": PROMPT_MODEL_LABEL, "actual": PROMPT_BUILDER_MODEL}
+    if is_kie_claude_model(requested):
+        return {"label": KIE_CLAUDE_DISPLAY_NAME, "actual": KIE_CLAUDE_MODEL_ID}
     if requested in {OPENAI_CHAT_MODEL, PROMPT_BUILDER_MODEL}:
         return {"label": requested, "actual": requested}
     return {"label": CHAT_MODEL_LABEL_DEFAULT, "actual": OPENAI_CHAT_MODEL}
@@ -543,7 +590,7 @@ async def _prepare_workspace_chat_attachments(files: List[UploadFile]) -> Dict[s
             continue
 
         if size_bytes > MAX_CHAT_ATTACHMENT_BYTES:
-            notices.append(f"{filename}: файл больше 8 МБ, пропущен.")
+            notices.append(f"{filename}: файл больше 10 МБ, пропущен.")
             prepared.append(item)
             continue
 
@@ -559,12 +606,10 @@ async def _prepare_workspace_chat_attachments(files: List[UploadFile]) -> Dict[s
             continue
 
         extracted = ""
-        if kind == "text":
-            extracted = _decode_text_bytes(raw)
-        elif kind == "docx":
-            extracted = _extract_docx_text(raw)
-        elif kind == "pdf":
-            notices.append(f"{filename}: PDF принят, но автоматическое извлечение текста на сервере пока не включено.")
+        if kind in {"text", "docx", "pdf"}:
+            _kind, extracted, notice = extract_file_text(raw, filename, content_type)
+            if notice:
+                notices.append(notice)
         else:
             notices.append(f"{filename}: файл прикреплён, но этот формат пока не разбирается автоматически.")
 
@@ -603,7 +648,7 @@ async def _prepare_workspace_chat_attachments(files: List[UploadFile]) -> Dict[s
 
 def _chat_models() -> List[str]:
     out: List[str] = []
-    for m in [OPENAI_CHAT_MODEL, PROMPT_BUILDER_MODEL]:
+    for m in [OPENAI_CHAT_MODEL, PROMPT_BUILDER_MODEL, KIE_CLAUDE_MODEL_ID]:
         m = (m or "").strip()
         if m and m not in out:
             out.append(m)
@@ -2125,6 +2170,7 @@ class ChatTurn(BaseModel):
 class WorkspaceChatIn(BaseModel):
     text: str = Field(..., min_length=1, max_length=12000)
     history: Optional[List[ChatTurn]] = None
+    summary: Optional[str] = Field(default="", max_length=10000)
     model: Optional[str] = None
     mode: str = Field(default="chat", pattern="^(chat|prompt_builder)$")
     temperature: float = Field(default=0.6, ge=0.0, le=1.5)
@@ -3120,6 +3166,7 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
         text_value = str(form.get("text") or "").strip()
         mode = _normalize_chat_mode_value(form.get("mode"))
         history = _sanitize_chat_history(form.get("history"))
+        summary_value = _sanitize_chat_summary(form.get("summary"))
         temperature = _clamp_float(form.get("temperature"), 0.6, 0.0, 1.5)
         max_tokens = _clamp_int(form.get("max_tokens"), 900, 150, 4000)
         resolved_model = _resolve_workspace_chat_model(form.get("model"), mode)
@@ -3129,6 +3176,7 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
         text_value = payload.text.strip()
         mode = _normalize_chat_mode_value(payload.mode)
         history = [{"role": item.role, "content": item.content} for item in (payload.history or []) if item.role in ("user", "assistant")]
+        summary_value = _sanitize_chat_summary(payload.summary)
         temperature = payload.temperature
         max_tokens = payload.max_tokens
         resolved_model = _resolve_workspace_chat_model(payload.model, mode)
@@ -3144,6 +3192,8 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
     user_text = text_value or "Проанализируй приложенные файлы и кратко скажи, что в них находится, затем предложи полезные следующие шаги."
     if prepared_files.get("context"):
         user_text = f"{user_text}\n\n{prepared_files['context']}"
+
+    history = _dedupe_latest_user_from_history(history, text_value)
 
     model_label = resolved_model["label"]
     model_actual = resolved_model["actual"]
@@ -3168,21 +3218,35 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
             f"Если пользователь спрашивает, какая модель выбрана в интерфейсе, отвечай только названием модели: {model_label}."
         )
 
-    answer = await openai_chat_answer(
-        user_text=user_text,
-        system_prompt=system_prompt,
-        history=history,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        model=model_actual,
-        image_bytes_list=prepared_files.get("image_bytes_list") or None,
-    )
+    response_summary = summary_value
+    if is_kie_claude_model(model_actual) and mode == "chat":
+        memory = await _prepare_workspace_claude_memory(history, summary_value)
+        response_summary = memory.get("summary") or ""
+        answer = await kie_claude_answer(
+            user_text=user_text,
+            system_prompt=system_prompt,
+            history=memory.get("history") or [],
+            summary=response_summary,
+            max_tokens=1500,
+            thinking=True,
+        )
+    else:
+        answer = await openai_chat_answer(
+            user_text=user_text,
+            system_prompt=system_prompt,
+            history=history,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            model=model_actual,
+            image_bytes_list=prepared_files.get("image_bytes_list") or None,
+        )
     return {
         "ok": True,
         "answer": answer,
         "mode": mode,
         "model": model_label,
         "resolved_model": model_actual,
+        "summary": response_summary,
         "attachments": prepared_files.get("items") or [],
         "is_prompt": _is_prompt_builder_output(answer) if mode == "prompt_builder" else False,
     }
