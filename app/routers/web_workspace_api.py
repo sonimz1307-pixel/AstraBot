@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import base64
 import math
 import json
 import mimetypes
@@ -26,6 +27,11 @@ from pydantic import BaseModel, Field
 
 from ai_chat import openai_chat_answer
 from chat_file_text import extract_file_text
+from chat_attachment_storage import (
+    CHAT_ATTACHMENTS_BUCKET,
+    is_chat_storage_configured,
+    upload_chat_attachment_bytes,
+)
 from kie_claude_chat import (
     KIE_CLAUDE_DISPLAY_NAME,
     KIE_CLAUDE_HISTORY_MESSAGES,
@@ -123,6 +129,7 @@ from kling3_kie_pricing import (
 )
 from songwriter_prompt import SONGWRITER_SYSTEM_PROMPT
 from queue_redis import enqueue_job
+from chat_job_store import create_chat_job_status, get_chat_job_status, set_chat_job_status
 from nano_banana import run_nano_banana
 from nano_banana_pro import handle_nano_banana_pro
 from nano_banana_pro_new_kie import handle_nano_banana_pro_new, normalize_nano_banana_pro_new_aspect_ratio, normalize_nano_banana_pro_new_resolution
@@ -167,6 +174,8 @@ TOPAZ_IMAGE_RETRY_DELAY_SEC = max(0.25, float(os.getenv("TOPAZ_IMAGE_RETRY_DELAY
 WORKSPACE_MEDIA_QUEUE_NAME = (os.getenv("WORKSPACE_MEDIA_QUEUE_NAME", "workspace_media") or "workspace_media").strip() or "workspace_media"
 KLING3_KIE_QUEUE_NAME = (os.getenv("KLING3_KIE_QUEUE_NAME", "kling3_kie") or "kling3_kie").strip() or "kling3_kie"
 WORKSPACE_IMAGE_QUEUE_NAME = (os.getenv("WORKSPACE_IMAGE_QUEUE_NAME", "workspace_image") or "workspace_image").strip() or "workspace_image"
+WORKSPACE_CHAT_OPENAI_QUEUE_NAME = (os.getenv("WORKSPACE_CHAT_OPENAI_QUEUE_NAME", "workspace_chat_openai") or "workspace_chat_openai").strip() or "workspace_chat_openai"
+WORKSPACE_CHAT_CLAUDE_QUEUE_NAME = (os.getenv("WORKSPACE_CHAT_CLAUDE_QUEUE_NAME", "workspace_chat_claude") or "workspace_chat_claude").strip() or "workspace_chat_claude"
 SEEDANCE_AUDIO_MAX_DURATION_SEC = 15.0
 SEEDANCE_AUDIO_ALLOWED_EXTS = {"mp3", "wav"}
 SEEDANCE_AUDIO_ALLOWED_MIME_TYPES = {"audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/wave"}
@@ -428,8 +437,10 @@ def _dedupe_latest_user_from_history(history: List[Dict[str, str]], latest_text:
     if not history:
         return []
     latest = str(latest_text or "").strip()
-    if latest and history[-1].get("role") == "user" and str(history[-1].get("content") or "").strip() == latest:
-        return history[:-1]
+    if latest and history[-1].get("role") == "user":
+        last_content = str(history[-1].get("content") or "").strip()
+        if last_content == latest or last_content.startswith(latest + "\n\n📎 Файлы:"):
+            return history[:-1]
     return history
 
 
@@ -559,12 +570,26 @@ def _guess_attachment_kind(filename: str, content_type: str) -> str:
     return "binary"
 
 
-async def _prepare_workspace_chat_attachments(files: List[UploadFile]) -> Dict[str, Any]:
+async def _prepare_workspace_chat_attachments(files: List[UploadFile], *, user_id: Any = None, origin: str = "workspace") -> Dict[str, Any]:
+    """Prepare chat attachments without putting raw bytes into Redis.
+
+    Raw files are uploaded to Supabase Storage. The async chat worker receives only
+    storage refs plus extracted text/context. For the legacy synchronous /chat route
+    we still keep image_bytes_list in memory only; it is never enqueued to Redis.
+    """
     prepared: List[Dict[str, Any]] = []
     notices: List[str] = []
     text_blocks: List[str] = []
     image_bytes_list: List[bytes] = []
+    image_storage_refs: List[Dict[str, Any]] = []
     total_text = 0
+
+    storage_enabled = is_chat_storage_configured()
+    if files and not storage_enabled:
+        notices.append(
+            "Supabase Storage для chat attachments не настроен: файлы будут обработаны, "
+            "но ссылки storage_path не будут созданы."
+        )
 
     for file in files[:MAX_CHAT_ATTACHMENTS]:
         filename = Path(getattr(file, "filename", "") or "file").name or "file"
@@ -594,9 +619,36 @@ async def _prepare_workspace_chat_attachments(files: List[UploadFile]) -> Dict[s
             prepared.append(item)
             continue
 
+        if storage_enabled:
+            try:
+                storage_ref = await upload_chat_attachment_bytes(
+                    raw,
+                    filename=filename,
+                    content_type=content_type,
+                    user_id=user_id,
+                    origin=origin,
+                )
+                item.update(storage_ref)
+            except Exception as exc:
+                notices.append(f"{filename}: не удалось загрузить в Supabase Storage ({exc}).")
+        else:
+            item["storage_bucket"] = CHAT_ATTACHMENTS_BUCKET
+            item["storage_path"] = ""
+
         if kind == "image":
             if len(image_bytes_list) < MAX_CHAT_IMAGE_ATTACHMENTS:
+                # Only for the old synchronous endpoint. Async jobs use image_storage_refs instead.
                 image_bytes_list.append(raw)
+                if item.get("storage_path"):
+                    image_storage_refs.append({
+                        "name": filename,
+                        "kind": kind,
+                        "content_type": content_type,
+                        "size_bytes": size_bytes,
+                        "storage_bucket": item.get("storage_bucket") or CHAT_ATTACHMENTS_BUCKET,
+                        "storage_path": item.get("storage_path") or "",
+                        "storage_url": item.get("storage_url") or "",
+                    })
                 item["parsed"] = True
             else:
                 notices.append(
@@ -627,10 +679,13 @@ async def _prepare_workspace_chat_attachments(files: List[UploadFile]) -> Dict[s
 
         prepared.append(item)
 
-    summary_lines = [
-        f"- {item['name']} · {item['kind']} · {max(1, round((item['size_bytes'] or 0) / 1024))} KB"
-        for item in prepared
-    ]
+    summary_lines = []
+    for item in prepared:
+        line = f"- {item['name']} · {item['kind']} · {max(1, round((item['size_bytes'] or 0) / 1024))} KB"
+        if item.get("storage_path"):
+            line += f" · storage: {item.get('storage_bucket')}/{item.get('storage_path')}"
+        summary_lines.append(line)
+
     context_parts: List[str] = []
     if summary_lines:
         context_parts.append("Пользователь приложил файлы:\n" + "\n".join(summary_lines))
@@ -643,6 +698,7 @@ async def _prepare_workspace_chat_attachments(files: List[UploadFile]) -> Dict[s
         "items": prepared,
         "context": "\n\n".join(part for part in context_parts if part).strip(),
         "image_bytes_list": image_bytes_list,
+        "image_storage_refs": image_storage_refs,
     }
 
 
@@ -3184,7 +3240,7 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
     if not text_value and not files:
         raise HTTPException(status_code=400, detail="Введите текст или прикрепите хотя бы один файл.")
 
-    prepared_files = await _prepare_workspace_chat_attachments(files) if files else {"items": [], "context": "", "image_bytes_list": []}
+    prepared_files = await _prepare_workspace_chat_attachments(files, user_id=user.get("telegram_user_id"), origin="workspace-sync") if files else {"items": [], "context": "", "image_bytes_list": [], "image_storage_refs": []}
     image_refs = [f"@image{i}" for i in range(1, len(prepared_files.get("image_bytes_list") or []) + 1)]
     audio_count = sum(1 for item in (prepared_files.get("items") or []) if str(item.get("kind") or "") == "audio")
     audio_refs = [f"@audio{i}" for i in range(1, audio_count + 1)]
@@ -3250,6 +3306,132 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
         "attachments": prepared_files.get("items") or [],
         "is_prompt": _is_prompt_builder_output(answer) if mode == "prompt_builder" else False,
     }
+
+
+@router.post("/chat/async")
+async def workspace_chat_async(request: Request, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
+    content_type = (request.headers.get("content-type") or "").lower()
+    files: List[UploadFile] = []
+
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        text_value = str(form.get("text") or "").strip()
+        mode = _normalize_chat_mode_value(form.get("mode"))
+        history = _sanitize_chat_history(form.get("history"))
+        summary_value = _sanitize_chat_summary(form.get("summary"))
+        temperature = _clamp_float(form.get("temperature"), 0.6, 0.0, 1.5)
+        max_tokens = _clamp_int(form.get("max_tokens"), 900, 150, 4000)
+        resolved_model = _resolve_workspace_chat_model(form.get("model"), mode)
+        files = [f for f in form.getlist("files") if getattr(f, "filename", None)]
+    else:
+        payload = WorkspaceChatIn.model_validate(await request.json())
+        text_value = payload.text.strip()
+        mode = _normalize_chat_mode_value(payload.mode)
+        history = [{"role": item.role, "content": item.content} for item in (payload.history or []) if item.role in ("user", "assistant")]
+        summary_value = _sanitize_chat_summary(payload.summary)
+        temperature = payload.temperature
+        max_tokens = payload.max_tokens
+        resolved_model = _resolve_workspace_chat_model(payload.model, mode)
+
+    if not text_value and not files:
+        raise HTTPException(status_code=400, detail="Введите текст или прикрепите хотя бы один файл.")
+
+    prepared_files = await _prepare_workspace_chat_attachments(files, user_id=user.get("telegram_user_id"), origin="workspace-async") if files else {"items": [], "context": "", "image_bytes_list": [], "image_storage_refs": []}
+    image_refs = [f"@image{i}" for i in range(1, len(prepared_files.get("image_bytes_list") or []) + 1)]
+    audio_count = sum(1 for item in (prepared_files.get("items") or []) if str(item.get("kind") or "") == "audio")
+    audio_refs = [f"@audio{i}" for i in range(1, audio_count + 1)]
+
+    user_text = text_value or "Проанализируй приложенные файлы и кратко скажи, что в них находится, затем предложи полезные следующие шаги."
+    if prepared_files.get("context"):
+        user_text = f"{user_text}\n\n{prepared_files['context']}"
+
+    history = _dedupe_latest_user_from_history(history, text_value)
+    model_label = resolved_model["label"]
+    model_actual = resolved_model["actual"]
+
+    if mode == "prompt_builder":
+        if not _is_prompt_builder_request(text_value, bool(files)):
+            answer = _prompt_builder_redirect_message()
+            job_id = str(uuid4())
+            await create_chat_job_status(job_id, {
+                "status": "completed",
+                "ok": True,
+                "user_id": str(user.get("telegram_user_id") or ""),
+                "answer": answer,
+                "mode": mode,
+                "model": model_label,
+                "resolved_model": model_actual,
+                "attachments": prepared_files.get("items") or [],
+                "is_prompt": False,
+            })
+            return {"ok": True, "job_id": job_id, "status": "completed", "answer": answer, "is_prompt": False}
+        system_prompt = _build_prompt_builder_system_prompt(model_label, image_refs, audio_refs)
+    else:
+        system_prompt = (
+            "Ты — AstraBot Workspace Assistant. "
+            "Помогай как product-minded AI co-pilot: сценарии, промпты, creative direction, тексты, планы и упаковка идей в рабочий пайплайн. "
+            "Пиши по делу, понятно и удобно для дальнейшего запуска в video/image/voice/music студиях. "
+            f"Если пользователь спрашивает, какая модель выбрана в интерфейсе, отвечай только названием модели: {model_label}."
+        )
+
+    if is_kie_claude_model(model_actual) and mode == "chat":
+        model_key = "claude"
+        queue_name = WORKSPACE_CHAT_CLAUDE_QUEUE_NAME
+        history_for_model = history[-KIE_CLAUDE_HISTORY_MESSAGES:]
+        response_summary = summary_value[:KIE_CLAUDE_SUMMARY_MAX_CHARS]
+    else:
+        model_key = "openai"
+        queue_name = WORKSPACE_CHAT_OPENAI_QUEUE_NAME
+        history_for_model = history
+        response_summary = summary_value
+
+    job_id = str(uuid4())
+    await create_chat_job_status(job_id, {
+        "status": "queued",
+        "ok": True,
+        "user_id": str(user.get("telegram_user_id") or ""),
+        "mode": mode,
+        "model": model_label,
+        "resolved_model": model_actual,
+        "attachments": prepared_files.get("items") or [],
+    })
+    job = {
+        "kind": "workspace_ai_chat",
+        "job_id": job_id,
+        "user_id": str(user.get("telegram_user_id") or ""),
+        "model_key": model_key,
+        "model_label": model_label,
+        "model_actual": model_actual,
+        "mode": mode,
+        "user_text": user_text,
+        "system_prompt": system_prompt,
+        "history": history_for_model,
+        "summary": response_summary,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "attachments": prepared_files.get("items") or [],
+        "image_storage_refs": prepared_files.get("image_storage_refs") or [],
+        "is_prompt_builder": mode == "prompt_builder",
+    }
+    try:
+        await enqueue_job(job, queue_name=queue_name)
+    except Exception as exc:
+        await set_chat_job_status(job_id, status="failed", ok=False, error=str(exc))
+        raise HTTPException(status_code=503, detail=f"Чат-очередь недоступна: {exc}")
+
+    return {"ok": True, "job_id": job_id, "status": "queued"}
+
+
+@router.get("/chat/status/{job_id}")
+async def workspace_chat_status(job_id: str, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
+    data = await get_chat_job_status(job_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="chat job not found")
+    owner_id = str(data.get("user_id") or "")
+    current_id = str(user.get("telegram_user_id") or "")
+    if owner_id and current_id and owner_id != current_id:
+        raise HTTPException(status_code=404, detail="chat job not found")
+    return data
 
 
 @router.post("/kling3/create")
