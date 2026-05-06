@@ -355,6 +355,7 @@ async def process_workspace_ai_chat_job(job: Dict[str, Any]) -> None:
                 summary=summary,
                 max_tokens=1500,
                 thinking=True,
+                image_bytes_list=image_bytes_list or None,
             )
         else:
             answer = await openai_chat_answer(
