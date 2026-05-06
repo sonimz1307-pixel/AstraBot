@@ -10,8 +10,9 @@ Default product mode:
 
 from __future__ import annotations
 
+import base64
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -102,6 +103,48 @@ def _extract_claude_text(data: Dict[str, Any]) -> str:
     return ""
 
 
+
+
+def _detect_image_type(data: bytes) -> Tuple[str, str]:
+    if not data:
+        return ("jpg", "image/jpeg")
+    if data.startswith(b"\xFF\xD8\xFF"):
+        return ("jpg", "image/jpeg")
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ("png", "image/png")
+    if data.startswith(b"RIFF") and len(data) >= 12 and data[8:12] == b"WEBP":
+        return ("webp", "image/webp")
+    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+        return ("gif", "image/gif")
+    return ("jpg", "image/jpeg")
+
+
+def _build_claude_user_content(user_text: str, image_bytes_list: Optional[List[bytes]] = None) -> Any:
+    images: List[bytes] = []
+    if isinstance(image_bytes_list, list):
+        for item in image_bytes_list:
+            if isinstance(item, (bytes, bytearray)) and item:
+                images.append(bytes(item))
+
+    text = _clean_text(user_text, 70000)
+    if not images:
+        return text
+
+    content: List[Dict[str, Any]] = []
+    if text:
+        content.append({"type": "text", "text": text})
+    for img in images[:4]:
+        _ext, media_type = _detect_image_type(img)
+        content.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": base64.b64encode(img).decode("utf-8"),
+            },
+        })
+    return content or text
+
 async def kie_claude_answer(
     *,
     user_text: str,
@@ -111,15 +154,16 @@ async def kie_claude_answer(
     max_tokens: int = KIE_CLAUDE_MAX_TOKENS,
     thinking: bool = True,
     timeout_sec: float = KIE_CLAUDE_TIMEOUT_SEC,
+    image_bytes_list: Optional[List[bytes]] = None,
 ) -> str:
     api_key = _api_key()
     if not api_key:
         return "KIE_API_KEY не задан в переменных окружения."
 
     messages = sanitize_claude_history(history, max_messages=KIE_CLAUDE_HISTORY_MESSAGES)
-    text = _clean_text(user_text, 70000)
-    if text:
-        messages.append({"role": "user", "content": text})
+    user_content = _build_claude_user_content(user_text, image_bytes_list)
+    if user_content:
+        messages.append({"role": "user", "content": user_content})
     if not messages:
         return "Пустой запрос."
 
