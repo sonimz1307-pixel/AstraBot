@@ -3285,6 +3285,7 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
             summary=response_summary,
             max_tokens=1500,
             thinking=True,
+            image_bytes_list=prepared_files.get("image_bytes_list") or None,
         )
     else:
         answer = await openai_chat_answer(
