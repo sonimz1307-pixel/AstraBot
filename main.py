@@ -88,6 +88,7 @@ from app.routers.songwriter import router as songwriter_router
 from app.routers.web_workspace_api import router as workspace_router
 from app.routers.video_editor_v2 import router as video_editor_v2_router, page_router as video_editor_v2_page_router
 from app.routers.site_builder_api import router as site_builder_router
+from app.routers.partner_program_api import router as partner_program_router
 app.include_router(leads_router, prefix="/api/leads", tags=["leads"])
 app.include_router(kling3_router, prefix="/api/kling3", tags=["kling3"])
 app.include_router(kling3_kie_router, prefix="/api/kling3-kie", tags=["kling3-kie"])
@@ -97,6 +98,7 @@ app.include_router(prompts_admin_router, prefix="/api/prompts_admin", tags=["pro
 app.include_router(tts_router)
 app.include_router(songwriter_router)
 app.include_router(workspace_router)
+app.include_router(partner_program_router)
 app.include_router(site_builder_router)
 app.include_router(video_editor_v2_router)
 app.include_router(video_editor_v2_page_router)
@@ -117,6 +119,81 @@ if UVICORN_LOGGER.level > logging.INFO:
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WORKSPACE_MEDIA_QUEUE_NAME = (os.getenv("WORKSPACE_MEDIA_QUEUE_NAME", "workspace_media") or "workspace_media").strip() or "workspace_media"
+PARTNER_EVENTS_QUEUE_NAME = (os.getenv("PARTNER_EVENTS_QUEUE_NAME", "partner_events") or "partner_events").strip() or "partner_events"
+
+
+def _extract_partner_ref_from_start(text: str) -> str:
+    """Extract ref code from /start ref_CODE or /start ref-CODE."""
+    raw = str(text or "").strip()
+    if not raw.startswith("/start"):
+        return ""
+    parts = raw.split(maxsplit=1)
+    if len(parts) < 2:
+        return ""
+    payload = parts[1].strip()
+    if payload.lower().startswith("ref_"):
+        payload = payload[4:]
+    elif payload.lower().startswith("ref-"):
+        payload = payload[4:]
+    else:
+        return ""
+    payload = re.sub(r"[^A-Za-z0-9_\-]", "", payload).upper()
+    return payload[:64]
+
+
+async def _enqueue_partner_bind_referral(user_id: int, ref_code: str, *, source: str, meta: Optional[Dict[str, Any]] = None) -> None:
+    code = str(ref_code or "").strip().upper()
+    if not code or int(user_id or 0) <= 0:
+        return
+    try:
+        await enqueue_job(
+            {
+                "job_id": f"partner_bind_{uuid4().hex}",
+                "kind": "partner_bind_referral",
+                "referred_user_id": int(user_id),
+                "ref_code": code,
+                "source": source,
+                "meta": meta or {},
+            },
+            queue_name=PARTNER_EVENTS_QUEUE_NAME,
+        )
+    except Exception as exc:
+        try:
+            print(f"[partner] failed to enqueue bind referral: {exc}", flush=True)
+        except Exception:
+            pass
+
+
+async def _enqueue_partner_topup_event(
+    *,
+    user_id: int,
+    payment_id: str,
+    amount_rub: float,
+    tokens: int,
+    provider: str,
+    meta: Optional[Dict[str, Any]] = None,
+) -> None:
+    if int(user_id or 0) <= 0 or not str(payment_id or "").strip() or float(amount_rub or 0) <= 0:
+        return
+    try:
+        await enqueue_job(
+            {
+                "job_id": f"partner_topup_{uuid4().hex}",
+                "kind": "partner_topup",
+                "referred_user_id": int(user_id),
+                "source_payment_id": str(payment_id).strip(),
+                "payment_amount_rub": float(amount_rub or 0),
+                "purchased_tokens": int(tokens or 0),
+                "payment_provider": str(provider or "unknown"),
+                "meta": meta or {},
+            },
+            queue_name=PARTNER_EVENTS_QUEUE_NAME,
+        )
+    except Exception as exc:
+        try:
+            print(f"[partner] failed to enqueue topup event: {exc}", flush=True)
+        except Exception:
+            pass
 
 CHAT_WORKER_ENABLED = (os.getenv("CHAT_WORKER_ENABLED", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
 TG_CHAT_OPENAI_QUEUE_NAME = (os.getenv("TG_CHAT_OPENAI_QUEUE_NAME", "tg_chat_openai") or "tg_chat_openai").strip() or "tg_chat_openai"
@@ -3946,6 +4023,19 @@ async def yookassa_webhook(request: Request):
             reason="yookassa_topup",
             meta={"payment_id": payment_id, "event": event, "status": status, "metadata": md},
         )
+        amount_obj = obj.get("amount") or {}
+        try:
+            amount_rub = float(amount_obj.get("value") or md.get("amount_rub") or 0)
+        except Exception:
+            amount_rub = 0.0
+        await _enqueue_partner_topup_event(
+            user_id=uid,
+            payment_id=payment_id,
+            amount_rub=amount_rub,
+            tokens=tokens,
+            provider="yookassa",
+            meta={"event": event, "status": status, "metadata": md},
+        )
         bal = int(get_balance(uid) or 0)
         # Notify user
         await tg_send_message(uid, f"✅ Оплата ЮKassa прошла!\\nНачислено: +{tokens} токенов\\nБаланс: {bal}", reply_markup=_help_menu_for(uid))
@@ -4590,6 +4680,19 @@ async def webhook(secret: str, request: Request):
                 user_id,
                 tokens,
                 reason="stars_topup",
+                meta={"tokens": tokens, "currency": "XTR", "payload": payload, "charge_id": tg_charge_id},
+            )
+            try:
+                pack_for_partner = _find_pack_by_tokens(tokens) or {}
+                amount_rub_for_partner = float(pack_for_partner.get("rub") or 0)
+            except Exception:
+                amount_rub_for_partner = 0.0
+            await _enqueue_partner_topup_event(
+                user_id=user_id,
+                payment_id=f"stars:{tg_charge_id or payload}",
+                amount_rub=amount_rub_for_partner,
+                tokens=tokens,
+                provider="telegram_stars",
                 meta={"tokens": tokens, "currency": "XTR", "payload": payload, "charge_id": tg_charge_id},
             )
             bal = int(get_balance(user_id) or 0)
@@ -5731,6 +5834,14 @@ async def webhook(secret: str, request: Request):
     # /start
     if incoming_text.startswith("/start"):
         _set_mode(chat_id, user_id, "chat")
+        partner_ref_code = _extract_partner_ref_from_start(incoming_text)
+        if partner_ref_code:
+            await _enqueue_partner_bind_referral(
+                user_id,
+                partner_ref_code,
+                source="telegram_start",
+                meta={"chat_id": chat_id, "text": incoming_text[:200]},
+            )
         # 🎁 Welcome bonus: 3 tokens only once (after first /start)
         try:
             granted = grant_welcome_bonus_once(user_id)
