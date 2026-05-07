@@ -26,6 +26,7 @@ from chat_memory_redis import (
 )
 from kie_claude_chat import is_kie_claude_model, kie_claude_answer
 from queue_redis import dequeue_job, get_redis
+from app.services.partner_program import apply_topup_event, bind_referral
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}" if TELEGRAM_BOT_TOKEN else ""
@@ -35,6 +36,12 @@ TG_CHAT_OPENAI_QUEUE_NAME = (os.getenv("TG_CHAT_OPENAI_QUEUE_NAME", "tg_chat_ope
 TG_CHAT_CLAUDE_QUEUE_NAME = (os.getenv("TG_CHAT_CLAUDE_QUEUE_NAME", "tg_chat_claude") or "tg_chat_claude").strip() or "tg_chat_claude"
 WORKSPACE_CHAT_OPENAI_QUEUE_NAME = (os.getenv("WORKSPACE_CHAT_OPENAI_QUEUE_NAME", "workspace_chat_openai") or "workspace_chat_openai").strip() or "workspace_chat_openai"
 WORKSPACE_CHAT_CLAUDE_QUEUE_NAME = (os.getenv("WORKSPACE_CHAT_CLAUDE_QUEUE_NAME", "workspace_chat_claude") or "workspace_chat_claude").strip() or "workspace_chat_claude"
+PARTNER_EVENTS_QUEUE_NAME = (os.getenv("PARTNER_EVENTS_QUEUE_NAME", "partner_events") or "partner_events").strip() or "partner_events"
+ADMIN_IDS = set(
+    int(x)
+    for x in (os.getenv("ADMIN_IDS", "") or "").replace(";", ",").split(",")
+    if x.strip().isdigit()
+)
 
 TG_CHAT_OPENAI_CONCURRENCY = int(os.getenv("TG_CHAT_OPENAI_CONCURRENCY", "3") or "3")
 TG_CHAT_CLAUDE_CONCURRENCY = int(os.getenv("TG_CHAT_CLAUDE_CONCURRENCY", "2") or "2")
@@ -387,6 +394,69 @@ async def process_workspace_ai_chat_job(job: Dict[str, Any]) -> None:
         print(f"[chat_worker] failed workspace job={job_id}: {exc}", flush=True)
 
 
+async def _notify_admins(text: str) -> None:
+    if not ADMIN_IDS:
+        return
+    for admin_id in ADMIN_IDS:
+        try:
+            await tg_send_message(int(admin_id), text)
+        except Exception as exc:
+            print(f"[partner_worker] failed to notify admin={admin_id}: {exc}", flush=True)
+
+
+async def process_partner_event(job: Dict[str, Any]) -> None:
+    kind = _job_kind(job)
+    if kind == "partner_bind_referral":
+        result = await asyncio.to_thread(
+            lambda: bind_referral(
+                referred_user_id=int(job.get("referred_user_id") or 0),
+                ref_code=str(job.get("ref_code") or ""),
+                source=str(job.get("source") or "telegram_start"),
+                meta=job.get("meta") if isinstance(job.get("meta"), dict) else {},
+            )
+        )
+        print(f"[partner_worker] bind result={result}", flush=True)
+        return
+
+    if kind == "partner_topup":
+        result = await asyncio.to_thread(
+            lambda: apply_topup_event(
+                referred_user_id=int(job.get("referred_user_id") or 0),
+                source_payment_id=str(job.get("source_payment_id") or ""),
+                payment_amount_rub=float(job.get("payment_amount_rub") or 0),
+                purchased_tokens=int(job.get("purchased_tokens") or 0),
+                payment_provider=str(job.get("payment_provider") or "unknown"),
+                meta=job.get("meta") if isinstance(job.get("meta"), dict) else {},
+            )
+        )
+        print(f"[partner_worker] topup result={result}", flush=True)
+        return
+
+    if kind == "partner_payout_created":
+        payout = job.get("payout") if isinstance(job.get("payout"), dict) else {}
+        if not payout:
+            return
+        amount = payout.get("amount_rub") or 0
+        partner_user_id = payout.get("partner_user_id") or ""
+        card_mask = payout.get("card_mask") or ""
+        holder = payout.get("card_holder_name") or ""
+        payout_id = payout.get("id") or ""
+        text = (
+            "💸 Новая заявка на выплату партнёрки\n\n"
+            f"Партнёр user_id: {partner_user_id}\n"
+            f"Сумма: {amount} ₽\n"
+            f"Карта: {card_mask}\n"
+            f"ФИО: {holder}\n"
+            f"ID заявки: {payout_id}\n\n"
+            "Открой админку партнёрских выплат и после ручного перевода нажми «Оплачено»."
+        )
+        await _notify_admins(text)
+        print(f"[partner_worker] payout notification sent payout_id={payout_id}", flush=True)
+        return
+
+    print(f"[partner_worker] unsupported event kind={kind} job={job.get('job_id')}", flush=True)
+
+
 async def _handle(job: Dict[str, Any]) -> None:
     kind = _job_kind(job)
     sem = _sem_for_job(job)
@@ -397,6 +467,9 @@ async def _handle(job: Dict[str, Any]) -> None:
         if kind == "workspace_ai_chat":
             await process_workspace_ai_chat_job(job)
             return
+        if kind in {"partner_topup", "partner_bind_referral", "partner_payout_created"}:
+            await process_partner_event(job)
+            return
         print(f"[chat_worker] skipped unsupported kind={kind} job={job.get('job_id')}", flush=True)
 
 
@@ -406,6 +479,7 @@ async def main() -> None:
         TG_CHAT_OPENAI_QUEUE_NAME,
         WORKSPACE_CHAT_CLAUDE_QUEUE_NAME,
         WORKSPACE_CHAT_OPENAI_QUEUE_NAME,
+        PARTNER_EVENTS_QUEUE_NAME,
     ]
     print(
         "[chat_worker] started "
