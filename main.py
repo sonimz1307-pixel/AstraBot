@@ -141,19 +141,64 @@ def _extract_partner_ref_from_start(text: str) -> str:
     return payload[:64]
 
 
+def _resolve_partner_referred_user_id(user_id: int) -> int:
+    """
+    Partner accounting must use workspace_accounts.id when a Telegram user is
+    linked to a site/email workspace account. Otherwise a referral created on
+    the site by workspace account id will not match a later Telegram top-up.
+    """
+    try:
+        raw_user_id = int(user_id or 0)
+    except Exception:
+        return 0
+    if raw_user_id <= 0:
+        return 0
+
+    try:
+        if sb is None:
+            return raw_user_id
+        res = (
+            sb.table("workspace_accounts")
+            .select("id,telegram_user_id")
+            .eq("telegram_user_id", raw_user_id)
+            .limit(1)
+            .execute()
+        )
+        row = (getattr(res, "data", None) or [None])[0]
+        if row:
+            account_id = int(row.get("id") or 0)
+            if account_id > 0:
+                return account_id
+    except Exception as exc:
+        try:
+            print(f"[partner] failed to resolve workspace account for telegram_user_id={raw_user_id}: {exc}", flush=True)
+        except Exception:
+            pass
+
+    return raw_user_id
+
+
 async def _enqueue_partner_bind_referral(user_id: int, ref_code: str, *, source: str, meta: Optional[Dict[str, Any]] = None) -> None:
     code = str(ref_code or "").strip().upper()
-    if not code or int(user_id or 0) <= 0:
+    raw_user_id = int(user_id or 0)
+    partner_referred_user_id = _resolve_partner_referred_user_id(raw_user_id)
+    if not code or partner_referred_user_id <= 0:
         return
+
+    meta_payload = dict(meta or {})
+    if partner_referred_user_id != raw_user_id:
+        meta_payload.setdefault("telegram_user_id", raw_user_id)
+        meta_payload.setdefault("workspace_user_id", partner_referred_user_id)
+
     try:
         await enqueue_job(
             {
                 "job_id": f"partner_bind_{uuid4().hex}",
                 "kind": "partner_bind_referral",
-                "referred_user_id": int(user_id),
+                "referred_user_id": partner_referred_user_id,
                 "ref_code": code,
                 "source": source,
-                "meta": meta or {},
+                "meta": meta_payload,
             },
             queue_name=PARTNER_EVENTS_QUEUE_NAME,
         )
@@ -173,19 +218,27 @@ async def _enqueue_partner_topup_event(
     provider: str,
     meta: Optional[Dict[str, Any]] = None,
 ) -> None:
-    if int(user_id or 0) <= 0 or not str(payment_id or "").strip() or float(amount_rub or 0) <= 0:
+    raw_user_id = int(user_id or 0)
+    partner_referred_user_id = _resolve_partner_referred_user_id(raw_user_id)
+    if partner_referred_user_id <= 0 or not str(payment_id or "").strip() or float(amount_rub or 0) <= 0:
         return
+
+    meta_payload = dict(meta or {})
+    if partner_referred_user_id != raw_user_id:
+        meta_payload.setdefault("telegram_user_id", raw_user_id)
+        meta_payload.setdefault("workspace_user_id", partner_referred_user_id)
+
     try:
         await enqueue_job(
             {
                 "job_id": f"partner_topup_{uuid4().hex}",
                 "kind": "partner_topup",
-                "referred_user_id": int(user_id),
+                "referred_user_id": partner_referred_user_id,
                 "source_payment_id": str(payment_id).strip(),
                 "payment_amount_rub": float(amount_rub or 0),
                 "purchased_tokens": int(tokens or 0),
                 "payment_provider": str(provider or "unknown"),
-                "meta": meta or {},
+                "meta": meta_payload,
             },
             queue_name=PARTNER_EVENTS_QUEUE_NAME,
         )
