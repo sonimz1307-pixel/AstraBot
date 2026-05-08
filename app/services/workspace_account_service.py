@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from typing import Any, Dict, Optional
 
-from billing_db import ensure_user_row, get_balance
+from billing_db import ensure_user_row, get_balance, merge_user_balance_records
 from db_supabase import supabase, track_user_activity
 
 
@@ -172,6 +172,24 @@ def get_workspace_account_by_telegram(telegram_user_id: int) -> Optional[Dict[st
     return _select_one("workspace_accounts", telegram_user_id=int(telegram_user_id))
 
 
+def _sync_linked_telegram_balance(row: Dict[str, Any]) -> None:
+    """Best-effort переносит старый TG-баланс на workspace account после привязки."""
+    try:
+        account_id = int(row.get("id") or 0)
+        linked_tg = row.get("telegram_user_id")
+        if linked_tg in (None, ""):
+            return
+        tg_id = int(linked_tg)
+        if account_id > 0 and tg_id > 0 and account_id != tg_id:
+            merge_user_balance_records(source_user_id=tg_id, target_user_id=account_id)
+    except Exception as exc:
+        # Не блокируем вход/привязку аккаунта из-за вспомогательной миграции баланса.
+        try:
+            print(f"[workspace_account] linked Telegram balance sync skipped: {exc}")
+        except Exception:
+            pass
+
+
 def _account_payload_from_row(row: Dict[str, Any]) -> Dict[str, Any]:
     account_id = int(row.get("id") or 0)
     linked_tg = row.get("telegram_user_id")
@@ -193,6 +211,7 @@ def _account_payload_from_row(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def account_to_workspace_user_payload(row: Dict[str, Any]) -> Dict[str, Any]:
+    _sync_linked_telegram_balance(row)
     payload = _account_payload_from_row(row)
     payload["auth_methods"] = []
     if payload.get("linked_telegram_user_id"):
@@ -209,6 +228,7 @@ def ensure_workspace_account_from_claims(claims: Dict[str, Any]) -> Dict[str, An
         raise WorkspaceAccountError("Invalid workspace account id in token")
     row = get_workspace_account_by_id(account_id)
     if row:
+        _sync_linked_telegram_balance(row)
         ensure_user_row(account_id)
         return row
 
@@ -233,6 +253,8 @@ def ensure_workspace_account_from_claims(claims: Dict[str, Any]) -> Dict[str, An
     }
     res = sb.table("workspace_accounts").upsert(row_payload, on_conflict="id").execute()
     row = (getattr(res, "data", None) or [None])[0] or get_workspace_account_by_id(account_id)
+    if row:
+        _sync_linked_telegram_balance(row)
     ensure_user_row(account_id)
     return row
 
@@ -272,6 +294,8 @@ def get_or_create_workspace_account_for_telegram(verified: Dict[str, Any], exist
         "is_premium": base_payload.get("is_premium"),
     }
     track_user_activity(tg_user)
+    if row:
+        _sync_linked_telegram_balance(row)
     ensure_user_row(int(row["id"]))
     return row
 
@@ -493,8 +517,10 @@ def login_with_email(email: str, password: str) -> Dict[str, Any]:
 
     sb = _require_supabase()
     sb.table("workspace_accounts").update({"last_login_at": _now_iso()}).eq("id", int(account["id"])).execute()
-    ensure_user_row(int(account["id"]))
-    return get_workspace_account_by_id(int(account["id"])) or account
+    fresh = get_workspace_account_by_id(int(account["id"])) or account
+    _sync_linked_telegram_balance(fresh)
+    ensure_user_row(int(fresh["id"]))
+    return fresh
 
 
 def link_telegram_to_account(*, account_id: int, verified: Dict[str, Any]) -> Dict[str, Any]:
@@ -518,6 +544,8 @@ def link_telegram_to_account(*, account_id: int, verified: Dict[str, Any]) -> Di
     sb = _require_supabase()
     res = sb.table("workspace_accounts").update(payload).eq("id", int(account_id)).execute()
     out = (getattr(res, "data", None) or [None])[0] or get_workspace_account_by_id(account_id)
+    if out:
+        _sync_linked_telegram_balance(out)
 
     track_user_activity(
         {
