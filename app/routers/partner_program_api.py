@@ -911,6 +911,80 @@ def _fetch_admin_ledger_rows_for_stats(*, since: datetime, until: datetime, max_
     return rows[:limit_total]
 
 
+def _chunk_admin_ids(values: List[int], size: int = 500) -> List[List[int]]:
+    unique = sorted({int(v) for v in values if _safe_int(v) > 0})
+    return [unique[i:i + size] for i in range(0, len(unique), size)]
+
+
+def _build_admin_canonical_user_map(raw_user_ids: List[int]) -> Dict[int, int]:
+    """
+    Collapse duplicate identities for stats:
+    - workspace_accounts.id is the canonical account id
+    - workspace_accounts.telegram_user_id is mapped to the same account id
+
+    Without this, one real client can be counted twice: once from the site
+    workspace account and once from the Telegram id.
+    """
+    ids = sorted({int(v) for v in raw_user_ids if _safe_int(v) > 0})
+    mapping: Dict[int, int] = {uid: uid for uid in ids}
+    if not ids:
+        return mapping
+
+    sb = _admin_sb()
+    seen_accounts: Dict[int, Dict[str, Any]] = {}
+
+    def absorb(rows: List[Dict[str, Any]]) -> None:
+        for row in rows:
+            account_id = _safe_int((row or {}).get("id"))
+            if account_id <= 0:
+                continue
+            seen_accounts[account_id] = row or {}
+
+    for chunk in _chunk_admin_ids(ids, 500):
+        try:
+            res = sb.table("workspace_accounts").select("id,telegram_user_id").in_("id", chunk).execute()
+            absorb(list(getattr(res, "data", None) or []))
+        except Exception:
+            pass
+        try:
+            res = sb.table("workspace_accounts").select("id,telegram_user_id").in_("telegram_user_id", chunk).execute()
+            absorb(list(getattr(res, "data", None) or []))
+        except Exception:
+            pass
+
+    for row in seen_accounts.values():
+        account_id = _safe_int(row.get("id"))
+        if account_id <= 0:
+            continue
+        mapping[account_id] = account_id
+        tg_id = _safe_int(row.get("telegram_user_id"))
+        if tg_id > 0:
+            mapping[tg_id] = account_id
+
+    return mapping
+
+
+def _canonical_admin_user_id(row: Dict[str, Any], user_map: Dict[int, int]) -> int:
+    meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+
+    # Prefer explicit workspace/account id when workers stored it in meta.
+    for key in ("workspace_user_id", "account_id", "workspace_id"):
+        value = _safe_int(meta.get(key))
+        if value > 0:
+            return int(user_map.get(value, value))
+
+    uid = _safe_int(row.get("telegram_user_id"))
+    if uid > 0:
+        return int(user_map.get(uid, uid))
+
+    # Last fallback: if only Telegram id is stored inside meta.
+    meta_tg = _safe_int(meta.get("telegram_user_id"))
+    if meta_tg > 0:
+        return int(user_map.get(meta_tg, meta_tg))
+
+    return 0
+
+
 def _bucket_label(dt: datetime, *, period: str) -> str:
     if period == "month":
         return dt.strftime("%d.%m")
@@ -955,7 +1029,21 @@ async def partner_admin_stats(
             continue
         rows.append(row)
 
+    raw_user_ids: List[int] = []
+    for row in rows:
+        raw_uid = _safe_int((row or {}).get("telegram_user_id"))
+        if raw_uid > 0:
+            raw_user_ids.append(raw_uid)
+        meta = (row or {}).get("meta") if isinstance((row or {}).get("meta"), dict) else {}
+        for key in ("workspace_user_id", "account_id", "workspace_id", "telegram_user_id"):
+            meta_uid = _safe_int(meta.get(key))
+            if meta_uid > 0:
+                raw_user_ids.append(meta_uid)
+
+    user_map = _build_admin_canonical_user_map(raw_user_ids)
+
     users = set()
+    raw_users = set()
     by_ai: Dict[str, Dict[str, Any]] = {}
     by_source: Dict[str, Dict[str, Any]] = {}
     by_reason: Dict[str, Dict[str, Any]] = {}
@@ -964,7 +1052,10 @@ async def partner_admin_stats(
     total_tokens = 0
 
     for row in rows:
-        uid = _safe_int(row.get("telegram_user_id"))
+        raw_uid = _safe_int(row.get("telegram_user_id"))
+        if raw_uid:
+            raw_users.add(raw_uid)
+        uid = _canonical_admin_user_id(row, user_map)
         if uid:
             users.add(uid)
         tokens = abs(_safe_int(row.get("delta_tokens")))
@@ -1030,9 +1121,11 @@ async def partner_admin_stats(
         "since": _admin_iso_z(since),
         "until": _admin_iso_z(until),
         "source": "bot_balance_ledger_negative_charges",
-        "note": "Статистика строится по отрицательным списаниям bot_balance_ledger. Это покрывает сайт и Telegram-бот, если генерация списывает токены через add_tokens().",
+        "note": "Статистика строится по отрицательным списаниям bot_balance_ledger. Пользователи нормализуются через workspace_accounts: сайт + Telegram одного клиента считаются как один клиент.",
         "total_generations": len(rows),
         "active_users": len(users),
+        "raw_active_users": len(raw_users),
+        "normalized_user_duplicates": max(0, len(raw_users) - len(users)),
         "total_tokens_spent": int(total_tokens),
         "rows_scanned": len(raw_rows),
         "rows_used": len(rows),
