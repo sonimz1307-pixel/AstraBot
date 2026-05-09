@@ -4,6 +4,11 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover
+    ZoneInfo = None
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
@@ -774,6 +779,52 @@ async def partner_admin_generation_mark_failed(
 # ==========================================================
 
 _STAT_EXCLUDE_REASON_RE = re.compile(r"(refund|возврат|topup|payment|yookassa|stars|partner|payout|admin_|balance_merge|merge)", re.I)
+_STAT_REAL_ACTIVE_MIN_TOKENS = 5
+_STAT_REAL_ACTIVE_MIN_GENERATIONS = 2
+_STAT_TZ_NAME = "Europe/Moscow"
+
+
+def _admin_stats_tz():
+    if ZoneInfo is not None:
+        try:
+            return ZoneInfo(_STAT_TZ_NAME)
+        except Exception:
+            pass
+    # Moscow is UTC+3 and currently has no daylight saving switch.
+    return timezone(timedelta(hours=3))
+
+
+def _admin_stats_period_bounds(period: str) -> tuple[datetime, datetime, datetime, datetime, str]:
+    """Return UTC and local-Moscow period bounds.
+
+    day   = current calendar day in Moscow, 00:00 inclusive to tomorrow 00:00 exclusive.
+    month = last 30 Moscow calendar days, from 00:00 inclusive to tomorrow 00:00 exclusive.
+
+    This intentionally avoids the old rolling-window behavior where the left graph
+    shifted every hour.
+    """
+    tz = _admin_stats_tz()
+    now_local = datetime.now(tz)
+    today_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    if str(period or "day").strip().lower() == "month":
+        since_local = today_start_local - timedelta(days=29)
+        until_local = today_start_local + timedelta(days=1)
+        label = f"{since_local.strftime('%d.%m.%Y')} — {(until_local - timedelta(seconds=1)).strftime('%d.%m.%Y')}, МСК"
+    else:
+        since_local = today_start_local
+        until_local = today_start_local + timedelta(days=1)
+        label = f"{since_local.strftime('%d.%m.%Y')}, МСК"
+    return (
+        since_local.astimezone(timezone.utc),
+        until_local.astimezone(timezone.utc),
+        since_local,
+        until_local,
+        label,
+    )
+
+
+def _admin_stats_label(dt: datetime) -> str:
+    return dt.astimezone(_admin_stats_tz()).strftime("%d.%m.%Y %H:%M МСК")
 
 
 def _parse_admin_dt(value: Any) -> Optional[datetime]:
@@ -878,7 +929,7 @@ def _fetch_admin_ledger_rows_for_stats(*, since: datetime, until: datetime, max_
                 .select("id,telegram_user_id,delta_tokens,reason,ref_id,meta,created_at")
                 .lt("delta_tokens", 0)
                 .gte("created_at", _admin_iso_z(since))
-                .lte("created_at", _admin_iso_z(until))
+                .lt("created_at", _admin_iso_z(until))
                 .order("created_at", desc=False)
                 .range(offset, end)
                 .execute()
@@ -898,7 +949,7 @@ def _fetch_admin_ledger_rows_for_stats(*, since: datetime, until: datetime, max_
                     row for row in (list(getattr(res, "data", None) or []))
                     if _safe_int((row or {}).get("delta_tokens")) < 0
                     and (dt := _parse_admin_dt((row or {}).get("created_at"))) is not None
-                    and since <= dt <= until
+                    and since <= dt < until
                 ]
             except Exception:
                 break
@@ -986,22 +1037,28 @@ def _canonical_admin_user_id(row: Dict[str, Any], user_map: Dict[int, int]) -> i
 
 
 def _bucket_label(dt: datetime, *, period: str) -> str:
+    local_dt = dt.astimezone(_admin_stats_tz())
     if period == "month":
-        return dt.strftime("%d.%m")
-    return dt.strftime("%H:00")
+        return local_dt.strftime("%d.%m")
+    return local_dt.strftime("%H:00")
 
 
 def _make_empty_buckets(*, since: datetime, until: datetime, period: str) -> List[Dict[str, Any]]:
     buckets: List[Dict[str, Any]] = []
+    tz = _admin_stats_tz()
+    since_local = since.astimezone(tz)
+    until_local_exclusive = until.astimezone(tz)
+    last_local = until_local_exclusive - timedelta(microseconds=1)
+
     if period == "month":
-        cur = datetime(since.year, since.month, since.day, tzinfo=timezone.utc)
-        last = datetime(until.year, until.month, until.day, tzinfo=timezone.utc)
+        cur = since_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        last = last_local.replace(hour=0, minute=0, second=0, microsecond=0)
         while cur <= last:
             buckets.append({"key": cur.strftime("%Y-%m-%d"), "label": cur.strftime("%d.%m"), "count": 0, "tokens": 0, "users_set": set()})
             cur += timedelta(days=1)
     else:
-        cur = since.replace(minute=0, second=0, microsecond=0)
-        last = until.replace(minute=0, second=0, microsecond=0)
+        cur = since_local.replace(minute=0, second=0, microsecond=0)
+        last = last_local.replace(minute=0, second=0, microsecond=0)
         while cur <= last:
             buckets.append({"key": cur.strftime("%Y-%m-%dT%H"), "label": cur.strftime("%H:00"), "count": 0, "tokens": 0, "users_set": set()})
             cur += timedelta(hours=1)
@@ -1016,8 +1073,7 @@ async def partner_admin_stats(
 ) -> Dict[str, Any]:
     _require_admin(x_admin_token)
     period_key = str(period or "day").strip().lower()
-    until = datetime.now(timezone.utc)
-    since = until - (timedelta(days=30) if period_key == "month" else timedelta(hours=24))
+    since, until, since_local, until_local, period_label = _admin_stats_period_bounds(period_key)
 
     raw_rows = _fetch_admin_ledger_rows_for_stats(since=since, until=until, max_rows=max_rows)
     rows: List[Dict[str, Any]] = []
@@ -1025,7 +1081,7 @@ async def partner_admin_stats(
         if not _is_generation_charge_reason((row or {}).get("reason")):
             continue
         dt = _parse_admin_dt((row or {}).get("created_at"))
-        if not dt or dt < since or dt > until:
+        if not dt or dt < since or dt >= until:
             continue
         rows.append(row)
 
@@ -1050,6 +1106,10 @@ async def partner_admin_stats(
     buckets = _make_empty_buckets(since=since, until=until, period=period_key)
     bucket_index = {b["key"]: b for b in buckets}
     total_tokens = 0
+    recent_24h_since = until - timedelta(hours=24)
+    recent_24h_users = set()
+    recent_24h_user_activity: Dict[int, Dict[str, int]] = {}
+    user_activity: Dict[int, Dict[str, Any]] = {}
 
     for row in rows:
         raw_uid = _safe_int(row.get("telegram_user_id"))
@@ -1065,7 +1125,8 @@ async def partner_admin_stats(
         label = _admin_ai_label_from_reason(reason, meta)
         source = _admin_source_from_meta(meta)
         dt = _parse_admin_dt(row.get("created_at")) or since
-        key = dt.strftime("%Y-%m-%d") if period_key == "month" else dt.strftime("%Y-%m-%dT%H")
+        local_dt = dt.astimezone(_admin_stats_tz())
+        key = local_dt.strftime("%Y-%m-%d") if period_key == "month" else local_dt.strftime("%Y-%m-%dT%H")
         if key not in bucket_index:
             bucket_index[key] = {"key": key, "label": _bucket_label(dt, period=period_key), "count": 0, "tokens": 0, "users_set": set()}
             buckets.append(bucket_index[key])
@@ -1073,6 +1134,19 @@ async def partner_admin_stats(
         bucket_index[key]["tokens"] += tokens
         if uid:
             bucket_index[key]["users_set"].add(uid)
+            if dt >= recent_24h_since:
+                recent_24h_users.add(uid)
+                recent_slot = recent_24h_user_activity.setdefault(uid, {"count": 0, "tokens": 0})
+                recent_slot["count"] += 1
+                recent_slot["tokens"] += tokens
+            user_slot = user_activity.setdefault(uid, {"user_id": uid, "raw_ids": set(), "count": 0, "tokens": 0, "last_seen": None, "reasons": {}})
+            if raw_uid:
+                user_slot["raw_ids"].add(raw_uid)
+            user_slot["count"] += 1
+            user_slot["tokens"] += tokens
+            user_slot["last_seen"] = max(str(user_slot.get("last_seen") or ""), str(row.get("created_at") or "")) or row.get("created_at")
+            rdict = user_slot["reasons"]
+            rdict[reason] = int(rdict.get(reason, 0)) + 1
 
         slot = by_ai.setdefault(label, {"label": label, "count": 0, "tokens": 0, "users_set": set()})
         slot["count"] += 1
@@ -1092,14 +1166,29 @@ async def partner_admin_stats(
         if uid:
             reason_slot["users_set"].add(uid)
 
+    qualified_users = {
+        int(uid)
+        for uid, item in user_activity.items()
+        if int(item.get("count") or 0) >= _STAT_REAL_ACTIVE_MIN_GENERATIONS
+        or int(item.get("tokens") or 0) >= _STAT_REAL_ACTIVE_MIN_TOKENS
+    }
+    recent_24h_qualified_users = {
+        int(uid)
+        for uid, item in recent_24h_user_activity.items()
+        if int(item.get("count") or 0) >= _STAT_REAL_ACTIVE_MIN_GENERATIONS
+        or int(item.get("tokens") or 0) >= _STAT_REAL_ACTIVE_MIN_TOKENS
+    }
+
     def finish_group(items: Dict[str, Dict[str, Any]], limit: int = 50) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
         for item in items.values():
+            item_users = set(item["users_set"])
             out.append({
                 "label": item["label"],
                 "count": int(item["count"]),
                 "tokens": int(item["tokens"]),
-                "unique_users": len(item["users_set"]),
+                "unique_users": len(item_users & qualified_users),
+                "unique_users_raw": len(item_users),
             })
         out.sort(key=lambda x: int(x.get("count") or 0), reverse=True)
         return out[:limit]
@@ -1111,21 +1200,58 @@ async def partner_admin_stats(
             "label": b["label"],
             "count": int(b["count"]),
             "tokens": int(b["tokens"]),
-            "unique_users": len(b["users_set"]),
+            "unique_users": len(set(b["users_set"]) & qualified_users),
+            "unique_users_raw": len(b["users_set"]),
         })
     series.sort(key=lambda x: str(x.get("key") or ""))
+
+    bucket_user_counts = [int(x.get("unique_users") or 0) for x in series]
+    avg_bucket_active_users = round((sum(bucket_user_counts) / len(bucket_user_counts)), 1) if bucket_user_counts else 0
+    nonzero_bucket_user_counts = [x for x in bucket_user_counts if x > 0]
+    avg_nonzero_bucket_active_users = round((sum(nonzero_bucket_user_counts) / len(nonzero_bucket_user_counts)), 1) if nonzero_bucket_user_counts else 0
+    max_bucket_active_users = max(bucket_user_counts) if bucket_user_counts else 0
+
+    top_users: List[Dict[str, Any]] = []
+    for item in user_activity.values():
+        reasons = item.get("reasons") if isinstance(item.get("reasons"), dict) else {}
+        top_reason = ""
+        if reasons:
+            top_reason = sorted(reasons.items(), key=lambda kv: int(kv[1]), reverse=True)[0][0]
+        raw_ids = sorted({int(x) for x in (item.get("raw_ids") or set()) if _safe_int(x) > 0})
+        top_users.append({
+            "user_id": int(item.get("user_id") or 0),
+            "raw_ids": raw_ids[:6],
+            "count": int(item.get("count") or 0),
+            "tokens": int(item.get("tokens") or 0),
+            "last_seen": item.get("last_seen"),
+            "top_reason": top_reason,
+            "is_real_active": int(item.get("user_id") or 0) in qualified_users,
+        })
+    top_users.sort(key=lambda x: (int(x.get("count") or 0), int(x.get("tokens") or 0)), reverse=True)
 
     return {
         "ok": True,
         "period": period_key,
+        "timezone": _STAT_TZ_NAME,
+        "period_label": period_label,
         "since": _admin_iso_z(since),
         "until": _admin_iso_z(until),
+        "since_label_msk": _admin_stats_label(since),
+        "until_label_msk": _admin_stats_label(until - timedelta(seconds=1)),
         "source": "bot_balance_ledger_negative_charges",
-        "note": "Статистика строится по отрицательным списаниям bot_balance_ledger. Пользователи нормализуются через workspace_accounts: сайт + Telegram одного клиента считаются как один клиент.",
+        "note": f"Статистика строится по отрицательным списаниям bot_balance_ledger. Реально активный клиент = минимум {_STAT_REAL_ACTIVE_MIN_GENERATIONS} списания или минимум {_STAT_REAL_ACTIVE_MIN_TOKENS} токенов за период. Пополнения, подарочные начисления и возвраты не учитываются.",
         "total_generations": len(rows),
-        "active_users": len(users),
+        "active_users": len(qualified_users),
+        "active_users_any_charge": len(users),
         "raw_active_users": len(raw_users),
         "normalized_user_duplicates": max(0, len(raw_users) - len(users)),
+        "recent_24h_active_users": len(recent_24h_qualified_users),
+        "recent_24h_active_users_any_charge": len(recent_24h_users),
+        "real_active_min_tokens": _STAT_REAL_ACTIVE_MIN_TOKENS,
+        "real_active_min_generations": _STAT_REAL_ACTIVE_MIN_GENERATIONS,
+        "avg_bucket_active_users": avg_bucket_active_users,
+        "avg_nonzero_bucket_active_users": avg_nonzero_bucket_active_users,
+        "max_bucket_active_users": max_bucket_active_users,
         "total_tokens_spent": int(total_tokens),
         "rows_scanned": len(raw_rows),
         "rows_used": len(rows),
@@ -1133,5 +1259,6 @@ async def partner_admin_stats(
         "by_ai": finish_group(by_ai, 80),
         "by_source": finish_group(by_source, 10),
         "by_reason": finish_group(by_reason, 80),
+        "top_users": top_users[:80],
     }
 
