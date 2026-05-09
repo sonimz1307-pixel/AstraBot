@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
@@ -765,4 +765,280 @@ async def partner_admin_generation_mark_failed(
         after=after,
     )
     return {"ok": True, "kind": kind_key, "generation_id": gen_id, "user_id": user_id, "refund_ledger_id": refund_ledger_id}
+
+# ==========================================================
+# Nabex Admin Statistics
+# - active generators site + Telegram bot via bot_balance_ledger
+# - total generation charges by AI/model/reason
+# - series for 24h and 30d graphs
+# ==========================================================
+
+_STAT_EXCLUDE_REASON_RE = re.compile(r"(refund|возврат|topup|payment|yookassa|stars|partner|payout|admin_|balance_merge|merge)", re.I)
+
+
+def _parse_admin_dt(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        text = str(value).strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _admin_iso_z(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _is_generation_charge_reason(reason: Any) -> bool:
+    r = str(reason or "").strip()
+    if not r:
+        return False
+    if _STAT_EXCLUDE_REASON_RE.search(r):
+        return False
+    return True
+
+
+def _admin_ai_label_from_reason(reason: Any, meta: Optional[Dict[str, Any]] = None) -> str:
+    r = str(reason or "").strip().lower()
+    m = meta if isinstance(meta, dict) else {}
+    raw_ai = str(m.get("ai") or m.get("model") or m.get("provider") or "").strip()
+    joined = f"{r} {raw_ai.lower()}"
+    if "seedance" in joined:
+        return "Seedance"
+    if "pixverse" in joined:
+        return "PixVerse"
+    if "grok" in joined:
+        return "Grok Video"
+    if "kling" in joined:
+        return "Kling"
+    if "sora" in joined:
+        return "Sora"
+    if "veo" in joined:
+        return "Veo"
+    if "midjourney" in joined or "legnext" in joined:
+        return "Midjourney"
+    if "nano_banana_pro_new" in joined:
+        return "Nano Banana Pro NEW"
+    if "nano_banana_pro" in joined:
+        return "Nano Banana Pro"
+    if "nano_banana_2" in joined:
+        return "Nano Banana 2"
+    if "nano_banana" in joined:
+        return "Nano Banana"
+    if "gpt_image" in joined or "gpt-image" in joined:
+        return "GPT Image"
+    if "seedream" in joined:
+        return "Seedream"
+    if "flux" in joined:
+        return "Flux"
+    if "topaz_video" in joined:
+        return "Topaz Video"
+    if "topaz_image" in joined:
+        return "Topaz Image"
+    if "suno" in joined:
+        return "Suno"
+    if "udio" in joined:
+        return "Udio"
+    if "eleven" in joined or "tts" in joined or "voice" in joined:
+        return "Voice / TTS"
+    if "site_builder" in joined or "website" in joined:
+        return "Создание сайтов"
+    if raw_ai:
+        return raw_ai[:80]
+    return (str(reason or "unknown").replace("_", " ").strip() or "unknown")[:80]
+
+
+def _admin_source_from_meta(meta: Optional[Dict[str, Any]]) -> str:
+    m = meta if isinstance(meta, dict) else {}
+    origin = str(m.get("origin") or m.get("source") or "").lower()
+    if "telegram" in origin or origin.startswith("tg") or "_tg" in origin:
+        return "telegram"
+    if "workspace" in origin or "site" in origin or "web" in origin:
+        return "site"
+    return "unknown"
+
+
+def _fetch_admin_ledger_rows_for_stats(*, since: datetime, until: datetime, max_rows: int) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    page_size = 1000
+    offset = 0
+    limit_total = max(1, min(int(max_rows or 10000), 50000))
+    sb = _admin_sb()
+    while len(rows) < limit_total:
+        end = min(offset + page_size - 1, limit_total - 1)
+        try:
+            res = (
+                sb.table("bot_balance_ledger")
+                .select("id,telegram_user_id,delta_tokens,reason,ref_id,meta,created_at")
+                .lt("delta_tokens", 0)
+                .gte("created_at", _admin_iso_z(since))
+                .lte("created_at", _admin_iso_z(until))
+                .order("created_at", desc=False)
+                .range(offset, end)
+                .execute()
+            )
+            batch = list(getattr(res, "data", None) or [])
+        except Exception:
+            # Fallback for schemas or PostgREST versions that are picky about filters/order.
+            try:
+                res = (
+                    sb.table("bot_balance_ledger")
+                    .select("id,telegram_user_id,delta_tokens,reason,ref_id,meta,created_at")
+                    .order("created_at", desc=False)
+                    .range(offset, end)
+                    .execute()
+                )
+                batch = [
+                    row for row in (list(getattr(res, "data", None) or []))
+                    if _safe_int((row or {}).get("delta_tokens")) < 0
+                    and (dt := _parse_admin_dt((row or {}).get("created_at"))) is not None
+                    and since <= dt <= until
+                ]
+            except Exception:
+                break
+        if not batch:
+            break
+        rows.extend(batch)
+        if len(batch) < page_size:
+            break
+        offset += page_size
+    return rows[:limit_total]
+
+
+def _bucket_label(dt: datetime, *, period: str) -> str:
+    if period == "month":
+        return dt.strftime("%d.%m")
+    return dt.strftime("%H:00")
+
+
+def _make_empty_buckets(*, since: datetime, until: datetime, period: str) -> List[Dict[str, Any]]:
+    buckets: List[Dict[str, Any]] = []
+    if period == "month":
+        cur = datetime(since.year, since.month, since.day, tzinfo=timezone.utc)
+        last = datetime(until.year, until.month, until.day, tzinfo=timezone.utc)
+        while cur <= last:
+            buckets.append({"key": cur.strftime("%Y-%m-%d"), "label": cur.strftime("%d.%m"), "count": 0, "tokens": 0, "users_set": set()})
+            cur += timedelta(days=1)
+    else:
+        cur = since.replace(minute=0, second=0, microsecond=0)
+        last = until.replace(minute=0, second=0, microsecond=0)
+        while cur <= last:
+            buckets.append({"key": cur.strftime("%Y-%m-%dT%H"), "label": cur.strftime("%H:00"), "count": 0, "tokens": 0, "users_set": set()})
+            cur += timedelta(hours=1)
+    return buckets
+
+
+@router.get("/admin/stats")
+async def partner_admin_stats(
+    period: str = Query("day", pattern="^(day|month)$"),
+    max_rows: int = Query(10000, ge=100, le=50000),
+    x_admin_token: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    _require_admin(x_admin_token)
+    period_key = str(period or "day").strip().lower()
+    until = datetime.now(timezone.utc)
+    since = until - (timedelta(days=30) if period_key == "month" else timedelta(hours=24))
+
+    raw_rows = _fetch_admin_ledger_rows_for_stats(since=since, until=until, max_rows=max_rows)
+    rows: List[Dict[str, Any]] = []
+    for row in raw_rows:
+        if not _is_generation_charge_reason((row or {}).get("reason")):
+            continue
+        dt = _parse_admin_dt((row or {}).get("created_at"))
+        if not dt or dt < since or dt > until:
+            continue
+        rows.append(row)
+
+    users = set()
+    by_ai: Dict[str, Dict[str, Any]] = {}
+    by_source: Dict[str, Dict[str, Any]] = {}
+    by_reason: Dict[str, Dict[str, Any]] = {}
+    buckets = _make_empty_buckets(since=since, until=until, period=period_key)
+    bucket_index = {b["key"]: b for b in buckets}
+    total_tokens = 0
+
+    for row in rows:
+        uid = _safe_int(row.get("telegram_user_id"))
+        if uid:
+            users.add(uid)
+        tokens = abs(_safe_int(row.get("delta_tokens")))
+        total_tokens += tokens
+        reason = str(row.get("reason") or "unknown")
+        meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+        label = _admin_ai_label_from_reason(reason, meta)
+        source = _admin_source_from_meta(meta)
+        dt = _parse_admin_dt(row.get("created_at")) or since
+        key = dt.strftime("%Y-%m-%d") if period_key == "month" else dt.strftime("%Y-%m-%dT%H")
+        if key not in bucket_index:
+            bucket_index[key] = {"key": key, "label": _bucket_label(dt, period=period_key), "count": 0, "tokens": 0, "users_set": set()}
+            buckets.append(bucket_index[key])
+        bucket_index[key]["count"] += 1
+        bucket_index[key]["tokens"] += tokens
+        if uid:
+            bucket_index[key]["users_set"].add(uid)
+
+        slot = by_ai.setdefault(label, {"label": label, "count": 0, "tokens": 0, "users_set": set()})
+        slot["count"] += 1
+        slot["tokens"] += tokens
+        if uid:
+            slot["users_set"].add(uid)
+
+        source_slot = by_source.setdefault(source, {"label": source, "count": 0, "tokens": 0, "users_set": set()})
+        source_slot["count"] += 1
+        source_slot["tokens"] += tokens
+        if uid:
+            source_slot["users_set"].add(uid)
+
+        reason_slot = by_reason.setdefault(reason, {"label": reason, "count": 0, "tokens": 0, "users_set": set()})
+        reason_slot["count"] += 1
+        reason_slot["tokens"] += tokens
+        if uid:
+            reason_slot["users_set"].add(uid)
+
+    def finish_group(items: Dict[str, Dict[str, Any]], limit: int = 50) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for item in items.values():
+            out.append({
+                "label": item["label"],
+                "count": int(item["count"]),
+                "tokens": int(item["tokens"]),
+                "unique_users": len(item["users_set"]),
+            })
+        out.sort(key=lambda x: int(x.get("count") or 0), reverse=True)
+        return out[:limit]
+
+    series = []
+    for b in buckets:
+        series.append({
+            "key": b["key"],
+            "label": b["label"],
+            "count": int(b["count"]),
+            "tokens": int(b["tokens"]),
+            "unique_users": len(b["users_set"]),
+        })
+    series.sort(key=lambda x: str(x.get("key") or ""))
+
+    return {
+        "ok": True,
+        "period": period_key,
+        "since": _admin_iso_z(since),
+        "until": _admin_iso_z(until),
+        "source": "bot_balance_ledger_negative_charges",
+        "note": "Статистика строится по отрицательным списаниям bot_balance_ledger. Это покрывает сайт и Telegram-бот, если генерация списывает токены через add_tokens().",
+        "total_generations": len(rows),
+        "active_users": len(users),
+        "total_tokens_spent": int(total_tokens),
+        "rows_scanned": len(raw_rows),
+        "rows_used": len(rows),
+        "series": series,
+        "by_ai": finish_group(by_ai, 80),
+        "by_source": finish_group(by_source, 10),
+        "by_reason": finish_group(by_reason, 80),
+    }
 
