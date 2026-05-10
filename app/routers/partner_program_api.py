@@ -794,11 +794,24 @@ def _admin_stats_tz():
     return timezone(timedelta(hours=3))
 
 
-def _admin_stats_period_bounds(period: str) -> tuple[datetime, datetime, datetime, datetime, str]:
+def _parse_admin_stats_date_msk(value: Optional[str], fallback_start_local: datetime) -> datetime:
+    raw = str(value or "").strip()
+    if not raw:
+        return fallback_start_local
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", raw):
+        raise HTTPException(status_code=400, detail="date_msk must be YYYY-MM-DD")
+    try:
+        parsed = datetime.strptime(raw, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="date_msk must be a valid date YYYY-MM-DD")
+    return fallback_start_local.replace(year=parsed.year, month=parsed.month, day=parsed.day)
+
+
+def _admin_stats_period_bounds(period: str, date_msk: Optional[str] = None) -> tuple[datetime, datetime, datetime, datetime, str]:
     """Return UTC and local-Moscow period bounds.
 
-    day   = current calendar day in Moscow, 00:00 inclusive to tomorrow 00:00 exclusive.
-    month = last 30 Moscow calendar days, from 00:00 inclusive to tomorrow 00:00 exclusive.
+    day   = selected Moscow calendar day, 00:00 inclusive to next day 00:00 exclusive.
+    month = last 30 Moscow calendar days ending at selected/current Moscow day.
 
     This intentionally avoids the old rolling-window behavior where the left graph
     shifted every hour.
@@ -806,13 +819,14 @@ def _admin_stats_period_bounds(period: str) -> tuple[datetime, datetime, datetim
     tz = _admin_stats_tz()
     now_local = datetime.now(tz)
     today_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    selected_start_local = _parse_admin_stats_date_msk(date_msk, today_start_local)
     if str(period or "day").strip().lower() == "month":
-        since_local = today_start_local - timedelta(days=29)
-        until_local = today_start_local + timedelta(days=1)
+        since_local = selected_start_local - timedelta(days=29)
+        until_local = selected_start_local + timedelta(days=1)
         label = f"{since_local.strftime('%d.%m.%Y')} — {(until_local - timedelta(seconds=1)).strftime('%d.%m.%Y')}, МСК"
     else:
-        since_local = today_start_local
-        until_local = today_start_local + timedelta(days=1)
+        since_local = selected_start_local
+        until_local = selected_start_local + timedelta(days=1)
         label = f"{since_local.strftime('%d.%m.%Y')}, МСК"
     return (
         since_local.astimezone(timezone.utc),
@@ -1068,12 +1082,13 @@ def _make_empty_buckets(*, since: datetime, until: datetime, period: str) -> Lis
 @router.get("/admin/stats")
 async def partner_admin_stats(
     period: str = Query("day", pattern="^(day|month)$"),
+    date_msk: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
     max_rows: int = Query(10000, ge=100, le=50000),
     x_admin_token: Optional[str] = Header(None),
 ) -> Dict[str, Any]:
     _require_admin(x_admin_token)
     period_key = str(period or "day").strip().lower()
-    since, until, since_local, until_local, period_label = _admin_stats_period_bounds(period_key)
+    since, until, since_local, until_local, period_label = _admin_stats_period_bounds(period_key, date_msk=date_msk)
 
     raw_rows = _fetch_admin_ledger_rows_for_stats(since=since, until=until, max_rows=max_rows)
     rows: List[Dict[str, Any]] = []
@@ -1233,6 +1248,7 @@ async def partner_admin_stats(
         "ok": True,
         "period": period_key,
         "timezone": _STAT_TZ_NAME,
+        "date_msk": since_local.strftime("%Y-%m-%d") if period_key == "day" else None,
         "period_label": period_label,
         "since": _admin_iso_z(since),
         "until": _admin_iso_z(until),
