@@ -1502,12 +1502,16 @@ async def handle_gpt_image2_job(job: Dict[str, Any]) -> None:
     prompt = str(job.get("prompt") or "").strip()
     size = str(job.get("size") or "1024x1024").strip() or "1024x1024"
     photo_file_id = str(job.get("photo_file_id") or "").strip()
+    photo_file_ids = [str(item or "").strip() for item in (job.get("photo_file_ids") or []) if str(item or "").strip()]
+    photo_urls = [str(item or "").strip() for item in (job.get("photo_urls") or []) if str(item or "").strip()]
+    if not photo_file_ids and photo_file_id:
+        photo_file_ids = [photo_file_id]
 
     if not chat_id or not user_id:
         raise RuntimeError("gpt_image_2 job missing chat_id/user_id")
     if not prompt:
         raise RuntimeError("gpt_image_2 job missing prompt")
-    if job_type == "gpt_image_2_i2i" and not photo_file_id:
+    if job_type == "gpt_image_2_i2i" and not (photo_file_ids or photo_urls):
         raise RuntimeError("gpt_image_2_i2i job missing photo_file_id")
 
     label = "GPT Image 2.0"
@@ -1519,8 +1523,29 @@ async def handle_gpt_image2_job(job: Dict[str, Any]) -> None:
         if job_type == "gpt_image_2_t2i":
             out_bytes = await openai_generate_image_v2(prompt=prompt, size=size)
         else:
-            source_bytes, _ = await tg_download_file_bytes(photo_file_id)
-            out_bytes = await openai_edit_image_v2(source_bytes, prompt, size=size, mask_png_bytes=None)
+            source_images = []
+            expected_refs = min(4, len(photo_file_ids)) if photo_file_ids else min(4, len(photo_urls))
+
+            # Если все входные фото успешно сохранены в storage — берём их оттуда.
+            # Если storage сохранил только часть, лучше fallback на Telegram file_id,
+            # иначе часть референсов тихо потеряется.
+            if photo_urls and (not photo_file_ids or len(photo_urls[:4]) >= expected_refs):
+                try:
+                    for source_url in photo_urls[:4]:
+                        source_images.append(await download_bytes(source_url))
+                except Exception:
+                    source_images = []
+
+            if (not source_images or (expected_refs and len(source_images) < expected_refs)) and photo_file_ids:
+                source_images = []
+                for source_file_id in photo_file_ids[:4]:
+                    source_bytes, _ = await tg_download_file_bytes(source_file_id)
+                    source_images.append(source_bytes)
+
+            if not source_images:
+                raise RuntimeError("gpt_image_2_i2i job has no downloadable source images")
+
+            out_bytes = await openai_edit_image_v2(source_images[:4], prompt, size=size, mask_png_bytes=None)
 
         stop.set()
         try:
