@@ -6037,8 +6037,9 @@ async def workspace_image_run(
     source_upload = source_uploads_raw[0] if source_uploads_raw else None
     source_image: Optional[bytes] = None
 
-    if provider == "nano_banana_pro_new":
-        for upload in source_uploads_raw[:8]:
+    if provider in {"nano_banana_pro_new", "gpt_image_2"}:
+        source_limit = 8 if provider == "nano_banana_pro_new" else 4
+        for upload in source_uploads_raw[:source_limit]:
             raw = await _read_optional_upload_bytes(upload)
             if raw:
                 source_image_uploads.append((upload, raw, getattr(upload, "filename", None)))
@@ -6073,8 +6074,8 @@ async def workspace_image_run(
         raise HTTPException(status_code=400, detail="Для Photo Edit нужен source image.")
     if provider == "photosession" and not source_image:
         raise HTTPException(status_code=400, detail="Для нейро фотосессии нужен source image.")
-    if provider == "gpt_image_2" and mode == "image_to_image" and not source_image:
-        raise HTTPException(status_code=400, detail="Для GPT Image 2.0 Image→Image нужен source image.")
+    if provider == "gpt_image_2" and mode == "image_to_image" and not source_image_uploads:
+        raise HTTPException(status_code=400, detail="Для GPT Image 2.0 Image→Image нужен хотя бы 1 source/reference image.")
     if provider == "two_images" and (not source_image or not base_image):
         raise HTTPException(status_code=400, detail="Для режима Картинка + Картинка нужны base image и source image.")
     if provider == "topaz_photo" and not source_image:
@@ -6175,8 +6176,9 @@ async def workspace_image_run(
             charged = True
 
         source_image_urls = []
-        if provider == "nano_banana_pro_new":
-            for index, (_upload_obj, raw_bytes, upload_name) in enumerate(source_image_uploads[:8], start=1):
+        if provider in {"nano_banana_pro_new", "gpt_image_2"}:
+            source_limit = 8 if provider == "nano_banana_pro_new" else 4
+            for index, (_upload_obj, raw_bytes, upload_name) in enumerate(source_image_uploads[:source_limit], start=1):
                 source_image_urls.append(_upload_workspace_input_image(uid, raw_bytes, filename=upload_name, slot=f"workspace_image_source_{index}"))
         source_image_url = source_image_urls[0] if source_image_urls else (_upload_workspace_input_image(uid, source_image, filename=getattr(source_upload, "filename", None), slot="workspace_image_source") if source_image else None)
         base_image_url = _upload_workspace_input_image(uid, base_image, filename=getattr(base_upload, "filename", None), slot="workspace_image_base") if base_image else None
