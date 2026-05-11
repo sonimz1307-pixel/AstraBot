@@ -10,7 +10,7 @@ import hmac
 import logging
 from uuid import uuid4
 from io import BytesIO
-from typing import Optional, Literal, Dict, Any, Tuple, List
+from typing import Optional, Literal, Dict, Any, Tuple, List, Union
 
 import httpx
 from queue_redis import enqueue_job
@@ -1399,7 +1399,7 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
         st["gpt_image_2_t2i"] = {"step": "need_prompt", "size": "1024x1024"}
 
     elif mode == "gpt_image_2_i2i":
-        st["gpt_image_2_i2i"] = {"step": "need_image", "photo_bytes": None, "photo_file_id": None, "size": "1024x1024"}
+        st["gpt_image_2_i2i"] = {"step": "need_image", "photo_bytes": None, "photo_file_id": None, "photo_file_ids": [], "photo_urls": [], "size": "1024x1024"}
 
     elif mode == "two_photos":
         # 2 фото: multi-image (если эндпоинт поддерживает)
@@ -3123,21 +3123,32 @@ async def openai_generate_image_v2(
 
 
 async def openai_edit_image_v2(
-    source_image_bytes: bytes,
+    source_image_bytes: Union[bytes, List[bytes]],
     prompt: str,
     size: str = "1024x1024",
     mask_png_bytes: Optional[bytes] = None,
 ) -> bytes:
-    """Image-to-image via OpenAI Images API (gpt-image-2)."""
+    """Image-to-image via OpenAI Images API (gpt-image-2).
+
+    Supports either a single source image or multiple reference/source images.
+    When multiple images are provided, they are sent as repeated `image[]` fields.
+    """
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY не задан в переменных окружения.")
 
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
 
-    ext, mime = _detect_image_type(source_image_bytes)
-    files = {"image": (f"source.{ext}", source_image_bytes, mime)}
+    image_items = source_image_bytes if isinstance(source_image_bytes, list) else [source_image_bytes]
+    normalized_items = [item for item in image_items if isinstance(item, (bytes, bytearray)) and item]
+    if not normalized_items:
+        raise RuntimeError("openai_edit_image_v2 requires at least one source image.")
+
+    files: List[Tuple[str, Tuple[str, bytes, str]]] = []
+    for idx, raw in enumerate(normalized_items, start=1):
+        ext, mime = _detect_image_type(bytes(raw))
+        files.append(("image[]", (f"source_{idx}.{ext}", bytes(raw), mime)))
     if mask_png_bytes:
-        files["mask"] = ("mask.png", mask_png_bytes, "image/png")
+        files.append(("mask", ("mask.png", mask_png_bytes, "image/png")))
 
     data = {"model": "gpt-image-2", "prompt": prompt, "size": size, "n": "1"}
 
@@ -7327,10 +7338,10 @@ async def webhook(secret: str, request: Request):
     if incoming_text == "Картинка→Картинка":
         _set_mode(chat_id, user_id, "gpt_image_2_i2i")
         st.pop("photo_submenu", None)
-        st["gpt_image_2_i2i"] = {"step": "need_image", "photo_bytes": None, "photo_file_id": None, "size": "1024x1024"}
+        st["gpt_image_2_i2i"] = {"step": "need_image", "photo_bytes": None, "photo_file_id": None, "photo_file_ids": [], "photo_urls": [], "size": "1024x1024"}
         await tg_send_message(
             chat_id,
-            "GPT Image 2.0 • режим «Картинка→Картинка».\n1) Пришли одно фото.\n2) Потом одним сообщением напиши, что нужно изменить.",
+            "GPT Image 2.0 • режим «Картинка→Картинка».\n1) Пришли от 1 до 4 фото.\n2) Можно отправить несколько сообщений с фото.\n3) Потом одним сообщением напиши, что нужно изменить.",
             reply_markup=_photo_future_menu_keyboard(),
         )
         return {"ok": True}
@@ -7372,23 +7383,43 @@ async def webhook(secret: str, request: Request):
 
         if st.get("mode") == "gpt_image_2_i2i":
             gi2 = st.get("gpt_image_2_i2i") or {}
-            step = (gi2.get("step") or "need_image")
-            if step == "need_image":
-                gi2["photo_bytes"] = img_bytes
-                gi2["photo_file_id"] = file_id
-                gi2["step"] = "need_prompt"
-                st["gpt_image_2_i2i"] = gi2
-                st["ts"] = _now()
+            photo_ids = [str(item or "").strip() for item in (gi2.get("photo_file_ids") or []) if str(item or "").strip()]
+            if not photo_ids and str(gi2.get("photo_file_id") or "").strip():
+                photo_ids = [str(gi2.get("photo_file_id") or "").strip()]
+            photo_urls = [str(item or "").strip() for item in (gi2.get("photo_urls") or []) if str(item or "").strip()]
+            if len(photo_ids) >= 4:
                 await tg_send_message(
                     chat_id,
-                    "Фото принял ✅ Теперь напиши одним сообщением, что нужно изменить через GPT Image 2.0.",
+                    "У GPT Image 2.0 можно использовать максимум 4 фото в этом режиме. Уже набрано 4/4 ✅ Теперь просто напиши, что нужно изменить.",
                     reply_markup=_photo_future_menu_keyboard(),
                 )
                 return {"ok": True}
 
+            photo_ids.append(str(file_id))
+            try:
+                ext, mime = _detect_image_type(img_bytes)
+                input_path = f"gpt_image2_inputs/{int(user_id)}/{int(time.time())}_{uuid4().hex[:10]}_{len(photo_ids)}.{ext}"
+                uploaded_url = upload_bytes_to_supabase(input_path, img_bytes, mime)
+                if uploaded_url:
+                    photo_urls.append(str(uploaded_url).strip())
+            except Exception:
+                logging.exception("GPT Image 2.0 input upload failed")
+
+            gi2["photo_bytes"] = img_bytes
+            gi2["photo_file_id"] = str(photo_ids[0]) if photo_ids else None
+            gi2["photo_file_ids"] = photo_ids[:4]
+            gi2["photo_urls"] = photo_urls[:4]
+            gi2["step"] = "need_prompt"
+            st["gpt_image_2_i2i"] = gi2
+            st["ts"] = _now()
+            count_refs = len(gi2.get("photo_file_ids") or [])
+            if count_refs >= 4:
+                msg = "Фото принято 4/4 ✅ Теперь напиши одним сообщением, что нужно изменить через GPT Image 2.0."
+            else:
+                msg = f"Фото принято {count_refs}/4 ✅ Можешь отправить ещё фото или сразу написать, что нужно изменить через GPT Image 2.0."
             await tg_send_message(
                 chat_id,
-                "Фото уже получено ✅ Теперь жду ТЕКСТ, что нужно изменить.",
+                msg,
                 reply_markup=_photo_future_menu_keyboard(),
             )
             return {"ok": True}
@@ -9666,15 +9697,17 @@ async def webhook(secret: str, request: Request):
             st["gpt_image_2_t2i"] = {"step": "need_prompt", "size": str((st.get("gpt_image_2_t2i") or {}).get("size") or gi2.get("size") or "1024x1024")}
             st["ts"] = _now()
             return {"ok": True}
-
         # GPT Image 2.0: image-to-image
         if st.get("mode") == "gpt_image_2_i2i":
             gi2 = st.get("gpt_image_2_i2i") or {}
             step = (gi2.get("step") or "need_image")
-            photo_file_id = str(gi2.get("photo_file_id") or "").strip()
+            photo_file_ids = [str(item or "").strip() for item in (gi2.get("photo_file_ids") or []) if str(item or "").strip()]
+            if not photo_file_ids and str(gi2.get("photo_file_id") or "").strip():
+                photo_file_ids = [str(gi2.get("photo_file_id") or "").strip()]
+            photo_urls = [str(item or "").strip() for item in (gi2.get("photo_urls") or []) if str(item or "").strip()]
 
-            if step == "need_image" or not photo_file_id:
-                await tg_send_message(chat_id, "Сначала пришли фото для GPT Image 2.0 → Картинка→Картинка.", reply_markup=_main_menu_for(user_id))
+            if step == "need_image" or not photo_file_ids:
+                await tg_send_message(chat_id, "Сначала пришли от 1 до 4 фото для GPT Image 2.0 → Картинка→Картинка.", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
             user_prompt = incoming_text.strip()
@@ -9691,7 +9724,9 @@ async def webhook(secret: str, request: Request):
                     "user_id": int(user_id),
                     "prompt": user_prompt,
                     "size": size,
-                    "photo_file_id": photo_file_id,
+                    "photo_file_id": photo_file_ids[0],
+                    "photo_file_ids": photo_file_ids[:4],
+                    "photo_urls": photo_urls[:4],
                 }, queue_name=GPT_IMAGE2_QUEUE_NAME)
             except Exception as e:
                 await tg_send_message(chat_id, f"❌ Не удалось поставить GPT Image 2.0 в очередь: {e}", reply_markup=_main_menu_for(user_id))
@@ -9702,7 +9737,14 @@ async def webhook(secret: str, request: Request):
                 "✅ GPT Image 2.0: запрос принят. Пришлю результат, как будет готово.",
                 reply_markup=_main_menu_for(user_id),
             )
-            st["gpt_image_2_i2i"] = {"step": "need_image", "photo_bytes": None, "photo_file_id": None, "size": str((st.get("gpt_image_2_i2i") or {}).get("size") or gi2.get("size") or "1024x1024")}
+            st["gpt_image_2_i2i"] = {
+                "step": "need_image",
+                "photo_bytes": None,
+                "photo_file_id": None,
+                "photo_file_ids": [],
+                "photo_urls": [],
+                "size": str((st.get("gpt_image_2_i2i") or {}).get("size") or gi2.get("size") or "1024x1024"),
+            }
             st["ts"] = _now()
             return {"ok": True}
 
