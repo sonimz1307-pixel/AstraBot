@@ -469,7 +469,7 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
     charge_ref_id = str(job.get("charge_ref_id") or "")
 
     source_image_urls = [str(item or "").strip() for item in (job.get("source_image_urls") or []) if str(item or "").strip()]
-    source_image = None if (provider == "nano_banana_pro_new" and source_image_urls) else await _download_optional_bytes(job.get("source_image_url"))
+    source_image = None if (provider in {"nano_banana_pro_new", "gpt_image_2"} and source_image_urls) else await _download_optional_bytes(job.get("source_image_url"))
     base_image = await _download_optional_bytes(job.get("base_image_url"))
 
     ww._update_workspace_image_generation(
@@ -604,9 +604,17 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
             size = ww._workspace_gpt_image_2_size(job.get("aspect_ratio"), job.get("mode"))
             gpt_mode = str(job.get("mode") or "").strip().lower()
             if gpt_mode == "image_to_image":
-                if not source_image:
+                gpt_source_images = []
+                for source_url in source_image_urls[:4]:
+                    try:
+                        gpt_source_images.append(await _download_bytes(source_url))
+                    except Exception:
+                        continue
+                if not gpt_source_images and source_image:
+                    gpt_source_images = [source_image]
+                if not gpt_source_images:
                     raise RuntimeError("GPT Image 2.0 Image→Image requires source image")
-                out_bytes = await openai_edit_image_v2(source_image, run_prompt, size=size, mask_png_bytes=None)
+                out_bytes = await openai_edit_image_v2(gpt_source_images, run_prompt, size=size, mask_png_bytes=None)
             else:
                 out_bytes = await openai_generate_image_v2(prompt=run_prompt, size=size)
             ext = ww._workspace_detect_image_ext(out_bytes, default="png")
