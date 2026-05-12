@@ -2087,6 +2087,7 @@ async def _enqueue_tg_ai_chat_job(
         status_message_id = None
 
     job: Dict[str, Any] = {
+        "job_id": f"tg_ai_chat_{uuid4().hex}",
         "kind": "tg_ai_chat",
         "chat_id": int(chat_id),
         "user_id": int(user_id),
