@@ -27,6 +27,7 @@ from chat_memory_redis import (
 from kie_claude_chat import is_kie_claude_model, kie_claude_answer
 from queue_redis import dequeue_job, get_redis
 from app.services.partner_program import apply_topup_event, bind_referral
+from app.services.free_usage_events import log_free_usage_event_async
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}" if TELEGRAM_BOT_TOKEN else ""
@@ -280,6 +281,23 @@ async def process_tg_ai_chat_job(job: Dict[str, Any]) -> None:
 
         await tg_delete_message(chat_id, status_message_id)
         await tg_send_long_message(chat_id, answer, reply_markup=reply_markup)
+        await log_free_usage_event_async(
+            source="telegram",
+            service="ChatGPT" if model_key == "openai" else "Claude",
+            model=str(job.get("model") or ""),
+            mode="chat",
+            user_id=user_id,
+            telegram_user_id=user_id,
+            status="completed",
+            ref_id=str(job.get("job_id") or ""),
+            meta={
+                "kind": "tg_ai_chat",
+                "chat_id": chat_id,
+                "telegram_user_id": user_id,
+                "has_file": bool(job.get("file")),
+                "text_length": len(incoming_text or ""),
+            },
+        )
         print(f"[chat_worker] completed tg job={job.get('job_id')} model={model_key}", flush=True)
     except Exception as exc:
         await tg_delete_message(chat_id, status_message_id)
@@ -387,6 +405,25 @@ async def process_workspace_ai_chat_job(job: Dict[str, Any]) -> None:
             summary=summary,
             attachments=attachments,
             is_prompt=is_prompt,
+        )
+        workspace_uid = int(job.get("user_id") or 0) if str(job.get("user_id") or "").isdigit() else None
+        await log_free_usage_event_async(
+            source="site",
+            service="Claude" if is_kie_claude_model(model_actual) and mode == "chat" else "ChatGPT",
+            model=model_actual or model_label,
+            mode=mode,
+            user_id=workspace_uid,
+            workspace_account_id=workspace_uid,
+            status="completed",
+            ref_id=job_id,
+            meta={
+                "kind": "workspace_ai_chat",
+                "workspace_user_id": workspace_uid,
+                "attachments_count": len(attachments or []),
+                "image_refs_count": len(image_bytes_list or []),
+                "is_prompt_builder": bool(is_prompt),
+                "text_length": len(user_text or ""),
+            },
         )
         print(f"[chat_worker] completed workspace job={job_id} model={model_actual}", flush=True)
     except Exception as exc:
