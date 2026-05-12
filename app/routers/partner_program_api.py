@@ -976,6 +976,68 @@ def _fetch_admin_ledger_rows_for_stats(*, since: datetime, until: datetime, max_
     return rows[:limit_total]
 
 
+def _fetch_admin_free_usage_rows_for_stats(*, since: datetime, until: datetime, max_rows: int) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    page_size = 1000
+    offset = 0
+    limit_total = max(1, min(int(max_rows or 10000), 50000))
+    sb = _admin_sb()
+    while len(rows) < limit_total:
+        end = min(offset + page_size - 1, limit_total - 1)
+        try:
+            res = (
+                sb.table("free_usage_events")
+                .select("id,user_id,telegram_user_id,workspace_account_id,source,service,model,mode,status,ref_id,meta,created_at")
+                .eq("status", "completed")
+                .gte("created_at", _admin_iso_z(since))
+                .lt("created_at", _admin_iso_z(until))
+                .order("created_at", desc=False)
+                .range(offset, end)
+                .execute()
+            )
+            batch = list(getattr(res, "data", None) or [])
+        except Exception as exc:
+            # Таблица может быть ещё не создана на первом деплое — не ломаем админку.
+            try:
+                print(f"[admin_stats] free_usage_events skipped: {exc}", flush=True)
+            except Exception:
+                pass
+            break
+        if not batch:
+            break
+        rows.extend(batch)
+        if len(batch) < page_size:
+            break
+        offset += page_size
+    return rows[:limit_total]
+
+
+def _admin_ai_label_from_free_event(row: Dict[str, Any]) -> str:
+    service = str((row or {}).get("service") or "").strip()
+    model = str((row or {}).get("model") or "").strip()
+    joined = f"{service} {model}".lower()
+    if "claude" in joined:
+        return "Claude"
+    if "chatgpt" in joined or "openai" in joined or "gpt" in joined:
+        return "ChatGPT"
+    return (service or model or "Бесплатный ИИ")[:80]
+
+
+def _free_event_user_id(row: Dict[str, Any], user_map: Dict[int, int]) -> int:
+    source = str((row or {}).get("source") or "").strip().lower()
+    preferred_keys = ("telegram_user_id", "user_id", "workspace_account_id") if source == "telegram" else ("workspace_account_id", "user_id", "telegram_user_id")
+    for key in preferred_keys:
+        value = _safe_int((row or {}).get(key))
+        if value > 0:
+            return int(user_map.get(value, value))
+    meta = (row or {}).get("meta") if isinstance((row or {}).get("meta"), dict) else {}
+    for key in ("workspace_user_id", "account_id", "workspace_id", "telegram_user_id"):
+        value = _safe_int(meta.get(key))
+        if value > 0:
+            return int(user_map.get(value, value))
+    return 0
+
+
 def _chunk_admin_ids(values: List[int], size: int = 500) -> List[List[int]]:
     unique = sorted({int(v) for v in values if _safe_int(v) > 0})
     return [unique[i:i + size] for i in range(0, len(unique), size)]
@@ -1090,21 +1152,33 @@ async def partner_admin_stats(
     period_key = str(period or "day").strip().lower()
     since, until, since_local, until_local, period_label = _admin_stats_period_bounds(period_key, date_msk=date_msk)
 
-    raw_rows = _fetch_admin_ledger_rows_for_stats(since=since, until=until, max_rows=max_rows)
-    rows: List[Dict[str, Any]] = []
-    for row in raw_rows:
+    raw_paid_rows = _fetch_admin_ledger_rows_for_stats(since=since, until=until, max_rows=max_rows)
+    paid_rows: List[Dict[str, Any]] = []
+    for row in raw_paid_rows:
         if not _is_generation_charge_reason((row or {}).get("reason")):
             continue
         dt = _parse_admin_dt((row or {}).get("created_at"))
         if not dt or dt < since or dt >= until:
             continue
-        rows.append(row)
+        paid_rows.append(row)
+
+    free_rows = _fetch_admin_free_usage_rows_for_stats(since=since, until=until, max_rows=max_rows)
 
     raw_user_ids: List[int] = []
-    for row in rows:
+    for row in paid_rows:
         raw_uid = _safe_int((row or {}).get("telegram_user_id"))
         if raw_uid > 0:
             raw_user_ids.append(raw_uid)
+        meta = (row or {}).get("meta") if isinstance((row or {}).get("meta"), dict) else {}
+        for key in ("workspace_user_id", "account_id", "workspace_id", "telegram_user_id"):
+            meta_uid = _safe_int(meta.get(key))
+            if meta_uid > 0:
+                raw_user_ids.append(meta_uid)
+    for row in free_rows:
+        for key in ("user_id", "telegram_user_id", "workspace_account_id"):
+            uid_value = _safe_int((row or {}).get(key))
+            if uid_value > 0:
+                raw_user_ids.append(uid_value)
         meta = (row or {}).get("meta") if isinstance((row or {}).get("meta"), dict) else {}
         for key in ("workspace_user_id", "account_id", "workspace_id", "telegram_user_id"):
             meta_uid = _safe_int(meta.get(key))
@@ -1126,73 +1200,84 @@ async def partner_admin_stats(
     recent_24h_user_activity: Dict[int, Dict[str, int]] = {}
     user_activity: Dict[int, Dict[str, Any]] = {}
 
-    for row in rows:
-        raw_uid = _safe_int(row.get("telegram_user_id"))
+    def add_event(*, uid: int, raw_uid: int, tokens: int, label: str, source: str, reason: str, dt: datetime, created_at: Any, is_free: bool) -> None:
+        nonlocal total_tokens
         if raw_uid:
             raw_users.add(raw_uid)
-        uid = _canonical_admin_user_id(row, user_map)
         if uid:
             users.add(uid)
-        tokens = abs(_safe_int(row.get("delta_tokens")))
-        total_tokens += tokens
-        reason = str(row.get("reason") or "unknown")
-        meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
-        label = _admin_ai_label_from_reason(reason, meta)
-        source = _admin_source_from_meta(meta)
-        dt = _parse_admin_dt(row.get("created_at")) or since
+        if not is_free:
+            total_tokens += int(tokens or 0)
         local_dt = dt.astimezone(_admin_stats_tz())
         key = local_dt.strftime("%Y-%m-%d") if period_key == "month" else local_dt.strftime("%Y-%m-%dT%H")
         if key not in bucket_index:
             bucket_index[key] = {"key": key, "label": _bucket_label(dt, period=period_key), "count": 0, "tokens": 0, "users_set": set()}
             buckets.append(bucket_index[key])
         bucket_index[key]["count"] += 1
-        bucket_index[key]["tokens"] += tokens
+        bucket_index[key]["tokens"] += int(tokens or 0)
         if uid:
             bucket_index[key]["users_set"].add(uid)
             if dt >= recent_24h_since:
                 recent_24h_users.add(uid)
                 recent_slot = recent_24h_user_activity.setdefault(uid, {"count": 0, "tokens": 0})
                 recent_slot["count"] += 1
-                recent_slot["tokens"] += tokens
-            user_slot = user_activity.setdefault(uid, {"user_id": uid, "raw_ids": set(), "count": 0, "tokens": 0, "last_seen": None, "reasons": {}})
+                recent_slot["tokens"] += int(tokens or 0)
+            user_slot = user_activity.setdefault(uid, {"user_id": uid, "raw_ids": set(), "count": 0, "tokens": 0, "free_count": 0, "paid_count": 0, "last_seen": None, "reasons": {}})
             if raw_uid:
                 user_slot["raw_ids"].add(raw_uid)
             user_slot["count"] += 1
-            user_slot["tokens"] += tokens
-            user_slot["last_seen"] = max(str(user_slot.get("last_seen") or ""), str(row.get("created_at") or "")) or row.get("created_at")
+            user_slot["tokens"] += int(tokens or 0)
+            if is_free:
+                user_slot["free_count"] += 1
+            else:
+                user_slot["paid_count"] += 1
+            user_slot["last_seen"] = max(str(user_slot.get("last_seen") or ""), str(created_at or "")) or created_at
             rdict = user_slot["reasons"]
             rdict[reason] = int(rdict.get(reason, 0)) + 1
 
         slot = by_ai.setdefault(label, {"label": label, "count": 0, "tokens": 0, "users_set": set()})
         slot["count"] += 1
-        slot["tokens"] += tokens
+        slot["tokens"] += int(tokens or 0)
         if uid:
             slot["users_set"].add(uid)
 
         source_slot = by_source.setdefault(source, {"label": source, "count": 0, "tokens": 0, "users_set": set()})
         source_slot["count"] += 1
-        source_slot["tokens"] += tokens
+        source_slot["tokens"] += int(tokens or 0)
         if uid:
             source_slot["users_set"].add(uid)
 
         reason_slot = by_reason.setdefault(reason, {"label": reason, "count": 0, "tokens": 0, "users_set": set()})
         reason_slot["count"] += 1
-        reason_slot["tokens"] += tokens
+        reason_slot["tokens"] += int(tokens or 0)
         if uid:
             reason_slot["users_set"].add(uid)
 
-    qualified_users = {
-        int(uid)
-        for uid, item in user_activity.items()
-        if int(item.get("count") or 0) >= _STAT_REAL_ACTIVE_MIN_GENERATIONS
-        or int(item.get("tokens") or 0) >= _STAT_REAL_ACTIVE_MIN_TOKENS
-    }
-    recent_24h_qualified_users = {
-        int(uid)
-        for uid, item in recent_24h_user_activity.items()
-        if int(item.get("count") or 0) >= _STAT_REAL_ACTIVE_MIN_GENERATIONS
-        or int(item.get("tokens") or 0) >= _STAT_REAL_ACTIVE_MIN_TOKENS
-    }
+    for row in paid_rows:
+        raw_uid = _safe_int(row.get("telegram_user_id"))
+        uid = _canonical_admin_user_id(row, user_map)
+        tokens = abs(_safe_int(row.get("delta_tokens")))
+        reason = str(row.get("reason") or "unknown")
+        meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+        label = _admin_ai_label_from_reason(reason, meta)
+        source = _admin_source_from_meta(meta)
+        dt = _parse_admin_dt(row.get("created_at")) or since
+        add_event(uid=uid, raw_uid=raw_uid, tokens=tokens, label=label, source=source, reason=reason, dt=dt, created_at=row.get("created_at"), is_free=False)
+
+    for row in free_rows:
+        source = (str(row.get("source") or "site").strip().lower() or "site")[:40]
+        raw_uid = _safe_int(row.get("telegram_user_id" if source == "telegram" else "workspace_account_id")) or _safe_int(row.get("user_id"))
+        uid = _free_event_user_id(row, user_map)
+        label = _admin_ai_label_from_free_event(row)
+        mode = str(row.get("mode") or "chat").strip() or "chat"
+        reason = f"free_{label.lower().replace(' ', '_')}_{mode}".replace("/", "_")[:120]
+        dt = _parse_admin_dt(row.get("created_at")) or since
+        add_event(uid=uid, raw_uid=raw_uid, tokens=0, label=label, source=source, reason=reason, dt=dt, created_at=row.get("created_at"), is_free=True)
+
+    # После введения free_usage_events каждое событие — реальный запуск ИИ, поэтому
+    # уникальных клиентов считаем по любому успешному событию, а не по порогу токенов.
+    qualified_users = set(users)
+    recent_24h_qualified_users = set(recent_24h_users)
 
     def finish_group(items: Dict[str, Dict[str, Any]], limit: int = 50) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
@@ -1237,6 +1322,8 @@ async def partner_admin_stats(
             "user_id": int(item.get("user_id") or 0),
             "raw_ids": raw_ids[:6],
             "count": int(item.get("count") or 0),
+            "free_count": int(item.get("free_count") or 0),
+            "paid_count": int(item.get("paid_count") or 0),
             "tokens": int(item.get("tokens") or 0),
             "last_seen": item.get("last_seen"),
             "top_reason": top_reason,
@@ -1244,6 +1331,8 @@ async def partner_admin_stats(
         })
     top_users.sort(key=lambda x: (int(x.get("count") or 0), int(x.get("tokens") or 0)), reverse=True)
 
+    total_paid_generations = len(paid_rows)
+    total_free_generations = len(free_rows)
     return {
         "ok": True,
         "period": period_key,
@@ -1254,23 +1343,28 @@ async def partner_admin_stats(
         "until": _admin_iso_z(until),
         "since_label_msk": _admin_stats_label(since),
         "until_label_msk": _admin_stats_label(until - timedelta(seconds=1)),
-        "source": "bot_balance_ledger_negative_charges",
-        "note": f"Статистика строится по отрицательным списаниям bot_balance_ledger. Реально активный клиент = минимум {_STAT_REAL_ACTIVE_MIN_GENERATIONS} списания или минимум {_STAT_REAL_ACTIVE_MIN_TOKENS} токенов за период. Пополнения, подарочные начисления и возвраты не учитываются.",
-        "total_generations": len(rows),
+        "source": "bot_balance_ledger_negative_charges + free_usage_events",
+        "note": "Платные генерации считаются по отрицательным списаниям bot_balance_ledger. Бесплатные чаты ChatGPT/Claude считаются по free_usage_events. Время — календарные сутки по МСК.",
+        "total_generations": total_paid_generations + total_free_generations,
+        "paid_generations": total_paid_generations,
+        "free_generations": total_free_generations,
+        "free_chat_generations": total_free_generations,
         "active_users": len(qualified_users),
         "active_users_any_charge": len(users),
         "raw_active_users": len(raw_users),
         "normalized_user_duplicates": max(0, len(raw_users) - len(users)),
         "recent_24h_active_users": len(recent_24h_qualified_users),
         "recent_24h_active_users_any_charge": len(recent_24h_users),
-        "real_active_min_tokens": _STAT_REAL_ACTIVE_MIN_TOKENS,
-        "real_active_min_generations": _STAT_REAL_ACTIVE_MIN_GENERATIONS,
+        "real_active_min_tokens": 0,
+        "real_active_min_generations": 1,
         "avg_bucket_active_users": avg_bucket_active_users,
         "avg_nonzero_bucket_active_users": avg_nonzero_bucket_active_users,
         "max_bucket_active_users": max_bucket_active_users,
         "total_tokens_spent": int(total_tokens),
-        "rows_scanned": len(raw_rows),
-        "rows_used": len(rows),
+        "rows_scanned": len(raw_paid_rows) + len(free_rows),
+        "paid_rows_scanned": len(raw_paid_rows),
+        "free_rows_scanned": len(free_rows),
+        "rows_used": total_paid_generations + total_free_generations,
         "series": series,
         "by_ai": finish_group(by_ai, 80),
         "by_source": finish_group(by_source, 10),
