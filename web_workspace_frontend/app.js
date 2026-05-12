@@ -1,25 +1,144 @@
 
-const DEFAULT_API_BASE = localStorage.getItem('astrabot:apiBaseUrl') || 'https://astrabot-tchj.onrender.com';
+const FIXED_API_BASE = 'https://nabex.ru';
+const DEFAULT_API_BASE = FIXED_API_BASE;
+try { localStorage.removeItem('astrabot:apiBaseUrl'); } catch {}
 const DEFAULT_AUTH_TOKEN = localStorage.getItem('astrabot:authToken') || '';
 const DEFAULT_ME = JSON.parse(localStorage.getItem('astrabot:me') || 'null');
 const DEFAULT_VIDEO_STATE = JSON.parse(localStorage.getItem('astrabot:videoState') || '{}');
 const DEFAULT_IMAGE_STATE = JSON.parse(localStorage.getItem('astrabot:imageState') || '{}');
 const DEFAULT_VOICE_STATE = JSON.parse(localStorage.getItem('astrabot:voiceState') || '{}');
+const VOICE_FIXED_OUTPUT_FORMAT = 'mp3_44100_192';
 const DEFAULT_VOICE_HISTORY_STATE = JSON.parse(localStorage.getItem('astrabot:voiceHistoryState') || '{}');
 const DEFAULT_MUSIC_STATE = JSON.parse(localStorage.getItem('astrabot:musicState') || '{}');
 const DEFAULT_MUSIC_HISTORY_STATE = JSON.parse(localStorage.getItem('astrabot:musicHistoryState') || '{}');
 const DEFAULT_SITE_BUILDER_STATE = JSON.parse(localStorage.getItem('astrabot:siteBuilderState') || '{}');
 const DEFAULT_VIDEO_EDITOR_STATE = JSON.parse(localStorage.getItem('astrabot:videoEditorState') || 'null');
+const DEFAULT_AUTH_UI_STATE = JSON.parse(localStorage.getItem('astrabot:authUiState') || '{}');
+const DEFAULT_PARTNER_STATE = JSON.parse(localStorage.getItem('astrabot:partnerState') || '{}');
+const BOOT_QUERY = new URLSearchParams(window.location.search || '');
+const PARTNER_REF_KEY = 'astrabot:partnerRefCode';
+const PARTNER_BOT_USERNAME = 'NeiroAstraBot';
+const PENDING_TOPUP_KEY = 'astrabot:pendingTopupTokens';
+const PENDING_TOPUP_RETURN_KEY = 'astrabot:pendingTopupReturnUrl';
+const SITE_BUILDER_BRIEF_SAMPLE_URL = 'https://storage.yandexcloud.net/astrabot-media-andre/brief.txt?response-content-disposition=attachment%3B%20filename%3Dbrief.txt&response-content-type=application%2Foctet-stream';
+
+const CHAT_WELCOME_TEXT = 'Новый диалог открыт. Выбери модель, задай вопрос или прикрепи файл.';
+const DEFAULT_CHAT_MODEL = localStorage.getItem('astrabot:chatModel') || 'gpt-4o-mini';
+const DEFAULT_CHAT_MODE = localStorage.getItem('astrabot:chatMode') || 'chat';
+
+function createChatWelcomeMessage() {
+  return { role: 'system', content: CHAT_WELCOME_TEXT };
+}
+
+function defaultChatMessages() {
+  return [createChatWelcomeMessage()];
+}
+
+function safeJsonParse(value, fallback) {
+  try {
+    if (value === null || value === undefined || value === '') return fallback;
+    return JSON.parse(value);
+  } catch (_e) {
+    return fallback;
+  }
+}
+
+function cleanChatStoragePart(value) {
+  return String(value || 'chat').trim().replace(/[^a-zA-Z0-9_.-]+/g, '_').slice(0, 90) || 'chat';
+}
+
+function chatSessionStorageKey(kind, model = DEFAULT_CHAT_MODEL, mode = DEFAULT_CHAT_MODE) {
+  return `astrabot:chat:${cleanChatStoragePart(mode)}:${cleanChatStoragePart(model)}:${kind}`;
+}
+
+function isValidChatMessages(value) {
+  return Array.isArray(value) && value.some((item) => item && typeof item === 'object' && typeof item.content === 'string');
+}
+
+function readChatMessagesForSession(model, mode, options = {}) {
+  const { allowLegacy = false } = options;
+  const stored = safeJsonParse(localStorage.getItem(chatSessionStorageKey('messages', model, mode)), null);
+  if (isValidChatMessages(stored)) return stored;
+
+  if (allowLegacy) {
+    const legacy = safeJsonParse(localStorage.getItem('astrabot:chatMessages'), null);
+    if (isValidChatMessages(legacy)) return legacy;
+  }
+  return defaultChatMessages();
+}
+
+function readChatSummaryForSession(model, mode, options = {}) {
+  const { allowLegacy = false } = options;
+  const stored = localStorage.getItem(chatSessionStorageKey('summary', model, mode));
+  if (stored !== null) return String(stored || '');
+  return allowLegacy ? String(localStorage.getItem('astrabot:chatSummary') || '') : '';
+}
+
+function chatModelTitle(model) {
+  const titles = {
+    'gpt-4o-mini': 'GPT 4 mini',
+    'gpt-5.4': 'GPT 5.4',
+    'claude-sonnet-4-6': 'Claude Sonnet 4.6',
+  };
+  return titles[String(model || '')] || String(model || 'AI Chat');
+}
+
+function normalizePartnerRefCode(value) {
+  const code = String(value || '').trim().toUpperCase().replace(/^REF[_-]/, '').replace(/[^A-Z0-9_-]/g, '');
+  return code.length >= 3 && code.length <= 32 ? code : '';
+}
+
+function partnerSiteLink(profile = {}) {
+  const code = normalizePartnerRefCode(profile.ref_code || '');
+  return String(profile.site_link || profile.universal_link || (code ? `https://nabex.ru/?ref=${code}` : '') || '');
+}
+
+function partnerBotLink(profile = {}) {
+  const code = normalizePartnerRefCode(profile.ref_code || '');
+  return String(profile.bot_link || (code ? `https://t.me/${PARTNER_BOT_USERNAME}?start=ref_${code}` : '') || '');
+}
+
+function capturePartnerRefFromUrl() {
+  const code = normalizePartnerRefCode(BOOT_QUERY.get('ref') || BOOT_QUERY.get('partner') || BOOT_QUERY.get('ref_code'));
+  if (!code) return '';
+  try { localStorage.setItem(PARTNER_REF_KEY, code); } catch {}
+  return code;
+}
+
+capturePartnerRefFromUrl();
 
 const runtime = {
   files: {},
   lastChatBootstrapLoaded: false,
   videoPollTimer: null,
+  imagePollTimer: null,
+  switchxRefPollTimer: null,
+  voicePollTimer: null,
   videoEditPollTimer: null,
   musicPollTimer: null,
   musicToolPollTimer: null,
   musicSourceFile: null,
   showcaseMediaObserver: null,
+  saveStateTimer: null,
+  saveStatePending: false,
+  pendingTopupInFlight: false,
+  mobileUi: {
+    navOpen: false,
+    sheetOpen: false,
+    sheetKind: 'settings',
+  },
+  switchxMaskEditor: {
+    sourceSignature: '',
+    frameDataUrl: '',
+    frameWidth: 0,
+    frameHeight: 0,
+    maskDataUrl: '',
+    brushSize: 28,
+    tool: 'brush',
+    loading: false,
+    ready: false,
+    errorText: '',
+  },
 };
 
 const DEFAULT_APP_VIEW = localStorage.getItem('astrabot:view') || (window.location.hash === '#workspace' ? 'workspace' : 'showcase');
@@ -30,14 +149,20 @@ const FILE_INPUT_MAP = {
   video_endFrame: { key: 'video.endFrame', multiple: false },
   video_lastFrame: { key: 'video.lastFrame', multiple: false },
   video_referenceImages: { key: 'video.referenceImages', multiple: true },
+  video_referenceAudios: { key: 'video.referenceAudios', multiple: true },
+  video_referenceVideos: { key: 'video.referenceVideos', multiple: true },
   video_avatarImage: { key: 'video.avatarImage', multiple: false },
   video_motionVideo: { key: 'video.motionVideo', multiple: false },
   video_sourceVideo: { key: 'video.sourceVideo', multiple: false },
+  video_switchxSelectMask: { key: 'video.switchxSelectMask', multiple: false },
   editorAudioUpload: { key: 'editor.audioUpload', multiple: false },
   editorMergeUpload: { key: 'editor.mergeUpload', multiple: false },
   music_sourceAudio: { key: 'music.sourceAudio', multiple: false },
   image_sourceImage: { key: 'image.sourceImage', multiple: false },
   image_baseImage: { key: 'image.baseImage', multiple: false },
+  image_styleRefImage: { key: 'image.styleRefImage', multiple: false },
+  image_omniRefImage: { key: 'image.omniRefImage', multiple: false },
+  site_revision_files: { key: 'siteBuilder.revisionFiles', multiple: true },
 };
 
 function makeRuntimeFileEntry(file) {
@@ -49,24 +174,46 @@ const state = {
   authToken: DEFAULT_AUTH_TOKEN,
   me: DEFAULT_ME,
   balance: null,
+  balanceHistory: {
+    items: [],
+    loading: false,
+    loaded: false,
+    lastError: '',
+    filter: 'all',
+    limit: 30,
+  },
+  partner: {
+    dashboard: DEFAULT_PARTNER_STATE.dashboard || null,
+    loading: false,
+    loaded: false,
+    lastError: '',
+    payoutSending: false,
+  },
+  authUi: {
+    profileTab: DEFAULT_AUTH_UI_STATE.profileTab || 'login',
+    modalTab: DEFAULT_AUTH_UI_STATE.modalTab || 'login',
+    modalOpen: !!DEFAULT_AUTH_UI_STATE.modalOpen,
+    registerPendingEmail: DEFAULT_AUTH_UI_STATE.registerPendingEmail || '',
+    linkPendingEmail: DEFAULT_AUTH_UI_STATE.linkPendingEmail || '',
+    resetPendingEmail: DEFAULT_AUTH_UI_STATE.resetPendingEmail || '',
+  },
   apiOnline: false,
   view: DEFAULT_APP_VIEW,
-  studio: localStorage.getItem('astrabot:studio') || 'chat',
+  studio: (['workspace', 'billing'].includes(localStorage.getItem('astrabot:studio')) ? 'chat' : (localStorage.getItem('astrabot:studio') || 'chat')),
   recentRuns: JSON.parse(localStorage.getItem('astrabot:recentRuns') || '[]'),
   workspaceNotes: localStorage.getItem('astrabot:workspaceNotes') || '',
   bootstrap: {
-    chatModels: ['gpt-4o-mini', 'gpt-5.4'],
+    chatModels: ['gpt-4o-mini', 'gpt-5.4', 'claude-sonnet-4-6'],
     liveIntegrations: ['workspace_chat', 'balance', 'kling3', 'tts', 'songwriter', 'prompts'],
   },
   chat: {
-    model: localStorage.getItem('astrabot:chatModel') || 'gpt-4o-mini',
-    mode: localStorage.getItem('astrabot:chatMode') || 'chat',
+    model: DEFAULT_CHAT_MODEL,
+    mode: DEFAULT_CHAT_MODE,
     temperature: Number(localStorage.getItem('astrabot:chatTemperature') || '0.6'),
     maxTokens: Number(localStorage.getItem('astrabot:chatMaxTokens') || '900'),
     input: '',
-    messages: JSON.parse(localStorage.getItem('astrabot:chatMessages') || JSON.stringify([
-      { role: 'system', content: 'Добро пожаловать в AstraBot Workspace. Здесь чат, генерации и проекты живут в одной рабочей зоне.' }
-    ])),
+    messages: readChatMessagesForSession(DEFAULT_CHAT_MODEL, DEFAULT_CHAT_MODE, { allowLegacy: true }),
+    summary: readChatSummaryForSession(DEFAULT_CHAT_MODEL, DEFAULT_CHAT_MODE, { allowLegacy: true }),
   },
 
 video: {
@@ -79,18 +226,34 @@ video: {
   aspectRatio: DEFAULT_VIDEO_STATE.aspectRatio || '16:9',
   enableAudio: !!DEFAULT_VIDEO_STATE.enableAudio,
   quality: DEFAULT_VIDEO_STATE.quality || 'pro',
-  outputUrl: '',
-  downloadUrl: '',
-  coverUrl: '',
-  percent: null,
-  generationId: '',
-  providerTaskId: '',
-  statusText: 'Выбери модель, настрой параметры и нажми запуск.',
-  errorText: '',
-  lastStatus: 'idle',
-  panel: 'params',
+  providerMode: DEFAULT_VIDEO_STATE.providerMode || 'normal',
+  outputUrl: DEFAULT_VIDEO_STATE.outputUrl || '',
+  downloadUrl: DEFAULT_VIDEO_STATE.downloadUrl || '',
+  coverUrl: DEFAULT_VIDEO_STATE.coverUrl || '',
+  percent: Number.isFinite(Number(DEFAULT_VIDEO_STATE.percent)) ? Number(DEFAULT_VIDEO_STATE.percent) : null,
+  generationId: DEFAULT_VIDEO_STATE.generationId || '',
+  providerTaskId: DEFAULT_VIDEO_STATE.providerTaskId || '',
+  statusText: DEFAULT_VIDEO_STATE.statusText || 'Выбери модель, настрой параметры и нажми запуск.',
+  errorText: DEFAULT_VIDEO_STATE.errorText || '',
+  lastStatus: DEFAULT_VIDEO_STATE.lastStatus || 'idle',
+  panel: DEFAULT_VIDEO_STATE.panel === 'library' ? 'library' : 'params',
   motionDurationSec: Number.isFinite(Number(DEFAULT_VIDEO_STATE.motionDurationSec)) ? Number(DEFAULT_VIDEO_STATE.motionDurationSec) : null,
-  isGenerating: false,
+  sourceVideoDurationSec: Number.isFinite(Number(DEFAULT_VIDEO_STATE.sourceVideoDurationSec)) ? Number(DEFAULT_VIDEO_STATE.sourceVideoDurationSec) : null,
+  switchxSourceUploadId: DEFAULT_VIDEO_STATE.switchxSourceUploadId || '',
+  switchxRefGenerationId: DEFAULT_VIDEO_STATE.switchxRefGenerationId || '',
+  switchxReferenceImageUrl: DEFAULT_VIDEO_STATE.switchxReferenceImageUrl || '',
+  switchxReferenceStatus: DEFAULT_VIDEO_STATE.switchxReferenceStatus || 'idle',
+  switchxRefPrompt: DEFAULT_VIDEO_STATE.switchxRefPrompt || '',
+  switchxAlphaMode: DEFAULT_VIDEO_STATE.switchxAlphaMode || 'auto',
+  isGenerating: !!DEFAULT_VIDEO_STATE.isGenerating,
+  requestStartedAt: DEFAULT_VIDEO_STATE.requestStartedAt || '',
+  seedanceUseStartFrame: !!DEFAULT_VIDEO_STATE.seedanceUseStartFrame,
+  seedanceUseLastFrame: !!DEFAULT_VIDEO_STATE.seedanceUseLastFrame,
+  kling3NewShots: Array.isArray(DEFAULT_VIDEO_STATE.kling3NewShots) && DEFAULT_VIDEO_STATE.kling3NewShots.length ? DEFAULT_VIDEO_STATE.kling3NewShots : [
+    { prompt: '', duration: '3' },
+    { prompt: '', duration: '3' },
+  ],
+  kling3NewElements: Array.isArray(DEFAULT_VIDEO_STATE.kling3NewElements) ? DEFAULT_VIDEO_STATE.kling3NewElements : [],
 },
 
   videoEditor: normalizeVideoEditorState(DEFAULT_VIDEO_EDITOR_STATE),
@@ -107,17 +270,27 @@ video: {
     stylePreset: DEFAULT_IMAGE_STATE.stylePreset || 'editorial',
     moodPreset: DEFAULT_IMAGE_STATE.moodPreset || 'premium',
     upscalePreset: DEFAULT_IMAGE_STATE.upscalePreset || 'standard',
-    outputUrl: '',
-    downloadUrl: '',
+    negativePrompt: DEFAULT_IMAGE_STATE.negativePrompt || '',
+    mjStylize: Number.isFinite(Number(DEFAULT_IMAGE_STATE.mjStylize)) ? Number(DEFAULT_IMAGE_STATE.mjStylize) : 100,
+    mjChaos: Number.isFinite(Number(DEFAULT_IMAGE_STATE.mjChaos)) ? Number(DEFAULT_IMAGE_STATE.mjChaos) : 0,
+    mjRaw: !!DEFAULT_IMAGE_STATE.mjRaw,
+    mjSpeedMode: DEFAULT_IMAGE_STATE.mjSpeedMode || 'fast',
+    mjSeed: DEFAULT_IMAGE_STATE.mjSeed || '',
+    outputUrl: DEFAULT_IMAGE_STATE.outputUrl || '',
+    downloadUrl: DEFAULT_IMAGE_STATE.downloadUrl || '',
     beforeImageUrl: DEFAULT_IMAGE_STATE.beforeImageUrl || '',
     afterImageUrl: DEFAULT_IMAGE_STATE.afterImageUrl || '',
+    imageUrls: Array.isArray(DEFAULT_IMAGE_STATE.imageUrls) ? DEFAULT_IMAGE_STATE.imageUrls : [],
+    availableActions: DEFAULT_IMAGE_STATE.availableActions && typeof DEFAULT_IMAGE_STATE.availableActions === 'object' ? DEFAULT_IMAGE_STATE.availableActions : {},
+    activeImageIndex: Number.isFinite(Number(DEFAULT_IMAGE_STATE.activeImageIndex)) ? Number(DEFAULT_IMAGE_STATE.activeImageIndex) : 0,
     compareMode: !!DEFAULT_IMAGE_STATE.compareMode,
     comparePosition: Number.isFinite(Number(DEFAULT_IMAGE_STATE.comparePosition)) ? Number(DEFAULT_IMAGE_STATE.comparePosition) : 50,
-    generationId: '',
+    generationId: DEFAULT_IMAGE_STATE.generationId || '',
     panel: DEFAULT_IMAGE_STATE.panel === 'library' ? 'library' : 'params',
-    isGenerating: false,
-    errorText: '',
-    statusText: 'Выбери режим, добавь изображения при необходимости и запусти генерацию.',
+    isGenerating: !!DEFAULT_IMAGE_STATE.isGenerating,
+    errorText: DEFAULT_IMAGE_STATE.errorText || '',
+    statusText: DEFAULT_IMAGE_STATE.statusText || 'Выбери режим, добавь изображения при необходимости и запусти генерацию.',
+    requestStartedAt: DEFAULT_IMAGE_STATE.requestStartedAt || '',
   },
   imageHistory: {
     items: [],
@@ -132,21 +305,22 @@ video: {
   voice: {
     voiceId: DEFAULT_VOICE_STATE.voiceId || '',
     modelId: DEFAULT_VOICE_STATE.modelId || 'eleven_multilingual_v2',
-    outputFormat: DEFAULT_VOICE_STATE.outputFormat || 'mp3_44100_128',
+    outputFormat: VOICE_FIXED_OUTPUT_FORMAT,
     languageCode: DEFAULT_VOICE_STATE.languageCode || 'ru',
     manualVoiceSettings: !!DEFAULT_VOICE_STATE.manualVoiceSettings,
+    showAdvancedPanel: !!DEFAULT_VOICE_STATE.showAdvancedPanel,
     stability: Number.isFinite(Number(DEFAULT_VOICE_STATE.stability)) ? Number(DEFAULT_VOICE_STATE.stability) : 0.5,
     similarityBoost: Number.isFinite(Number(DEFAULT_VOICE_STATE.similarityBoost)) ? Number(DEFAULT_VOICE_STATE.similarityBoost) : 0.75,
     style: Number.isFinite(Number(DEFAULT_VOICE_STATE.style)) ? Number(DEFAULT_VOICE_STATE.style) : 0,
     speed: Number.isFinite(Number(DEFAULT_VOICE_STATE.speed)) ? Number(DEFAULT_VOICE_STATE.speed) : 1,
-    useSpeakerBoost: typeof DEFAULT_VOICE_STATE.useSpeakerBoost === 'boolean' ? DEFAULT_VOICE_STATE.useSpeakerBoost : true,
+    useSpeakerBoost: true,
     text: DEFAULT_VOICE_STATE.text || '',
-    audioUrl: '',
-    downloadUrl: '',
+    audioUrl: DEFAULT_VOICE_STATE.audioUrl || '',
+    downloadUrl: DEFAULT_VOICE_STATE.downloadUrl || '',
     generationId: DEFAULT_VOICE_STATE.generationId || '',
     voices: [],
-    isGenerating: false,
-    errorText: '',
+    isGenerating: !!DEFAULT_VOICE_STATE.isGenerating,
+    errorText: DEFAULT_VOICE_STATE.errorText || '',
     lastGeneratedAt: DEFAULT_VOICE_STATE.lastGeneratedAt || '',
   },
   voiceHistory: {
@@ -184,12 +358,12 @@ video: {
     generatedLyrics: Array.isArray(DEFAULT_MUSIC_STATE.generatedLyrics) ? DEFAULT_MUSIC_STATE.generatedLyrics : [],
     timestampedLyrics: DEFAULT_MUSIC_STATE.timestampedLyrics && typeof DEFAULT_MUSIC_STATE.timestampedLyrics === 'object' ? DEFAULT_MUSIC_STATE.timestampedLyrics : {},
     generationId: DEFAULT_MUSIC_STATE.generationId || '',
-    isGenerating: false,
+    isGenerating: !!DEFAULT_MUSIC_STATE.isGenerating,
     status: DEFAULT_MUSIC_STATE.status || 'idle',
     statusText: DEFAULT_MUSIC_STATE.statusText || 'Заполни идею или текст и запусти генерацию.',
-    errorText: '',
+    errorText: DEFAULT_MUSIC_STATE.errorText || '',
     lastCompletedAt: DEFAULT_MUSIC_STATE.lastCompletedAt || '',
-    results: [],
+    results: Array.isArray(DEFAULT_MUSIC_STATE.results) ? DEFAULT_MUSIC_STATE.results : [],
     toolAction: DEFAULT_MUSIC_STATE.toolAction || 'upload-cover',
     toolTaskId: DEFAULT_MUSIC_STATE.toolTaskId || '',
     toolTaskStatus: DEFAULT_MUSIC_STATE.toolTaskStatus || 'idle',
@@ -228,6 +402,7 @@ video: {
     groups: [],
     selectedGroupId: '',
     items: [],
+    openItemId: '',
     loading: false,
   },
   history: {
@@ -259,6 +434,9 @@ video: {
       extraTextsRaw: DEFAULT_SITE_BUILDER_STATE.extraTextsRaw || '',
     },
     revisionText: DEFAULT_SITE_BUILDER_STATE.revisionText || '',
+    hiddenProjects: Array.isArray(DEFAULT_SITE_BUILDER_STATE.hiddenProjects) ? DEFAULT_SITE_BUILDER_STATE.hiddenProjects : [],
+    hiddenVersions: Array.isArray(DEFAULT_SITE_BUILDER_STATE.hiddenVersions) ? DEFAULT_SITE_BUILDER_STATE.hiddenVersions : [],
+    hiddenJobs: Array.isArray(DEFAULT_SITE_BUILDER_STATE.hiddenJobs) ? DEFAULT_SITE_BUILDER_STATE.hiddenJobs : [],
   },
 };
 
@@ -271,8 +449,8 @@ function scrollChatToBottom() {
 
 const STUDIO_META = {
   chat: { icon: 'spark', title: 'ChatGPT Studio', subtitle: 'Центральный AI-чат для идей, сценариев и быстрых переходов в другие студии.', eyebrow: 'Creative AI Studio' },
-  video: { icon: 'video', title: 'Video Studio', subtitle: 'Kling, Veo, Seedance и Sora в одной рабочей зоне с живыми настройками.', eyebrow: 'Video generation' },
-  image: { icon: 'image', title: 'Image Studio', subtitle: 'Nano Banana, нейрофотосессии, posters и image-to-image сценарии.', eyebrow: 'Image generation' },
+  video: { icon: 'video', title: 'Video Studio', subtitle: 'Kling, Veo, Grok, Seedance и Sora в одной рабочей зоне с живыми настройками.', eyebrow: 'Video generation' },
+  image: { icon: 'image', title: 'Image Studio', subtitle: 'Nano Banana, Seedream, апскейл и image-to-image сценарии.', eyebrow: 'Image generation' },
   voice: { icon: 'voice', title: 'Voice Studio', subtitle: 'Озвучка, выбор голоса и быстрый экспорт результата.', eyebrow: 'Voice workflow' },
   music: { icon: 'music', title: 'Music Studio', subtitle: 'Suno, Udio, генератор текста и понятная рабочая зона для генерации треков.', eyebrow: 'Музыкальная студия' },
   library: { icon: 'library', title: 'Prompt Library', subtitle: 'Категории, группы и карточки промптов с быстрым переносом в студии.', eyebrow: 'Prompt system' },
@@ -280,6 +458,7 @@ const STUDIO_META = {
   history: { icon: 'site', title: 'Site Creator', subtitle: 'Создание сайта, версии, правки и скачивание ZIP в одном разделе.', eyebrow: 'Website builder' },
   billing: { icon: 'billing', title: 'Billing', subtitle: 'Баланс, токены и экономика генераций.', eyebrow: 'Token economy' },
   profile: { icon: 'profile', title: 'Profile', subtitle: 'Telegram-связка, базовые настройки и состояние системы.', eyebrow: 'Account and access' },
+  partner: { icon: 'partner', title: 'Партнёрка', subtitle: 'Реферальная ссылка, статистика, начисления и вывод средств.', eyebrow: 'Referral program' },
 };
 
 const STUDIO_ICON_SVG = {
@@ -294,6 +473,7 @@ const STUDIO_ICON_SVG = {
   site: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v11a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 17.5v-11Z" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M4 9h16M9 20V9" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>',
   billing: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="6" width="17" height="12" rx="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M3.5 10.5h17M8 14h3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>',
   profile: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M5.5 19a6.5 6.5 0 0 1 13 0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>',
+  partner: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 12a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm8 6a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M10.7 10.7l2.6 2.6M5 19a5 5 0 0 1 6 0M13 6a5 5 0 0 1 6 0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>',
 };
 
 function renderStudioIcon(iconKey) {
@@ -336,6 +516,15 @@ const VIDEO_REGISTRY = {
           multi_shot: { name: 'Multi-shot', fields: ['prompt', 'startFrame', 'endFrame', 'duration', 'resolution', 'aspectRatio', 'enableAudio'] },
         },
       },
+      'kling-3.0-new': {
+        name: 'Kling 3.0 - New',
+        backend: 'live',
+        modes: {
+          text_to_video: { name: 'Text → Video', fields: ['prompt', 'duration', 'resolution', 'aspectRatio', 'enableAudio'] },
+          image_to_video: { name: 'Image → Video', fields: ['startFrame', 'endFrame', 'prompt', 'duration', 'resolution', 'aspectRatio', 'enableAudio'] },
+          multi_shot: { name: 'Multi-shot', fields: ['startFrame', 'kling3NewShots', 'kling3NewElements', 'resolution', 'aspectRatio', 'enableAudio'] },
+        },
+      },
     },
   },
   veo: {
@@ -359,23 +548,74 @@ const VIDEO_REGISTRY = {
       },
     },
   },
-  seedance: {
-    name: 'Seedance',
+  grok: {
+    name: 'Grok',
     models: {
-      'seedance-preview': {
-        name: 'Seedance Preview',
+      'grok-imagine-video': {
+        name: 'Grok Imagine Video',
         backend: 'live',
         modes: {
-          text_to_video: { name: 'Text → Video', fields: ['prompt', 'durationSeedance', 'aspectRatioSeedance'] },
-          image_to_video: { name: 'Image → Video', fields: ['referenceImages', 'prompt', 'durationSeedance', 'aspectRatioSeedance'] },
+          text_to_video: { name: 'Text → Video', fields: ['prompt', 'providerModeGrok', 'durationGrok', 'resolutionGrok', 'aspectRatioGrok'] },
+          image_to_video: { name: 'Image → Video', fields: ['startFrame', 'prompt', 'providerModeGrok', 'durationGrok', 'resolutionGrok', 'aspectRatioGrok'] },
+        },
+      },
+    },
+  },
+  seedance: {
+    name: 'Seedance 2.0 Preview',
+    models: {
+      'seedance-preview': {
+        name: 'Seedance 2.0 Preview',
+        backend: 'live',
+        modes: {
+          text_to_video: { name: 'Text → Video', fields: ['prompt'] },
+          image_to_video: { name: 'Image → Video', fields: ['prompt', 'referenceImages'] },
         },
       },
       'seedance-fast': {
-        name: 'Seedance Fast',
+        name: 'Seedance 2.0 Preview Fast',
         backend: 'live',
         modes: {
-          text_to_video: { name: 'Text → Video', fields: ['prompt', 'durationSeedance', 'aspectRatioSeedance'] },
-          image_to_video: { name: 'Image → Video', fields: ['referenceImages', 'prompt', 'durationSeedance', 'aspectRatioSeedance'] },
+          text_to_video: { name: 'Text → Video', fields: ['prompt'] },
+          image_to_video: { name: 'Image → Video', fields: ['prompt', 'referenceImages'] },
+        },
+      },
+    },
+  },
+  seedance_kie: {
+    name: 'Seedance 2.0',
+    models: {
+      'seedance-kie': {
+        name: 'Seedance 2.0',
+        backend: 'live',
+        modes: {
+          text_to_video: { name: 'Text → Video', fields: ['prompt'] },
+          image_to_video: { name: 'Image → Video', fields: ['prompt', 'referenceImages', 'referenceAudios', 'startFrame', 'lastFrame'] },
+          omni_reference: { name: 'Omni Reference', fields: ['prompt', 'referenceImages', 'referenceAudios', 'referenceVideos'] },
+        },
+      },
+      'seedance-kie-fast': {
+        name: 'Seedance 2.0 Fast',
+        backend: 'live',
+        modes: {
+          text_to_video: { name: 'Text → Video', fields: ['prompt'] },
+          image_to_video: { name: 'Image → Video', fields: ['prompt', 'referenceImages', 'referenceAudios', 'startFrame', 'lastFrame'] },
+          omni_reference: { name: 'Omni Reference', fields: ['prompt', 'referenceImages', 'referenceAudios', 'referenceVideos'] },
+        },
+      },
+    },
+  },
+  pixverse_c1: {
+    name: 'PixVerse C1',
+    models: {
+      c1: {
+        name: 'C1',
+        backend: 'live',
+        modes: {
+          text_to_video: { name: 'Text → Video', fields: ['prompt'] },
+          image_to_video: { name: 'Image → Video', fields: ['startFrame', 'prompt'] },
+          transition: { name: 'First + Last Frame', fields: ['startFrame', 'lastFrame', 'prompt'] },
+          fusion: { name: 'Reference / Fusion', fields: ['referenceImages', 'prompt'] },
         },
       },
     },
@@ -388,6 +628,18 @@ const VIDEO_REGISTRY = {
         backend: 'live',
         modes: {
           text_to_video: { name: 'Text → Video', fields: ['prompt', 'durationSora', 'aspectRatioSora'] },
+        },
+      },
+    },
+  },
+  switchx: {
+    name: 'SwitchX',
+    models: {
+      'switchx': {
+        name: 'SwitchX',
+        backend: 'live',
+        modes: {
+          video_swap: { name: 'Video Swap', fields: ['sourceVideo', 'referenceImages', 'prompt', 'resolutionSwitchx'] },
         },
       },
     },
@@ -407,6 +659,19 @@ const IMAGE_REGISTRY = {
       },
     },
   },
+  nano_banana_2: {
+    name: 'Nano Banana 2',
+    models: {
+      'nano-banana-2': {
+        name: 'Nano Banana 2',
+        backend: 'live',
+        modes: {
+          image_to_image: { name: 'Image → Image', fields: ['sourceImage', 'prompt', 'resolutionImage', 'aspectRatioImage'] },
+          text_to_image: { name: 'Text → Image', fields: ['prompt', 'resolutionImage', 'aspectRatioImageText'] },
+        },
+      },
+    },
+  },
   nano_banana_pro: {
     name: 'Nano Banana Pro',
     models: {
@@ -420,27 +685,41 @@ const IMAGE_REGISTRY = {
       },
     },
   },
-  topaz_photo: {
-    name: 'Topaz Upscale Фото',
+  nano_banana_pro_new: {
+    name: 'Nano Banana Pro - NEW',
     models: {
-      'topaz-photo': {
-        name: 'Topaz Photo AI',
-        backend: 'planned',
+      'nano-banana-pro-kie': {
+        name: 'Nano Banana Pro - NEW',
+        backend: 'live',
         modes: {
-          upscale: { name: 'Upscale', fields: ['sourceImage', 'upscalePreset'] },
+          image_to_image: { name: 'Image → Image', fields: ['sourceImage', 'prompt', 'resolutionImage', 'aspectRatioImage'] },
+          text_to_image: { name: 'Text → Image', fields: ['prompt', 'resolutionImage', 'aspectRatioImageText'] },
         },
       },
     },
   },
-  posters: {
-    name: 'Фото / Афиши',
+  midjourney: {
+    name: 'Midjourney',
     models: {
-      'poster-engine': {
-        name: 'Poster / Edit Flow',
-        backend: 'planned',
+      'midjourney-v7': {
+        name: 'Midjourney V7',
+        backend: 'live',
         modes: {
-          poster: { name: 'Poster', fields: ['sourceImage', 'prompt', 'posterStyle'] },
-          photo_edit: { name: 'Photo Edit', fields: ['sourceImage', 'prompt'] },
+          text_to_image: { name: 'Text → Image', fields: ['prompt', 'aspectRatioImageText'] },
+        },
+      },
+    },
+  },
+  seedream: {
+    name: 'Seedream',
+    models: {
+      'seedream-45': {
+        name: 'Seedream 4.5',
+        backend: 'live',
+        modes: {
+          single: { name: 'Seedream 4.5', fields: ['sourceImage', 'prompt', 'resolutionImage', 'aspectRatioImage'] },
+          t2i: { name: 'Текст → Картинка', fields: ['prompt', 'resolutionImage', 'aspectRatioImageText'] },
+          i2i: { name: 'Картинка + Картинка', fields: ['baseImage', 'sourceImage', 'prompt', 'resolutionImage', 'aspectRatioImage'] },
         },
       },
     },
@@ -457,26 +736,41 @@ const IMAGE_REGISTRY = {
       },
     },
   },
-  two_images: {
-    name: 'Картинка + Картинка',
+  topaz_photo: {
+    name: 'Topaz Upscale Фото',
     models: {
-      'two-images': {
-        name: 'Two Images',
+      'topaz-photo': {
+        name: 'Topaz Photo AI',
         backend: 'planned',
         modes: {
-          merge: { name: 'Merge / Transfer', fields: ['baseImage', 'sourceImage', 'prompt'] },
+          upscale: { name: 'Upscale', fields: ['sourceImage', 'upscalePreset'] },
         },
       },
     },
   },
-  text_to_image: {
-    name: 'Текст → Картинка',
+  gpt_image_2: {
+    name: 'GPT Image 2.0',
     models: {
-      't2i': {
-        name: 'Seedream Text to Image',
+      'gpt-image-2': {
+        name: 'GPT Image 2.0',
+        backend: 'live',
+        modes: {
+          text_to_image: { name: 'Text → Image', fields: ['prompt', 'aspectRatioImageText'] },
+          image_to_image: { name: 'Image → Image', fields: ['sourceImage', 'prompt', 'aspectRatioImage'] },
+        },
+      },
+    },
+  },
+  posters: {
+    hidden: true,
+    name: 'Фото / Афиши (legacy)',
+    models: {
+      'poster-engine': {
+        name: 'Poster / Edit Flow',
         backend: 'planned',
         modes: {
-          t2i: { name: 'Text → Image', fields: ['prompt'] },
+          poster: { name: 'Poster', fields: ['sourceImage', 'prompt', 'posterStyle'] },
+          photo_edit: { name: 'Photo Edit', fields: ['sourceImage', 'prompt'] },
         },
       },
     },
@@ -565,6 +859,41 @@ function formatSecondsCompact(value) {
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+
+function getDownloadFilenameFromUrl(url, fallback = 'image.png') {
+  try {
+    const clean = String(url || '').split('?')[0].split('#')[0];
+    const name = clean.substring(clean.lastIndexOf('/') + 1);
+    return name ? decodeURIComponent(name) : fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
+
+async function forceDownloadFile(url, fallbackName = 'image.png') {
+  if (!url) {
+    toast('error', 'Нет файла', 'Ссылка на скачивание не найдена.');
+    return;
+  }
+
+  try {
+    const res = await fetch(url, { mode: 'cors', credentials: 'omit' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = blobUrl;
+    a.download = getDownloadFilenameFromUrl(url, fallbackName);
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 1500);
+  } catch (_) {
+    toast('error', 'Скачать не удалось', 'Источник не дал скачать файл напрямую. Нужен CORS или backend-прокси.');
+  }
 }
 
 function syncVideoEditorWithHistoryItem(item) {
@@ -946,18 +1275,22 @@ function renderVideoEditor() {
   `;
 }
 
-function saveState() {
+function writeStateSnapshot() {
+  state.apiBaseUrl = FIXED_API_BASE;
   localStorage.setItem('astrabot:studio', state.studio);
-  localStorage.setItem('astrabot:apiBaseUrl', state.apiBaseUrl);
+  localStorage.removeItem('astrabot:apiBaseUrl');
   localStorage.setItem('astrabot:authToken', state.authToken || '');
   localStorage.setItem('astrabot:me', JSON.stringify(state.me || null));
+  localStorage.setItem('astrabot:authUiState', JSON.stringify(state.authUi || {}));
   localStorage.setItem('astrabot:recentRuns', JSON.stringify(state.recentRuns.slice(0, 50)));
   localStorage.setItem('astrabot:workspaceNotes', state.workspaceNotes);
   localStorage.setItem('astrabot:chatModel', state.chat.model);
   localStorage.setItem('astrabot:chatMode', state.chat.mode);
   localStorage.setItem('astrabot:chatTemperature', String(state.chat.temperature));
   localStorage.setItem('astrabot:chatMaxTokens', String(state.chat.maxTokens));
-  localStorage.setItem('astrabot:chatMessages', JSON.stringify(state.chat.messages.slice(-50)));
+  persistCurrentChatSession();
+  localStorage.removeItem('astrabot:chatMessages');
+  localStorage.removeItem('astrabot:chatSummary');
   localStorage.setItem('astrabot:videoState', JSON.stringify({
     provider: state.video.provider,
     model: state.video.model,
@@ -968,7 +1301,31 @@ function saveState() {
     aspectRatio: state.video.aspectRatio,
     enableAudio: state.video.enableAudio,
     quality: state.video.quality,
+    providerMode: state.video.providerMode || 'normal',
     motionDurationSec: state.video.motionDurationSec,
+    sourceVideoDurationSec: state.video.sourceVideoDurationSec,
+    outputUrl: state.video.outputUrl || '',
+    downloadUrl: state.video.downloadUrl || '',
+    coverUrl: state.video.coverUrl || '',
+    percent: Number.isFinite(Number(state.video.percent)) ? Number(state.video.percent) : null,
+    generationId: state.video.generationId || '',
+    providerTaskId: state.video.providerTaskId || '',
+    statusText: state.video.statusText || '',
+    errorText: state.video.errorText || '',
+    lastStatus: state.video.lastStatus || 'idle',
+    panel: state.video.panel || 'params',
+    isGenerating: !!state.video.isGenerating,
+    requestStartedAt: state.video.requestStartedAt || '',
+    switchxSourceUploadId: state.video.switchxSourceUploadId || '',
+    switchxRefGenerationId: state.video.switchxRefGenerationId || '',
+    switchxReferenceImageUrl: state.video.switchxReferenceImageUrl || '',
+    switchxReferenceStatus: state.video.switchxReferenceStatus || 'idle',
+    switchxRefPrompt: state.video.switchxRefPrompt || '',
+    switchxAlphaMode: state.video.switchxAlphaMode || 'auto',
+    seedanceUseStartFrame: !!state.video.seedanceUseStartFrame,
+    seedanceUseLastFrame: !!state.video.seedanceUseLastFrame,
+    kling3NewShots: getKling3NewShots(),
+    kling3NewElements: getKling3NewElements(),
   }));
   localStorage.setItem('astrabot:videoEditorState', JSON.stringify(state.videoEditor));
   localStorage.setItem('astrabot:imageState', JSON.stringify({
@@ -983,6 +1340,17 @@ function saveState() {
     stylePreset: state.image.stylePreset,
     moodPreset: state.image.moodPreset,
     panel: state.image.panel,
+    outputUrl: state.image.outputUrl || '',
+    downloadUrl: state.image.downloadUrl || '',
+    beforeImageUrl: state.image.beforeImageUrl || '',
+    afterImageUrl: state.image.afterImageUrl || '',
+    compareMode: !!state.image.compareMode,
+    comparePosition: Number.isFinite(Number(state.image.comparePosition)) ? Number(state.image.comparePosition) : 50,
+    generationId: state.image.generationId || '',
+    isGenerating: !!state.image.isGenerating,
+    errorText: state.image.errorText || '',
+    statusText: state.image.statusText || '',
+    requestStartedAt: state.image.requestStartedAt || '',
   }));
   localStorage.setItem('astrabot:voiceState', JSON.stringify({
     voiceId: state.voice.voiceId,
@@ -990,13 +1358,18 @@ function saveState() {
     outputFormat: state.voice.outputFormat,
     languageCode: state.voice.languageCode,
     manualVoiceSettings: !!state.voice.manualVoiceSettings,
+    showAdvancedPanel: !!state.voice.showAdvancedPanel,
     stability: Number(state.voice.stability),
     similarityBoost: Number(state.voice.similarityBoost),
     style: Number(state.voice.style),
     speed: Number(state.voice.speed),
-    useSpeakerBoost: !!state.voice.useSpeakerBoost,
+    useSpeakerBoost: true,
     text: state.voice.text,
+    audioUrl: state.voice.audioUrl || '',
+    downloadUrl: state.voice.downloadUrl || '',
     generationId: state.voice.generationId || '',
+    isGenerating: !!state.voice.isGenerating,
+    errorText: state.voice.errorText || '',
     lastGeneratedAt: state.voice.lastGeneratedAt || '',
   }));
   localStorage.setItem('astrabot:voiceHistoryState', JSON.stringify({
@@ -1027,9 +1400,12 @@ function saveState() {
     generatedLyrics: Array.isArray(state.music.generatedLyrics) ? state.music.generatedLyrics.slice(0, 6) : [],
     timestampedLyrics: state.music.timestampedLyrics || {},
     generationId: state.music.generationId || '',
+    isGenerating: !!state.music.isGenerating,
     status: state.music.status || 'idle',
     statusText: state.music.statusText || '',
+    errorText: state.music.errorText || '',
     lastCompletedAt: state.music.lastCompletedAt || '',
+    results: Array.isArray(state.music.results) ? state.music.results.slice(0, 8) : [],
     toolAction: state.music.toolAction || 'upload-cover',
     toolTaskId: state.music.toolTaskId || '',
     toolTaskStatus: state.music.toolTaskStatus || 'idle',
@@ -1060,8 +1436,40 @@ function saveState() {
     revisionText: state.siteBuilder.revisionText || '',
     createPrice: Number(state.siteBuilder.prices?.create || 30),
     revisionPrice: Number(state.siteBuilder.prices?.revision || 10),
+    hiddenProjects: Array.isArray(state.siteBuilder.hiddenProjects) ? state.siteBuilder.hiddenProjects.slice(-120) : [],
+    hiddenVersions: Array.isArray(state.siteBuilder.hiddenVersions) ? state.siteBuilder.hiddenVersions.slice(-240) : [],
+    hiddenJobs: Array.isArray(state.siteBuilder.hiddenJobs) ? state.siteBuilder.hiddenJobs.slice(-240) : [],
   }));
 }
+
+function flushSaveState() {
+  if (runtime.saveStateTimer) {
+    clearTimeout(runtime.saveStateTimer);
+    runtime.saveStateTimer = null;
+  }
+  if (!runtime.saveStatePending) return;
+  runtime.saveStatePending = false;
+  writeStateSnapshot();
+}
+
+function saveState(options = {}) {
+  const immediate = options === true || options?.immediate === true;
+  if (immediate) {
+    runtime.saveStatePending = true;
+    flushSaveState();
+    return;
+  }
+  runtime.saveStatePending = true;
+  if (runtime.saveStateTimer) clearTimeout(runtime.saveStateTimer);
+  runtime.saveStateTimer = window.setTimeout(() => {
+    flushSaveState();
+  }, 180);
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flushSaveState();
+});
+window.addEventListener('pagehide', flushSaveState);
 
 function escapeHtml(str = '') {
   return String(str)
@@ -1078,6 +1486,12 @@ function formatDate(ts) {
   } catch {
     return ts;
   }
+}
+
+function formatRub(value) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n)) return '0 ₽';
+  return `${n.toLocaleString('ru-RU', { maximumFractionDigits: 2 })} ₽`;
 }
 
 
@@ -1175,6 +1589,7 @@ function revokeVoiceAudioUrl() {
 }
 
 function clearVoiceRunState({ keepText = true, clearHistorySelection = true } = {}) {
+  stopVoicePolling();
   revokeVoiceAudioUrl();
   state.voice.audioUrl = '';
   state.voice.downloadUrl = '';
@@ -1215,8 +1630,19 @@ function voiceHistoryDownloadUrl(item) {
   return candidates[0] || '';
 }
 
+function voiceHistoryStatus(item) {
+  return String(item?.status || '').trim().toLowerCase();
+}
+
+function voiceHistoryCanHydrateWorkspace(item) {
+  const status = voiceHistoryStatus(item);
+  if (voiceHistoryAudioUrl(item)) return true;
+  return ['failed', 'error', 'cancelled', 'canceled'].includes(status);
+}
+
 function applyVoiceHistoryItemToWorkspace(item, options = {}) {
   if (!item) return;
+  stopVoicePolling();
   const { silent = false } = options;
   revokeVoiceAudioUrl();
   state.voiceHistory.selectedId = item.id || '';
@@ -1226,9 +1652,10 @@ function applyVoiceHistoryItemToWorkspace(item, options = {}) {
   state.voice.downloadUrl = voiceHistoryDownloadUrl(item);
   state.voice.errorText = item.error_message || '';
   state.voice.lastGeneratedAt = item.completed_at || item.created_at || '';
+  state.voice.isGenerating = false;
   if (item.voice_id) state.voice.voiceId = item.voice_id;
   if (item.model) state.voice.modelId = item.model;
-  if (item.output_format) state.voice.outputFormat = item.output_format;
+  state.voice.outputFormat = VOICE_FIXED_OUTPUT_FORMAT;
   if (item.text) state.voice.text = item.text;
   saveState();
   render();
@@ -1320,23 +1747,111 @@ function requireAuth() {
   return true;
 }
 
+function getApiBaseUrl() {
+  return String(FIXED_API_BASE || '').replace(/\/$/, '');
+}
+
 async function apiFetch(path, options = {}) {
-  const base = String(state.apiBaseUrl || '').replace(/\/$/, '');
+  const base = getApiBaseUrl();
   if (!base) throw new Error('API Base URL is empty');
+
   const headers = new Headers(options.headers || {});
-  if (state.authToken && !headers.has('Authorization')) headers.set('Authorization', `Bearer ${state.authToken}`);
+  if (state.authToken && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${state.authToken}`);
+  }
+
   const res = await fetch(`${base}${path}`, { ...options, headers });
+
   if (!res.ok) {
-    let detail = res.statusText;
+    let detail = res.statusText || `HTTP ${res.status}`;
+
     try {
-      const data = await res.json();
-      detail = data.detail || data.error || JSON.stringify(data);
+      const raw = await res.text();
+      if (raw) {
+        try {
+          const data = JSON.parse(raw);
+          detail = data.detail || data.error || data.message || raw;
+        } catch {
+          detail = raw;
+        }
+      }
     } catch {
-      detail = await res.text();
+      // keep default detail
     }
+
     throw new Error(detail || `HTTP ${res.status}`);
   }
+
   return res;
+}
+
+function readPendingTopupTokens() {
+  const fromQuery = Number(BOOT_QUERY.get('topup') || '0');
+  if (Number.isFinite(fromQuery) && fromQuery > 0) return fromQuery;
+  const fromStorage = Number(localStorage.getItem(PENDING_TOPUP_KEY) || '0');
+  return Number.isFinite(fromStorage) && fromStorage > 0 ? fromStorage : 0;
+}
+
+function readPendingTopupReturnUrl() {
+  try {
+    return localStorage.getItem(PENDING_TOPUP_RETURN_KEY) || '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function clearPendingTopup() {
+  try {
+    localStorage.removeItem(PENDING_TOPUP_KEY);
+    localStorage.removeItem(PENDING_TOPUP_RETURN_KEY);
+  } catch (_) {}
+}
+
+function clearBootAuthParams() {
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('auth');
+    url.searchParams.delete('topup');
+    const next = `${url.pathname}${url.search}${url.hash}`;
+    history.replaceState(null, '', next);
+  } catch (_) {}
+}
+
+async function startWorkspaceTopup(tokens, options = {}) {
+  const numericTokens = Number(tokens || 0);
+  if (!Number.isFinite(numericTokens) || numericTokens <= 0) throw new Error('Неизвестный пакет пополнения.');
+  if (!requireAuth()) return null;
+  const returnUrl = String(options.returnUrl || readPendingTopupReturnUrl() || window.location.href);
+  const res = await apiFetch('/api/workspace/topup/create', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tokens: numericTokens, return_url: returnUrl }),
+  });
+  const data = await res.json();
+  clearPendingTopup();
+  clearBootAuthParams();
+  if (options.redirect !== false && data?.confirmation_url) {
+    window.location.href = data.confirmation_url;
+  }
+  return data;
+}
+
+async function resumePendingTopup() {
+  if (runtime.pendingTopupInFlight) return false;
+  const tokens = readPendingTopupTokens();
+  if (!tokens || !state.authToken || !state.me) return false;
+  runtime.pendingTopupInFlight = true;
+  try {
+    await startWorkspaceTopup(tokens, { redirect: true });
+    return true;
+  } catch (e) {
+    clearPendingTopup();
+    clearBootAuthParams();
+    toast('error', 'Не удалось создать оплату', String(e.message || e));
+    return false;
+  } finally {
+    runtime.pendingTopupInFlight = false;
+  }
 }
 
 function pushRun(run) {
@@ -1384,13 +1899,20 @@ function getFile(key) {
   return runtime.files[key] || null;
 }
 
+function isImageSourceMultipleMode() {
+  return (state.image.provider === 'nano_banana_pro_new' && state.image.mode === 'image_to_image')
+    || (state.image.provider === 'gpt_image_2' && state.image.mode === 'image_to_image');
+}
+
 function removeUploadFile(inputId, index = null) {
   const config = FILE_INPUT_MAP[inputId];
   if (!config) return;
   const current = runtime.files[config.key];
   if (!current) return;
 
-  if (config.multiple && Array.isArray(current)) {
+  const isMultiple = config.multiple || (inputId === 'image_sourceImage' && isImageSourceMultipleMode());
+
+  if (isMultiple && Array.isArray(current)) {
     const targetIndex = Number(index);
     if (!Number.isInteger(targetIndex) || targetIndex < 0 || targetIndex >= current.length) return;
     const removed = current[targetIndex];
@@ -1405,6 +1927,20 @@ function removeUploadFile(inputId, index = null) {
 
   const input = document.getElementById(inputId);
   if (input) input.value = '';
+
+  if (inputId === 'video_sourceVideo') {
+    state.video.switchxSourceUploadId = '';
+    state.video.switchxReferenceImageUrl = '';
+    state.video.switchxRefGenerationId = '';
+    state.video.switchxReferenceStatus = 'idle';
+    state.video.sourceVideoDurationSec = null;
+    resetSwitchxMaskEditor({ clearMaskFile: true });
+  }
+  if (inputId === 'video_switchxSelectMask') {
+    const editor = runtime.switchxMaskEditor || {};
+    editor.maskDataUrl = '';
+  }
+
   saveState();
   render();
 }
@@ -1426,6 +1962,43 @@ function clearChatAttachments() {
   if (input) input.value = '';
 }
 
+function persistCurrentChatSession() {
+  const messages = Array.isArray(state?.chat?.messages) ? state.chat.messages.slice(-50) : defaultChatMessages();
+  localStorage.setItem(chatSessionStorageKey('messages', state.chat.model, state.chat.mode), JSON.stringify(messages));
+  localStorage.setItem(chatSessionStorageKey('summary', state.chat.model, state.chat.mode), state.chat.summary || '');
+}
+
+function loadCurrentChatSession(options = {}) {
+  const { allowLegacy = false, keepInput = false } = options;
+  state.chat.messages = readChatMessagesForSession(state.chat.model, state.chat.mode, { allowLegacy });
+  state.chat.summary = readChatSummaryForSession(state.chat.model, state.chat.mode, { allowLegacy });
+  if (!keepInput) state.chat.input = '';
+  clearChatAttachments();
+}
+
+function switchChatSession(nextModel, nextMode, options = {}) {
+  persistCurrentChatSession();
+  state.chat.model = nextModel || state.chat.model;
+  state.chat.mode = nextMode || state.chat.mode;
+  ensureChatModeCompatibility(!!options.showToast);
+  loadCurrentChatSession({ allowLegacy: false, keepInput: false });
+}
+
+function startNewChatSession(options = {}) {
+  state.chat.messages = defaultChatMessages();
+  state.chat.summary = '';
+  state.chat.input = '';
+  clearChatAttachments();
+  localStorage.removeItem(chatSessionStorageKey('messages', state.chat.model, state.chat.mode));
+  localStorage.removeItem(chatSessionStorageKey('summary', state.chat.model, state.chat.mode));
+  if (options.renderNow !== false) {
+    saveState();
+    render();
+    scrollChatToBottom();
+  }
+  if (options.toast !== false) toast('success', 'Новый диалог', 'Контекст текущего чата очищен.');
+}
+
 function removeChatAttachment(index) {
   const files = getChatAttachments();
   if (!files.length) return;
@@ -1440,6 +2013,38 @@ function removeChatAttachment(index) {
   if (input && !next.length) input.value = '';
 }
 
+function chatAttachmentKindLabel(item) {
+  const type = String(item?.type || '').toLowerCase();
+  if (type.startsWith('image/')) return 'Изображение';
+  if (type.startsWith('video/')) return 'Видео';
+  if (type.startsWith('audio/')) return 'Аудио';
+  if (type === 'application/pdf') return 'PDF';
+  const ext = String(item?.name || '').split('.').pop();
+  return ext && ext !== String(item?.name || '') ? ext.toUpperCase() : 'Файл';
+}
+
+function renderChatAttachmentCard(item, index) {
+  const type = String(item?.type || '').toLowerCase();
+  const isImage = type.startsWith('image/');
+  const isVideo = type.startsWith('video/');
+  const media = isImage
+    ? `<img class="chat-file-thumb-media" src="${escapeHtml(item?.url || '')}" alt="${escapeHtml(item?.name || 'attachment')}">`
+    : isVideo
+      ? `<video class="chat-file-thumb-media" src="${escapeHtml(item?.url || '')}" muted playsinline preload="metadata"></video>`
+      : `<div class="chat-file-thumb-fallback">📎</div>`;
+  const meta = [chatAttachmentKindLabel(item), formatFileSize(item?.size)].filter(Boolean).join(' · ');
+  return `
+    <div class="chat-file-card${isImage || isVideo ? ' has-preview' : ''}">
+      <div class="chat-file-thumb">${media}</div>
+      <div class="chat-file-card-body">
+        <div class="chat-file-card-name" title="${escapeHtml(item?.name || 'file')}">${escapeHtml(trimText(item?.name || 'file', 34))}</div>
+        <div class="chat-file-card-meta">${escapeHtml(meta)}</div>
+      </div>
+      <button type="button" class="chat-file-pill-remove chat-file-card-remove" data-action="remove-chat-file" data-index="${index}" aria-label="Удалить файл">×</button>
+    </div>
+  `;
+}
+
 function getCurrentVideoModel() {
   const provider = VIDEO_REGISTRY[state.video.provider];
   return provider?.models?.[state.video.model] || null;
@@ -1451,27 +2056,26 @@ function getCurrentImageModel() {
 }
 
 function isPromptBuilderAvailable() {
-  return state.chat.model === 'gpt-5.4';
+  return true;
 }
 
 function ensureChatModeCompatibility(showToast = false) {
-  if (isPromptBuilderAvailable()) {
-    if (state.chat.mode !== 'prompt_builder') {
-      state.chat.mode = 'prompt_builder';
-      if (showToast) toast('info', 'Режим изменён', 'Для GPT 5.4 включён только Prompt Builder.');
-    }
-    return;
-  }
-  if (state.chat.mode !== 'chat') {
+  const allowedModes = new Set(['chat', 'prompt_builder']);
+  const requestedMode = String(state.chat.mode || '').trim();
+  if (!allowedModes.has(requestedMode)) {
     state.chat.mode = 'chat';
-    if (showToast) toast('info', 'Режим изменён', 'Для GPT 4 mini доступен только обычный чат.');
+    if (showToast) toast('info', 'Режим изменён', 'Выбран обычный режим Chat.');
+  }
+  if (state.chat.mode === 'prompt_builder' && state.chat.model !== 'gpt-5.4') {
+    state.chat.model = 'gpt-5.4';
+    if (showToast) toast('info', 'Модель изменена', 'Для Prompt Builder автоматически включён GPT 5.4.');
   }
 }
 
 function currentMeta() {
   switch (state.studio) {
     case 'chat':
-      return { studio: 'ChatGPT', provider: 'Chat GPT', model: state.chat.model, mode: state.chat.mode === 'prompt_builder' ? 'Prompt Builder' : 'Chat' };
+      return { studio: 'AI Chat', provider: state.chat.model === 'claude-sonnet-4-6' ? 'KIE Claude' : 'Chat GPT', model: state.chat.model, mode: state.chat.mode === 'prompt_builder' ? 'Prompt Builder' : 'Chat' };
     case 'video': {
       const provider = VIDEO_REGISTRY[state.video.provider];
       const model = provider?.models?.[state.video.model];
@@ -1525,6 +2129,21 @@ function imageModeConfig() {
 }
 
 function syncImageSelection() {
+  const legacyProvider = String(state.image.provider || '').trim();
+  if (legacyProvider === 'two_images') {
+    state.image.provider = 'seedream';
+    state.image.model = 'seedream-45';
+    state.image.mode = 'i2i';
+  } else if (legacyProvider === 'text_to_image') {
+    state.image.provider = 'seedream';
+    state.image.model = 'seedream-45';
+    state.image.mode = 't2i';
+  } else if (legacyProvider === 'posters') {
+    state.image.provider = 'gpt_image_2';
+    state.image.model = 'gpt-image-2';
+    state.image.mode = ['poster', 'photo_edit', 'image_to_image'].includes(String(state.image.mode || '').trim()) ? 'image_to_image' : 'text_to_image';
+  }
+
   const fallbackProvider = IMAGE_REGISTRY.nano_banana_pro ? 'nano_banana_pro' : Object.keys(IMAGE_REGISTRY)[0];
   const provider = IMAGE_REGISTRY[state.image.provider] ? state.image.provider : fallbackProvider;
   state.image.provider = provider;
@@ -1535,25 +2154,65 @@ function syncImageSelection() {
   const modeIds = Object.keys(modelConfig.modes || {});
   if (!modeIds.includes(state.image.mode)) state.image.mode = modeIds[0];
 
+  if (state.image.provider === 'nano_banana_2' || state.image.provider === 'nano_banana_pro_new') {
+    if (!['2K', '4K'].includes(String(state.image.resolution || '2K'))) state.image.resolution = '2K';
+    const allowedAspect = state.image.mode === 'image_to_image'
+      ? ['match_input_image', '16:9', '9:16', '1:1', '4:5']
+      : ['16:9', '9:16', '1:1', '4:5'];
+    if (!allowedAspect.includes(String(state.image.aspectRatio || ''))) {
+      state.image.aspectRatio = state.image.mode === 'image_to_image' ? 'match_input_image' : '16:9';
+    }
+  }
+
+  if (state.image.provider === 'gpt_image_2') {
+    const allowedAspect = state.image.mode === 'image_to_image'
+      ? ['match_input_image', '16:9', '9:16', '1:1', '4:5']
+      : ['16:9', '9:16', '1:1', '4:5'];
+    const defaultAspect = state.image.mode === 'image_to_image' ? 'match_input_image' : '1:1';
+    if (!allowedAspect.includes(String(state.image.aspectRatio || ''))) {
+      state.image.aspectRatio = defaultAspect;
+    }
+  }
+
+  if (state.image.provider === 'seedream') {
+    if (!['2K', '4K'].includes(String(state.image.resolution || '2K'))) state.image.resolution = '2K';
+    const allowedAspect = state.image.mode === 'single' || state.image.mode === 'i2i'
+      ? ['match_input_image', '16:9', '9:16', '1:1', '4:5']
+      : ['16:9', '9:16', '1:1', '4:5'];
+    const defaultAspect = state.image.mode === 'single' || state.image.mode === 'i2i' ? 'match_input_image' : '9:16';
+    if (!allowedAspect.includes(String(state.image.aspectRatio || ''))) {
+      state.image.aspectRatio = defaultAspect;
+    }
+  }
+
+  if (state.image.provider === 'midjourney') {
+    if (!['16:9', '9:16', '1:1', '4:5'].includes(String(state.image.aspectRatio || ''))) state.image.aspectRatio = '1:1';
+    if (!['fast', 'turbo'].includes(String(state.image.mjSpeedMode || ''))) state.image.mjSpeedMode = 'fast';
+  }
+
   if (['text_to_image', 't2i'].includes(state.image.mode) && state.image.aspectRatio === 'match_input_image') {
-    state.image.aspectRatio = '16:9';
+    state.image.aspectRatio = state.image.provider === 'seedream' ? '9:16' : '16:9';
   }
 }
 
 function imageNeedsSourceImage() {
   syncImageSelection();
   if (state.image.provider === 'nano_banana') return true;
+  if (state.image.provider === 'nano_banana_2' && state.image.mode === 'image_to_image') return true;
   if (state.image.provider === 'nano_banana_pro' && state.image.mode === 'image_to_image') return true;
-  if (state.image.provider === 'posters' && state.image.mode === 'photo_edit') return true;
+  if (state.image.provider === 'nano_banana_pro_new' && state.image.mode === 'image_to_image') return true;
   if (state.image.provider === 'photosession') return true;
-  if (state.image.provider === 'two_images') return true;
+  if (state.image.provider === 'gpt_image_2' && state.image.mode === 'image_to_image') return true;
+  if (state.image.provider === 'posters' && state.image.mode === 'photo_edit') return true;
+  if (state.image.provider === 'seedream' && ['single', 'i2i'].includes(state.image.mode)) return true;
   if (state.image.provider === 'topaz_photo') return true;
+  if (state.image.provider === 'midjourney') return false;
   return false;
 }
 
 function imageNeedsBaseImage() {
   syncImageSelection();
-  return state.image.provider === 'two_images';
+  return state.image.provider === 'seedream' && state.image.mode === 'i2i';
 }
 
 function imageRunCost() {
@@ -1561,12 +2220,20 @@ function imageRunCost() {
   switch (state.image.provider) {
     case 'nano_banana':
       return 1;
+    case 'nano_banana_2':
+      return String(state.image.resolution || '2K') === '4K' ? 2 : 1;
     case 'nano_banana_pro':
       return 2;
+    case 'nano_banana_pro_new':
+      return String(state.image.resolution || '2K') === '4K' ? 2 : 1;
+    case 'seedream':
+      return state.image.mode === 't2i' ? 0 : 1;
     case 'photosession':
       return 1;
-    case 'two_images':
-      return 1;
+    case 'gpt_image_2':
+      return 0;
+    case 'midjourney':
+      return String(state.image.mjSpeedMode || 'fast') === 'turbo' ? 2 : 1;
     case 'topaz_photo': {
       const preset = String(state.image.upscalePreset || 'standard');
       if (preset === 'detail') return 3;
@@ -1574,8 +2241,6 @@ function imageRunCost() {
       return 2;
     }
     case 'posters':
-      return 0;
-    case 'text_to_image':
       return 0;
     default:
       return 0;
@@ -1599,6 +2264,39 @@ function syncVideoSelection() {
   if (!modelConfig.modes[state.video.mode]) {
     state.video.mode = Object.keys(modelConfig.modes)[0];
   }
+  if (provider === 'grok') {
+    if (!['fun', 'normal', 'spicy'].includes(String(state.video.providerMode || '').trim())) state.video.providerMode = 'normal';
+    if (!['480p', '720p'].includes(String(state.video.resolution || '').trim())) state.video.resolution = '480p';
+    if (!['2:3', '3:2', '1:1', '16:9', '9:16'].includes(String(state.video.aspectRatio || '').trim())) state.video.aspectRatio = '16:9';
+    state.video.duration = normalizeGrokDurationValue(state.video.duration || '6');
+  }
+  if (provider === 'seedance' || provider === 'seedance_kie') {
+    state.video.duration = normalizeSeedanceDurationValue(state.video.duration || '5');
+    const allowedAspectRatios = ['16:9', '9:16', '1:1'];
+    if (!allowedAspectRatios.includes(String(state.video.aspectRatio || ''))) {
+      state.video.aspectRatio = '16:9';
+    }
+    if (provider === 'seedance_kie') {
+      state.video.enableAudio = true;
+      state.video.resolution = state.video.model === 'seedance-kie-fast' ? '480p' : '720p';
+    }
+  }
+  if (provider === 'kling' && state.video.model === 'kling-3.0-new') {
+    state.video.resolution = normalizeKling3NewModeValue(state.video.resolution || 'std');
+    const allowedAspectRatios = ['16:9', '9:16', '1:1'];
+    if (!allowedAspectRatios.includes(String(state.video.aspectRatio || ''))) state.video.aspectRatio = '16:9';
+    const allowedDurations = ['3', '5', '10', '15'];
+    if (!allowedDurations.includes(String(state.video.duration || ''))) state.video.duration = '5';
+    if (state.video.mode === 'multi_shot') {
+      state.video.kling3NewShots = getKling3NewShots();
+    }
+  }
+  if (provider === 'pixverse_c1') {
+    state.video.duration = normalizePixVerseDurationValue(state.video.duration || '5');
+    state.video.resolution = normalizePixVerseResolutionValue(state.video.resolution || '720p');
+    state.video.aspectRatio = normalizePixVerseAspectRatioValue(state.video.aspectRatio || '16:9');
+    state.video.enableAudio = true;
+  }
 }
 
 function pluralizeTokens(value) {
@@ -1608,6 +2306,429 @@ function pluralizeTokens(value) {
   if (n10 === 1 && n100 !== 11) return 'токен';
   if (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14)) return 'токена';
   return 'токенов';
+}
+
+function normalizeGrokDurationValue(value) {
+  const allowed = [6, 12, 18, 24, 30];
+  const raw = Number(value || 0);
+  if (!Number.isFinite(raw)) return '6';
+  let best = allowed[0];
+  let bestDistance = Math.abs(raw - best);
+  for (const item of allowed) {
+    const distance = Math.abs(raw - item);
+    if (distance < bestDistance || (distance === bestDistance && item < best)) {
+      best = item;
+      bestDistance = distance;
+    }
+  }
+  return String(best);
+}
+
+function grokDurationOptions() {
+  return [['6', '6 sec'], ['12', '12 sec'], ['18', '18 sec'], ['24', '24 sec'], ['30', '30 sec']];
+}
+
+function normalizeSeedanceDurationValue(value) {
+  const allowed = [5, 10, 15];
+  const raw = Number(value || 0);
+  if (!Number.isFinite(raw)) return '5';
+  let best = allowed[0];
+  let bestDistance = Math.abs(raw - best);
+  for (const item of allowed) {
+    const distance = Math.abs(raw - item);
+    if (distance < bestDistance || (distance === bestDistance && item < best)) {
+      best = item;
+      bestDistance = distance;
+    }
+  }
+  return String(best);
+}
+
+function normalizePixVerseDurationValue(value) {
+  const allowed = [5, 10, 15];
+  const raw = Number(value || 0);
+  if (!Number.isFinite(raw)) return '5';
+  let best = allowed[0];
+  let bestDistance = Math.abs(raw - best);
+  for (const item of allowed) {
+    const distance = Math.abs(raw - item);
+    if (distance < bestDistance || (distance === bestDistance && item < best)) {
+      best = item;
+      bestDistance = distance;
+    }
+  }
+  return String(best);
+}
+
+function normalizePixVerseResolutionValue(value) {
+  const normalized = String(value || '720p').trim().toLowerCase();
+  if (normalized === '360p' || normalized === '360') return '360p';
+  if (normalized === '540p' || normalized === '540') return '540p';
+  if (normalized === '1080p' || normalized === '1080') return '1080p';
+  return normalized === '720p' || normalized === '720' ? '720p' : '720p';
+}
+
+function normalizePixVerseAspectRatioValue(value) {
+  const allowed = ['16:9', '4:3', '1:1', '3:4', '9:16', '2:3', '3:2', '21:9'];
+  const normalized = String(value || '16:9').trim();
+  return allowed.includes(normalized) ? normalized : '16:9';
+}
+
+function pixVerseDurationOptions() {
+  return [['5', '5 sec'], ['10', '10 sec'], ['15', '15 sec']];
+}
+
+function getPixVerseRunCost(duration, resolution) {
+  const seconds = Number(normalizePixVerseDurationValue(duration));
+  const normalizedResolution = normalizePixVerseResolutionValue(resolution);
+  const priceMap = {
+    '360p': { 5: 2, 10: 4, 15: 6 },
+    '540p': { 5: 2, 10: 5, 15: 7 },
+    '720p': { 5: 3, 10: 6, 15: 9 },
+    '1080p': { 5: 5, 10: 11, 15: 16 },
+  };
+  const tokens = priceMap[normalizedResolution]?.[seconds] || 3;
+  return { tokens, normalizedResolution };
+}
+
+
+function normalizeSwitchxSourceDurationSec(value) {
+  const raw = Number(value || 0);
+  if (!Number.isFinite(raw) || raw <= 0) return null;
+  return Math.max(1, Math.floor(raw + 0.5));
+}
+
+function getGrokRunCost(duration, resolution) {
+  const seconds = Number(normalizeGrokDurationValue(duration));
+  const normalizedResolution = String(resolution || '480p').trim().toLowerCase() === '720p' ? '720p' : '480p';
+  const secondsPerToken = normalizedResolution === '720p' ? 6 : 12;
+  const tokens = Math.max(1, Math.ceil(seconds / secondsPerToken));
+  return { tokens, normalizedResolution, secondsPerToken };
+}
+
+function normalizeKling3NewModeValue(value) {
+  const raw = String(value || 'std').trim();
+  const lower = raw.toLowerCase();
+  if (['standard', 'std', '720', '720p'].includes(lower)) return 'std';
+  if (['pro', '1080', '1080p'].includes(lower)) return 'pro';
+  if (['4k', '4K'].includes(raw) || lower === '4k') return '4K';
+  return 'std';
+}
+
+function getKling3NewShots() {
+  const source = Array.isArray(state.video.kling3NewShots) ? state.video.kling3NewShots : [];
+  const normalized = source.map((shot) => ({
+    prompt: String(shot?.prompt || '').slice(0, 500),
+    duration: String(Math.max(1, Math.min(12, Number(shot?.duration || 3) || 3))),
+    elements: Array.isArray(shot?.elements)
+      ? shot.elements.map((el) => ({
+          name: String(el?.name || '').trim(),
+          kind: String(el?.kind || 'image').trim() || 'image',
+          files_count: Number(el?.files_count || 0) || 0,
+        })).filter((el) => el.name)
+      : [],
+  }));
+  while (normalized.length < 2) normalized.push({ prompt: '', duration: '3', elements: [] });
+  return normalized.slice(0, 5);
+}
+
+function getKling3NewShotElements(index) {
+  const shots = getKling3NewShots();
+  return Array.isArray(shots[index]?.elements) ? shots[index].elements : [];
+}
+
+function appendTokenToTextareaValue(currentValue, token) {
+  const source = String(currentValue || '').trim();
+  if (!source) return token;
+  if (source.includes(token)) return source;
+  return `${source} ${token}`.trim();
+}
+
+
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function removeTokenFromTextareaValue(currentValue, token) {
+  const source = String(currentValue || '');
+  const safeToken = escapeRegExp(String(token || '').trim());
+  if (!safeToken) return source.trim();
+  return source
+    .replace(new RegExp(`(^|\\s)${safeToken}(?=\\s|$)`, 'g'), ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function kling3NewElementImageUrls(element) {
+  return String(element?.image_urls_text || '').split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+}
+
+function kling3NewElementImageMetas(element) {
+  const raw = String(element?.image_meta_json || '').trim();
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((item) => ({
+      name: String(item?.name || '').trim(),
+      width: Number(item?.width || 0) || 0,
+      height: Number(item?.height || 0) || 0,
+      size: Number(item?.size || 0) || 0,
+      url: String(item?.url || '').trim(),
+    }));
+  } catch (_) {
+    return [];
+  }
+}
+
+function kling3NewImageFileLabel(url) {
+  try {
+    const clean = String(url || '').split('?')[0].split('#')[0];
+    const raw = clean.split('/').filter(Boolean).pop() || '';
+    const decoded = decodeURIComponent(raw);
+    return decoded.length > 34 ? `${decoded.slice(0, 16)}…${decoded.slice(-14)}` : decoded;
+  } catch (_) {
+    const raw = String(url || '').split('?')[0].split('/').pop() || '';
+    return raw.length > 34 ? `${raw.slice(0, 16)}…${raw.slice(-14)}` : raw;
+  }
+}
+
+function kling3NewFormatFileSize(bytes) {
+  const value = Number(bytes || 0) || 0;
+  if (!value) return '';
+  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  if (value >= 1024) return `${Math.round(value / 1024)} KB`;
+  return `${value} B`;
+}
+
+function getLocalImageDimensions(file) {
+  return new Promise((resolve, reject) => {
+    if (!file) {
+      resolve({ width: 0, height: 0 });
+      return;
+    }
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const width = Number(img.naturalWidth || img.width || 0) || 0;
+      const height = Number(img.naturalHeight || img.height || 0) || 0;
+      URL.revokeObjectURL(url);
+      resolve({ width, height });
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error(`Не удалось прочитать размер изображения: ${file.name || 'image'}`));
+    };
+    img.src = url;
+  });
+}
+
+async function getKling3NewImageFileInfos(files) {
+  const list = Array.from(files || []);
+  return Promise.all(list.map(async (file) => {
+    const dims = await getLocalImageDimensions(file);
+    return {
+      name: String(file?.name || 'image').trim(),
+      width: Number(dims.width || 0) || 0,
+      height: Number(dims.height || 0) || 0,
+      size: Number(file?.size || 0) || 0,
+    };
+  }));
+}
+
+function syncKling3NewShotElementCounts() {
+  state.video.kling3NewShots = getKling3NewShots();
+  state.video.kling3NewElements = getKling3NewElements();
+  const byName = new Map(state.video.kling3NewElements.map((el) => [el.name, el]));
+  state.video.kling3NewShots.forEach((shot) => {
+    if (!Array.isArray(shot.elements)) shot.elements = [];
+    shot.elements = shot.elements.map((linked) => {
+      const element = byName.get(linked.name);
+      if (!element) return linked;
+      const imageCount = kling3NewElementImageUrls(element).length;
+      return {
+        ...linked,
+        kind: element.video_url ? 'video' : 'image',
+        files_count: element.video_url ? 1 : imageCount,
+      };
+    }).filter((linked) => byName.has(linked.name));
+  });
+}
+
+function removeKling3NewShotElement(index, elementName) {
+  const name = String(elementName || '').trim();
+  if (!name) return;
+  state.video.kling3NewShots = getKling3NewShots();
+  state.video.kling3NewElements = getKling3NewElements().filter((el) => el.name !== name);
+  const shot = state.video.kling3NewShots[index];
+  if (shot) {
+    shot.elements = Array.isArray(shot.elements) ? shot.elements.filter((el) => el.name !== name) : [];
+    shot.prompt = removeTokenFromTextareaValue(shot.prompt || '', `@${name}`);
+  }
+  saveState();
+  render();
+  toast('success', 'Element удалён', `@${name} удалён из shot и prompt.`);
+}
+
+function removeKling3NewShotElementImage(index, elementName, imageIndex) {
+  const name = String(elementName || '').trim();
+  const targetIndex = Number(imageIndex || 0);
+  if (!name || targetIndex < 0) return;
+  state.video.kling3NewShots = getKling3NewShots();
+  state.video.kling3NewElements = getKling3NewElements();
+  const element = state.video.kling3NewElements.find((el) => el.name === name);
+  if (!element) return;
+  const urls = kling3NewElementImageUrls(element);
+  if (!urls.length || targetIndex >= urls.length) return;
+  urls.splice(targetIndex, 1);
+  const metas = kling3NewElementImageMetas(element);
+  if (metas.length) {
+    metas.splice(targetIndex, 1);
+    element.image_meta_json = JSON.stringify(metas);
+  }
+  if (!urls.length) {
+    removeKling3NewShotElement(index, name);
+    return;
+  }
+  element.image_urls_text = urls.join('\n');
+  const shot = state.video.kling3NewShots[index];
+  if (shot && Array.isArray(shot.elements)) {
+    const linked = shot.elements.find((el) => el.name === name);
+    if (linked) linked.files_count = urls.length;
+  }
+  syncKling3NewShotElementCounts();
+  saveState();
+  render();
+  toast('success', 'Фото удалено', `В @${name} осталось ${urls.length}/4 фото.`);
+}
+
+async function uploadKling3NewWorkspaceFiles(files, slot = 'element') {
+  const urls = [];
+  for (const file of Array.from(files || [])) {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('telegram_user_id', String((state.user && (state.user.telegram_id || state.user.id)) || 0));
+    fd.append('slot', slot);
+    const res = await fetch('/api/kling3-kie/upload-reference', { method: 'POST', body: fd, credentials: 'include' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) throw new Error(data.detail || data.message || `Upload failed: ${res.status}`);
+    urls.push(data.public_url || data.url);
+  }
+  return urls;
+}
+
+async function handleKling3NewShotElementUpload(index, fileList, kind = 'image') {
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  if (kind === 'image') {
+    const bad = files.filter((file) => {
+      const type = String(file?.type || '').toLowerCase();
+      const name = String(file?.name || '').toLowerCase();
+      return !(['image/jpeg', 'image/jpg', 'image/png'].includes(type) || /\.(jpe?g|png)$/.test(name));
+    });
+    if (bad.length) throw new Error('Для image element доступны только JPG/PNG. WEBP не отправляем в KIE.');
+    if (files.length > 4) {
+      throw new Error('За один раз можно выбрать максимум 4 фото. Для запуска у image element должно быть 2–4 фото.');
+    }
+  }
+
+  const imageFileInfos = kind === 'image' ? await getKling3NewImageFileInfos(files) : [];
+  if (kind === 'image') {
+    const tooSmall = imageFileInfos.find((info) => info.width < 300 || info.height < 300);
+    if (tooSmall) {
+      throw new Error(`Фото "${tooSmall.name}" слишком маленькое: ${tooSmall.width}×${tooSmall.height}px. Для Kling 3.0 - New нужно минимум 300×300px.`);
+    }
+  }
+
+  state.video.kling3NewShots = getKling3NewShots();
+  state.video.kling3NewElements = getKling3NewElements();
+  const shot = state.video.kling3NewShots[index];
+  if (!shot) return;
+  if (!Array.isArray(shot.elements)) shot.elements = [];
+
+  let targetElement = null;
+  let targetShotElement = null;
+
+  if (kind === 'image') {
+    for (let i = shot.elements.length - 1; i >= 0; i -= 1) {
+      const linked = shot.elements[i];
+      if (!linked || linked.kind === 'video') continue;
+      const existing = state.video.kling3NewElements.find((el) => el.name === linked.name);
+      if (!existing) continue;
+      const currentUrls = kling3NewElementImageUrls(existing);
+      if (currentUrls.length < 4) {
+        targetElement = existing;
+        targetShotElement = linked;
+        break;
+      }
+    }
+  }
+
+  const willCreateNew = !targetElement;
+  if (willCreateNew && state.video.kling3NewElements.length >= 3) {
+    toast('info', 'Лимит элементов', 'Kling 3.0 - New поддерживает до 3 elements на один multi-shot ролик.');
+    return;
+  }
+
+  if (targetElement && kind === 'image') {
+    const currentUrls = kling3NewElementImageUrls(targetElement);
+    if (currentUrls.length + files.length > 4) {
+      throw new Error(`В @${targetElement.name} уже ${currentUrls.length} фото. Максимум для одного image element — 4 фото.`);
+    }
+  }
+
+  const nextIndex = shot.elements.length + 1;
+  const elementName = targetElement?.name || `shot${index + 1}_el${nextIndex}`;
+  const slot = `shot_${index + 1}_${kind}`;
+  toast('info', 'Загрузка элемента', `Загружаю ${kind === 'video' ? 'видео' : 'изображения'} для Shot ${index + 1}...`);
+  const urls = await uploadKling3NewWorkspaceFiles(files, slot);
+
+  if (targetElement && kind === 'image') {
+    const currentUrls = kling3NewElementImageUrls(targetElement);
+    const currentMetas = kling3NewElementImageMetas(targetElement);
+    const paddedCurrentMetas = currentUrls.map((url, metaIndex) => ({ ...(currentMetas[metaIndex] || {}), url }));
+    const newMetas = urls.map((url, metaIndex) => ({ ...(imageFileInfos[metaIndex] || {}), url }));
+    const nextUrls = currentUrls.concat(urls).slice(0, 4);
+    targetElement.image_urls_text = nextUrls.join('\n');
+    targetElement.image_meta_json = JSON.stringify(paddedCurrentMetas.concat(newMetas).slice(0, 4));
+    if (targetShotElement) targetShotElement.files_count = nextUrls.length;
+    saveState();
+    render();
+    toast('success', 'Фото добавлено', `В @${elementName} теперь ${nextUrls.length}/4 фото. Для запуска нужно минимум 2.`);
+    return;
+  }
+
+  const element = {
+    name: elementName,
+    description: `Shot ${index + 1} element ${nextIndex}`,
+    image_urls_text: kind === 'image' ? urls.join('\n') : '',
+    image_meta_json: kind === 'image' ? JSON.stringify(urls.map((url, metaIndex) => ({ ...(imageFileInfos[metaIndex] || {}), url }))) : '',
+    video_url: kind === 'video' ? (urls[0] || '') : '',
+  };
+  state.video.kling3NewElements.push(element);
+  shot.elements.push({ name: elementName, kind, files_count: urls.length });
+  shot.prompt = appendTokenToTextareaValue(shot.prompt || '', `@${elementName}`);
+  saveState();
+  render();
+  const needMore = kind === 'image' && urls.length < 2 ? ' Добавь ещё 1 фото в этот же element перед запуском.' : '';
+  toast('success', 'Элемент добавлен', `@${elementName} автоматически вставлен в Shot ${index + 1}.${needMore}`);
+}
+
+function getKling3NewShotDuration() {
+  const shots = getKling3NewShots().filter((shot) => String(shot.prompt || '').trim());
+  const total = shots.reduce((sum, shot) => sum + Math.max(1, Math.min(12, Number(shot.duration || 3) || 3)), 0);
+  return Math.max(3, Math.min(15, total || Number(state.video.duration || 5) || 5));
+}
+
+function getKling3NewElements() {
+  const source = Array.isArray(state.video.kling3NewElements) ? state.video.kling3NewElements : [];
+  return source.map((el) => ({
+    name: String(el?.name || '').trim().replace(/^@+/, '').replace(/[^a-zA-Z0-9_]/g, '_').slice(0, 48),
+    description: String(el?.description || '').trim().slice(0, 240),
+    image_urls_text: String(el?.image_urls_text || '').trim(),
+    image_meta_json: String(el?.image_meta_json || '').trim(),
+    video_url: String(el?.video_url || '').trim(),
+  })).slice(0, 3);
 }
 
 function getVideoRunCost() {
@@ -1631,6 +2752,18 @@ function getVideoRunCost() {
     const tokens = Math.max(1, duration);
     return { known: true, tokens, label: `▶ Запуск • ${tokens} ${pluralizeTokens(tokens)}` };
   }
+  if (model === 'kling-3.0-new') {
+    const mode = normalizeKling3NewModeValue(state.video.resolution || 'std');
+    const seconds = state.video.mode === 'multi_shot' ? getKling3NewShotDuration() : Math.max(3, Math.min(15, duration || 5));
+    const table = {
+      std: { off: 1, on: 1.5 },
+      pro: { off: 1.5, on: 2 },
+      '4K': { off: 5, on: 6 },
+    };
+    const rate = table[mode]?.[state.video.enableAudio ? 'on' : 'off'] || 1;
+    const tokens = Math.max(1, Math.ceil(seconds * rate));
+    return { known: true, tokens, label: `▶ Запуск • ${tokens} ${pluralizeTokens(tokens)}`, helper: `Kling 3.0 - New: ${seconds} сек, ${mode}, ${state.video.enableAudio ? 'audio' : 'no audio'}.` };
+  }
   if (model === 'kling-3.0') {
     const rate = state.video.enableAudio ? 3 : 2;
     const tokens = Math.max(1, duration) * rate;
@@ -1646,24 +2779,64 @@ function getVideoRunCost() {
     const tokens = Math.max(1, duration) * rate;
     return { known: true, tokens, label: `▶ Запуск • ${tokens} ${pluralizeTokens(tokens)}` };
   }
+  if (model === 'grok-imagine-video') {
+    const grokCost = getGrokRunCost(duration, state.video.resolution || '480p');
+    const tokens = grokCost.tokens;
+    return { known: true, tokens, label: `▶ Запуск • ${tokens} ${pluralizeTokens(tokens)}`, helper: '' };
+  }
   if (model === 'seedance-preview') {
-    const tokens = Math.max(1, duration) * 2;
-    return { known: true, tokens, label: `▶ Запуск • ${tokens} ${pluralizeTokens(tokens)}` };
+    const rate = 2;
+    const tokens = Math.max(1, duration) * rate;
+    return { known: true, tokens, label: `▶ Запуск • ${tokens} ${pluralizeTokens(tokens)}`, helper: 'В режиме Preview с референсом формат может быть взят из изображения.' };
   }
   if (model === 'seedance-fast') {
-    const tokens = Math.max(1, duration);
-    return { known: true, tokens, label: `▶ Запуск • ${tokens} ${pluralizeTokens(tokens)}` };
+    const rate = 1;
+    const tokens = Math.max(1, duration) * rate;
+    return { known: true, tokens, label: `▶ Запуск • ${tokens} ${pluralizeTokens(tokens)}`, helper: 'Seedance 2.0 Preview Fast.' };
+  }
+  if (model === 'seedance-kie') {
+    const priceMap = { 5: 10, 10: 20, 15: 30 };
+    const omniVideoRefs = getFile('video.referenceVideos');
+    const hasOmniVideoRef = state.video.provider === 'seedance_kie' && state.video.mode === 'omni_reference' && Array.isArray(omniVideoRefs) && omniVideoRefs.length > 0;
+    const surcharge = hasOmniVideoRef ? 20 : 0;
+    const tokens = (priceMap[duration] || 10) + surcharge;
+    return { known: true, tokens, label: `▶ Запуск • ${tokens} ${pluralizeTokens(tokens)}`, helper: hasOmniVideoRef ? '720p · audio on · video ref +20 ток.' : '720p · аудио включено.' };
+  }
+  if (model === 'seedance-kie-fast') {
+    const priceMap = { 5: 5, 10: 10, 15: 15 };
+    const omniVideoRefs = getFile('video.referenceVideos');
+    const hasOmniVideoRef = state.video.provider === 'seedance_kie' && state.video.mode === 'omni_reference' && Array.isArray(omniVideoRefs) && omniVideoRefs.length > 0;
+    const surcharge = hasOmniVideoRef ? 13 : 0;
+    const tokens = (priceMap[duration] || 5) + surcharge;
+    return { known: true, tokens, label: `▶ Запуск • ${tokens} ${pluralizeTokens(tokens)}`, helper: hasOmniVideoRef ? '480p Fast · audio on · video ref +13 ток.' : '480p Fast · аудио включено.' };
+  }
+  if (model === 'c1') {
+    const pixVerseCost = getPixVerseRunCost(duration, state.video.resolution || '720p');
+    const tokens = pixVerseCost.tokens;
+    return { known: true, tokens, label: `▶ Запуск • ${tokens} ${pluralizeTokens(tokens)}`, helper: `${pixVerseCost.normalizedResolution} · звук включён.` };
   }
   if (model === 'sora-2') {
     const costMap = { 4: 5, 8: 10, 12: 15 };
     const tokens = costMap[duration] || 5;
     return { known: true, tokens, label: `▶ Запуск • ${tokens} ${pluralizeTokens(tokens)}` };
   }
+  if (model === 'switchx') {
+    const seconds = normalizeSwitchxSourceDurationSec(state.video.sourceVideoDurationSec);
+    if (!seconds) return { known: false, label: '▶ Запуск', helper: 'Стоимость зависит от длины исходного видео.' };
+    const rate = String(state.video.resolution || '1080') === '720' ? 1 : 2;
+    const tokens = Math.max(1, seconds) * rate;
+    return { known: true, tokens, label: `▶ Запуск • ${tokens} ${pluralizeTokens(tokens)}`, helper: `Исходник: ${seconds} сек · ${rate} ток/сек.` };
+  }
   return { known: false, label: '▶ Запуск' };
 }
 
+function isVideoRunLocked() {
+  const status = String(state.video.lastStatus || '').toLowerCase();
+  return !!state.video.isGenerating || (!!state.video.generationId && !state.video.outputUrl && !isVideoTaskFinished(status));
+}
+
 function videoRunButtonLabel() {
-  if (state.video.isGenerating) return '⏳ Генерация...';
+  if (isVideoRunLocked()) return '⏳ Генерация...';
   const cost = getVideoRunCost();
   if (cost.known) return cost.label;
   return cost.label || '▶ Запуск';
@@ -1711,6 +2884,31 @@ function imageHistorySelectedItem() {
 function imageHistoryUrl(item) {
   if (!item) return '';
   return item.download_url || item.image_url || item.after_image_url || '';
+}
+
+function imageHistoryUrls(item) {
+  if (!item) return [];
+  if (Array.isArray(item.image_urls) && item.image_urls.length) return item.image_urls.filter(Boolean);
+  const single = imageHistoryUrl(item);
+  return single ? [single] : [];
+}
+
+function imageHistoryAvailableActions(item) {
+  if (!item || !item.available_actions || typeof item.available_actions !== 'object') return {};
+  return item.available_actions;
+}
+
+function imageActiveUrls(item = null) {
+  const source = item || (state.image.panel === 'library' ? imageHistorySelectedItem() : null);
+  if (source && Array.isArray(source.image_urls) && source.image_urls.length) return source.image_urls.filter(Boolean);
+  if (Array.isArray(state.image.imageUrls) && state.image.imageUrls.length) return state.image.imageUrls.filter(Boolean);
+  const single = source ? imageHistoryUrl(source) : (state.image.downloadUrl || state.image.outputUrl || state.image.afterImageUrl || '');
+  return single ? [single] : [];
+}
+
+function imageStageProvider(item = null) {
+  const source = item || (state.image.panel === 'library' ? imageHistorySelectedItem() : null);
+  return String(source?.provider || state.image.provider || '').trim().toLowerCase();
 }
 
 function imageHistoryTitle(item) {
@@ -1881,9 +3079,526 @@ async function probeMotionDuration(fileObj) {
   };
 }
 
+
+async function probeSourceVideoDuration(fileObj) {
+  if (!fileObj?.url) {
+    state.video.sourceVideoDurationSec = null;
+    saveState();
+    render();
+    return;
+  }
+  const video = document.createElement('video');
+  video.preload = 'metadata';
+  video.src = fileObj.url;
+  video.onloadedmetadata = () => {
+    const duration = Number(video.duration || 0);
+    state.video.sourceVideoDurationSec = normalizeSwitchxSourceDurationSec(duration);
+    saveState();
+    render();
+  };
+  video.onerror = () => {
+    state.video.sourceVideoDurationSec = null;
+    saveState();
+    render();
+  };
+}
+
+
+function isSwitchxSelectModeActive() {
+  return false;
+}
+
+function switchxMaskEditorSourceSignature(fileObj) {
+  if (!fileObj?.file && !fileObj?.url) return '';
+  return [String(fileObj.name || fileObj.file?.name || 'source'), Number(fileObj.size || fileObj.file?.size || 0), Number(fileObj.lastModified || fileObj.file?.lastModified || 0)].join('::');
+}
+
+function resetSwitchxMaskEditor({ clearMaskFile = true } = {}) {
+  const prev = runtime.switchxMaskEditor || {};
+  runtime.switchxMaskEditor = {
+    sourceSignature: '',
+    frameDataUrl: '',
+    frameWidth: 0,
+    frameHeight: 0,
+    maskDataUrl: '',
+    brushSize: Number.isFinite(Number(prev.brushSize)) ? Number(prev.brushSize) : 28,
+    tool: prev.tool === 'eraser' ? 'eraser' : 'brush',
+    loading: false,
+    ready: false,
+    errorText: '',
+  };
+  if (clearMaskFile) {
+    revokeRuntimeFileValue(runtime.files['video.switchxSelectMask']);
+    delete runtime.files['video.switchxSelectMask'];
+    const input = document.getElementById('video_switchxSelectMask');
+    if (input) input.value = '';
+  }
+}
+
+function switchxMaskEditorHasPaint(maskCanvas) {
+  if (!maskCanvas) return false;
+  const ctx = maskCanvas.getContext('2d');
+  if (!ctx) return false;
+  const { width, height } = maskCanvas;
+  if (!width || !height) return false;
+  const { data } = ctx.getImageData(0, 0, width, height);
+  for (let i = 3; i < data.length; i += 4) {
+    if (data[i] > 0) return true;
+  }
+  return false;
+}
+
+function switchxMaskEditorSetGeneratedFile(file) {
+  if (!file) {
+    revokeRuntimeFileValue(runtime.files['video.switchxSelectMask']);
+    delete runtime.files['video.switchxSelectMask'];
+    const input = document.getElementById('video_switchxSelectMask');
+    if (input) input.value = '';
+    return;
+  }
+  revokeRuntimeFileValue(runtime.files['video.switchxSelectMask']);
+  runtime.files['video.switchxSelectMask'] = makeRuntimeFileEntry(file);
+  const input = document.getElementById('video_switchxSelectMask');
+  if (input) input.value = '';
+}
+
+function canvasToFile(canvas, filename = 'switchx_select_mask.png', type = 'image/png') {
+  return new Promise((resolve, reject) => {
+    if (!canvas) {
+      reject(new Error('Canvas not ready'));
+      return;
+    }
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error('Не удалось сохранить маску в PNG'));
+        return;
+      }
+      resolve(new File([blob], filename, { type }));
+    }, type);
+  });
+}
+
+function getSwitchxMaskPixelValue(r, g, b, a) {
+  const rgbLuminance = Math.max(Number(r || 0), Number(g || 0), Number(b || 0));
+  const alpha = Math.max(0, Math.min(255, Number(a || 0)));
+  const scaled = alpha >= 255 ? rgbLuminance : Math.round((rgbLuminance / 255) * alpha);
+  if (scaled <= 6) return 0;
+  return Math.max(0, Math.min(255, scaled));
+}
+
+async function drawSwitchxMaskSourceToCanvas(source, width, height) {
+  const image = typeof source === 'string' ? await loadImageElement(source) : source;
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Number(width || image?.naturalWidth || image?.videoWidth || image?.width || 1));
+  canvas.height = Math.max(1, Number(height || image?.naturalHeight || image?.videoHeight || image?.height || 1));
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
+async function switchxMaskSourceToGrayscaleFile(source, width, height, filename = 'switchx_select_mask.png') {
+  const canvas = await drawSwitchxMaskSourceToCanvas(source, width, height);
+  const ctx = canvas.getContext('2d');
+  const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const data = frame.data;
+  for (let i = 0; i < data.length; i += 4) {
+    const value = getSwitchxMaskPixelValue(data[i], data[i + 1], data[i + 2], data[i + 3]);
+    data[i] = value;
+    data[i + 1] = value;
+    data[i + 2] = value;
+    data[i + 3] = 255;
+  }
+  ctx.putImageData(frame, 0, 0);
+  return canvasToFile(canvas, filename, 'image/png');
+}
+
+async function switchxMaskSourceToTransparentDataUrl(source, width, height) {
+  const canvas = await drawSwitchxMaskSourceToCanvas(source, width, height);
+  const ctx = canvas.getContext('2d');
+  const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const data = frame.data;
+  for (let i = 0; i < data.length; i += 4) {
+    const value = getSwitchxMaskPixelValue(data[i], data[i + 1], data[i + 2], data[i + 3]);
+    data[i] = 255;
+    data[i + 1] = 255;
+    data[i + 2] = 255;
+    data[i + 3] = value;
+  }
+  ctx.putImageData(frame, 0, 0);
+  return canvas.toDataURL('image/png');
+}
+
+async function switchxMaskEditorSyncExport(maskCanvas) {
+  const editor = runtime.switchxMaskEditor || {};
+  if (!maskCanvas || !editor.frameWidth || !editor.frameHeight) {
+    switchxMaskEditorSetGeneratedFile(null);
+    return false;
+  }
+  if (!switchxMaskEditorHasPaint(maskCanvas)) {
+    editor.maskDataUrl = '';
+    switchxMaskEditorSetGeneratedFile(null);
+    return false;
+  }
+  editor.maskDataUrl = await switchxMaskSourceToTransparentDataUrl(maskCanvas, editor.frameWidth, editor.frameHeight);
+  const file = await switchxMaskSourceToGrayscaleFile(maskCanvas, editor.frameWidth, editor.frameHeight, 'switchx_select_mask.png');
+  switchxMaskEditorSetGeneratedFile(file);
+  return true;
+}
+
+function loadImageElement(url) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('Не удалось загрузить изображение'));
+    image.src = url;
+  });
+}
+
+async function normalizeSwitchxMaskToTransparent(url, width, height) {
+  return switchxMaskSourceToTransparentDataUrl(url, width, height);
+}
+
+function extractFirstFrameFromVideo(url) {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement('video');
+    let finished = false;
+    const cleanup = () => {
+      video.onloadeddata = null;
+      video.onseeked = null;
+      video.onerror = null;
+    };
+    const fail = (error) => {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      reject(error instanceof Error ? error : new Error(String(error || 'Не удалось извлечь 1-й кадр')));
+    };
+    const capture = () => {
+      if (finished) return;
+      try {
+        const width = Number(video.videoWidth || 0);
+        const height = Number(video.videoHeight || 0);
+        if (!width || !height) {
+          fail(new Error('Не определились размеры source video'));
+          return;
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(video, 0, 0, width, height);
+        finished = true;
+        cleanup();
+        resolve({ dataUrl: canvas.toDataURL('image/png'), width, height });
+      } catch (error) {
+        fail(error);
+      }
+    };
+    video.preload = 'auto';
+    video.muted = true;
+    video.playsInline = true;
+    video.onloadeddata = () => capture();
+    video.onseeked = () => capture();
+    video.onerror = () => fail(new Error('Браузер не смог открыть source video'));
+    video.src = url;
+    video.load();
+  });
+}
+
+async function ensureSwitchxMaskEditorFrame() {
+  const editor = runtime.switchxMaskEditor || {};
+  const sourceVideo = getFile('video.sourceVideo');
+  if (!sourceVideo?.url) {
+    editor.ready = false;
+    editor.loading = false;
+    editor.errorText = '';
+    return false;
+  }
+  const signature = switchxMaskEditorSourceSignature(sourceVideo);
+  if (editor.frameDataUrl && editor.sourceSignature === signature) {
+    editor.ready = true;
+    editor.loading = false;
+    editor.errorText = '';
+    return true;
+  }
+  editor.loading = true;
+  editor.ready = false;
+  editor.errorText = '';
+  try {
+    const frame = await extractFirstFrameFromVideo(sourceVideo.url);
+    editor.sourceSignature = signature;
+    editor.frameDataUrl = frame.dataUrl;
+    editor.frameWidth = frame.width;
+    editor.frameHeight = frame.height;
+    editor.maskDataUrl = '';
+    editor.loading = false;
+    editor.ready = true;
+    switchxMaskEditorSetGeneratedFile(null);
+    return true;
+  } catch (error) {
+    editor.loading = false;
+    editor.ready = false;
+    editor.errorText = String(error?.message || error || 'Не удалось подготовить 1-й кадр');
+    return false;
+  }
+}
+
+async function initSwitchxMaskEditor() {
+  const root = document.getElementById('switchxMaskEditorCard');
+  if (!root || !isSwitchxSelectModeActive()) return;
+  const statusEl = document.getElementById('switchxMaskEditorStatus');
+  const canvas = document.getElementById('switchxMaskEditorCanvas');
+  const brushInput = document.getElementById('switchxMaskBrushSize');
+  const sizeValue = document.getElementById('switchxMaskBrushSizeValue');
+  const sourceVideo = getFile('video.sourceVideo');
+  const editor = runtime.switchxMaskEditor || {};
+
+  if (sizeValue) sizeValue.textContent = `${Number(editor.brushSize || 28)} px`;
+
+  if (!sourceVideo?.url && !editor.frameDataUrl) {
+    if (statusEl) {
+      statusEl.textContent = state.video.switchxSourceUploadId
+        ? 'Для рисования маски заново прикрепи source video в браузере. Upload id уже есть, но без локального файла 1-й кадр не показать.'
+        : 'Сначала загрузи source video, потом здесь появится 1-й кадр для рисования.';
+    }
+    return;
+  }
+
+  if ((!editor.frameDataUrl || editor.sourceSignature !== switchxMaskEditorSourceSignature(sourceVideo)) && sourceVideo?.url) {
+    if (statusEl) statusEl.textContent = 'Достаю 1-й кадр source video...';
+    const ok = await ensureSwitchxMaskEditorFrame();
+    if (!ok) {
+      if (statusEl) statusEl.textContent = editor.errorText || 'Не удалось подготовить 1-й кадр.';
+      return;
+    }
+  }
+
+  if (!canvas || !editor.frameDataUrl || !editor.frameWidth || !editor.frameHeight) {
+    if (statusEl) statusEl.textContent = editor.errorText || 'Рабочая область маски пока недоступна.';
+    return;
+  }
+
+  const frameImage = await loadImageElement(editor.frameDataUrl);
+  const maskCanvas = document.createElement('canvas');
+  maskCanvas.width = editor.frameWidth;
+  maskCanvas.height = editor.frameHeight;
+  const maskCtx = maskCanvas.getContext('2d');
+  maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+
+  if (editor.maskDataUrl) {
+    try {
+      const maskImage = await loadImageElement(editor.maskDataUrl);
+      maskCtx.drawImage(maskImage, 0, 0, maskCanvas.width, maskCanvas.height);
+    } catch (_e) {}
+  } else {
+    const existingMask = getFile('video.switchxSelectMask');
+    if (existingMask?.url) {
+      try {
+        editor.maskDataUrl = await normalizeSwitchxMaskToTransparent(existingMask.url, editor.frameWidth, editor.frameHeight);
+        const maskImage = await loadImageElement(editor.maskDataUrl);
+        maskCtx.drawImage(maskImage, 0, 0, maskCanvas.width, maskCanvas.height);
+      } catch (_e) {}
+    }
+  }
+
+  canvas.width = editor.frameWidth;
+  canvas.height = editor.frameHeight;
+  canvas.style.width = '100%';
+  canvas.style.height = 'auto';
+  const ctx = canvas.getContext('2d');
+
+  const redraw = () => {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(frameImage, 0, 0, canvas.width, canvas.height);
+    ctx.save();
+    ctx.globalAlpha = 0.52;
+    ctx.drawImage(maskCanvas, 0, 0, canvas.width, canvas.height);
+    ctx.restore();
+  };
+
+  const syncStatus = (text) => {
+    if (statusEl) statusEl.textContent = text;
+  };
+
+  const syncBadge = (hasMask) => {
+    const badge = document.getElementById('switchxMaskReadyBadge');
+    if (!badge) return;
+    badge.textContent = hasMask ? 'Mask ready' : 'Mask draft';
+    badge.style.background = hasMask ? 'rgba(64, 196, 144, 0.18)' : 'rgba(255,255,255,0.08)';
+  };
+
+  const saveMask = async (message) => {
+    const hasMask = await switchxMaskEditorSyncExport(maskCanvas);
+    if (!hasMask) {
+      syncBadge(false);
+      syncStatus('Маска очищена. Отметь сам объект, который нужно заменить.');
+      return;
+    }
+    syncBadge(true);
+    syncStatus(message || 'Маска сохранена. Выделен сам объект: он и будет меняться.');
+  };
+
+  redraw();
+  syncBadge(!!getFile('video.switchxSelectMask'));
+  syncStatus(getFile('video.switchxSelectMask') ? 'Маска готова. Можно запускать SwitchX Select.' : 'Отмечай сам объект. Всё вне объекта останется из исходного видео.');
+
+  if (brushInput) {
+    brushInput.value = String(Number(editor.brushSize || 28));
+    brushInput.oninput = (event) => {
+      editor.brushSize = Number(event.target.value || 28);
+      if (sizeValue) sizeValue.textContent = `${Number(editor.brushSize || 28)} px`;
+    };
+  }
+
+  root.querySelectorAll('[data-switchx-mask-tool]').forEach((button) => {
+    const nextTool = String(button.getAttribute('data-switchx-mask-tool') || 'brush');
+    button.onclick = () => {
+      editor.tool = nextTool === 'eraser' ? 'eraser' : 'brush';
+      root.querySelectorAll('[data-switchx-mask-tool]').forEach((item) => {
+        const active = String(item.getAttribute('data-switchx-mask-tool') || '') === editor.tool;
+        item.classList.toggle('primary', active);
+        item.classList.toggle('ghost', !active);
+      });
+      syncStatus(editor.tool === 'eraser' ? 'Ластик: стирай лишнее с маски.' : 'Кисть: отмечай сам объект, который нужно заменить.');
+    };
+  });
+
+  const clearBtn = document.getElementById('switchxMaskClearBtn');
+  if (clearBtn) {
+    clearBtn.onclick = async () => {
+      maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+      editor.maskDataUrl = '';
+      switchxMaskEditorSetGeneratedFile(null);
+      redraw();
+      syncBadge(false);
+      syncStatus('Маска очищена.');
+    };
+  }
+
+  const fillBtn = document.getElementById('switchxMaskFillBtn');
+  if (fillBtn) {
+    fillBtn.onclick = async () => {
+      maskCtx.save();
+      maskCtx.globalCompositeOperation = 'source-over';
+      maskCtx.fillStyle = '#fff';
+      maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
+      maskCtx.restore();
+      redraw();
+      await saveMask('Маска залита целиком и сохранена.');
+    };
+  }
+
+  let drawing = false;
+  let lastX = 0;
+  let lastY = 0;
+
+  const pointFromEvent = (event) => {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / Math.max(rect.width, 1);
+    const scaleY = canvas.height / Math.max(rect.height, 1);
+    return {
+      x: (event.clientX - rect.left) * scaleX,
+      y: (event.clientY - rect.top) * scaleY,
+    };
+  };
+
+  const paint = (fromX, fromY, toX, toY) => {
+    maskCtx.save();
+    maskCtx.lineCap = 'round';
+    maskCtx.lineJoin = 'round';
+    maskCtx.lineWidth = Number(editor.brushSize || 28);
+    if (editor.tool === 'eraser') {
+      maskCtx.globalCompositeOperation = 'destination-out';
+      maskCtx.strokeStyle = 'rgba(0,0,0,1)';
+    } else {
+      maskCtx.globalCompositeOperation = 'source-over';
+      maskCtx.strokeStyle = 'rgba(255,255,255,1)';
+    }
+    maskCtx.beginPath();
+    maskCtx.moveTo(fromX, fromY);
+    maskCtx.lineTo(toX, toY);
+    maskCtx.stroke();
+    maskCtx.restore();
+    redraw();
+  };
+
+  canvas.onpointerdown = (event) => {
+    event.preventDefault();
+    const point = pointFromEvent(event);
+    drawing = true;
+    lastX = point.x;
+    lastY = point.y;
+    paint(point.x, point.y, point.x, point.y);
+    canvas.setPointerCapture?.(event.pointerId);
+    syncStatus(editor.tool === 'eraser' ? 'Стираю маску...' : 'Рисую маску...');
+  };
+
+  canvas.onpointermove = (event) => {
+    if (!drawing) return;
+    event.preventDefault();
+    const point = pointFromEvent(event);
+    paint(lastX, lastY, point.x, point.y);
+    lastX = point.x;
+    lastY = point.y;
+  };
+
+  const finishStroke = async (event) => {
+    if (!drawing) return;
+    drawing = false;
+    try { canvas.releasePointerCapture?.(event?.pointerId); } catch (_e) {}
+    await saveMask('Маска сохранена. Можно запускать SwitchX Select.');
+  };
+
+  canvas.onpointerup = finishStroke;
+  canvas.onpointercancel = finishStroke;
+  canvas.onpointerleave = (event) => {
+    if (drawing && (event.buttons === 0 || typeof event.buttons === 'undefined')) finishStroke(event);
+  };
+}
+
+function renderSwitchxMaskWorkspace() {
+  return '';
+  const sourceVideo = getFile('video.sourceVideo');
+  const editor = runtime.switchxMaskEditor || {};
+  const badgeText = getFile('video.switchxSelectMask') ? 'Mask ready' : 'Mask draft';
+  const statusTone = getFile('video.switchxSelectMask') ? 'rgba(64, 196, 144, 0.18)' : 'rgba(255,255,255,0.08)';
+  const statusText = !sourceVideo?.url && !editor.frameDataUrl
+    ? (state.video.switchxSourceUploadId
+        ? 'Source video уже загружен на сервер, но для рисования нужно снова прикрепить файл в браузере.'
+        : 'Сначала загрузи source video, потом здесь откроется 1-й кадр.')
+    : (editor.loading ? 'Достаю 1-й кадр source video...' : (editor.errorText || 'Отмечай сам объект, который нужно заменить. Маска сохраняется автоматически после каждого штриха.'));
+  return `
+    <div id="switchxMaskEditorCard" class="inspector-card" style="margin-top:16px; padding:18px; border:1px solid rgba(255,255,255,0.08); background:linear-gradient(180deg, rgba(15,18,31,0.96) 0%, rgba(8,11,22,0.96) 100%); box-shadow:0 18px 40px rgba(0,0,0,0.24);">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:14px;">
+        <div>
+          <div class="section-title" style="margin:0;">Select mask workspace</div>
+          <div class="help-text" style="margin-top:6px;">1-й кадр видео. Отмечай сам объект: только он будет заменён в SwitchX Select.</div>
+        </div>
+        <span id="switchxMaskReadyBadge" style="display:inline-flex; align-items:center; min-height:34px; padding:0 12px; border-radius:999px; background:${statusTone}; border:1px solid rgba(255,255,255,0.08); color:rgba(255,255,255,0.92); font-size:12px; font-weight:700; letter-spacing:0.01em;">${escapeHtml(badgeText)}</span>
+      </div>
+      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:12px;">
+        <button type="button" class="btn ${editor.tool === 'eraser' ? 'ghost' : 'primary'} small" data-switchx-mask-tool="brush">Кисть</button>
+        <button type="button" class="btn ${editor.tool === 'eraser' ? 'primary' : 'ghost'} small" data-switchx-mask-tool="eraser">Ластик</button>
+        <button type="button" class="btn ghost small" id="switchxMaskClearBtn">Очистить</button>
+        <button type="button" class="btn ghost small" id="switchxMaskFillBtn">Залить всё</button>
+        <label style="display:inline-flex; align-items:center; gap:10px; min-width:220px; flex:1 1 220px;">
+          <span class="help-text" style="margin:0; white-space:nowrap;">Размер кисти</span>
+          <input id="switchxMaskBrushSize" type="range" min="8" max="120" step="1" value="${Number(editor.brushSize || 28)}" style="flex:1 1 auto;">
+          <strong id="switchxMaskBrushSizeValue" style="font-size:12px; color:rgba(255,255,255,0.92); white-space:nowrap;">${Number(editor.brushSize || 28)} px</strong>
+        </label>
+      </div>
+      <div style="position:relative; border-radius:18px; overflow:hidden; border:1px solid rgba(255,255,255,0.08); background:linear-gradient(180deg, rgba(4,7,18,0.96) 0%, rgba(2,4,12,0.98) 100%); min-height:260px; display:flex; align-items:center; justify-content:center;">
+        ${sourceVideo?.url || editor.frameDataUrl ? `<canvas id="switchxMaskEditorCanvas" style="display:block; width:100%; max-height:540px; touch-action:none; cursor:crosshair;"></canvas>` : `<div class="empty-copy" style="padding:32px 22px;"><strong>Нет source video</strong><div>Прикрепи исходное видео, чтобы открыть рабочую область для Select.</div></div>`}
+      </div>
+      <div id="switchxMaskEditorStatus" class="help-text" style="margin-top:12px;">${escapeHtml(statusText)}</div>
+    </div>
+  `;
+}
+
 function renderNav() {
   const nav = document.getElementById('studioNav');
-  const order = ['chat', 'video', 'image', 'voice', 'music', 'library', 'workspace', 'history', 'billing', 'profile'];
+  const order = ['chat', 'video', 'image', 'voice', 'music', 'library', 'history', 'profile', 'partner'];
   nav.innerHTML = order.map((key) => {
     const meta = STUDIO_META[key];
     return `
@@ -1896,6 +3611,239 @@ function renderNav() {
       </button>
     `;
   }).join('');
+}
+
+function mobileStudioShortTitle() {
+  const meta = STUDIO_META[state.studio] || STUDIO_META.chat;
+  const current = currentMeta();
+  if (state.studio === 'video') return current.provider && current.model ? `${current.provider} · ${current.model}` : meta.title;
+  if (state.studio === 'image') return current.provider && current.model ? `${current.provider} · ${current.model}` : meta.title;
+  if (state.studio === 'music') return current.provider || meta.title;
+  if (state.studio === 'voice') return 'Voice Studio';
+  if (state.studio === 'history') return 'Site Creator';
+  if (state.studio === 'library') return 'Prompt Library';
+  if (state.studio === 'profile') return 'Профиль';
+  if (state.studio === 'partner') return 'Партнёрка';
+  return meta.title;
+}
+
+function mobileStudioSubtitle() {
+  const current = currentMeta();
+  if (state.studio === 'chat') return state.chat.mode === 'prompt_builder' ? 'Prompt Builder' : 'Новый чат';
+  if (state.studio === 'video' || state.studio === 'image') return [current.mode, state.balance != null ? `${state.balance} ток.` : ''].filter(Boolean).join(' · ');
+  if (state.studio === 'music') return state.music.activeTab === 'results' ? 'История и результаты' : (current.mode || 'Генерация музыки');
+  if (state.studio === 'voice') return state.voice.isGenerating ? 'Генерация озвучки' : 'Текст в голос';
+  if (state.studio === 'profile') return state.me ? formatUserName(state.me) : 'Вход и баланс';
+  return current.mode || 'Workspace';
+}
+
+function closeMobileOverlays({ keepSheet = false } = {}) {
+  runtime.mobileUi.navOpen = false;
+  if (!keepSheet) runtime.mobileUi.sheetOpen = false;
+}
+
+function hasMobileSettingsPanel() {
+  // These sections are full-width workspaces; opening the inspector on mobile would show an empty/irrelevant sheet.
+  return !['library', 'history'].includes(state.studio);
+}
+
+function hasMobileHistoryPanel() {
+  return ['video', 'image', 'voice', 'music', 'profile', 'history'].includes(state.studio);
+}
+
+function mobileMusicEditorFallbackTab() {
+  const last = String(state.music.lastEditorTab || '');
+  if (['idea', 'lyrics', 'songwriter', 'tools'].includes(last)) return last;
+  return state.music.ai === 'suno' && state.music.mode === 'lyrics' ? 'lyrics' : 'idea';
+}
+
+function openMobileSheet(kind = 'settings') {
+  const normalizedKind = kind === 'history' ? 'history' : 'settings';
+  if (normalizedKind === 'settings' && !hasMobileSettingsPanel()) {
+    closeMobileOverlays();
+    renderMobileChrome();
+    return;
+  }
+  if (normalizedKind === 'history' && !hasMobileHistoryPanel()) {
+    closeMobileOverlays();
+    renderMobileChrome();
+    return;
+  }
+  runtime.mobileUi.navOpen = false;
+  runtime.mobileUi.sheetKind = normalizedKind;
+  runtime.mobileUi.sheetOpen = true;
+  renderMobileChrome();
+}
+
+function openMobileHistoryPanel() {
+  runtime.mobileUi.navOpen = false;
+  runtime.mobileUi.sheetKind = 'history';
+
+  if (!hasMobileHistoryPanel()) {
+    closeMobileOverlays();
+    renderMobileChrome();
+    return;
+  }
+
+  if (state.studio === 'video') {
+    state.video.panel = 'library';
+    if (state.authToken) loadVideoHistory({ silent: true, keepSelection: true }).catch(() => {});
+    saveState();
+    render();
+    runtime.mobileUi.sheetKind = 'history';
+    runtime.mobileUi.sheetOpen = true;
+    renderMobileChrome();
+    return;
+  }
+  if (state.studio === 'image') {
+    state.image.panel = 'library';
+    if (state.authToken) loadImageHistory({ silent: true, keepSelection: true }).catch(() => {});
+    saveState();
+    render();
+    runtime.mobileUi.sheetKind = 'history';
+    runtime.mobileUi.sheetOpen = true;
+    renderMobileChrome();
+    return;
+  }
+  if (state.studio === 'voice') {
+    if (state.authToken) loadVoiceHistory({ silent: true, keepSelection: true }).catch(() => {});
+    renderInspector();
+    runtime.mobileUi.sheetKind = 'history';
+    runtime.mobileUi.sheetOpen = true;
+    renderMobileChrome();
+    return;
+  }
+  if (state.studio === 'music') {
+    state.music.activeTab = 'results';
+    if (state.authToken) loadMusicHistory({ silent: true, keepSelection: true }).catch(() => {});
+    saveState();
+    render();
+    runtime.mobileUi.sheetKind = 'history';
+    runtime.mobileUi.sheetOpen = true;
+    renderMobileChrome();
+    return;
+  }
+  if (state.studio === 'history') {
+    if (state.authToken) loadSiteBuilderProjects({ silent: true, keepSelection: true }).catch(() => {});
+    scrollWorkspaceToResult();
+    return;
+  }
+  openMobileSheet('history');
+}
+
+function openMobileSettingsPanel() {
+  runtime.mobileUi.navOpen = false;
+  runtime.mobileUi.sheetKind = 'settings';
+
+  if (!hasMobileSettingsPanel()) {
+    closeMobileOverlays();
+    renderMobileChrome();
+    return;
+  }
+
+  if (state.studio === 'video') state.video.panel = 'params';
+  if (state.studio === 'image') state.image.panel = 'params';
+  if (state.studio === 'music' && state.music.activeTab === 'results') {
+    state.music.activeTab = mobileMusicEditorFallbackTab();
+  }
+  saveState();
+  render();
+  runtime.mobileUi.sheetKind = 'settings';
+  runtime.mobileUi.sheetOpen = true;
+  renderMobileChrome();
+}
+
+function scrollWorkspaceToResult() {
+  runtime.mobileUi.navOpen = false;
+  runtime.mobileUi.sheetOpen = false;
+  renderMobileChrome();
+  requestAnimationFrame(() => {
+    const target = document.querySelector('.video-stage-card, .image-stage-card, .voice-output-card, .music-stage, .workspace-main, #workspaceBody');
+    target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+}
+
+function renderMobileChrome() {
+  const chrome = document.getElementById('mobileWorkspaceChrome');
+  if (!chrome) return;
+  const isWorkspace = state.view === 'workspace';
+  chrome.setAttribute('aria-hidden', isWorkspace ? 'false' : 'true');
+  document.body.classList.toggle('mobile-nav-open', isWorkspace && !!runtime.mobileUi.navOpen);
+  document.body.classList.toggle('mobile-sheet-open', isWorkspace && !!runtime.mobileUi.sheetOpen);
+  document.body.classList.toggle('mobile-sheet-history', isWorkspace && runtime.mobileUi.sheetOpen && runtime.mobileUi.sheetKind === 'history');
+
+  const title = document.getElementById('mobileStudioTitle');
+  const subtitle = document.getElementById('mobileStudioSubtitle');
+  const balance = document.getElementById('mobileDrawerBalance');
+  if (title) title.textContent = mobileStudioShortTitle();
+  if (subtitle) subtitle.textContent = mobileStudioSubtitle();
+  if (balance) balance.textContent = state.balance == null ? 'Баланс: —' : `Баланс: ${state.balance} ток.`;
+
+  const menu = document.getElementById('mobileStudioMenu');
+  if (menu) {
+    const groups = [
+      ['chat', 'GPT / чат'],
+      ['image', 'Дизайн / фото'],
+      ['video', 'Видео'],
+      ['voice', 'Озвучка'],
+      ['music', 'Аудио / музыка'],
+      ['library', 'Промты'],
+      ['history', 'Сайты'],
+      ['partner', 'Партнёрка'],
+    ];
+    menu.innerHTML = groups.map(([key, label]) => {
+      const meta = STUDIO_META[key] || STUDIO_META.chat;
+      return `
+        <button class="mobile-studio-item ${state.studio === key ? 'active' : ''}" type="button" data-action="switch-studio" data-studio="${key}">
+          <span class="mobile-studio-icon">${renderStudioIcon(meta.icon)}</span>
+          <span><strong>${escapeHtml(label)}</strong><small>${escapeHtml(meta.title)}</small></span>
+        </button>
+      `;
+    }).join('');
+  }
+
+  const sheetTitle = document.querySelector('.inspector-head h2');
+  const sheetEyebrow = document.querySelector('.inspector-head .eyebrow');
+  if (runtime.mobileUi.sheetKind === 'history') {
+    if (sheetTitle && window.matchMedia('(max-width: 900px)').matches) sheetTitle.textContent = 'История';
+    if (sheetEyebrow && window.matchMedia('(max-width: 900px)').matches) sheetEyebrow.textContent = 'Results';
+  } else if (window.matchMedia('(max-width: 900px)').matches && state.studio !== 'video' && state.studio !== 'image') {
+    if (sheetTitle) sheetTitle.textContent = 'Настройки';
+    if (sheetEyebrow) sheetEyebrow.textContent = 'Inspector';
+  }
+
+  const activeBottomAction = runtime.mobileUi.sheetOpen
+    ? (runtime.mobileUi.sheetKind === 'history' ? 'mobile-open-history' : 'mobile-open-settings')
+    : 'mobile-show-create';
+  document.querySelectorAll('.mobile-bottom-item').forEach((btn) => {
+    const action = btn.dataset.action || '';
+    const disabled = (action === 'mobile-open-settings' && !hasMobileSettingsPanel())
+      || (action === 'mobile-open-history' && !hasMobileHistoryPanel());
+    btn.classList.toggle('active', action === activeBottomAction && !disabled);
+    btn.toggleAttribute('disabled', disabled);
+    btn.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+  });
+  document.querySelectorAll('.mobile-appbar [data-action="mobile-open-settings"]').forEach((btn) => {
+    const disabled = !hasMobileSettingsPanel();
+    btn.toggleAttribute('disabled', disabled);
+    btn.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+  });
+  document.querySelectorAll('.mobile-appbar [data-action="mobile-open-history"]').forEach((btn) => {
+    const disabled = !hasMobileHistoryPanel();
+    btn.toggleAttribute('disabled', disabled);
+    btn.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+  });
+
+  const inspectorHead = document.querySelector('.inspector-head');
+  if (inspectorHead && !inspectorHead.querySelector('[data-action="mobile-close-sheet"]')) {
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'mobile-sheet-close';
+    closeBtn.type = 'button';
+    closeBtn.dataset.action = 'mobile-close-sheet';
+    closeBtn.setAttribute('aria-label', 'Закрыть панель');
+    closeBtn.textContent = '×';
+    inspectorHead.appendChild(closeBtn);
+  }
 }
 
 function renderHeader() {
@@ -1911,23 +3859,25 @@ function renderHeader() {
   const inspectorTitle = document.querySelector('.inspector-head h2');
   const inspectorEyebrow = document.querySelector('.inspector-head .eyebrow');
   const isSiteCreator = state.studio === 'history';
+  const isPromptLibrary = state.studio === 'library';
+  const hideInspector = isSiteCreator || isPromptLibrary;
 
   shell?.classList.toggle('chat-no-inspector', false);
   shell?.classList.toggle('music-no-inspector', false);
-  shell?.classList.toggle('history-no-inspector', isSiteCreator);
-  workspaceShell?.classList.toggle('workspace-shell--site-creator', isSiteCreator);
+  shell?.classList.toggle('history-no-inspector', hideInspector);
+  workspaceShell?.classList.toggle('workspace-shell--site-creator', hideInspector);
 
   if (inspector) {
-    inspector.hidden = isSiteCreator;
-    inspector.setAttribute('aria-hidden', isSiteCreator ? 'true' : 'false');
+    inspector.hidden = hideInspector;
+    inspector.setAttribute('aria-hidden', hideInspector ? 'true' : 'false');
   }
   if (workspaceTopline) workspaceTopline.style.display = state.studio === 'chat' ? 'none' : '';
 
-  const hideTopActions = ['chat', 'video', 'image', 'voice', 'music', 'history'].includes(state.studio);
+  const hideTopActions = ['chat', 'video', 'image', 'voice', 'music', 'library', 'history', 'profile', 'partner'].includes(state.studio);
   if (topbarActions) topbarActions.style.display = hideTopActions ? 'none' : '';
-  if (seedDemoBtn) seedDemoBtn.style.display = ['video', 'image', 'voice', 'music', 'history'].includes(state.studio) ? 'none' : '';
-  if (globalRunBtn) globalRunBtn.style.display = ['chat', 'video', 'image', 'voice', 'music', 'history'].includes(state.studio) ? 'none' : '';
-  if (resetStudioBtn) resetStudioBtn.style.display = ['video', 'image', 'voice', 'history'].includes(state.studio) ? 'none' : '';
+  if (seedDemoBtn) seedDemoBtn.style.display = ['video', 'image', 'voice', 'music', 'library', 'history', 'profile', 'partner'].includes(state.studio) ? 'none' : '';
+  if (globalRunBtn) globalRunBtn.style.display = ['chat', 'video', 'image', 'voice', 'music', 'library', 'history', 'profile', 'partner'].includes(state.studio) ? 'none' : '';
+  if (resetStudioBtn) resetStudioBtn.style.display = ['video', 'image', 'voice', 'library', 'history', 'profile', 'partner'].includes(state.studio) ? 'none' : '';
 
   if (inspectorTitle) {
     inspectorTitle.textContent = state.studio === 'video' && state.video.panel === 'library' ? 'Библиотека видео' : 'Параметры';
@@ -1936,18 +3886,39 @@ function renderHeader() {
     inspectorEyebrow.textContent = state.studio === 'video' && state.video.panel === 'library' ? 'Library' : 'Inspector';
   }
 
-  document.getElementById('headerTitle').textContent = meta.title;
-  document.getElementById('headerSubtitle').textContent = meta.subtitle;
-  document.getElementById('headerEyebrow').textContent = meta.eyebrow || meta.title;
+  const headerTitleEl = document.getElementById('headerTitle');
+  const headerSubtitleEl = document.getElementById('headerSubtitle');
+  const headerEyebrowEl = document.getElementById('headerEyebrow');
+  if (headerTitleEl) headerTitleEl.textContent = meta.title;
+  if (headerSubtitleEl) headerSubtitleEl.textContent = meta.subtitle;
+  if (headerEyebrowEl) headerEyebrowEl.textContent = meta.eyebrow || meta.title;
   const metaInfo = currentMeta();
   document.getElementById('metaStudio').textContent = metaInfo.studio;
   document.getElementById('metaProvider').textContent = metaInfo.provider;
   document.getElementById('metaModel').textContent = metaInfo.model;
   document.getElementById('metaMode').textContent = metaInfo.mode;
-  document.getElementById('apiBaseUrl').value = state.apiBaseUrl;
-  document.getElementById('balanceValue').textContent = state.balance == null ? '—' : `${state.balance} ток.`;
-  document.getElementById('apiStatus').className = `badge ${state.apiOnline ? 'ok' : 'muted'}`;
-  document.getElementById('apiStatus').textContent = state.apiOnline ? 'online' : 'offline';
+  state.apiBaseUrl = FIXED_API_BASE;
+  const apiBaseUrlInput = document.getElementById('apiBaseUrl');
+  if (apiBaseUrlInput) apiBaseUrlInput.value = FIXED_API_BASE;
+  const balanceValueEl = document.getElementById('balanceValue');
+  if (balanceValueEl) balanceValueEl.textContent = state.balance == null ? '—' : `${state.balance} ток.`;
+  const apiStatusEl = document.getElementById('apiStatus');
+  if (apiStatusEl) {
+    apiStatusEl.className = `badge ${state.apiOnline ? 'ok' : 'muted'}`;
+    apiStatusEl.textContent = state.apiOnline ? 'online' : 'offline';
+  }
+  const portalLoginBtn = document.querySelector('.workspace-portal-actions [data-action="login-placeholder"], .workspace-portal-actions [data-action="open-auth-modal"], .workspace-portal-actions [data-action="switch-studio"][data-studio="profile"]');
+  if (portalLoginBtn) {
+    if (state.authToken && state.me) {
+      portalLoginBtn.dataset.action = 'switch-studio';
+      portalLoginBtn.dataset.studio = 'profile';
+      portalLoginBtn.textContent = 'Профиль';
+    } else {
+      portalLoginBtn.dataset.action = 'open-auth-modal';
+      delete portalLoginBtn.dataset.studio;
+      portalLoginBtn.textContent = 'Войти';
+    }
+  }
   renderAuthCard();
 }
 
@@ -1958,10 +3929,51 @@ function botUsernameFromBase(baseUrl) {
   return fromConfig.replace(/^@/, '');
 }
 
+function authMethodsLabel(user) {
+  const items = Array.isArray(user?.auth_methods) ? user.auth_methods : [];
+  if (!items.length) return '—';
+  return items.map((item) => item === 'telegram' ? 'Telegram' : item === 'email' ? 'Email' : item).join(' + ');
+}
+
 function formatUserName(user) {
   if (!user) return '—';
   const full = `${user.first_name || ''} ${user.last_name || ''}`.trim();
-  return full || (user.username ? `@${user.username}` : 'Telegram user');
+  return full || user.email || (user.username ? `@${user.username}` : (user.linked_telegram_user_id ? 'Telegram user' : 'Email user'));
+}
+
+function formatUserMeta(user) {
+  if (!user) return '—';
+  if (user.email && user.linked_telegram_user_id) return `${user.email} · Telegram + Email`;
+  if (user.email) return user.email;
+  if (user.username) return `@${user.username}`;
+  if (user.linked_telegram_user_id) return `Telegram ID ${user.linked_telegram_user_id}`;
+  return `Workspace ID ${user.workspace_user_id || user.telegram_user_id || user.id || '—'}`;
+}
+
+function validateEmailValue(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim());
+}
+
+
+function renderTelegramAuthSlot(targetId, variant = 'default') {
+  if (variant === 'native-inline') {
+    return `
+      <div class="auth-social-btn auth-social-btn--telegram-native" style="min-height:56px; width:100%; padding:8px; display:flex; align-items:center; justify-content:center;">
+        <div id="${targetId}" class="telegram-login-mount" style="display:flex; align-items:center; justify-content:center; width:100%; min-height:38px;"></div>
+      </div>
+    `;
+  }
+
+  const icon = variant === 'compact' ? '✈' : '✈';
+  return `
+    <div class="auth-social-btn auth-social-btn--telegram" style="position:relative; overflow:hidden; min-height:64px; display:flex; align-items:center; justify-content:center;">
+      <div class="auth-telegram-fallback" style="pointer-events:none; display:flex; align-items:center; justify-content:center; gap:12px; width:100%; padding:0 18px; font-weight:700; font-size:22px; color:#f4f4f7; text-align:center;">
+        <span class="auth-social-icon" style="display:inline-flex; align-items:center; justify-content:center; width:34px; height:34px; border-radius:999px; background:rgba(34,158,217,.18); color:#7fd8ff; font-size:18px; flex:0 0 34px;">${icon}</span>
+        <span style="display:inline-block; line-height:1.1;">Продолжить с Telegram</span>
+      </div>
+      <div id="${targetId}" class="telegram-login-mount" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center; opacity:.02;"></div>
+    </div>
+  `;
 }
 
 function renderAuthCard() {
@@ -1972,40 +3984,81 @@ function renderAuthCard() {
   guest.classList.toggle('hidden', loggedIn);
   userView.classList.toggle('hidden', !loggedIn);
   const hint = document.getElementById('balanceHint');
-  if (hint) hint.textContent = loggedIn ? 'данные из backend' : 'выполни вход через Telegram';
+  if (hint) hint.textContent = loggedIn ? 'Данные из Личного Кабинета' : 'вход через Telegram или по почте';
   if (loggedIn) {
     const user = state.me || {};
     const nameEl = document.getElementById('authUserName');
     const metaEl = document.getElementById('authUserMeta');
     const avatarEl = document.getElementById('authAvatar');
     if (nameEl) nameEl.textContent = formatUserName(user);
-    if (metaEl) metaEl.textContent = user.username ? `@${user.username}` : `id ${user.telegram_user_id || user.id || '—'}`;
+    if (metaEl) metaEl.textContent = formatUserMeta(user);
     if (avatarEl) {
       if (user.photo_url) avatarEl.innerHTML = `<img src="${escapeHtml(user.photo_url)}" alt="avatar">`;
-      else avatarEl.textContent = (user.first_name || user.username || 'TG').slice(0, 2).toUpperCase();
+      else avatarEl.textContent = (user.first_name || user.email || user.username || 'AB').slice(0, 2).toUpperCase();
     }
     return;
   }
-  mountTelegramLogin();
+  guest.innerHTML = `
+    <div class="auth-copy">Войти в workspace можно через Telegram или по email. Если аккаунт уже создан в Telegram, почту можно привязать в профиле.</div>
+    ${renderTelegramAuthSlot('telegramLoginMount')}
+    <div class="actions compact-gap" style="margin-top:10px;">
+      <button class="btn ghost full" data-action="open-auth-modal" data-tab="register">Войти / зарегистрироваться по почте</button>
+    </div>
+    <div class="auth-help muted">Telegram нужен для существующих пользователей бота. Для новых пользователей доступна регистрация по email.</div>
+  `;
+  mountTelegramLogin('telegramLoginMount', 'login');
 }
 
 function setSession(payload) {
   state.authToken = payload?.access_token || '';
   state.me = payload?.user || null;
   if (typeof payload?.balance_tokens !== 'undefined') state.balance = Number(payload.balance_tokens || 0);
+  state.balanceHistory.loaded = false;
+  state.partner.dashboard = null;
+  state.partner.loaded = false;
+  state.partner.lastError = '';
+  state.balanceHistory.lastError = '';
+  state.authUi.modalOpen = false;
+  state.authUi.modalTab = 'login';
+  state.authUi.registerPendingEmail = '';
+  state.authUi.linkPendingEmail = '';
+  state.authUi.resetPendingEmail = '';
   localStorage.setItem('astrabot:authToken', state.authToken || '');
   localStorage.setItem('astrabot:me', JSON.stringify(state.me || null));
+  saveState();
   render();
   if (state.studio === 'history' && state.authToken) {
     loadSiteBuilderMeta({ silent: true }).catch(() => {});
     loadSiteBuilderProjects({ silent: true, keepSelection: true }).catch(() => {});
   }
+  if (state.authToken && state.me) {
+    bindPendingPartnerRef().then(() => {
+      if (state.studio === 'partner') loadPartnerDashboard({ silent: true, force: true, renderNow: true }).catch(() => {});
+    }).catch(() => {});
+    loadBalanceHistory({ silent: true, force: true, renderNow: state.studio === 'profile' }).catch(() => {});
+  }
+  if (readPendingTopupTokens()) {
+    setTimeout(() => { resumePendingTopup().catch(() => {}); }, 0);
+  }
 }
 
 async function logoutWorkspace() {
+  const previousToken = state.authToken || '';
   state.authToken = '';
   state.me = null;
   state.balance = null;
+  state.balanceHistory.items = [];
+  state.balanceHistory.loading = false;
+  state.balanceHistory.loaded = false;
+  state.balanceHistory.lastError = '';
+  state.partner.dashboard = null;
+  state.partner.loaded = false;
+  state.partner.lastError = '';
+  state.authUi.modalOpen = false;
+  state.authUi.modalTab = 'login';
+  state.authUi.registerPendingEmail = '';
+  state.authUi.linkPendingEmail = '';
+  state.authUi.resetPendingEmail = '';
   state.siteBuilder.projects = [];
   state.siteBuilder.selectedProjectId = '';
   state.siteBuilder.selectedProject = null;
@@ -2013,32 +4066,142 @@ async function logoutWorkspace() {
   state.siteBuilder.jobs = [];
   localStorage.removeItem('astrabot:authToken');
   localStorage.removeItem('astrabot:me');
-  try { await apiFetch('/api/workspace/logout', { method: 'POST' }); } catch (_) {}
+  localStorage.removeItem('astrabot:partnerState');
+  saveState();
+  try {
+    if (previousToken) {
+      await fetch(`${String(state.apiBaseUrl || '').replace(/\/$/, '')}/api/workspace/logout`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${previousToken}` },
+      });
+    }
+  } catch (_) {}
   render();
-  toast('success', 'Выход выполнен', 'Сессия сайта очищена.');
+  setTimeout(() => {
+    window.location.reload();
+  }, 60);
 }
 
-async function handleTelegramAuth(user) {
+
+
+function openAuthModal(tab = 'login') {
+  state.authUi.modalOpen = true;
+  state.authUi.modalTab = tab || 'login';
+  saveState();
+  render();
+}
+
+function closeAuthModal() {
+  state.authUi.modalOpen = false;
+  saveState();
+  renderAuthModal();
+}
+
+function renderAuthModal() {
+  let root = document.getElementById('authModalRoot');
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'authModalRoot';
+    document.body.appendChild(root);
+  }
+
+  const open = !!state.authUi.modalOpen;
+  document.body.classList.toggle('auth-modal-open', open);
+  if (!open) {
+    root.innerHTML = '';
+    return;
+  }
+
+  const tab = state.authUi.modalTab || 'login';
+  const registerPending = state.authUi.registerPendingEmail || '';
+  const resetPending = state.authUi.resetPendingEmail || '';
+  root.innerHTML = `
+    <div class="auth-modal-backdrop" id="authModalBackdrop">
+      <div class="auth-modal-card" role="dialog" aria-modal="true" aria-label="Вход в AstraBot Workspace">
+        <button class="auth-modal-close" type="button" data-action="close-auth-modal" aria-label="Закрыть">×</button>
+        <div class="auth-modal-title">${tab === 'register' ? 'Создать аккаунт' : tab === 'reset' ? 'Сбросить пароль' : 'С возвращением'}</div>
+        <div class="auth-modal-subtitle">${tab === 'register' ? 'Зарегистрируйся, чтобы создавать контент' : tab === 'reset' ? 'Получите код на почту и задайте новый пароль' : 'Войдите, чтобы создавать'}</div>
+
+        ${tab !== 'reset' ? `
+          <div style="display:flex; gap:12px; align-items:stretch; flex-wrap:nowrap; margin-bottom:6px;">
+            <div style="flex:1 1 0; min-width:0;">
+              ${renderTelegramAuthSlot('authModalTelegramMount', 'native-inline')}
+            </div>
+            <div style="flex:1 1 0; min-width:0;">
+              <button class="auth-social-btn" type="button" data-action="google-auth-placeholder" style="min-height:56px; width:100%; display:flex; align-items:center; justify-content:center; gap:10px; padding:0 16px;">
+                <span class="auth-social-icon">G</span>
+                <span>Google</span>
+                <span class="auth-soon-tag">скоро</span>
+              </button>
+            </div>
+          </div>
+          <div class="auth-divider"><span>или по EMAIL</span></div>
+        ` : ''}
+
+        ${tab === 'login' ? `
+          <div class="input-group"><label class="label">Email</label><input id="auth_modal_login_email" type="email" placeholder="name@example.com"></div>
+          <div class="input-group auth-password-row"><label class="label">Пароль</label><input id="auth_modal_login_password" type="password" placeholder="Пароль"></div>
+          <div class="auth-inline-link-row">
+            <button class="link-btn" type="button" data-action="auth-modal-tab-reset">Забыли пароль?</button>
+          </div>
+          <button id="authModalLoginBtn" class="btn primary full" type="button">Войти</button>
+          <div class="auth-switch-row">Нет аккаунта? <button class="link-btn" type="button" data-action="auth-modal-tab-register">Создать</button></div>
+        ` : ''}
+
+        ${tab === 'register' ? `
+          <div class="input-group"><label class="label">Email</label><input id="auth_modal_register_email" type="email" placeholder="name@example.com" value="${escapeHtml(registerPending)}"></div>
+          <div class="input-group"><label class="label">Пароль</label><input id="auth_modal_register_password" type="password" placeholder="Минимум 6 символов"></div>
+          <div class="input-group"><label class="label">Повтори пароль</label><input id="auth_modal_register_password2" type="password" placeholder="Повтори пароль"></div>
+          <button id="authModalRegisterStartBtn" class="btn primary full" type="button">${registerPending ? 'Отправить код заново' : 'Отправить код'}</button>
+          ${registerPending ? `
+            <div class="input-group" style="margin-top:12px;"><label class="label">Код из письма</label><input id="auth_modal_register_code" type="text" inputmode="numeric" placeholder="6 цифр"></div>
+            <button id="authModalRegisterConfirmBtn" class="btn secondary full" type="button">Подтвердить и войти</button>
+          ` : ''}
+          <div class="auth-switch-row">Есть аккаунт? <button class="link-btn" type="button" data-action="auth-modal-tab-login">Войти</button></div>
+        ` : ''}
+
+        ${tab === 'reset' ? `
+          <div class="input-group"><label class="label">Email</label><input id="auth_modal_reset_email" type="email" placeholder="name@example.com" value="${escapeHtml(resetPending)}"></div>
+          <button id="authModalResetStartBtn" class="btn primary full" type="button">${resetPending ? 'Отправить код заново' : 'Отправить код'}</button>
+          ${resetPending ? `
+            <div class="input-group" style="margin-top:12px;"><label class="label">Код из письма</label><input id="auth_modal_reset_code" type="text" inputmode="numeric" placeholder="6 цифр"></div>
+            <div class="input-group"><label class="label">Новый пароль</label><input id="auth_modal_reset_password" type="password" placeholder="Минимум 6 символов"></div>
+            <div class="input-group"><label class="label">Повтори пароль</label><input id="auth_modal_reset_password2" type="password" placeholder="Повтори пароль"></div>
+            <button id="authModalResetConfirmBtn" class="btn secondary full" type="button">Сохранить новый пароль</button>
+          ` : ''}
+          <div class="auth-switch-row"><button class="link-btn" type="button" data-action="auth-modal-tab-login">Вернуться ко входу</button></div>
+        ` : ''}
+      </div>
+    </div>
+  `;
+
+  if (tab !== 'reset') mountTelegramLogin('authModalTelegramMount', 'login');
+}
+
+async function handleTelegramAuth(user, intent = 'login') {
   try {
-    const res = await apiFetch('/api/workspace/auth/telegram', {
+    const path = intent === 'link' && state.authToken ? '/api/workspace/account/link-telegram' : '/api/workspace/auth/telegram';
+    const successTitle = intent === 'link' ? 'Telegram привязан' : 'Вход выполнен';
+    const res = await apiFetch(path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ auth_data: user }),
     });
     const data = await res.json();
     setSession(data);
-    toast('success', 'Вход выполнен', `Добро пожаловать, ${formatUserName(data.user)}.`);
+    toast('success', successTitle, intent === 'link' ? 'Telegram-аккаунт привязан к текущему профилю.' : `Добро пожаловать, ${formatUserName(data.user)}.`);
   } catch (e) {
-    toast('error', 'Вход через Telegram не выполнен', String(e.message || e));
+    toast('error', intent === 'link' ? 'Не удалось привязать Telegram' : 'Вход через Telegram не выполнен', String(e.message || e));
   }
 }
 
-window.onTelegramAuth = handleTelegramAuth;
+window.onTelegramAuthLogin = (user) => handleTelegramAuth(user, 'login');
+window.onTelegramAuthLink = (user) => handleTelegramAuth(user, 'link');
 
-function mountTelegramLogin() {
-  const box = document.getElementById('telegramLoginMount');
-  if (!box || box.dataset.mounted === '1' || (state.authToken && state.me)) return;
-  box.dataset.mounted = '1';
+function mountTelegramLogin(targetId = 'telegramLoginMount', intent = 'login') {
+  const box = document.getElementById(targetId);
+  if (!box) return;
+  if (intent === 'login' && state.authToken && state.me) return;
   box.innerHTML = '';
   const script = document.createElement('script');
   script.async = true;
@@ -2048,7 +4211,7 @@ function mountTelegramLogin() {
   script.setAttribute('data-radius', '12');
   script.setAttribute('data-userpic', 'false');
   script.setAttribute('data-request-access', 'write');
-  script.setAttribute('data-onauth', 'onTelegramAuth(user)');
+  script.setAttribute('data-onauth', intent === 'link' ? 'onTelegramAuthLink(user)' : 'onTelegramAuthLogin(user)');
   box.appendChild(script);
 }
 
@@ -2060,18 +4223,107 @@ async function loadMe() {
     state.me = data.user || null;
     state.balance = typeof data.balance_tokens !== 'undefined' ? Number(data.balance_tokens || 0) : state.balance;
     localStorage.setItem('astrabot:me', JSON.stringify(state.me || null));
+    saveState();
     return true;
   } catch (e) {
     state.authToken = '';
     state.me = null;
+    state.balanceHistory.items = [];
+    state.balanceHistory.loading = false;
+    state.balanceHistory.loaded = false;
+    state.balanceHistory.lastError = '';
     localStorage.removeItem('astrabot:authToken');
     localStorage.removeItem('astrabot:me');
+    saveState();
     return false;
   }
 }
 
+async function submitEmailLogin(email, password) {
+  const res = await apiFetch('/api/workspace/auth/email-login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+  const data = await res.json();
+  setSession(data);
+  return data;
+}
+
+async function submitEmailRegisterStart(email, password) {
+  const res = await apiFetch('/api/workspace/auth/email-register/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+  return res.json();
+}
+
+async function submitEmailRegisterConfirm(email, code) {
+  const res = await apiFetch('/api/workspace/auth/email-register/confirm', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, code }),
+  });
+  const data = await res.json();
+  setSession(data);
+  return data;
+}
+
+async function submitLinkEmailStart(email, password) {
+  const res = await apiFetch('/api/workspace/account/link-email/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+  return res.json();
+}
+
+async function submitLinkEmailConfirm(email, code) {
+  const res = await apiFetch('/api/workspace/account/link-email/confirm', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, code }),
+  });
+  const data = await res.json();
+  setSession(data);
+  return data;
+}
+
+async function submitPasswordResetStart(email) {
+  const res = await apiFetch('/api/workspace/auth/password-reset/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email }),
+  });
+  return res.json();
+}
+
+async function submitPasswordResetConfirm(email, code, password) {
+  const res = await apiFetch('/api/workspace/auth/password-reset/confirm', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, code, password }),
+  });
+  const data = await res.json();
+  setSession(data);
+  return data;
+}
+
+async function submitChangePassword(currentPassword, newPassword) {
+  const res = await apiFetch('/api/workspace/account/change-password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+  });
+  const data = await res.json();
+  setSession(data);
+  return data;
+}
+
 function renderRecentRuns() {
   const box = document.getElementById('recentRuns');
+  if (!box) return;
   if (!state.recentRuns.length) {
     box.innerHTML = '<div class="empty-state">Пока пусто</div>';
     return;
@@ -2083,6 +4335,60 @@ function renderRecentRuns() {
       <small>${formatDate(run.ts)}</small>
     </div>
   `).join('');
+}
+
+function sanitizeLegacySidebarBalanceCard() {
+  const sidebar = document.querySelector('.sidebar');
+  if (!sidebar) return;
+  const allowed = new Set(['brand', 'studio-nav']);
+  Array.from(sidebar.children).forEach((node) => {
+    if (!(node instanceof HTMLElement)) return;
+    if (node.id === 'studioNav') return;
+    if (node.classList.contains('brand')) return;
+    if (node.classList.contains('sidebar-balance-only-card')) return;
+    const text = String(node.textContent || '').toLowerCase();
+    if (
+      text.includes('системные настройки') ||
+      text.includes('подключение и баланс') ||
+      text.includes('api base url') ||
+      text.includes('проверить api')
+    ) {
+      node.remove();
+    }
+  });
+}
+
+function sanitizeLegacySiteCreatorLayout() {
+  if (state.studio !== 'history') return;
+  const body = document.getElementById('workspaceBody');
+  if (!body) return;
+  const grid = body.querySelector('.site-creator-grid');
+  if (!grid) return;
+
+  const removePatterns = [
+    'последние действия',
+    'аккаунт',
+    'системные настройки',
+    'подключение и баланс',
+    'api base url',
+    'проверить api'
+  ];
+
+  Array.from(grid.children).forEach((column) => {
+    if (!(column instanceof HTMLElement)) return;
+    const text = String(column.textContent || '').toLowerCase();
+    if (removePatterns.some((pattern) => text.includes(pattern))) {
+      column.remove();
+    }
+  });
+
+  body.querySelectorAll('.history-card, .profile-card, .result-card, .soft-panel, .panel').forEach((card) => {
+    if (!(card instanceof HTMLElement)) return;
+    const text = String(card.textContent || '').toLowerCase();
+    if (removePatterns.some((pattern) => text.includes(pattern))) {
+      card.remove();
+    }
+  });
 }
 
 function renderWorkspace() {
@@ -2098,10 +4404,14 @@ function renderWorkspace() {
     case 'history': el.innerHTML = renderHistoryWorkspace(); break;
     case 'billing': el.innerHTML = renderBillingWorkspace(); break;
     case 'profile': el.innerHTML = renderProfileWorkspace(); break;
+    case 'partner': el.innerHTML = renderPartnerWorkspace(); break;
     default: el.innerHTML = `<div class="placeholder-stage"><div class="empty-copy"><strong>Студия в разработке</strong><div>Для этой студии пока нет workspace-renderer.</div></div></div>`;
   }
+  sanitizeLegacySidebarBalanceCard();
+  sanitizeLegacySiteCreatorLayout();
   attachImageCompareInteractions();
   initShowcaseMedia();
+  initSwitchxMaskEditor().catch(() => {});
 }
 
 function renderInspector() {
@@ -2117,6 +4427,7 @@ function renderInspector() {
     case 'history': el.innerHTML = renderHistoryInspector(); break;
     case 'billing': el.innerHTML = renderBillingInspector(); break;
     case 'profile': el.innerHTML = renderProfileInspector(); break;
+    case 'partner': el.innerHTML = renderPartnerInspector(); break;
     default: el.innerHTML = '';
   }
 }
@@ -2141,12 +4452,7 @@ function renderChatWorkspace() {
   const attachments = getChatAttachments();
   const attachmentsHtml = attachments.length ? `
     <div class="chat-attachment-strip">
-      ${attachments.map((item, index) => `
-        <div class="chat-file-pill">
-          <span>📎 ${escapeHtml(trimText(item.name || 'file', 34))}</span>
-          <button type="button" class="chat-file-pill-remove" data-action="remove-chat-file" data-index="${index}" aria-label="Удалить файл">×</button>
-        </div>
-      `).join('')}
+      ${attachments.map((item, index) => renderChatAttachmentCard(item, index)).join('')}
     </div>
   ` : '';
   const placeholder = isPromptBuilder
@@ -2216,6 +4522,47 @@ function isVideoTaskFailed(status) {
 function isVideoTaskFinished(status) {
   const value = String(status || '').toLowerCase();
   return ['succeeded', 'completed', 'success', 'finished', 'done', 'failed', 'error', 'cancelled', 'canceled'].includes(value);
+}
+
+function isTerminalTaskStatus(status) {
+  const value = String(status || '').toLowerCase();
+  return ['succeeded', 'completed', 'success', 'finished', 'done', 'failed', 'error', 'cancelled', 'canceled'].includes(value);
+}
+
+function parseTimestampMs(value) {
+  const ts = Date.parse(String(value || '').trim());
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+function promptsLookSimilar(left, right) {
+  const a = String(left || '').trim().toLowerCase();
+  const b = String(right || '').trim().toLowerCase();
+  if (!a || !b) return true;
+  if (a === b) return true;
+  const shortA = a.slice(0, 72);
+  const shortB = b.slice(0, 72);
+  return shortA.includes(shortB) || shortB.includes(shortA);
+}
+
+function findRecentHistoryCandidate(items, options = {}) {
+  const startedAtMs = parseTimestampMs(options.startedAt);
+  const maxAgeMs = Number(options.maxAgeMs || (45 * 60 * 1000));
+  if (!Array.isArray(items) || !items.length || !startedAtMs) return null;
+  const provider = String(options.provider || '').trim().toLowerCase();
+  const model = String(options.model || '').trim().toLowerCase();
+  const prompt = String(options.prompt || '').trim();
+  const now = Date.now();
+  return items.find((item) => {
+    const itemMs = parseTimestampMs(item?.created_at || item?.updated_at || item?.completed_at);
+    if (!itemMs) return false;
+    if (itemMs < (startedAtMs - 2 * 60 * 1000)) return false;
+    if (itemMs > (now + 5 * 60 * 1000)) return false;
+    if (now - itemMs > maxAgeMs) return false;
+    if (provider && String(item?.provider || '').trim().toLowerCase() !== provider) return false;
+    if (model && String(item?.model || '').trim().toLowerCase() !== model) return false;
+    if (!promptsLookSimilar(prompt, item?.prompt)) return false;
+    return true;
+  }) || null;
 }
 
 function extractVideoTaskStatus(task) {
@@ -2360,9 +4707,137 @@ function startVideoPolling({ immediate = false } = {}) {
   }
 }
 
+function stopImagePolling() {
+  if (runtime.imagePollTimer) {
+    clearInterval(runtime.imagePollTimer);
+    runtime.imagePollTimer = null;
+  }
+}
+
+function startImagePolling({ immediate = false } = {}) {
+  const status = String(state.image.status || state.image.lastStatus || '').toLowerCase();
+  if (!state.authToken || !state.image.generationId || state.image.outputUrl || ['failed', 'error', 'cancelled', 'canceled'].includes(status)) return;
+  stopImagePolling();
+  runtime.imagePollTimer = setInterval(() => {
+    pollImageTask({ silent: true }).catch(() => {});
+  }, 3000);
+  if (immediate) {
+    pollImageTask({ silent: true }).catch(() => {});
+  }
+}
+
+function stopSwitchxRefPolling() {
+  if (runtime.switchxRefPollTimer) {
+    clearInterval(runtime.switchxRefPollTimer);
+    runtime.switchxRefPollTimer = null;
+  }
+}
+
+function startSwitchxRefPolling({ immediate = false } = {}) {
+  const status = String(state.video.switchxReferenceStatus || '').toLowerCase();
+  if (!state.authToken || !state.video.switchxRefGenerationId || state.video.switchxReferenceImageUrl || ['failed', 'error', 'completed'].includes(status)) return;
+  stopSwitchxRefPolling();
+  runtime.switchxRefPollTimer = setInterval(() => {
+    pollSwitchxReference({ silent: true }).catch(() => {});
+  }, 3000);
+  if (immediate) {
+    pollSwitchxReference({ silent: true }).catch(() => {});
+  }
+}
+
+async function pollSwitchxReference({ silent = false } = {}) {
+  if (!state.video.switchxRefGenerationId) return;
+  try {
+    const res = await apiFetch(`/api/workspace/video/switchx/reference/${encodeURIComponent(state.video.switchxRefGenerationId)}`);
+    const data = await res.json();
+    const item = data.item || {};
+    state.video.switchxReferenceStatus = String(item.status || '').toLowerCase() || 'processing';
+    if (item.image_url || item.download_url) {
+      state.video.switchxReferenceImageUrl = item.download_url || item.image_url || '';
+      state.video.switchxReferenceStatus = 'completed';
+      stopSwitchxRefPolling();
+      saveState();
+      render();
+      if (!silent) toast('success', 'AI-референс готов', 'Можно запускать SwitchX.');
+      return;
+    }
+    if (['failed', 'error'].includes(state.video.switchxReferenceStatus)) {
+      stopSwitchxRefPolling();
+      state.video.errorText = item.error_message || 'Не удалось создать AI-референс.';
+      saveState();
+      render();
+      if (!silent) toast('error', 'AI-референс не создан', state.video.errorText);
+      return;
+    }
+    saveState();
+    render();
+  } catch (e) {
+    if (!silent) toast('error', 'Не удалось обновить статус', String(e.message || e));
+  }
+}
+
+async function requestSwitchxReference() {
+  const sourceVideo = getFile('video.sourceVideo');
+  if (!sourceVideo?.file && !state.video.switchxSourceUploadId) {
+    toast('error', 'Нужно видео', 'Сначала загрузи исходное видео для SwitchX.');
+    return;
+  }
+  if (!state.video.switchxRefPrompt.trim()) {
+    toast('error', 'Нужен prompt для AI-референса', 'Заполни отдельный prompt для Nano Banana Pro.');
+    return;
+  }
+  state.video.switchxReferenceStatus = 'queued';
+  state.video.switchxReferenceImageUrl = '';
+  state.video.errorText = '';
+  saveState();
+  render();
+  const form = new FormData();
+  form.append('ref_prompt', state.video.switchxRefPrompt.trim());
+  if (state.video.switchxSourceUploadId) form.append('source_video_upload_id', state.video.switchxSourceUploadId);
+  if (sourceVideo?.file && !state.video.switchxSourceUploadId) form.append('source_video', sourceVideo.file, sourceVideo.name || sourceVideo.file.name || 'source_video');
+  try {
+    const res = await apiFetch('/api/workspace/video/switchx/reference/run', { method: 'POST', body: form });
+    const data = await res.json();
+    state.video.switchxRefGenerationId = data.generation_id || '';
+    state.video.switchxSourceUploadId = data.source_video_upload_id || state.video.switchxSourceUploadId;
+    state.video.switchxReferenceStatus = 'processing';
+    if (typeof data.balance_tokens !== 'undefined') state.balance = Number(data.balance_tokens || 0);
+    saveState();
+    render();
+    startSwitchxRefPolling({ immediate: true });
+    toast('success', 'AI-референс запущен', data.status_text || 'Создание референса началось.');
+  } catch (e) {
+    state.video.switchxReferenceStatus = 'failed';
+    state.video.errorText = String(e.message || e);
+    saveState();
+    render();
+    toast('error', 'Не удалось запустить AI-референс', state.video.errorText);
+  }
+}
+
+
+function stopVoicePolling() {
+  if (runtime.voicePollTimer) {
+    clearInterval(runtime.voicePollTimer);
+    runtime.voicePollTimer = null;
+  }
+}
+
+function startVoicePolling({ immediate = false } = {}) {
+  if (!state.authToken || !state.voice.generationId || state.voice.audioUrl || !state.voice.isGenerating) return;
+  stopVoicePolling();
+  runtime.voicePollTimer = setInterval(() => {
+    pollVoiceTask({ silent: true }).catch(() => {});
+  }, 3000);
+  if (immediate) {
+    pollVoiceTask({ silent: true }).catch(() => {});
+  }
+}
+
 function clearVideoRunState({ keepPrompt = true } = {}) {
   stopVideoPolling();
   stopVideoEditPolling();
+  stopSwitchxRefPolling();
   state.video.outputUrl = '';
   state.video.downloadUrl = '';
   state.video.coverUrl = '';
@@ -2373,19 +4848,79 @@ function clearVideoRunState({ keepPrompt = true } = {}) {
   state.video.lastStatus = 'idle';
   state.video.isGenerating = false;
   state.video.statusText = 'Выбери модель, настрой параметры и нажми запуск.';
+  state.video.switchxRefGenerationId = '';
+  state.video.switchxReferenceImageUrl = '';
+  state.video.switchxReferenceStatus = 'idle';
+  state.video.switchxSourceUploadId = '';
+  state.video.seedanceUseStartFrame = false;
+  state.video.seedanceUseLastFrame = false;
   resetVideoEditorState();
-  if (!keepPrompt) state.video.prompt = '';
+  if (!keepPrompt) {
+    state.video.prompt = '';
+    state.video.switchxRefPrompt = '';
+  }
   saveState();
 }
 
+function clearRuntimeInputEntries(items = []) {
+  items.forEach(({ key, inputId }) => {
+    revokeRuntimeFileValue(runtime.files[key]);
+    delete runtime.files[key];
+    const input = document.getElementById(inputId);
+    if (input) input.value = '';
+  });
+}
 
+function clearVideoInputFiles() {
+  clearRuntimeInputEntries([
+    { key: 'video.startFrame', inputId: 'video_startFrame' },
+    { key: 'video.endFrame', inputId: 'video_endFrame' },
+    { key: 'video.lastFrame', inputId: 'video_lastFrame' },
+    { key: 'video.referenceImages', inputId: 'video_referenceImages' },
+    { key: 'video.referenceAudios', inputId: 'video_referenceAudios' },
+    { key: 'video.referenceVideos', inputId: 'video_referenceVideos' },
+    { key: 'video.avatarImage', inputId: 'video_avatarImage' },
+    { key: 'video.motionVideo', inputId: 'video_motionVideo' },
+    { key: 'video.sourceVideo', inputId: 'video_sourceVideo' },
+    { key: 'video.switchxSelectMask', inputId: 'video_switchxSelectMask' },
+  ]);
+  state.video.motionDurationSec = null;
+  state.video.sourceVideoDurationSec = null;
+  resetSwitchxMaskEditor({ clearMaskFile: false });
+}
 
+function resetVideoTransientState({ keepPrompt = false, keepFiles = false } = {}) {
+  clearVideoRunState({ keepPrompt });
+  if (!keepFiles) clearVideoInputFiles();
+}
+
+function currentVideoFieldSet() {
+  syncVideoSelection();
+  const fields = videoModeConfig()?.fields;
+  return new Set(Array.isArray(fields) ? fields : []);
+}
+
+function videoModeUsesField(field) {
+  return currentVideoFieldSet().has(field);
+}
+
+function clearImageInputFiles() {
+  clearRuntimeInputEntries([
+    { key: 'image.sourceImage', inputId: 'image_sourceImage' },
+    { key: 'image.baseImage', inputId: 'image_baseImage' },
+    { key: 'image.styleRefImage', inputId: 'image_styleRefImage' },
+    { key: 'image.omniRefImage', inputId: 'image_omniRefImage' },
+  ]);
+}
 
 function clearImageRunState({ keepPrompt = true, keepFiles = true } = {}) {
   state.image.outputUrl = '';
   state.image.downloadUrl = '';
   state.image.beforeImageUrl = '';
   state.image.afterImageUrl = '';
+  state.image.imageUrls = [];
+  state.image.availableActions = {};
+  state.image.activeImageIndex = 0;
   state.image.compareMode = false;
   state.image.comparePosition = 50;
   state.image.generationId = '';
@@ -2393,21 +4928,12 @@ function clearImageRunState({ keepPrompt = true, keepFiles = true } = {}) {
   state.image.isGenerating = false;
   state.image.statusText = 'Выбери режим, добавь изображения при необходимости и запусти генерацию.';
   if (!keepPrompt) state.image.prompt = '';
-  if (!keepFiles) {
-    ['image.sourceImage', 'image.baseImage'].forEach((key) => {
-      revokeRuntimeFileValue(runtime.files[key]);
-      delete runtime.files[key];
-    });
-    ['image_sourceImage', 'image_baseImage'].forEach((id) => {
-      const input = document.getElementById(id);
-      if (input) input.value = '';
-    });
-  }
+  if (!keepFiles) clearImageInputFiles();
   saveState();
 }
 
 function buildVideoEditorLaunchUrl() {
-  const baseUrl = String(state.apiBaseUrl || window.location.origin || 'https://astrabot-tchj.onrender.com').replace(/\/$/, '');
+  const baseUrl = getApiBaseUrl();
   const params = new URLSearchParams();
   if (state.authToken) params.set('token', state.authToken);
   params.set('api_base', baseUrl);
@@ -2422,13 +4948,31 @@ function renderVideoWorkspace() {
   const statusLabel = videoStatusLabel(state.video.lastStatus);
   const loadingHeadline = getVideoLoadingHeadline(state.video.percent, state.video.lastStatus);
   const loadingSubline = getVideoLoadingSubline(state.video.percent, state.video.lastStatus);
+  const switchxRefCard = (state.video.provider === 'switchx' && state.video.switchxReferenceImageUrl) ? `
+    <article class="media-card" style="position:relative; overflow:hidden; border:1px solid rgba(255,255,255,0.08); background:linear-gradient(180deg, rgba(16,20,34,0.96) 0%, rgba(7,10,20,0.96) 100%); box-shadow:0 18px 40px rgba(0,0,0,0.28);">
+      <div class="media-card-head" style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px;">
+        <span style="display:inline-flex; align-items:center; gap:8px; min-height:36px; padding:0 14px; border-radius:999px; border:1px solid rgba(255,177,66,0.22); background:linear-gradient(180deg, rgba(255,186,92,0.18) 0%, rgba(255,132,48,0.10) 100%); color:rgba(255,244,225,0.96); font-size:13px; font-weight:700; letter-spacing:0.01em; box-shadow:0 10px 24px rgba(255,140,40,0.10);">
+          <span style="width:8px; height:8px; border-radius:50%; background:#ffb142; box-shadow:0 0 12px rgba(255,177,66,0.7);"></span>
+          AI reference
+        </span>
+        <button type="button" data-action="remove-switchx-ai-reference" title="Убрать AI-референс" aria-label="Убрать AI-референс" style="width:36px; height:36px; border:none; border-radius:12px; display:inline-flex; align-items:center; justify-content:center; background:linear-gradient(180deg, rgba(255,255,255,0.10) 0%, rgba(255,255,255,0.05) 100%); box-shadow:0 10px 24px rgba(0,0,0,0.22), inset 0 0 0 1px rgba(255,255,255,0.08); color:rgba(255,255,255,0.92); font-size:17px; font-weight:700; line-height:1; cursor:pointer; flex:0 0 auto;">✕</button>
+      </div>
+      <div class="media-card-preview" style="display:flex; align-items:center; justify-content:center; min-height:188px; padding:14px; border-radius:18px; background:radial-gradient(circle at top, rgba(255,177,66,0.10), transparent 38%), linear-gradient(180deg, rgba(8,12,26,0.96) 0%, rgba(4,7,18,0.92) 100%); box-shadow:inset 0 0 0 1px rgba(255,255,255,0.04);">
+        <img class="preview-media" style="display:block; width:100%; height:100%; max-width:220px; max-height:160px; object-fit:contain; object-position:center; border-radius:16px; box-shadow:0 14px 32px rgba(0,0,0,0.34); margin:0 auto;" src="${escapeHtml(state.video.switchxReferenceImageUrl)}" alt="AI reference" />
+      </div>
+      <div class="help-text">Сгенерирован из 1-го кадра через Nano Banana Pro.</div>
+    </article>
+  ` : '';
   const assets = [
-    mediaCard('Start frame', getFile('video.startFrame'), false, false, 'contain'),
-    mediaCard('End frame', getFile('video.endFrame'), false, false, 'contain'),
-    mediaCard('Last frame', getFile('video.lastFrame'), false, false, 'contain'),
-    mediaCard('Avatar image', getFile('video.avatarImage'), false, false, 'contain'),
-    mediaCard('Motion video', getFile('video.motionVideo'), true, false, 'contain'),
-    mediaCard('Reference images', getFile('video.referenceImages'), false, true),
+    videoModeUsesField('sourceVideo') ? mediaCard('Source video', getFile('video.sourceVideo'), true, false, 'contain') : '',
+    videoModeUsesField('startFrame') ? mediaCard('Start frame', getFile('video.startFrame'), false, false, 'contain') : '',
+    videoModeUsesField('endFrame') ? mediaCard('End frame', getFile('video.endFrame'), false, false, 'contain') : '',
+    videoModeUsesField('lastFrame') ? mediaCard('Last frame', getFile('video.lastFrame'), false, false, 'contain') : '',
+    videoModeUsesField('avatarImage') ? mediaCard('Avatar image', getFile('video.avatarImage'), false, false, 'contain') : '',
+    videoModeUsesField('motionVideo') ? mediaCard('Motion video', getFile('video.motionVideo'), true, false, 'contain') : '',
+    videoModeUsesField('referenceImages') ? mediaCard('Reference images', getFile('video.referenceImages'), false, true) : '',
+    videoModeUsesField('referenceVideos') ? mediaCard('Reference videos', getFile('video.referenceVideos'), true, true, 'contain') : '',
+    switchxRefCard,
   ].filter(Boolean).join('');
 
   const stageInner = previewUrl ? `
@@ -2464,6 +5008,28 @@ function renderVideoWorkspace() {
     </div>
   `);
 
+  const hideMainPromptForKling3NewMultiShot = state.video.model === 'kling-3.0-new' && state.video.mode === 'multi_shot';
+  const promptCard = hideMainPromptForKling3NewMultiShot ? '' : renderWorkspacePromptCard(
+    state.video.provider === 'switchx' ? 'SwitchX prompt' : 'Prompt',
+    'video_prompt',
+    state.video.prompt,
+    state.video.provider === 'switchx'
+      ? 'Опиши итоговую замену/стилизацию: окружение, свет, атмосферу и желаемый финальный вид.'
+      : (state.video.provider === 'pixverse_c1' && state.video.mode === 'fusion'
+        ? 'Собери сцену через теги @image1, @image2 и далее: кто что делает, где происходит, как движется камера.'
+        : 'Опиши сцену, действие, камеру, свет и ожидаемый результат.'),
+    state.video.provider === 'switchx'
+      ? 'Этот prompt уходит в финальный запуск SwitchX. Для AI-референса ниже используется отдельный prompt.'
+      : (state.video.provider === 'pixverse_c1' && state.video.mode === 'fusion'
+        ? 'Референсы автоматически помечаются как @image1 , @image2 , @image3 и далее по порядку загрузки.'
+        : '')
+  );
+  const pixverseFusionAliasBar = renderPixverseFusionAliasBar();
+
+  const seedanceFrameControls = renderSeedanceFrameControls();
+  const seedanceOmniVideoReference = renderSeedanceOmniVideoReference();
+  const switchxMaskWorkspace = renderSwitchxMaskWorkspace();
+
   return `
     <div class="workspace-grid single video-workspace-grid">
       <div class="workspace-main scroll video-workspace-main">
@@ -2472,17 +5038,51 @@ function renderVideoWorkspace() {
             ${stageInner}
           </div>
         </div>
-        <div class="video-editor-launch-card">
-          <div class="video-editor-launch-copy">
-            <div class="section-title" style="margin:0;">Новый редактор видео</div>
-            <div class="help-text">Старый mini editor v1 убран из интерфейса. Для монтажа открой новый редактор с таймлайном.</div>
-          </div>
-          <div class="actions compact-gap" style="justify-content:center; flex-wrap:wrap; margin-top:14px;">
-            <a class="btn primary" href="${escapeHtml(buildVideoEditorLaunchUrl())}">Открыть редактор видео(РАЗРАБОТКА)</a>
-          </div>
-        </div>
+        ${promptCard}
+        ${renderKling3NewWorkspaceMultiShotBlock()}
+        ${pixverseFusionAliasBar}
+        ${switchxMaskWorkspace}
+        ${seedanceFrameControls}
+        ${seedanceOmniVideoReference}
         ${assets ? `<div class="upload-grid two" style="margin-top:16px;">${assets}</div>` : ''}
       </div>
+    </div>
+  `;
+}
+
+function renderSeedanceFrameControls() {
+  if (!(state.video.provider === 'seedance_kie' && state.video.mode === 'image_to_video')) return '';
+
+  const startBlock = `
+    <div>
+      <div class="inspector-card">${fieldTogglePanel('Use start frame', 'video_seedanceUseStartFrame', !!state.video.seedanceUseStartFrame, 'Добавляет стартовый кадр как приоритетный image reference.', state.video.seedanceUseStartFrame ? 'Активно' : 'Выключено')}</div>
+      ${state.video.seedanceUseStartFrame ? sectionUpload('Start frame', 'video_startFrame', 'Опциональный стартовый кадр. Учитывается в общем лимите до 7 изображений.', false, 'image/*') : ''}
+    </div>
+  `;
+
+  const lastBlock = `
+    <div>
+      <div class="inspector-card">${fieldTogglePanel('Use last frame', 'video_seedanceUseLastFrame', !!state.video.seedanceUseLastFrame, 'Добавляет последний кадр как финальный image reference.', state.video.seedanceUseLastFrame ? 'Активно' : 'Выключено')}</div>
+      ${state.video.seedanceUseLastFrame ? sectionUpload('Last frame', 'video_lastFrame', 'Опциональный последний кадр. Учитывается в общем лимите до 7 изображений.', false, 'image/*') : ''}
+    </div>
+  `;
+
+  return `
+    <div class="upload-grid two" style="margin-top:16px;">
+      ${startBlock}
+      ${lastBlock}
+    </div>
+  `;
+}
+
+
+function renderSeedanceOmniVideoReference() {
+  if (!(state.video.provider === 'seedance_kie' && state.video.mode === 'omni_reference')) return '';
+  const surcharge = state.video.model === 'seedance-kie-fast' ? 13 : 20;
+  return `
+    <div style="margin-top:16px;">
+      ${sectionUpload('Video reference', 'video_referenceVideos', `MP4 / MOV. Можно без видео, но если добавлен хотя бы один video reference, к запуску прибавляется +${surcharge} ток.`, true, 'video/mp4,video/quicktime,.mp4,.mov')}
+      <div class="help-text" style="margin-top:10px;">Суммарная длина всех video references — до 15.4 сек. Photo reference и audio reference остаются справа.</div>
     </div>
   `;
 }
@@ -2491,35 +5091,71 @@ function renderVideoWorkspace() {
 function renderImageWorkspace() {
   syncImageSelection();
   const source = getFile('image.sourceImage');
+  const sourceIsMultiple = Array.isArray(source);
   const base = getFile('image.baseImage');
+  const styleRef = getFile('image.styleRefImage');
+  const omniRef = getFile('image.omniRefImage');
   const historyItem = state.image.panel === 'library' ? imageHistorySelectedItem() : null;
   const compareState = imageCompareState(historyItem);
-  const activeUrl = historyItem ? imageHistoryUrl(historyItem) : (state.image.outputUrl || compareState.afterUrl);
-  const activeDownloadUrl = historyItem ? imageHistoryUrl(historyItem) : (state.image.downloadUrl || state.image.outputUrl || compareState.afterUrl);
+  const stageProvider = imageStageProvider(historyItem);
+  const stageImageUrls = imageActiveUrls(historyItem);
+  const safeIndex = Math.max(0, Math.min(stageImageUrls.length - 1, Number(state.image.activeImageIndex || 0)));
+  const selectedStageUrl = stageImageUrls[safeIndex] || '';
+  const activeUrl = selectedStageUrl || (historyItem ? imageHistoryUrl(historyItem) : (state.image.outputUrl || compareState.afterUrl));
+  const activeDownloadUrl = selectedStageUrl || (historyItem ? imageHistoryUrl(historyItem) : (state.image.downloadUrl || state.image.outputUrl || compareState.afterUrl));
   const assets = [
-    mediaCard('Source image', source, false, false, 'contain'),
+    mediaCard(state.image.provider === 'nano_banana_pro_new' ? 'Reference images' : 'Source image', source, false, sourceIsMultiple, 'contain'),
     mediaCard('Base image', base, false, false, 'contain'),
+    stageProvider === 'midjourney' ? mediaCard('Style ref', styleRef, false, false, 'contain') : '',
+    stageProvider === 'midjourney' ? mediaCard('Omni ref', omniRef, false, false, 'contain') : '',
   ].filter(Boolean).join('');
 
+  const showImageLoading = state.image.isGenerating || (!!state.image.generationId && !activeUrl && !state.image.errorText);
+  const canReroll = stageProvider === 'midjourney' && !!state.image.generationId;
   const stageInner = compareState.compareMode ? `
     <div class="video-stage-result image-stage-result">
       ${renderImageCompareStage(compareState.beforeUrl, compareState.afterUrl)}
       <div class="actions compact-gap" style="justify-content:center; flex-wrap:wrap; margin-top:14px;">
-        <a class="btn primary" href="${escapeHtml(activeDownloadUrl || compareState.afterUrl)}" download>Скачать изображение</a>
+        <button class="btn primary" data-action="download-image-result">Скачать изображение</button>
         ${historyItem ? `<button class="btn outline" data-action="use-image-history-item" data-generation-id="${escapeHtml(historyItem.id || '')}">В рабочую зону</button>` : `<button class="btn outline" data-action="clear-image-run">Очистить результат</button>`}
       </div>
       ${historyItem ? `<div class="help-text" style="margin-top:10px;">Открыт сохранённый результат из истории Image Studio.</div>` : ''}
+    </div>
+  ` : (stageProvider === 'midjourney' && stageImageUrls.length ? `
+    <div class="video-stage-result image-stage-result">
+      <div style="display:grid; gap:14px;">
+        <img class="preview-media image-preview-media" src="${escapeHtml(selectedStageUrl)}" alt="Midjourney result">
+        <div style="display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:12px;">
+          ${stageImageUrls.map((url, index) => `
+            <article style="border:1px solid ${safeIndex === index ? 'rgba(255,178,66,0.65)' : 'rgba(255,255,255,0.08)'}; border-radius:18px; padding:10px; background:rgba(9,14,28,0.88); box-shadow:${safeIndex === index ? '0 0 0 1px rgba(255,178,66,0.15)' : 'none'};">
+              <button type="button" data-action="select-mj-image" data-image-index="${index}" style="display:block; width:100%; padding:0; border:none; background:none; cursor:pointer;">
+                <img src="${escapeHtml(url)}" alt="Midjourney ${index + 1}" style="display:block; width:100%; aspect-ratio:1/1; object-fit:cover; border-radius:14px;">
+              </button>
+              <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;">
+                <button class="btn outline small" data-action="midjourney-variation" data-image-index="${index}" data-variation-type="subtle">Vary subtle</button>
+                <button class="btn outline small" data-action="midjourney-variation" data-image-index="${index}" data-variation-type="strong">Vary strong</button>
+              </div>
+            </article>
+          `).join('')}
+        </div>
+        <div class="actions compact-gap" style="justify-content:center; flex-wrap:wrap; margin-top:4px;">
+          <button class="btn primary" data-action="download-image-result">Скачать выбранное</button>
+          <button class="btn outline" data-action="midjourney-reroll" ${canReroll ? '' : 'disabled'}>Reroll</button>
+          ${historyItem ? `<button class="btn outline" data-action="use-image-history-item" data-generation-id="${escapeHtml(historyItem.id || '')}">В рабочую зону</button>` : `<button class="btn outline" data-action="clear-image-run">Очистить результат</button>`}
+        </div>
+      </div>
+      ${historyItem ? `<div class="help-text" style="margin-top:10px;">Открыт сохранённый Midjourney результат из истории Image Studio.</div>` : '<div class="help-text" style="margin-top:10px;">Один запуск Midjourney возвращает 4 изображения. Выбери карточку ниже и запускай reroll / variation.</div>'}
     </div>
   ` : activeUrl ? `
     <div class="video-stage-result image-stage-result">
       <img class="preview-media image-preview-media" src="${escapeHtml(activeUrl)}" alt="Generated image">
       <div class="actions compact-gap" style="justify-content:center; flex-wrap:wrap; margin-top:14px;">
-        <a class="btn primary" href="${escapeHtml(activeDownloadUrl || activeUrl)}" download>Скачать изображение</a>
+        <button class="btn primary" data-action="download-image-result">Скачать изображение</button>
         ${historyItem ? `<button class="btn outline" data-action="use-image-history-item" data-generation-id="${escapeHtml(historyItem.id || '')}">В рабочую зону</button>` : `<button class="btn outline" data-action="clear-image-run">Очистить результат</button>`}
       </div>
       ${historyItem ? `<div class="help-text" style="margin-top:10px;">Открыт сохранённый результат из истории Image Studio.</div>` : ''}
     </div>
-  ` : (state.image.isGenerating ? `
+  ` : (showImageLoading ? `
     <div class="image-loading-shell">
       <div class="video-loader-shell video-loader-shell-scan">
         <div class="video-scan-stage">
@@ -2544,7 +5180,26 @@ function renderImageWorkspace() {
       <strong>Изображение появится здесь</strong>
       <div>Справа выбери семейство, режим, добавь входные изображения при необходимости и запусти генерацию. Для сохранённых результатов используй историю изображений в правой панели.</div>
     </div>
-  `);
+  `));
+
+  const promptCard = state.image.provider === 'topaz_photo'
+    ? ''
+    : renderWorkspacePromptCard(
+        stageProvider === 'midjourney' ? 'Midjourney prompt' : 'Prompt',
+        'image_prompt',
+        state.image.prompt,
+        stageProvider === 'midjourney' ? 'Опиши сцену, стиль, свет, композицию, материалы, одежду, фон и детали. Midjourney v7 параметры уйдут отдельно из правой панели.' : 'Опиши, что нужно создать или изменить: стиль, композицию, свет, детали, фон.',
+        '',
+        stageProvider === 'midjourney'
+          ? renderWorkspacePromptExtraTextarea(
+              'Negative prompt',
+              'image_negativePrompt',
+              state.image.negativePrompt || '',
+              'Что исключить из кадра: лишние люди, текст, watermark, extra fingers, low quality и т.д.',
+              4,
+            )
+          : '',
+      );
 
   return `
     <div class="workspace-grid single image-workspace-grid">
@@ -2554,6 +5209,7 @@ function renderImageWorkspace() {
             ${stageInner}
           </div>
         </div>
+        ${promptCard}
         ${assets ? `<div class="upload-grid two" style="margin-top:16px;">${assets}</div>` : ''}
         ${state.image.errorText ? `<div class="planner-card" style="margin-top:16px;"><h4>Ошибка</h4><div class="help-text">${escapeHtml(state.image.errorText)}</div></div>` : ''}
       </div>
@@ -2589,7 +5245,7 @@ function renderVoiceWorkspace() {
           <textarea id="voice_text" class="voice-textarea" placeholder="Вставь текст для озвучки. Например: приветствие, дикторский текст для рекламы, voice-over для видео, CTA, сценарий ролика...">${escapeHtml(state.voice.text || '')}</textarea>
 
           <div class="voice-toolbar">
-            <div class="help-text">Выбранный голос: <strong>${escapeHtml(voiceName)}</strong> · ${escapeHtml(voiceModelLabel(state.voice.modelId))} · ${escapeHtml(voiceOutputLabel(state.voice.outputFormat))}</div>
+            <div class="help-text">Выбранный голос: <strong>${escapeHtml(voiceName)}</strong> · ${escapeHtml(voiceModelLabel(state.voice.modelId))}</div>
             <div class="actions compact-gap" style="flex-wrap:wrap;">
               <button class="btn outline" data-action="clear-voice-stage">Очистить результат</button>
             </div>
@@ -2607,10 +5263,6 @@ function renderVoiceWorkspace() {
 
           ${hasAudio ? `
             <div class="voice-result-shell">
-              <div class="voice-result-summary">
-                <strong>${escapeHtml(voiceName)}</strong>
-                <small>${escapeHtml(voiceModelLabel(state.voice.modelId))}<br>${escapeHtml(voiceOutputLabel(state.voice.outputFormat))}</small>
-              </div>
               <audio class="voice-audio-player" controls src="${escapeHtml(activeAudioUrl)}"></audio>
               <div class="actions compact-gap" style="flex-wrap:wrap;">
                 <a class="btn primary" href="${escapeHtml(activeDownloadUrl || activeAudioUrl)}" download="${escapeHtml(voiceDownloadFilename())}">Скачать звук</a>
@@ -2640,10 +5292,6 @@ function renderVoiceInspector() {
     ['eleven_multilingual_v2', 'Eleven Multilingual v2'],
     ['eleven_flash_v2_5', 'Eleven Flash v2.5'],
     ['eleven_turbo_v2_5', 'Eleven Turbo v2.5'],
-  ];
-  const outputOptions = [
-    ['mp3_44100_128', 'MP3 · 128 kbps'],
-    ['mp3_44100_192', 'MP3 · 192 kbps'],
   ];
   const languageOptions = [
     ['auto', 'Авто'],
@@ -2683,66 +5331,66 @@ function renderVoiceInspector() {
     <div class="inspector-card voice-config-card">
       <div class="voice-config-grid">
         ${fieldSelect('Модель', 'voice_modelId', state.voice.modelId, modelOptions)}
-        ${fieldSelect('Формат', 'voice_outputFormat', state.voice.outputFormat, outputOptions)}
         ${fieldSelect('Язык', 'voice_languageCode', state.voice.languageCode || 'auto', languageOptions)}
       </div>
       <div class="help-text" style="margin-top:12px;">Текущий голос: <strong>${escapeHtml(selectedVoice?.name || 'не выбран')}</strong> · Язык: <strong>${escapeHtml(voiceLanguageLabel(state.voice.languageCode || 'auto'))}</strong></div>
     </div>
 
-    <div class="inspector-card voice-advanced-card">
-      <div class="field-head" style="margin-bottom:12px; align-items:flex-start; gap:12px;">
+    <div class="inspector-card voice-advanced-card ${state.voice.showAdvancedPanel ? 'open' : ''}">
+      <div class="field-head voice-advanced-head" style="align-items:flex-start; gap:12px;">
         <div>
           <h4 style="margin:0 0 6px;">Расширенные настройки</h4>
           <div class="help-text">Эти параметры применяются только к новому запуску на сайте и не переписывают историю.</div>
         </div>
-        <label class="toggle-pill">
-          <input id="voice_manualVoiceSettings" type="checkbox" ${state.voice.manualVoiceSettings ? 'checked' : ''}>
-          <span>Ручные voice settings</span>
-        </label>
+        <button class="btn ghost small" data-action="voice-toggle-advanced">${state.voice.showAdvancedPanel ? 'Скрыть' : 'Показать'}</button>
       </div>
 
-      <div class="voice-range-stack ${state.voice.manualVoiceSettings ? '' : 'is-disabled'}">
-        <label class="voice-range-row">
-          <div class="voice-range-top">
-            <span>Stability</span>
-            <strong>${escapeHtml(voiceSettingsBadge(state.voice.stability))}</strong>
-          </div>
-          <input id="voice_stability" type="range" min="0" max="1" step="0.01" value="${escapeHtml(String(state.voice.stability))}" ${state.voice.manualVoiceSettings ? '' : 'disabled'}>
-          <small>Ниже — больше вариативности и эмоций. Выше — стабильнее и ровнее речь.</small>
-        </label>
+      ${state.voice.showAdvancedPanel ? `
+        <div class="voice-advanced-body">
+          <label class="toggle-pill">
+            <input id="voice_manualVoiceSettings" type="checkbox" ${state.voice.manualVoiceSettings ? 'checked' : ''}>
+            <span>Ручные voice settings</span>
+          </label>
 
-        <label class="voice-range-row">
-          <div class="voice-range-top">
-            <span>Similarity boost</span>
-            <strong>${escapeHtml(voiceSettingsBadge(state.voice.similarityBoost))}</strong>
-          </div>
-          <input id="voice_similarityBoost" type="range" min="0" max="1" step="0.01" value="${escapeHtml(String(state.voice.similarityBoost))}" ${state.voice.manualVoiceSettings ? '' : 'disabled'}>
-          <small>Насколько плотно модель держится исходного тембра выбранного голоса.</small>
-        </label>
+          <div class="voice-range-stack ${state.voice.manualVoiceSettings ? '' : 'is-disabled'}">
+            <label class="voice-range-row">
+              <div class="voice-range-top">
+                <span>Stability</span>
+                <strong>${escapeHtml(voiceSettingsBadge(state.voice.stability))}</strong>
+              </div>
+              <input id="voice_stability" type="range" min="0" max="1" step="0.01" value="${escapeHtml(String(state.voice.stability))}" ${state.voice.manualVoiceSettings ? '' : 'disabled'}>
+              <small>Ниже — больше вариативности и эмоций. Выше — стабильнее и ровнее речь.</small>
+            </label>
 
-        <label class="voice-range-row">
-          <div class="voice-range-top">
-            <span>Style</span>
-            <strong>${escapeHtml(voiceSettingsBadge(state.voice.style))}</strong>
-          </div>
-          <input id="voice_style" type="range" min="0" max="1" step="0.01" value="${escapeHtml(String(state.voice.style))}" ${state.voice.manualVoiceSettings ? '' : 'disabled'}>
-          <small>Добавляет больше стилевой выразительности. Чем выше, тем заметнее подача.</small>
-        </label>
+            <label class="voice-range-row">
+              <div class="voice-range-top">
+                <span>Similarity boost</span>
+                <strong>${escapeHtml(voiceSettingsBadge(state.voice.similarityBoost))}</strong>
+              </div>
+              <input id="voice_similarityBoost" type="range" min="0" max="1" step="0.01" value="${escapeHtml(String(state.voice.similarityBoost))}" ${state.voice.manualVoiceSettings ? '' : 'disabled'}>
+              <small>Насколько плотно модель держится исходного тембра выбранного голоса.</small>
+            </label>
 
-        <label class="voice-range-row">
-          <div class="voice-range-top">
-            <span>Speed</span>
-            <strong>${escapeHtml(voiceSettingsBadge(state.voice.speed))}</strong>
-          </div>
-          <input id="voice_speed" type="range" min="0.7" max="1.2" step="0.01" value="${escapeHtml(String(state.voice.speed))}" ${state.voice.manualVoiceSettings ? '' : 'disabled'}>
-          <small>1.0 — стандартная скорость. Ниже — медленнее, выше — быстрее.</small>
-        </label>
+            <label class="voice-range-row">
+              <div class="voice-range-top">
+                <span>Style</span>
+                <strong>${escapeHtml(voiceSettingsBadge(state.voice.style))}</strong>
+              </div>
+              <input id="voice_style" type="range" min="0" max="1" step="0.01" value="${escapeHtml(String(state.voice.style))}" ${state.voice.manualVoiceSettings ? '' : 'disabled'}>
+              <small>Добавляет больше стилевой выразительности. Чем выше, тем заметнее подача.</small>
+            </label>
 
-        <label class="toggle-pill">
-          <input id="voice_useSpeakerBoost" type="checkbox" ${state.voice.useSpeakerBoost ? 'checked' : ''} ${state.voice.manualVoiceSettings ? '' : 'disabled'}>
-          <span>Speaker boost</span>
-        </label>
-      </div>
+            <label class="voice-range-row">
+              <div class="voice-range-top">
+                <span>Speed</span>
+                <strong>${escapeHtml(voiceSettingsBadge(state.voice.speed))}</strong>
+              </div>
+              <input id="voice_speed" type="range" min="0.7" max="1.2" step="0.01" value="${escapeHtml(String(state.voice.speed))}" ${state.voice.manualVoiceSettings ? '' : 'disabled'}>
+              <small>1.0 — стандартная скорость. Ниже — медленнее, выше — быстрее.</small>
+            </label>
+          </div>
+        </div>
+      ` : ''}
     </div>
 
     <div class="inspector-card voice-history-panel">
@@ -2790,6 +5438,27 @@ function musicCurrentTracks() {
   const selected = musicSelectedItem();
   if (selected && Array.isArray(selected.tracks) && selected.tracks.length) return selected.tracks;
   return Array.isArray(state.music.results) ? state.music.results : [];
+}
+
+function resetMusicWorkspaceStage(options = {}) {
+  const { keepToolState = false } = options;
+  stopMusicPolling();
+  stopMusicToolPolling();
+  state.music.isGenerating = false;
+  state.music.results = [];
+  state.music.generationId = '';
+  state.music.status = 'idle';
+  state.music.statusText = 'Заполни идею или текст и запусти генерацию.';
+  state.music.errorText = '';
+  state.music.lastCompletedAt = '';
+  state.musicHistory.selectedId = '';
+  state.musicHistory.selectedItem = null;
+  if (!keepToolState) {
+    state.music.toolTaskId = '';
+    state.music.toolTaskStatus = 'idle';
+    state.music.toolTaskMessage = '';
+    state.music.toolTracks = [];
+  }
 }
 
 function musicLastAnswerText() {
@@ -2903,7 +5572,7 @@ function musicRunButtonLabel() {
   }
   return state.music.ai === 'suno'
     ? 'Сгенерировать 2 трека · 2 токена'
-    : 'Сгенерировать музыку · 2 токена';
+    : 'Сгенерировать музыку · бесплатно';
 }
 
 function musicToolIsRunning() {
@@ -3130,22 +5799,12 @@ function renderMusicWorkspaceStage(options = {}) {
     const headline = toolMode
       ? `${toolMeta.short} готово`
       : (stageTracks.length >= stageExpectedCount ? 'Музыка готова' : 'Результат обновляется');
-    const subline = toolMode
-      ? musicToolStatusText()
-      : (state.music.statusText || `Получено ${stageTracks.length} ${musicTrackLabel(stageTracks.length)}.`);
-    const title = String(state.music.title || selected?.title || '').trim();
     return `
       <div class="music-stage music-stage--result">
         <div class="music-stage-result-head">
           <div class="music-stage-copy">
             <span class="music-stage-kicker">Результат</span>
             <h3>${escapeHtml(headline)}</h3>
-            <p>${escapeHtml(subline)}</p>
-            ${renderMusicStageChips(toolMode ? commonChips : [...commonChips, title ? `Трек: ${trimText(title, 38)}` : '', generationStamp ? `Обновлено ${formatDate(generationStamp)}` : ''])}
-          </div>
-          <div class="music-stage-count">
-            <strong>${stageTracks.length}</strong>
-            <small>${escapeHtml(musicTrackLabel(stageTracks.length || stageExpectedCount))}</small>
           </div>
         </div>
         <div class="music-stage-track-grid">
@@ -3154,7 +5813,8 @@ function renderMusicWorkspaceStage(options = {}) {
               ? 'После запуска результат инструмента появится здесь.'
               : (isSuno ? 'После запуска здесь появятся 2 готовых трека Suno.' : 'После запуска здесь появится 1 готовый трек Udio.'),
             taskId: toolMode ? (state.music.toolTaskId || '') : musicProviderTaskId(),
-            cardClass: 'music-track-card--stage'
+            cardClass: 'music-track-card--stage',
+            hideLyrics: !isSuno
           })}
         </div>
       </div>
@@ -3184,6 +5844,7 @@ function renderMusicTrackCards(tracks = [], options = {}) {
   const emptyText = options.emptyText || 'После первой успешной генерации здесь появятся карточки треков.';
   const taskId = options.taskId || musicProviderTaskId();
   const cardClass = ['music-track-card', options.cardClass].filter(Boolean).join(' ');
+  const hideLyrics = !!options.hideLyrics;
   if (!Array.isArray(tracks) || !tracks.length) {
     return `<div class="music-empty-card">${escapeHtml(emptyText)}</div>`;
   }
@@ -3191,7 +5852,6 @@ function renderMusicTrackCards(tracks = [], options = {}) {
     const title = track.title || `Трек ${index + 1}`;
     const audioUrl = track.audio_url || track.download_url || '';
     const videoUrl = track.video_url || '';
-    const coverUrl = track.cover_url || '';
     const lyrics = String(track.lyrics || '').trim();
     const audioId = musicTrackAudioId(track);
     const timed = audioId ? state.music.timestampedLyrics[audioId] : null;
@@ -3200,19 +5860,14 @@ function renderMusicTrackCards(tracks = [], options = {}) {
         <div class="music-track-top">
           <div>
             <strong>${escapeHtml(title)}</strong>
-            <div class="help-text">Трек #${index + 1}${audioId ? ` · audioId ${escapeHtml(audioId)}` : ''}</div>
           </div>
-          ${coverUrl ? `<img class="music-track-cover" src="${escapeHtml(coverUrl)}" alt="${escapeHtml(title)}">` : `<div class="music-track-cover placeholder">♪</div>`}
         </div>
         ${audioUrl ? `<audio controls preload="none" src="${escapeHtml(audioUrl)}"></audio>` : `<div class="help-text">У этого результата пока нет audio_url.</div>`}
-        ${lyrics ? `<div class="music-lyrics-snippet"><strong>Текст песни</strong><pre>${escapeHtml(trimText(lyrics, 900))}</pre></div>` : ''}
-        ${timed && Array.isArray(timed.alignedWords) && timed.alignedWords.length ? `<div class="music-lyrics-snippet"><strong>Таймкоды текста</strong><small>${escapeHtml(timed.alignedWords.slice(0, 10).map((w) => `${Number(w.startS || 0).toFixed(1)}s ${w.word || ''}`).join(' · '))}</small></div>` : ''}
+        ${(!hideLyrics && lyrics) ? `<div class="music-lyrics-snippet"><strong>Текст песни</strong><pre>${escapeHtml(trimText(lyrics, 900))}</pre></div>` : ''}
+        ${(!hideLyrics && timed && Array.isArray(timed.alignedWords) && timed.alignedWords.length) ? `<div class="music-lyrics-snippet"><strong>Таймкоды текста</strong><small>${escapeHtml(timed.alignedWords.slice(0, 10).map((w) => `${Number(w.startS || 0).toFixed(1)}s ${w.word || ''}`).join(' · '))}</small></div>` : ''}
         <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;">
           ${audioUrl ? `<a class="btn ghost small" href="${escapeHtml(audioUrl)}" target="_blank" rel="noopener">Открыть MP3</a>` : ''}
           ${videoUrl ? `<a class="btn ghost small" href="${escapeHtml(videoUrl)}" target="_blank" rel="noopener">Открыть MP4</a>` : ''}
-          ${taskId && audioId ? `<button class="btn ghost small" data-action="music-load-timestamped-lyrics" data-task-id="${escapeHtml(taskId)}" data-audio-id="${escapeHtml(audioId)}">Таймкоды текста</button>` : ''}
-          ${taskId && audioId ? `<button class="btn ghost small" data-action="music-generate-persona" data-task-id="${escapeHtml(taskId)}" data-audio-id="${escapeHtml(audioId)}">Сделать persona</button>` : ''}
-          <button class="btn outline small" data-action="send-music-to-chat" data-text="${encodeURIComponent(track.title || '')}">В ChatGPT</button>
         </div>
       </div>
     `;
@@ -3231,12 +5886,9 @@ function renderMusicPrimarySettingsPanel({ isSuno, compact = false } = {}) {
         <span class="badge muted">${escapeHtml(isSuno ? 'SunoAPI' : 'PiAPI / Udio')}</span>
       </div>
 
-      <div class="music-form-grid ${compact ? 'music-form-grid--inspector' : 'music-form-grid--compact'}">
+      <div class="music-form-grid ${compact ? 'music-form-grid--inspector' : 'music-form-grid--compact'} music-form-grid--main-fields">
         <label>Название трека
           <input id="music_title" value="${escapeHtml(state.music.title)}" placeholder="Например: Музыка будущего">
-        </label>
-        <label>Стиль / жанр
-          <input id="music_tags" value="${escapeHtml(state.music.tags)}" placeholder="dance-pop, cinematic, commercial, female vocal">
         </label>
         <label>Язык
           <select id="music_language">
@@ -3245,14 +5897,19 @@ function renderMusicPrimarySettingsPanel({ isSuno, compact = false } = {}) {
             <option value="auto" ${state.music.language === 'auto' ? 'selected' : ''}>Авто</option>
           </select>
         </label>
-        <label>Настроение
-          <input id="music_mood" value="${escapeHtml(state.music.mood)}" placeholder="энергично, вдохновляюще, премиально, тепло">
-        </label>
       </div>
 
-      <label>Детали трека
-        <textarea id="music_references" rows="${compact ? 5 : 4}" placeholder="Например: реклама школы танцев, короткий яркий припев, современный коммерческий звук, ощущение роста и премиального вайба">${escapeHtml(state.music.references)}</textarea>
-      </label>
+      <div class="music-form-stack">
+        <label>Стиль / жанр
+          <textarea id="music_tags" class="music-small-textarea" rows="3" placeholder="dance-pop, cinematic, commercial, female vocal">${escapeHtml(state.music.tags)}</textarea>
+        </label>
+        <label>Настроение
+          <textarea id="music_mood" class="music-small-textarea" rows="3" placeholder="энергично, вдохновляюще, премиально, тепло">${escapeHtml(state.music.mood)}</textarea>
+        </label>
+        <label>Детали трека
+          <textarea id="music_references" class="music-track-details-textarea" rows="${compact ? 5 : 4}" placeholder="Например: реклама школы танцев, короткий яркий припев, современный коммерческий звук, ощущение роста и премиального вайба">${escapeHtml(state.music.references)}</textarea>
+        </label>
+      </div>
     </div>
   `;
 }
@@ -3454,13 +6111,15 @@ function renderMusicWorkspace() {
                     <div class="help-text">Собери куплеты, припев, правки и несколько вариантов текста прямо внутри Music Studio.</div>
                   </div>
                 </div>
+                <div class="actions compact-gap" style="margin:0 0 12px; flex-wrap:wrap;">
+                  <button class="btn ghost small" data-action="music-open-editor">Редактор</button>
+                  <button class="btn ghost small active" data-action="music-open-songwriter">Генератор текста</button>
+                </div>
                 <div class="music-chat-thread">${songThread}</div>
                 <div class="music-chat-composer">
                   <textarea id="music_songwriterInput" rows="3" placeholder="Напиши задачу, например: сделай цепкий русский припев для рекламы школы танцев, 2 куплета и припев">${escapeHtml(state.music.songwriter.input || '')}</textarea>
                   <div class="actions compact-gap" style="flex-wrap:wrap;">
                     <button class="btn primary ${state.music.songwriter.loading ? 'loading' : ''}" data-action="songwriter-send" ${state.music.songwriter.loading ? 'disabled' : ''}>${state.music.songwriter.loading ? 'Генерация...' : 'Сгенерировать текст'}</button>
-                    
-                    
                   </div>
                 </div>
               </div>
@@ -3602,10 +6261,9 @@ function renderMusicInspector() {
         ${isSuno ? `
           <div class="music-segment-field">
             <span class="music-field-label">Режим Music Studio</span>
-            <div class="music-segmented music-segmented--triple" role="group" aria-label="Режим Music Studio">
+            <div class="music-segmented" role="group" aria-label="Режим Music Studio">
               <button class="music-segment ${state.music.activeTab === 'idea' ? 'active' : ''}" type="button" data-action="music-set-tab" data-tab="idea">Идея</button>
               <button class="music-segment ${state.music.activeTab === 'lyrics' ? 'active' : ''}" type="button" data-action="music-set-tab" data-tab="lyrics">Текст</button>
-              <button class="music-segment music-segment--wide ${state.music.activeTab === 'tools' ? 'active' : ''}" type="button" data-action="music-set-tab" data-tab="tools">Инструменты</button>
             </div>
           </div>
         ` : `
@@ -3683,55 +6341,187 @@ function renderMusicInspector() {
   `;
 }
 
-function renderLibraryWorkspace() {
+function promptLibraryMediaUrl(entity, fallback = '') {
+  if (!entity) return fallback || '';
+  return entity.preview_url || entity.cover_url || entity.image_url || entity.thumb_url || entity.thumbnail_url || entity.poster_url || fallback || '';
+}
 
-  const categories = state.prompts.categories.map((c) => `
-    <button class="chip ${state.prompts.selectedCategory === c.slug ? 'active' : ''}" data-action="select-category" data-category="${escapeHtml(c.slug)}">${escapeHtml(c.title || c.slug)}</button>
-  `).join('');
-  const groups = state.prompts.groups.map((g) => `
-    <div class="prompt-item">
-      <strong>${escapeHtml(g.title)}</strong>
-      <small>${escapeHtml(g.cover_url || 'Без cover')}</small>
-      <div style="margin-top:10px;"><button class="btn ghost small" data-action="select-group" data-group-id="${escapeHtml(g.id)}">Открыть</button></div>
-    </div>
-  `).join('');
-  const items = state.prompts.items.map((item) => `
-    <div class="prompt-item">
-      <strong>${escapeHtml(item.title || 'Prompt')}</strong>
-      <small>${escapeHtml(item.model_hint || 'Без model_hint')}</small>
-      <div class="help-text" style="margin-top:8px;">${escapeHtml((item.prompt_text || '').slice(0, 260))}${(item.prompt_text || '').length > 260 ? '…' : ''}</div>
-      <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
-        <button class="btn ghost small" data-action="copy-prompt" data-prompt="${encodeURIComponent(item.prompt_text || '')}">Копировать</button>
-        <button class="btn outline small" data-action="send-prompt-to-chat" data-prompt="${encodeURIComponent(item.prompt_text || '')}">В ChatGPT</button>
-      </div>
-    </div>
-  `).join('');
-  return `
-    <div class="workspace-grid">
-      <div class="workspace-main scroll">
-        <div class="library-card">
-          <div class="field-head"><h4>Категории</h4><button class="btn ghost small" data-action="refresh-prompts">Обновить</button></div>
-          <div class="quick-chips">${categories || '<span class="muted">Категории ещё не загружены.</span>'}</div>
-        </div>
-        <div class="upload-grid two" style="margin-top:16px;">
-          <div class="library-card">
-            <div class="field-head"><h4>Группы</h4><span class="badge muted">${state.prompts.selectedCategory || '—'}</span></div>
-            <div class="mini-list">${groups || '<div class="empty-state">Нет групп. Выбери категорию или проверь Supabase.</div>'}</div>
+function promptLibraryVideoUrl(entity, fallback = '') {
+  if (!entity) return fallback || '';
+  return entity.video_url || entity.provider_video_url || entity.download_url || entity.signed_url || fallback || '';
+}
+
+function promptSelectedGroup() {
+  return state.prompts.groups.find((group) => String(group.id) === String(state.prompts.selectedGroupId)) || null;
+}
+
+function shouldAutoOpenSinglePromptGroup(category = state.prompts.selectedCategory, groups = state.prompts.groups) {
+  return String(category || '').toLowerCase() === 'video' && Array.isArray(groups) && groups.length === 1;
+}
+
+function promptOpenItem() {
+  return state.prompts.items.find((item) => String(item.id) === String(state.prompts.openItemId)) || null;
+}
+
+function renderPromptItemModal() {
+  let root = document.getElementById('promptLibraryModalRoot');
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'promptLibraryModalRoot';
+    document.body.appendChild(root);
+  }
+
+  const openItem = state.view === 'workspace' && state.studio === 'library' ? promptOpenItem() : null;
+  const open = !!openItem;
+  document.body.classList.toggle('prompt-library-modal-open', open);
+  if (!open) {
+    root.innerHTML = '';
+    return;
+  }
+
+  const selectedGroup = promptSelectedGroup();
+  const openItemPreview = promptLibraryMediaUrl(openItem, promptLibraryMediaUrl(selectedGroup));
+  const openItemVideoUrl = promptLibraryVideoUrl(openItem);
+  const useVideoPreview = String(state.prompts.selectedCategory || '').toLowerCase() === 'video' && !!openItemVideoUrl;
+  const mediaMarkup = useVideoPreview
+    ? `<div style="margin-bottom:14px; border-radius:22px; overflow:hidden; border:1px solid rgba(255,255,255,0.08); background:rgba(6,10,20,0.92); padding:10px;"><video src="${escapeHtml(openItemVideoUrl)}" ${openItemPreview ? `poster="${escapeHtml(openItemPreview)}"` : ''} controls playsinline preload="metadata" style="width:100%; max-height:360px; object-fit:contain; object-position:center top; display:block; border-radius:16px; background:#050811;"></video></div>`
+    : (openItemPreview ? `<div style="margin-bottom:14px; border-radius:22px; overflow:hidden; border:1px solid rgba(255,255,255,0.08); background:rgba(6,10,20,0.92); padding:10px;"><img src="${escapeHtml(openItemPreview)}" alt="${escapeHtml(openItem.title || 'Карточка')}" style="width:100%; max-height:360px; object-fit:contain; object-position:center top; display:block; border-radius:16px;"></div>` : '');
+  root.innerHTML = `
+    <div class="auth-modal-backdrop" id="promptLibraryModalBackdrop" style="z-index:1200; padding:56px 20px 20px;">
+      <div class="prompt-library-modal-card" role="dialog" aria-modal="true" aria-label="Карточка промпта" style="position:relative; width:min(100%, 620px); max-height:calc(100dvh - 76px); overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; border-radius:28px; padding:18px; border:1px solid rgba(255,255,255,0.1); background:linear-gradient(180deg, rgba(7,11,28,0.985), rgba(8,12,24,0.985)); box-shadow:0 32px 80px rgba(0,0,0,0.45);">
+        <div class="field-head" style="margin-bottom:14px; align-items:flex-start; gap:12px;">
+          <div style="min-width:0;">
+            <div style="font-size:22px; font-weight:800; line-height:1.2;">${escapeHtml(openItem.title || 'Карточка')}</div>
+            <div style="margin-top:6px; color:rgba(255,255,255,0.62); font-size:13px;">${escapeHtml(openItem.model_hint || 'Без model hint')}</div>
           </div>
-          <div class="library-card">
-            <div class="field-head"><h4>Элементы</h4><span class="badge muted">${state.prompts.selectedGroupId || '—'}</span></div>
-            <div class="mini-list">${items || '<div class="empty-state">Выбери группу, чтобы увидеть prompt items.</div>'}</div>
-          </div>
+          <button class="btn ghost small" data-action="close-prompt-item">Закрыть</button>
         </div>
-      </div>
-      <div class="workspace-side scroll">
-        <div class="result-card">
-          <h4>Как использовать</h4>
-          <small>Библиотека уже подключена к существующим роутам &lt;code&gt;/api/prompts/*&lt;/code&gt;. Копируй prompt в буфер или отправляй его прямо в ChatGPT Studio для доработки.</small>
+        ${mediaMarkup}
+        <div style="border:1px solid rgba(255,255,255,0.08); background:rgba(255,255,255,0.03); border-radius:20px; padding:16px; color:rgba(255,255,255,0.92); font-size:14px; line-height:1.65; white-space:pre-wrap;">${escapeHtml(openItem.prompt_text || '')}</div>
+        <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">
+          <button class="btn primary" data-action="copy-prompt" data-prompt="${encodeURIComponent(openItem.prompt_text || '')}">Скопировать</button>
+          <button class="btn outline" data-action="send-prompt-to-chat" data-prompt="${encodeURIComponent(openItem.prompt_text || '')}">В ChatGPT</button>
+          <button class="btn ghost" data-action="close-prompt-item">Закрыть</button>
         </div>
       </div>
     </div>
   `;
+
+  requestAnimationFrame(() => {
+    const modalCard = root.querySelector('.prompt-library-modal-card');
+    if (modalCard) modalCard.scrollTop = 0;
+  });
+}
+
+function renderLibraryWorkspace() {
+  const selectedGroup = promptSelectedGroup();
+  const selectedCategoryTitle = state.prompts.categories.find((c) => c.slug === state.prompts.selectedCategory)?.title || state.prompts.selectedCategory || '';
+  const autoOpenSingleGroup = shouldAutoOpenSinglePromptGroup();
+
+  const categories = state.prompts.categories.map((c) => `
+    <button
+      class="chip ${state.prompts.selectedCategory === c.slug ? 'active' : ''}"
+      data-action="select-category"
+      data-category="${escapeHtml(c.slug)}"
+      style="padding:8px 12px; min-height:36px; font-size:13px; border-radius:999px;"
+    >${escapeHtml(c.title || c.slug)}</button>
+  `).join('');
+
+  const groups = state.prompts.groups.map((g) => {
+    const coverUrl = promptLibraryMediaUrl(g);
+    const isActive = String(state.prompts.selectedGroupId) === String(g.id);
+    return `
+      <article
+        class="prompt-group-card ${isActive ? 'active' : ''}"
+        style="border:1px solid ${isActive ? 'rgba(255,177,66,0.38)' : 'rgba(255,255,255,0.08)'}; background:linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.025)); border-radius:24px; padding:14px; display:flex; flex-direction:column; gap:10px; box-shadow:${isActive ? '0 16px 40px rgba(255,177,66,0.12)' : 'none'};"
+      >
+        <button data-action="select-group" data-group-id="${escapeHtml(g.id)}" style="all:unset; cursor:pointer; display:block;">
+          ${coverUrl ? `<div style="width:100%; aspect-ratio: 1.28 / 1; border-radius:18px; overflow:hidden; border:1px solid rgba(255,255,255,0.07); background:rgba(255,255,255,0.03);"><img src="${escapeHtml(coverUrl)}" alt="${escapeHtml(g.title)}" style="width:100%; height:100%; object-fit:cover; display:block;"></div>` : `<div style="width:100%; aspect-ratio: 1.28 / 1; border-radius:18px; border:1px solid rgba(255,255,255,0.07); background:rgba(255,255,255,0.03); display:grid; place-items:center; color:rgba(255,255,255,0.42); font-size:12px;">Нет cover</div>`}
+          <div style="margin-top:10px;">
+            <div style="font-size:15px; font-weight:700; line-height:1.3;">${escapeHtml(g.title || 'Группа')}</div>
+            <div style="margin-top:6px; color:rgba(255,255,255,0.64); font-size:12px;">${isActive ? 'Открыта подборка' : 'Нажми, чтобы открыть карточки'}</div>
+          </div>
+        </button>
+      </article>
+    `;
+  }).join('');
+
+  const items = state.prompts.items.map((item) => {
+    const previewUrl = promptLibraryMediaUrl(item, promptLibraryMediaUrl(selectedGroup));
+    const previewText = (item.prompt_text || '').trim();
+    return `
+      <article style="border:1px solid rgba(255,255,255,0.08); background:linear-gradient(180deg, rgba(255,255,255,0.045), rgba(255,255,255,0.02)); border-radius:22px; padding:12px; display:flex; flex-direction:column; gap:10px;">
+        <button data-action="open-prompt-item" data-item-id="${escapeHtml(item.id)}" style="all:unset; cursor:pointer; display:block;">
+          ${previewUrl ? `<div style="width:100%; aspect-ratio: 1 / 1; border-radius:18px; overflow:hidden; border:1px solid rgba(255,255,255,0.07); background:rgba(6,10,20,0.92); padding:8px;"><img src="${escapeHtml(previewUrl)}" alt="${escapeHtml(item.title || 'Prompt')}" style="width:100%; height:100%; object-fit:contain; object-position:center top; display:block; border-radius:12px;"></div>` : ''}
+          <div style="margin-top:${previewUrl ? '10px' : '0'};">
+            <div style="font-size:15px; font-weight:700; line-height:1.3;">${escapeHtml(item.title || 'Prompt')}</div>
+            <div style="margin-top:4px; color:rgba(255,255,255,0.62); font-size:12px;">${escapeHtml(item.model_hint || 'Без model hint')}</div>
+            <div style="margin-top:8px; color:rgba(255,255,255,0.8); font-size:13px; line-height:1.5;">${escapeHtml(previewText.slice(0, 140))}${previewText.length > 140 ? '…' : ''}</div>
+          </div>
+        </button>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button class="btn ghost small" data-action="open-prompt-item" data-item-id="${escapeHtml(item.id)}">Открыть</button>
+          <button class="btn outline small" data-action="copy-prompt" data-prompt="${encodeURIComponent(item.prompt_text || '')}">Копировать</button>
+        </div>
+      </article>
+    `;
+  }).join('');
+
+  return `
+    <div class="workspace-grid single">
+      <div class="workspace-main scroll">
+        <section class="library-card" style="padding:18px 18px 16px;">
+          <div class="field-head" style="align-items:flex-start; gap:12px;">
+            <div>
+              <h4 style="margin:0;">Категории</h4>
+              <div class="help-text" style="margin-top:6px;">Доступ к промтам открыт только для авторизованных пользователей.</div>
+            </div>
+            <button class="btn ghost small" data-action="refresh-prompts">Обновить</button>
+          </div>
+          <div class="quick-chips" style="margin-top:14px; gap:8px;">${categories || '<span class="muted">Категории ещё не загружены.</span>'}</div>
+        </section>
+
+        ${state.prompts.selectedCategory ? `
+          ${autoOpenSingleGroup ? '' : `
+            <section class="library-card" style="margin-top:16px; padding:18px;">
+              <div class="field-head" style="align-items:flex-start; gap:12px;">
+                <div>
+                  <h4 style="margin:0;">Подборки · ${escapeHtml(selectedCategoryTitle || 'Категория')}</h4>
+                  <div class="help-text" style="margin-top:6px;">Нажми на подборку — ниже откроются карточки этой категории.</div>
+                </div>
+              </div>
+              ${groups
+                ? `<div style="margin-top:14px; display:grid; grid-template-columns:repeat(auto-fit, minmax(210px, 1fr)); gap:14px;">${groups}</div>`
+                : `<div class="empty-state" style="margin-top:14px;">Нет групп в этой категории.</div>`}
+            </section>
+          `}
+        ` : `
+          <section class="library-card" style="margin-top:16px; padding:18px;">
+            <div class="empty-state">Выбери категорию сверху — затем откроются её подборки.</div>
+          </section>
+        `}
+
+        ${state.prompts.selectedGroupId ? `
+          <section class="library-card" style="margin-top:16px; padding:18px;">
+            <div class="field-head" style="align-items:flex-start; gap:12px;">
+              <div>
+                <h4 style="margin:0;">${autoOpenSingleGroup ? `Промты · ${escapeHtml(selectedCategoryTitle || 'Видео')}` : `Карточки · ${escapeHtml(selectedGroup?.title || 'Подборка')}`}</h4>
+                <div class="help-text" style="margin-top:6px;">${autoOpenSingleGroup ? 'Промты открываются сразу без промежуточной кнопки группы.' : 'Карточки открываются отдельно, не на весь экран.'}</div>
+              </div>
+            </div>
+            ${items
+              ? `<div style="margin-top:14px; display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:14px; align-items:start;">${items}</div>`
+              : `<div class="empty-state" style="margin-top:14px;">${autoOpenSingleGroup ? 'В этой категории пока нет карточек.' : 'В этой подборке пока нет карточек.'}</div>`}
+          </section>
+        ` : ''}
+
+      </div>
+    </div>
+  `;
+}
+
+function renderLibraryInspector() {
+  return '';
 }
 
 function renderPlanningWorkspace() {
@@ -3763,6 +6553,119 @@ function siteBuilderSelectedProject() {
     return state.siteBuilder.selectedProject;
   }
   return items.find((item) => String(item.id || '') === selectedId) || state.siteBuilder?.selectedProject || null;
+}
+
+function siteBuilderProjectHideKey(item) {
+  return String(item?.id || '').trim();
+}
+
+function siteBuilderVersionHideKey(projectId, version) {
+  return [String(projectId || '').trim(), String(version?.id || version?.version_number || version?.created_at || '').trim()].filter(Boolean).join('::');
+}
+
+function siteBuilderJobHideKey(projectId, job) {
+  return [
+    String(projectId || '').trim(),
+    String(job?.id || job?.job_id || job?.created_at || '').trim(),
+    String(job?.job_type || '').trim(),
+  ].filter(Boolean).join('::');
+}
+
+function siteBuilderHiddenSet(kind) {
+  const list = Array.isArray(state.siteBuilder?.[kind]) ? state.siteBuilder[kind] : [];
+  return new Set(list.map((item) => String(item || '').trim()).filter(Boolean));
+}
+
+function clearSiteBuilderRevisionFiles() {
+  const key = 'siteBuilder.revisionFiles';
+  if (runtime.files[key]) {
+    revokeRuntimeFileValue(runtime.files[key]);
+    delete runtime.files[key];
+  }
+  const input = document.getElementById('site_revision_files');
+  if (input) input.value = '';
+}
+
+function dismissSiteBuilderItem(kind, key, options = {}) {
+  const normalizedKind = ['hiddenProjects', 'hiddenVersions', 'hiddenJobs'].includes(kind) ? kind : '';
+  const normalizedKey = String(key || '').trim();
+  if (!normalizedKind || !normalizedKey) return;
+  const current = Array.isArray(state.siteBuilder[normalizedKind]) ? state.siteBuilder[normalizedKind] : [];
+  if (!current.includes(normalizedKey)) state.siteBuilder[normalizedKind] = [...current, normalizedKey].slice(-240);
+
+  if (normalizedKind === 'hiddenProjects') {
+    state.siteBuilder.projects = (Array.isArray(state.siteBuilder.projects) ? state.siteBuilder.projects : []).filter((item) => siteBuilderProjectHideKey(item) !== normalizedKey);
+    if (String(state.siteBuilder.selectedProjectId || '').trim() === normalizedKey) {
+      const next = (Array.isArray(state.siteBuilder.projects) ? state.siteBuilder.projects : [])[0] || null;
+      state.siteBuilder.selectedProjectId = String(next?.id || '').trim();
+      state.siteBuilder.selectedProject = next;
+      if (!next) {
+        state.siteBuilder.versions = [];
+        state.siteBuilder.jobs = [];
+      }
+    }
+  }
+
+  if (normalizedKind === 'hiddenVersions') {
+    const currentProjectId = String(options.projectId || state.siteBuilder.selectedProjectId || '').trim();
+    state.siteBuilder.versions = (Array.isArray(state.siteBuilder.versions) ? state.siteBuilder.versions : []).filter((item) => siteBuilderVersionHideKey(currentProjectId, item) !== normalizedKey);
+  }
+
+  if (normalizedKind === 'hiddenJobs') {
+    const currentProjectId = String(options.projectId || state.siteBuilder.selectedProjectId || '').trim();
+    state.siteBuilder.jobs = (Array.isArray(state.siteBuilder.jobs) ? state.siteBuilder.jobs : []).filter((item) => siteBuilderJobHideKey(currentProjectId, item) !== normalizedKey);
+  }
+
+  saveState();
+  render();
+  toast('success', 'Убрано из списка', 'Карточка скрыта в интерфейсе этого workspace.');
+}
+
+function renderInlineUploadField(label, id, help, multiple = false, accept = 'image/*') {
+  const config = FILE_INPUT_MAP[id];
+  const asset = config ? getFile(config.key) : null;
+  const triggerTitle = multiple ? 'Добавить файлы' : 'Добавить файл';
+  const normalizedAccept = String(accept || '').toLowerCase();
+  let acceptLabel = 'PNG / JPG / WEBP';
+  if (normalizedAccept.includes('audio/') || normalizedAccept.includes('.mp3') || normalizedAccept.includes('.wav')) acceptLabel = 'MP3 / WAV';
+  else if (normalizedAccept.includes('video/') || normalizedAccept.includes('.mp4') || normalizedAccept.includes('.mov') || normalizedAccept.includes('.webm')) acceptLabel = 'MP4 / MOV / WEBM';
+  const selectedMarkup = asset ? (
+    Array.isArray(asset)
+      ? `
+        <div class="upload-file-list">
+          ${asset.map((item, index) => `
+            <div class="upload-file-pill has-file">
+              <span class="upload-file-name">${escapeHtml(item.name || `Файл ${index + 1}`)}</span>
+              <button class="upload-file-remove" type="button" data-action="remove-upload-file" data-upload-id="${escapeHtml(id)}" data-index="${index}" aria-label="Удалить файл" title="Удалить файл">×</button>
+            </div>
+          `).join('')}
+        </div>
+      `
+      : `
+        <div class="upload-file-list">
+          <div class="upload-file-pill has-file">
+            <span class="upload-file-name">${escapeHtml(asset.name || 'Файл выбран')}</span>
+            <button class="upload-file-remove" type="button" data-action="remove-upload-file" data-upload-id="${escapeHtml(id)}" aria-label="Удалить файл" title="Удалить файл">×</button>
+          </div>
+        </div>
+      `
+  ) : `<div class="upload-file-pill">Файл ещё не выбран</div>`;
+
+  return `
+    <div class="site-inline-upload" style="margin-top:12px;">
+      <label class="label">${escapeHtml(label)}</label>
+      <input class="upload-input-native" id="${id}" type="file" ${multiple ? 'multiple' : ''} accept="${escapeHtml(accept)}">
+      <label class="upload-trigger" for="${id}">
+        <span class="upload-trigger-plus">+</span>
+        <span class="upload-trigger-copy">
+          <strong>${escapeHtml(triggerTitle)}</strong>
+          <small>${escapeHtml(acceptLabel)}</small>
+        </span>
+      </label>
+      <div class="help-text">${escapeHtml(help)}</div>
+      ${selectedMarkup}
+    </div>
+  `;
 }
 
 function siteBuilderStatusTone(status) {
@@ -3932,6 +6835,8 @@ async function runSiteBuilderRevision(projectId) {
   if (!requireAuth()) return;
   const projectIdText = String(projectId || '').trim();
   const requestRaw = String(state.siteBuilder.revisionText || '').trim();
+  const revisionFilesRaw = getFile('siteBuilder.revisionFiles');
+  const revisionFiles = Array.isArray(revisionFilesRaw) ? revisionFilesRaw.filter((item) => item?.file) : (revisionFilesRaw?.file ? [revisionFilesRaw] : []);
   if (!projectIdText) {
     toast('error', 'Проект не выбран', 'Сначала выбери проект сайта.');
     return;
@@ -3941,14 +6846,26 @@ async function runSiteBuilderRevision(projectId) {
     return;
   }
   try {
-    const res = await apiFetch(`/api/site-builder/projects/${encodeURIComponent(projectIdText)}/revisions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ request_raw: requestRaw }),
-    });
+    let options;
+    if (revisionFiles.length) {
+      const form = new FormData();
+      form.append('request_raw', requestRaw);
+      revisionFiles.forEach((item, index) => {
+        form.append('reference_images', item.file, item.name || `reference-${index + 1}.png`);
+      });
+      options = { method: 'POST', body: form };
+    } else {
+      options = {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ request_raw: requestRaw }),
+      };
+    }
+    const res = await apiFetch(`/api/site-builder/projects/${encodeURIComponent(projectIdText)}/revisions`, options);
     const data = await res.json();
     if (typeof data.balance_tokens !== 'undefined') state.balance = Number(data.balance_tokens || 0);
     state.siteBuilder.revisionText = '';
+    clearSiteBuilderRevisionFiles();
     toast('success', 'Правки запущены', 'Новая версия сайта собирается в фоне.');
     await loadSiteBuilderProjects({ silent: true, keepSelection: true, selectId: projectIdText });
   } catch (e) {
@@ -3978,10 +6895,14 @@ async function downloadSiteBuilderVersion(projectId, versionNumber) {
 }
 
 function renderHistoryWorkspace() {
-  const selected = siteBuilderSelectedProject();
-  const projects = Array.isArray(state.siteBuilder.projects) ? state.siteBuilder.projects : [];
-  const versions = Array.isArray(state.siteBuilder.versions) ? state.siteBuilder.versions : [];
-  const jobs = Array.isArray(state.siteBuilder.jobs) ? state.siteBuilder.jobs : [];
+  const hiddenProjects = siteBuilderHiddenSet('hiddenProjects');
+  const hiddenVersions = siteBuilderHiddenSet('hiddenVersions');
+  const hiddenJobs = siteBuilderHiddenSet('hiddenJobs');
+  const projects = (Array.isArray(state.siteBuilder.projects) ? state.siteBuilder.projects : []).filter((item) => !hiddenProjects.has(siteBuilderProjectHideKey(item)));
+  const selected = projects.find((item) => String(item.id || '') === String(state.siteBuilder.selectedProjectId || '')) || (siteBuilderSelectedProject() && !hiddenProjects.has(siteBuilderProjectHideKey(siteBuilderSelectedProject())) ? siteBuilderSelectedProject() : null);
+  const selectedProjectId = String(selected?.id || state.siteBuilder.selectedProjectId || '').trim();
+  const versions = (Array.isArray(state.siteBuilder.versions) ? state.siteBuilder.versions : []).filter((item) => !hiddenVersions.has(siteBuilderVersionHideKey(selectedProjectId, item)));
+  const jobs = (Array.isArray(state.siteBuilder.jobs) ? state.siteBuilder.jobs : []).filter((item) => !hiddenJobs.has(siteBuilderJobHideKey(selectedProjectId, item)));
   const canBuild = !!selected && Number(selected.current_version || 0) <= 0 && !['queued', 'payment_pending', 'generating'].includes(String(selected.status || ''));
   const revisionPrice = selected && !selected.free_revision_used ? 0 : Number(state.siteBuilder.prices?.revision || 10);
   const buildPrice = Number(state.siteBuilder.prices?.create || 30);
@@ -4025,7 +6946,14 @@ function renderHistoryWorkspace() {
             </div>
           </div>
           <div class="input-group" style="margin-top:12px;">
-            <label class="label">Бриф сайта</label>
+            <div class="field-head site-brief-head">
+              <label class="label" for="site_project_brief">Бриф сайта</label>
+              <a
+                class="btn outline small site-brief-sample-btn"
+                href="${escapeHtml(SITE_BUILDER_BRIEF_SAMPLE_URL)}"
+                download="brief.txt"
+              >Скачать образец брифа</a>
+            </div>
             <textarea id="site_project_brief" placeholder="Кто вы, что продаёте, для кого сайт, какие блоки нужны, какой стиль, какие офферы и контакты должны быть на странице.">${escapeHtml(state.siteBuilder.create.briefRaw || '')}</textarea>
           </div>
           <div class="input-group" style="margin-top:12px;">
@@ -4062,6 +6990,7 @@ function renderHistoryWorkspace() {
               <label class="label">Пакет правок</label>
               <textarea id="site_revision_text" placeholder="Например: сделать первый экран светлее, усилить CTA, добавить блок с тарифами и FAQ, сократить текст о компании.">${escapeHtml(state.siteBuilder.revisionText || '')}</textarea>
             </div>
+            ${renderInlineUploadField('Фото и скриншоты для правки', 'site_revision_files', 'Можно приложить примеры блоков, скриншоты сайта и фото, чтобы правка была точнее.', true, 'image/*')}
             <div class="actions compact-gap" style="margin-top:12px; flex-wrap:wrap;">
               <button class="btn secondary" data-action="site-run-revision" data-project-id="${escapeHtml(selected.id || '')}" ${Number(selected.current_version || 0) > 0 ? '' : 'disabled'}>${revisionPrice === 0 ? 'Запустить бесплатную правку' : `Запустить правку за ${revisionPrice} ток.`}</button>
             </div>
@@ -4076,6 +7005,7 @@ function renderHistoryWorkspace() {
           <div class="mini-list" style="margin-top:14px;">
             ${projects.length ? projects.map((item) => `
               <div class="history-item compact ${String(selected?.id || '') === String(item.id || '') ? 'active' : ''}">
+                <button class="history-delete-btn" data-action="dismiss-site-project" data-project-id="${escapeHtml(item.id || '')}" title="Убрать проект из списка" aria-label="Убрать проект из списка">×</button>
                 <div class="history-item-row"><strong>${escapeHtml(item.title || 'Сайт')}</strong><span class="badge ${siteBuilderStatusTone(item.status)}">${escapeHtml(siteBuilderStatusLabel(item.status))}</span></div>
                 <small>v${escapeHtml(Number(item.current_version || 0))} · ${escapeHtml(formatDate(item.updated_at || item.created_at))}</small>
                 <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;">
@@ -4091,6 +7021,7 @@ function renderHistoryWorkspace() {
           <div class="mini-list" style="margin-top:14px;">
             ${versions.length ? versions.map((version) => `
               <div class="history-item compact">
+                <button class="history-delete-btn" data-action="dismiss-site-version" data-project-id="${escapeHtml(selectedProjectId)}" data-version-number="${escapeHtml(String(version.id || version.version_number || version.created_at || ''))}" title="Убрать версию из списка" aria-label="Убрать версию из списка">×</button>
                 <div class="history-item-row"><strong>v${escapeHtml(Number(version.version_number || 0))}</strong><span class="badge muted">${escapeHtml(String(version.source_type || 'build'))}</span></div>
                 <small>${escapeHtml(formatDate(version.created_at))}</small>
                 <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;">
@@ -4106,6 +7037,7 @@ function renderHistoryWorkspace() {
           <div class="mini-list" style="margin-top:14px;">
             ${jobs.length ? jobs.map((job) => `
               <div class="history-item compact">
+                <button class="history-delete-btn" data-action="dismiss-site-job" data-project-id="${escapeHtml(selectedProjectId)}" data-job-key="${escapeHtml(String(job.id || job.job_id || job.created_at || ''))}" data-job-type="${escapeHtml(String(job.job_type || 'job'))}" title="Убрать запуск из списка" aria-label="Убрать запуск из списка">×</button>
                 <div class="history-item-row"><strong>${escapeHtml(String(job.job_type || 'job').toUpperCase())}</strong><span class="badge ${siteBuilderStatusTone(job.status)}">${escapeHtml(siteBuilderStatusLabel(job.status))}</span></div>
                 <small>${escapeHtml(formatDate(job.updated_at || job.created_at))}</small>
                 <small>${job.is_free_revision ? 'Бесплатная правка' : `${escapeHtml(Number(job.tokens_cost || 0))} ток.`}</small>
@@ -4192,24 +7124,250 @@ function renderBillingWorkspace() {
   `;
 }
 
-function renderProfileWorkspace() {
+
+function partnerDashboard() {
+  return state.partner.dashboard || null;
+}
+
+function renderPartnerWorkspace() {
+  if (!state.authToken || !state.me) {
+    return `
+      <div class="workspace-grid single">
+        <div class="workspace-main scroll">
+          <div class="profile-card">
+            <h3>Партнёрская программа</h3>
+            <p class="muted">Войди в аккаунт, чтобы получить реферальную ссылку, видеть рефералов, начисления и заявки на вывод.</p>
+            <button class="btn primary" data-action="switch-studio" data-studio="profile">Войти</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  const data = partnerDashboard();
+  if (state.partner.loading && !data) {
+    return `<div class="placeholder-stage"><div class="empty-copy"><strong>Загружаю партнёрский кабинет…</strong><div>Данные подтягиваются из backend.</div></div></div>`;
+  }
+  if (state.partner.lastError && !data) {
+    return `
+      <div class="workspace-grid single"><div class="workspace-main scroll">
+        <div class="profile-card"><h3>Не удалось загрузить партнёрку</h3><p class="muted">${escapeHtml(state.partner.lastError)}</p><button class="btn primary" data-action="partner-refresh">Повторить</button></div>
+      </div></div>
+    `;
+  }
+
+  const profile = data?.profile || {};
+  const stats = data?.stats || {};
+  const referrals = Array.isArray(data?.referrals) ? data.referrals : [];
+  const commissions = Array.isArray(data?.commissions) ? data.commissions : [];
+  const payouts = Array.isArray(data?.payouts) ? data.payouts : [];
+  const canPayout = Number(stats.available_balance_rub || 0) >= Number(stats.min_payout_rub || 1000);
+  const siteLink = partnerSiteLink(profile);
+  const botLink = partnerBotLink(profile);
+
   return `
     <div class="workspace-grid">
+      <div class="workspace-main scroll">
+        <div class="metrics">
+          <div class="metric"><strong>${escapeHtml(String(stats.total_referrals ?? 0))}</strong><span>рефералов всего</span></div>
+          <div class="metric"><strong>${escapeHtml(String(stats.paid_referrals ?? 0))}</strong><span>оплативших</span></div>
+          <div class="metric"><strong>${escapeHtml(formatRub(stats.available_balance_rub))}</strong><span>доступно к выводу</span></div>
+        </div>
+
+        <div class="profile-card" style="margin-top:16px;">
+          <h3>Твои партнёрские ссылки</h3>
+          <p class="muted">Один ref_code используется и для сайта, и для Telegram-бота. Ссылки разные.</p>
+          <div class="input-group"><label class="label">Ссылка на сайт</label><input id="partnerSiteLink" readonly value="${escapeHtml(siteLink)}"></div>
+          <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;">
+            <button class="btn primary" data-action="partner-copy-site-link">Скопировать ссылку на сайт</button>
+          </div>
+          <div class="input-group" style="margin-top:14px;"><label class="label">Ссылка на Telegram-бота</label><input id="partnerBotLink" readonly value="${escapeHtml(botLink)}"></div>
+          <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;">
+            <button class="btn primary" data-action="partner-copy-bot-link">Скопировать ссылку на бота</button>
+            <button class="btn ghost" data-action="partner-refresh">Обновить</button>
+          </div>
+        </div>
+
+        <div class="profile-card" style="margin-top:16px;">
+          <h3>Вывести средства</h3>
+          <p class="muted">Минимальная сумма вывода — ${escapeHtml(formatRub(stats.min_payout_rub || 1000))}. После отправки заявка уходит админу, срок выплаты — до 3 рабочих дней.</p>
+          <div class="upload-grid two">
+            <div class="input-group"><label class="label">Сумма вывода, ₽</label><input id="partnerPayoutAmount" type="number" min="1000" step="100" placeholder="1000" ${canPayout ? '' : 'disabled'}></div>
+            <div class="input-group"><label class="label">Номер карты</label><input id="partnerPayoutCard" inputmode="numeric" placeholder="2200 0000 0000 0000" ${canPayout ? '' : 'disabled'}></div>
+          </div>
+          <div class="input-group"><label class="label">ФИО получателя</label><input id="partnerPayoutName" placeholder="Иванов Иван Иванович" ${canPayout ? '' : 'disabled'}></div>
+          <div class="input-group"><label class="label">Комментарий — необязательно</label><input id="partnerPayoutComment" placeholder="Например: СБП/банк" ${canPayout ? '' : 'disabled'}></div>
+          <div class="actions compact-gap" style="margin-top:14px;"><button id="partnerPayoutSubmitBtn" class="btn primary" ${canPayout ? '' : 'disabled'}>${state.partner.payoutSending ? 'Отправляю…' : 'Отправить заявку'}</button></div>
+        </div>
+
+        <div class="profile-card" style="margin-top:16px;">
+          <h3>Последние начисления</h3>
+          <div class="tableish" style="margin-top:12px;">
+            ${commissions.length ? commissions.map((item) => `
+              <div class="table-row"><span>${escapeHtml(item.referral_label || 'Реферал')}</span><span>${escapeHtml(formatRub(item.commission_amount_rub))}</span><span class="badge ok">${escapeHtml(String(item.commission_percent || 0))}%</span></div>
+            `).join('') : `<div class="help-text">Начислений пока нет.</div>`}
+          </div>
+        </div>
+      </div>
+
+      <div class="workspace-side scroll">
+        <div class="result-card">
+          <h4>Баланс партнёрки</h4>
+          <div class="tableish" style="margin-top:12px;">
+            <div class="table-row"><span class="muted">Заработано всего</span><span>${escapeHtml(formatRub(stats.earned_total_rub))}</span><span class="badge muted">total</span></div>
+            <div class="table-row"><span class="muted">Доступно</span><span>${escapeHtml(formatRub(stats.available_balance_rub))}</span><span class="badge ok">available</span></div>
+            <div class="table-row"><span class="muted">Ожидает выплаты</span><span>${escapeHtml(formatRub(stats.pending_payout_balance_rub))}</span><span class="badge warn">pending</span></div>
+            <div class="table-row"><span class="muted">Выплачено</span><span>${escapeHtml(formatRub(stats.paid_total_rub))}</span><span class="badge muted">paid</span></div>
+          </div>
+        </div>
+
+        <div class="result-card">
+          <h4>Мои рефералы</h4>
+          <div class="tableish" style="margin-top:12px;">
+            ${referrals.length ? referrals.slice(0, 12).map((item) => `
+              <div class="table-row"><span>${escapeHtml(item.label || 'Реферал')}</span><span>${escapeHtml(formatDate(item.created_at || ''))}</span><span class="badge ${item.paid ? 'ok' : 'muted'}">${item.paid ? 'оплатил' : 'новый'}</span></div>
+            `).join('') : `<div class="help-text">Рефералов пока нет.</div>`}
+          </div>
+        </div>
+
+        <div class="result-card">
+          <h4>История выплат</h4>
+          <div class="tableish" style="margin-top:12px;">
+            ${payouts.length ? payouts.slice(0, 10).map((item) => `
+              <div class="table-row"><span>${escapeHtml(formatRub(item.amount_rub))}</span><span>**** ${escapeHtml(item.card_last4 || '')}</span><span class="badge ${item.status === 'paid' ? 'ok' : item.status === 'rejected' ? 'danger' : 'warn'}">${escapeHtml(item.status || '')}</span></div>
+            `).join('') : `<div class="help-text">Выплат пока нет.</div>`}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderPartnerInspector() {
+  const data = partnerDashboard();
+  const stats = data?.stats || {};
+  return `
+    <div class="inspector-card">
+      <div class="section-title">Партнёрская программа</div>
+      <div class="help-text" style="margin-top:10px;">Ссылки для сайта и Telegram-бота находятся в центральном блоке. Здесь только краткий баланс.</div>
+      <div style="margin-top:14px; display:grid; gap:10px;">
+        <div style="padding:12px; border:1px solid rgba(255,255,255,.08); border-radius:14px; background:rgba(255,255,255,.035);">
+          <div class="muted" style="font-size:12px;">Доступно к выводу</div>
+          <div style="margin-top:4px; font-weight:800; font-size:20px;">${escapeHtml(formatRub(stats.available_balance_rub))}</div>
+        </div>
+        <div style="padding:12px; border:1px solid rgba(255,255,255,.08); border-radius:14px; background:rgba(255,255,255,.035);">
+          <div class="muted" style="font-size:12px;">Минимум вывода</div>
+          <div style="margin-top:4px; font-weight:800; font-size:20px;">${escapeHtml(formatRub(stats.min_payout_rub || 1000))}</div>
+        </div>
+        <div style="padding:12px; border:1px solid rgba(255,255,255,.08); border-radius:14px; background:rgba(255,255,255,.035);">
+          <div class="muted" style="font-size:12px;">Рефералов всего</div>
+          <div style="margin-top:4px; font-weight:800; font-size:20px;">${escapeHtml(String(stats.total_referrals ?? 0))}</div>
+        </div>
+      </div>
+      <div class="actions compact-gap" style="margin-top:12px;"><button class="btn ghost small" data-action="partner-refresh">Обновить</button></div>
+    </div>
+  `;
+}
+
+function renderProfileWorkspace() {
+  const user = state.me || null;
+  const registerPending = state.authUi.registerPendingEmail || '';
+  const linkPending = state.authUi.linkPendingEmail || '';
+  if (!user) {
+    return `
+      <div class="workspace-grid single">
+        <div class="workspace-main scroll">
+          <div class="profile-card">
+            <h4>Вход и регистрация</h4>
+            <div class="actions compact-gap" style="margin-bottom:14px; flex-wrap:wrap;">
+              <button class="btn ${state.authUi.profileTab === 'login' ? 'primary' : 'ghost'}" data-action="profile-tab-login">Вход по почте</button>
+              <button class="btn ${state.authUi.profileTab === 'register' ? 'primary' : 'ghost'}" data-action="profile-tab-register">Регистрация</button>
+            </div>
+            ${state.authUi.profileTab === 'login' ? `
+              <div class="field-grid two">
+                <div class="input-group"><label class="label">Email</label><input id="profile_login_email" type="email" placeholder="name@example.com"></div>
+                <div class="input-group"><label class="label">Пароль</label><input id="profile_login_password" type="password" placeholder="Пароль"></div>
+              </div>
+              <div class="actions compact-gap" style="margin-top:14px;"><button id="profileLoginBtn" class="btn primary">Войти по почте</button></div>
+              <small class="muted" style="display:block; margin-top:10px;">Если аккаунт уже существует в Telegram, войди через Telegram в правом верхнем углу и привяжи почту внутри профиля.</small>
+            ` : `
+              <div class="field-grid two">
+                <div class="input-group"><label class="label">Email</label><input id="profile_register_email" type="email" placeholder="name@example.com" value="${escapeHtml(registerPending)}"></div>
+                <div class="input-group"><label class="label">Пароль</label><input id="profile_register_password" type="password" placeholder="Минимум 6 символов"></div>
+              </div>
+              <div class="input-group" style="margin-top:12px;"><label class="label">Повтори пароль</label><input id="profile_register_password2" type="password" placeholder="Повтори пароль"></div>
+              <div class="actions compact-gap" style="margin-top:14px;"><button id="profileRegisterStartBtn" class="btn primary">Отправить код</button></div>
+              ${registerPending ? `
+                <div class="field-grid two" style="margin-top:16px;">
+                  <div class="input-group"><label class="label">Код из письма</label><input id="profile_register_code" type="text" inputmode="numeric" placeholder="6 цифр"></div>
+                  <div class="input-group"><label class="label">Подтверждение</label><input type="text" value="${escapeHtml(registerPending)}" disabled></div>
+                </div>
+                <div class="actions compact-gap" style="margin-top:12px;"><button id="profileRegisterConfirmBtn" class="btn secondary">Подтвердить и войти</button></div>
+              ` : ''}
+              <small class="muted" style="display:block; margin-top:10px;">После подтверждения почты ты сразу войдёшь в аккаунт.</small>
+            `}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="workspace-grid single">
       <div class="workspace-main scroll">
         <div class="profile-card">
           <h4>Профиль</h4>
           <div class="tableish">
-            <div class="table-row"><span class="muted">Пользователь</span><span>${escapeHtml(state.me ? ((state.me.first_name || '') + ' ' + (state.me.last_name || '')).trim() || state.me.username || 'Telegram user' : '—')}</span><span class="badge muted">telegram</span></div>
-            <div class="table-row"><span class="muted">Username</span><span>${escapeHtml(state.me?.username ? '@' + state.me.username : '—')}</span><span class="badge muted">session</span></div>
-            <div class="table-row"><span class="muted">API Base URL</span><span>${escapeHtml(state.apiBaseUrl || '—')}</span><span class="badge ${state.apiOnline ? 'ok' : 'warn'}">${state.apiOnline ? 'online' : 'offline'}</span></div>
+            <div class="table-row"><span class="muted">Имя</span><span>${escapeHtml(formatUserName(user))}</span><span class="badge muted">account</span></div>
+            <div class="table-row"><span class="muted">Способы входа</span><span>${escapeHtml(authMethodsLabel(user))}</span><span class="badge muted">auth</span></div>
+            <div class="table-row"><span class="muted">Email</span><span>${escapeHtml(user.email || 'не привязан')}</span><span class="badge ${user.email_verified ? 'ok' : 'warn'}">${user.email_verified ? 'verified' : 'not set'}</span></div>
+            <div class="table-row"><span class="muted">Telegram</span><span>${escapeHtml(user.username ? '@' + user.username : (user.linked_telegram_user_id ? `id ${user.linked_telegram_user_id}` : 'не привязан'))}</span><span class="badge ${user.linked_telegram_user_id ? 'ok' : 'muted'}">${user.linked_telegram_user_id ? 'linked' : 'not set'}</span></div>
+          </div>
+          <div class="actions compact-gap" style="margin-top:14px;">
+            ${user.email ? `<button id="profileOpenResetBtn" class="btn secondary">Забыли пароль?</button><button id="profileChangePasswordScrollBtn" class="btn outline">Сменить пароль</button>` : ''}
+            <button id="profileLogoutBtn" class="btn ghost">Выйти</button>
           </div>
         </div>
-      </div>
-      <div class="workspace-side scroll">
-        <div class="result-card">
-          <h4>Следующий шаг</h4>
-          <small>Для продакшена сюда нужно добавить Telegram Login с проверкой подписи и общую user-модель, чтобы сайт и бот работали от одного аккаунта.</small>
-        </div>
+
+        ${user.email ? `
+          <div class="profile-card" id="profileChangePasswordCard" style="margin-top:16px;">
+            <h4>Сменить пароль</h4>
+            <div class="field-grid two">
+              <div class="input-group"><label class="label">Текущий пароль</label><input id="profile_change_current_password" type="password" placeholder="Текущий пароль"></div>
+              <div class="input-group"><label class="label">Новый пароль</label><input id="profile_change_new_password" type="password" placeholder="Минимум 6 символов"></div>
+            </div>
+            <div class="input-group" style="margin-top:12px;"><label class="label">Повтори новый пароль</label><input id="profile_change_new_password2" type="password" placeholder="Повтори новый пароль"></div>
+            <div class="actions compact-gap" style="margin-top:14px;"><button id="profileChangePasswordBtn" class="btn primary">Сохранить новый пароль</button></div>
+            <small class="muted" style="display:block; margin-top:10px;">Если не помнишь старый пароль, используй восстановление через код на почту.</small>
+          </div>
+        ` : ''}
+
+        ${!user.email ? `
+          <div class="profile-card" style="margin-top:16px;">
+            <h4>Привязать email и пароль</h4>
+            <div class="field-grid two">
+              <div class="input-group"><label class="label">Email</label><input id="profile_link_email" type="email" placeholder="name@example.com" value="${escapeHtml(linkPending)}"></div>
+              <div class="input-group"><label class="label">Пароль</label><input id="profile_link_password" type="password" placeholder="Минимум 6 символов"></div>
+            </div>
+            <div class="input-group" style="margin-top:12px;"><label class="label">Повтори пароль</label><input id="profile_link_password2" type="password" placeholder="Повтори пароль"></div>
+            <div class="actions compact-gap" style="margin-top:14px;"><button id="profileLinkEmailStartBtn" class="btn primary">Отправить код</button></div>
+            ${linkPending ? `
+              <div class="field-grid two" style="margin-top:16px;">
+                <div class="input-group"><label class="label">Код из письма</label><input id="profile_link_code" type="text" inputmode="numeric" placeholder="6 цифр"></div>
+                <div class="input-group"><label class="label">Email</label><input type="text" value="${escapeHtml(linkPending)}" disabled></div>
+              </div>
+              <div class="actions compact-gap" style="margin-top:12px;"><button id="profileLinkEmailConfirmBtn" class="btn secondary">Подтвердить привязку</button></div>
+            ` : ''}
+          </div>
+        ` : ''}
+
+        ${!user.linked_telegram_user_id ? `
+          <div class="profile-card" style="margin-top:16px;">
+            <h4>Привязать Telegram</h4>
+            <small class="muted" style="display:block; margin-bottom:12px;">После привязки тот же аккаунт сайта можно будет открывать через Telegram Login.</small>
+            <div id="profileTelegramLinkMount" class="telegram-login-mount"></div>
+          </div>
+        ` : ''}
       </div>
     </div>
   `;
@@ -4218,7 +7376,27 @@ function renderProfileWorkspace() {
 function mediaCard(title, asset, isVideo = false, multiple = false, fit = 'cover') {
   if (!asset) return '';
   const thumbClass = `asset-thumb ${fit === 'contain' ? 'fit-contain' : ''}`.trim();
+  const normalizedTitle = String(title || '').trim().toLowerCase();
+  const isReferenceCard = normalizedTitle === 'reference images' || normalizedTitle === 'reference image';
+  const singleReferenceStyle = isReferenceCard
+    ? 'display:flex;align-items:center;justify-content:center;min-height:188px;padding:14px;border-radius:18px;background:linear-gradient(180deg, rgba(8,12,26,0.96) 0%, rgba(4,7,18,0.92) 100%);box-shadow:inset 0 0 0 1px rgba(255,255,255,0.04);'
+    : '';
+  const singleReferenceImageStyle = isReferenceCard
+    ? 'display:block;width:100%;height:100%;max-width:220px;max-height:160px;object-fit:contain;object-position:center;border-radius:14px;box-shadow:0 10px 26px rgba(0,0,0,0.28);margin:0 auto;'
+    : '';
   if (multiple && Array.isArray(asset)) {
+    if (asset.length === 1) {
+      const first = asset[0];
+      return `
+        <div class="asset-card">
+          <h4>${escapeHtml(title)}</h4>
+          <div class="media-card-preview" style="${singleReferenceStyle}">
+            <img class="${thumbClass}" style="${singleReferenceImageStyle}" src="${escapeHtml(first.url)}" alt="${escapeHtml(first.name)}">
+          </div>
+          <small>1 файл</small>
+        </div>
+      `;
+    }
     return `
       <div class="asset-card">
         <h4>${escapeHtml(title)}</h4>
@@ -4232,7 +7410,7 @@ function mediaCard(title, asset, isVideo = false, multiple = false, fit = 'cover
   return `
     <div class="asset-card">
       <h4>${escapeHtml(title)}</h4>
-      ${isVideo ? `<video class="${thumbClass}" src="${escapeHtml(asset.url)}" controls></video>` : `<img class="${thumbClass}" src="${escapeHtml(asset.url)}" alt="${escapeHtml(asset.name)}">`}
+      ${isVideo ? `<video class="${thumbClass}" src="${escapeHtml(asset.url)}" controls></video>` : `<img class="${thumbClass}" ${singleReferenceImageStyle ? `style="${singleReferenceImageStyle}"` : ''} src="${escapeHtml(asset.url)}" alt="${escapeHtml(asset.name)}">`}
       <small>${escapeHtml(asset.name)}</small>
     </div>
   `;
@@ -4240,20 +7418,27 @@ function mediaCard(title, asset, isVideo = false, multiple = false, fit = 'cover
 
 
 function renderChatInspector() {
-  const isPromptBuilder = isPromptBuilderAvailable();
+  const modeOptions = [
+    ['chat', 'Chat'],
+    ['prompt_builder', 'Prompt Builder'],
+  ].map(([value, label]) => `<option value="${value}" ${state.chat.mode === value ? 'selected' : ''}>${label}</option>`).join('');
+
   return `
     <div class="inspector-card">
       <div class="section-title">ChatGPT Studio</div>
-      <div class="input-group"><label class="label">Assistant</label><input type="text" value="ChatGPT" disabled></div>
+      <div class="input-group"><label class="label">Assistant</label><input type="text" value="AI Chat" disabled></div>
       <div class="input-group"><label class="label">Model</label>
         <select id="chat_model">
           <option value="gpt-4o-mini" ${state.chat.model === 'gpt-4o-mini' ? 'selected' : ''}>GPT 4 mini</option>
           <option value="gpt-5.4" ${state.chat.model === 'gpt-5.4' ? 'selected' : ''}>GPT 5.4</option>
+          <option value="claude-sonnet-4-6" ${state.chat.model === 'claude-sonnet-4-6' ? 'selected' : ''}>Claude Sonnet 4.6 · Free</option>
         </select>
       </div>
       <div class="input-group"><label class="label">Режим</label>
-        <input type="text" value="${isPromptBuilder ? 'Prompt Builder' : 'Chat'}" disabled>
+        <select id="chat_mode">${modeOptions}</select>
       </div>
+      <button class="btn outline full chat-new-dialog-btn" data-action="start-new-chat">Новый диалог</button>
+      <div class="help-text">Кнопка очищает историю. При смене GPT/Claude контекст не смешивается.</div>
     </div>
   `;
 }
@@ -4294,17 +7479,97 @@ function renderVideoInspector() {
           <label class="label">Семейство</label>
           <select id="video_provider">${providerOptions}</select>
         </div>
+        ${Object.keys(VIDEO_REGISTRY[state.video.provider]?.models || {}).length > 1 ? `
         <div class="input-group">
           <label class="label">Модель</label>
           <select id="video_model">${modelOptions}</select>
         </div>
+        ` : ''}
         ${Object.keys(videoModelConfig().modes).length > 1 ? `<div class="input-group"><label class="label">Режим</label><select id="video_mode">${modeOptions}</select></div>` : ''}
       </div>
     </div>
     ${renderVideoModeFields(videoModelConfig())}
     <div class="inspector-card">
-      <button class="btn primary full video-run-btn ${state.video.isGenerating ? 'loading' : ''}" id="videoRunPrimaryBtn" data-action="run-video" ${state.video.isGenerating ? 'disabled' : ''}>${escapeHtml(videoRunButtonLabel())}</button>
+      <button class="btn primary full video-run-btn ${isVideoRunLocked() ? 'loading' : ''}" id="videoRunPrimaryBtn" data-action="run-video" ${isVideoRunLocked() ? 'disabled' : ''}>${escapeHtml(videoRunButtonLabel())}</button>
       <div class="help-text" style="margin-top:10px;">${escapeHtml(getVideoRunCost().helper || 'Стоимость генерации пересчитывается прямо в кнопке.')}</div>
+    </div>
+  `;
+}
+
+function renderKling3NewShotsPanel() {
+  return '';
+}
+
+function renderKling3NewElementsPanel() {
+  return '';
+}
+
+function renderKling3NewWorkspaceMultiShotBlock() {
+  if (!(state.studio === 'video' && state.video.model === 'kling-3.0-new' && state.video.mode === 'multi_shot')) return '';
+  const shots = getKling3NewShots();
+  const total = getKling3NewShotDuration();
+  const rows = shots.map((shot, index) => {
+    const linked = getKling3NewShotElements(index);
+    const linkedHtml = linked.length
+      ? `<div style="margin-top:10px; display:grid; gap:8px;">${linked.map((el) => {
+          const fullElement = getKling3NewElements().find((item) => item.name === el.name) || {};
+          const imageUrls = kling3NewElementImageUrls(fullElement);
+          const imageMetas = kling3NewElementImageMetas(fullElement);
+          const thumbs = imageUrls.length
+            ? `<div style="margin-top:10px; display:grid; grid-template-columns:repeat(auto-fill, minmax(92px, 1fr)); gap:10px;">${imageUrls.map((url, refIndex) => {
+                const meta = imageMetas[refIndex] || {};
+                const label = meta.name || kling3NewImageFileLabel(url) || `Фото ${refIndex + 1}`;
+                const dims = meta.width && meta.height ? `${meta.width}×${meta.height}px` : '';
+                const size = kling3NewFormatFileSize(meta.size);
+                return `<div style="position:relative; border:1px solid rgba(255,255,255,.12); border-radius:14px; overflow:hidden; background:rgba(255,255,255,.045);">
+                  <button type="button" data-action="kling3-new-preview-element-image" data-url="${escapeHtml(url)}" title="Открыть фото" style="display:block; width:100%; padding:0; border:0; background:transparent; cursor:pointer;">
+                    <img src="${escapeHtml(url)}" loading="lazy" alt="${escapeHtml(label)}" style="display:block; width:100%; height:72px; object-fit:cover; background:#111;">
+                  </button>
+                  <button class="btn ghost small" type="button" data-action="kling3-new-remove-element-image" data-index="${index}" data-element-name="${escapeHtml(el.name)}" data-ref-index="${refIndex}" title="Удалить фото" style="position:absolute; top:5px; right:5px; min-width:26px; height:26px; padding:0; border-radius:999px; background:rgba(0,0,0,.62); border:1px solid rgba(255,255,255,.2);">×</button>
+                  <div style="padding:7px 8px 8px;">
+                    <div style="font-size:11px; font-weight:700; line-height:1.25; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${escapeHtml(label)}">${refIndex + 1}. ${escapeHtml(label)}</div>
+                    <div class="help-text" style="font-size:10px; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml([dims, size].filter(Boolean).join(' · ') || 'загружено')}</div>
+                  </div>
+                </div>`;
+              }).join('')}</div>`
+            : '';
+          return `<div class="inspector-subcard" style="padding:10px; border:1px solid var(--border); border-radius:14px;">
+            <div class="row between" style="gap:8px; align-items:center;">
+              <span class="badge">@${escapeHtml(el.name)} · ${escapeHtml(el.kind === 'video' ? 'video' : `${el.files_count || 0} img`)}</span>
+              <button class="btn ghost small" type="button" data-action="kling3-new-remove-element" data-index="${index}" data-element-name="${escapeHtml(el.name)}">Удалить element</button>
+            </div>
+            ${thumbs}
+          </div>`;
+        }).join('')}</div>`
+      : `<div class="help-text" style="margin-top:10px;">Можно добавить image element прямо в этот shot. Фото можно докидывать по одному: для запуска нужно 2–4 фото в одном element. Имя вставится в prompt автоматически.</div>`;
+    return `
+      <div class="inspector-card" style="margin-top:14px;">
+        <div class="row between" style="align-items:flex-start; gap:12px;">
+          <div><div class="section-title" style="margin:0;">Shot ${index + 1}</div><div class="help-text">Локальные elements относятся только к этому shot. Сейчас доступны только image elements: на 1 element минимум 2 фото и максимум 4 фото.</div></div>
+          ${shots.length > 2 ? `<button class="btn ghost small" type="button" data-action="kling3-new-remove-shot" data-index="${index}">Удалить</button>` : ''}
+        </div>
+        <div class="field-grid two" style="margin-top:12px;">
+          ${fieldSelect('Duration', `video_kling3NewShotDuration_${index}`, String(shot.duration || '3'), [1,2,3,4,5,6,7,8,9,10,11,12].map((n) => [String(n), `${n} sec`]))}
+        </div>
+        <label class="field" style="margin-top:10px;"><span>Shot prompt</span><textarea id="video_kling3NewShotPrompt_${index}" rows="4" maxlength="500" placeholder="Опиши этот shot. Элементы будут подставляться как @shot${index + 1}_elN">${escapeHtml(shot.prompt || '')}</textarea></label>
+        <div class="actions compact-gap" style="margin-top:10px; flex-wrap:wrap;">
+          <label class="btn outline small" style="cursor:pointer;">+ Фото element<input id="video_kling3NewShotImageUpload_${index}" type="file" accept="image/jpeg,image/png" multiple style="display:none;"></label>
+                  </div>
+        ${linkedHtml}
+      </div>
+    `;
+  }).join('');
+  return `
+    <div class="inspector-card" style="margin-top:16px;">
+      <div class="row between" style="align-items:flex-start; gap:12px;">
+        <div>
+          <div class="section-title" style="margin:0;">Multi-shot scenes</div>
+          <div class="help-text">Основной Prompt в Multi-shot скрыт: используется только prompt внутри каждого shot. Общая длительность должна быть 3–15 сек.</div>
+        </div>
+        <button class="btn ghost small" type="button" data-action="kling3-new-add-shot">+ Add shot</button>
+      </div>
+      <div class="help-text" style="margin-top:8px;">Сейчас: ${total} сек. Start frame остаётся справа. Last frame в Multi-shot не используется.</div>
+      ${rows}
     </div>
   `;
 }
@@ -4317,7 +7582,7 @@ function renderVideoModeFields(model) {
     parts.push(sectionUpload(label, id, hint, multiple, accept));
   };
   const addFields = (html) => parts.push(`<div class="inspector-card"><div class="field-grid two">${html}</div></div>`);
-  const addPrompt = () => parts.push(sectionTextarea('Prompt', 'video_prompt', state.video.prompt, 'Опиши сцену, действие, камеру, свет и ожидаемый результат.'));
+  const addPrompt = () => {};
 
   if (state.video.model === 'motion-control') {
     addUpload('Avatar photo', 'video_avatarImage', 'Фото персонажа, который должен повторять движение.');
@@ -4327,13 +7592,46 @@ function renderVideoModeFields(model) {
     return parts.join('');
   }
 
-  if (['image_to_video', 'multi_shot'].includes(mode)) addUpload('Start frame', 'video_startFrame', 'Стартовый кадр для генерации.');
-  if (state.video.provider === 'kling' && ['image_to_video', 'multi_shot'].includes(mode) && ['kling-2.5', 'kling-3.0'].includes(state.video.model)) addUpload('End frame', 'video_endFrame', 'Финальный кадр, если нужен переход или финальная поза.');
+  const needsStartFrame =
+    (state.video.provider === 'kling' && ['image_to_video', 'multi_shot'].includes(mode)) ||
+    (state.video.provider === 'veo' && mode === 'image_to_video') ||
+    (state.video.provider === 'grok' && mode === 'image_to_video') ||
+    (state.video.provider === 'pixverse_c1' && ['image_to_video', 'transition'].includes(mode));
+
+  if (needsStartFrame) addUpload('Start frame', 'video_startFrame', 'Стартовый кадр для генерации.');
+  if (state.video.provider === 'kling' && (
+    (['image_to_video', 'multi_shot'].includes(mode) && ['kling-2.5', 'kling-3.0'].includes(state.video.model)) ||
+    (state.video.model === 'kling-3.0-new' && mode === 'image_to_video')
+  )) addUpload('End frame', 'video_endFrame', 'Финальный кадр, если нужен переход или финальная поза.');
   if (state.video.provider === 'veo' && state.video.model === 'veo-3.1-pro' && mode === 'image_to_video') addUpload('Last frame', 'video_lastFrame', 'Финальный кадр для Veo 3.1.');
+  if (state.video.provider === 'pixverse_c1' && mode === 'transition') addUpload('Last frame', 'video_lastFrame', 'Последний кадр для режима Transition.');
   if (state.video.provider === 'veo' && state.video.model === 'veo-3.1-pro' && mode === 'image_to_video') addUpload('Reference images', 'video_referenceImages', 'До 3 референсов.', true, 'image/*');
-  if (state.video.provider === 'seedance' && mode === 'image_to_video') addUpload('Reference images', 'video_referenceImages', 'До 9 референсов.', true, 'image/*');
 
   addPrompt();
+
+  if (state.video.provider === 'grok') {
+    addFields(`${fieldSelect('Mode', 'video_providerModeGrok', state.video.providerMode || 'normal', [['fun','Fun'],['normal','Normal'],['spicy','Spicy']])}${fieldSelect('Duration', 'video_durationGrok', state.video.duration || '6', grokDurationOptions())}${fieldSelect('Resolution', 'video_resolutionGrok', state.video.resolution || '480p', [['480p','480p'],['720p','720p']])}${fieldSelect('Aspect ratio', 'video_aspectRatioGrok', state.video.aspectRatio || '16:9', [['2:3','2:3'],['3:2','3:2'],['1:1','1:1'],['16:9','16:9'],['9:16','9:16']])}`);
+    parts.push(`<div class="inspector-card"><div class="help-text">Fun / Normal / Spicy, resolution = 480p / 720p, длительности 6 / 12 / 18 / 24 / 30 сек.</div></div>`);
+    return parts.join('');
+  }
+
+  if (state.video.provider === 'pixverse_c1') {
+    if (mode === 'fusion') {
+      addUpload('Reference images', 'video_referenceImages', 'До 7 изображений. Используй в prompt теги @image1 , @image2 и далее.', true, 'image/*');
+    }
+    const aspectField = ['text_to_video', 'fusion'].includes(mode)
+      ? fieldSelect('Aspect ratio', 'video_aspectRatioPixVerse', state.video.aspectRatio || '16:9', [['16:9','16:9'],['4:3','4:3'],['1:1','1:1'],['3:4','3:4'],['9:16','9:16'],['2:3','2:3'],['3:2','3:2'],['21:9','21:9']])
+      : '';
+    addFields(`${fieldSelect('Duration', 'video_durationPixVerse', state.video.duration || '5', pixVerseDurationOptions())}${fieldSelect('Resolution', 'video_resolutionPixVerse', state.video.resolution || '720p', [['360p','360p'],['540p','540p'],['720p','720p'],['1080p','1080p']])}${aspectField}`);
+    parts.push(`<div class="inspector-card"><div class="help-text">PixVerse C1 на сайте запускаем сразу со звуком. Доступно 5 / 10 / 15 сек.</div></div>`);
+    return parts.join('');
+  }
+
+  if (state.video.model === 'kling-3.0-new') {
+    addFields(`${fieldSelect('Quality', 'video_resolution', normalizeKling3NewModeValue(state.video.resolution || 'std'), [['std','Standard'],['pro','Pro'],['4K','4K']])}${fieldSelect('Aspect ratio', 'video_aspectRatio', state.video.aspectRatio || '16:9', [['16:9','16:9'],['9:16','9:16'],['1:1','1:1']])}${mode !== 'multi_shot' ? fieldSelect('Duration', 'video_duration', state.video.duration || '5', [['3','3 sec'],['5','5 sec'],['10','10 sec'],['15','15 sec']]) : ''}`);
+    parts.push(`<div class="inspector-card">${fieldTogglePanel('Enable audio', 'video_enableAudio', state.video.enableAudio, 'Audio влияет на цену. В Multi-shot KIE может включать звук по умолчанию.', state.video.enableAudio ? 'Звук включён' : 'Без звука')}</div>`);
+    return parts.join('');
+  }
 
   if (state.video.model === 'kling-1.6') {
     addFields(`${fieldSelect('Duration', 'video_durationLegacy', state.video.duration || '5', [['5','5 sec'],['10','10 sec']])}${fieldSelect('Quality', 'video_quality', state.video.quality, [['standard','Standard'],['pro','Pro']])}`);
@@ -4353,7 +7651,33 @@ function renderVideoModeFields(model) {
     return parts.join('');
   }
   if (state.video.provider === 'seedance') {
-    addFields(`${fieldSelect('Duration', 'video_durationSeedance', state.video.duration || '5', [['5','5 sec'],['10','10 sec'],['15','15 sec']])}${fieldSelect('Aspect ratio', 'video_aspectRatioSeedance', state.video.aspectRatio || '16:9', [['16:9','16:9'],['9:16','9:16'],['4:3','4:3'],['3:4','3:4']])}`);
+    if (mode === 'image_to_video') {
+      addUpload('Reference images', 'video_referenceImages', 'До 9 изображений для Seedance 2.0 Preview.', true, 'image/*');
+    }
+
+    addFields(`${fieldSelect('Duration', 'video_durationSeedance', state.video.duration || '5', [['5','5 sec'],['10','10 sec'],['15','15 sec']])}${fieldSelect('Aspect ratio', 'video_aspectRatioSeedance', state.video.aspectRatio || '16:9', [['16:9','16:9'],['9:16','9:16'],['1:1','1:1']])}`);
+    return parts.join('');
+  }
+  if (state.video.provider === 'seedance_kie') {
+    if (mode === 'image_to_video') {
+      addUpload('Reference images', 'video_referenceImages', 'До 7 изображений суммарно. Стартовый и последний кадр входят в лимит, только если включены.', true, 'image/*');
+      addUpload('Reference audio', 'video_referenceAudios', 'До 3 аудиофайлов. Только MP3, максимум 15 секунд каждый. Необязательно.', true, '.mp3,.wav,audio/mpeg,audio/mp3,audio/wav,audio/x-wav,audio/wave');
+    } else if (mode === 'omni_reference') {
+      addUpload('Photo reference', 'video_referenceImages', 'Image refs остаются справа. Общий лимит Omni Reference: до 12 refs суммарно.', true, 'image/*');
+      addUpload('Audio reference', 'video_referenceAudios', 'До 3 аудиофайлов. Только MP3 , максимум 15 секунд каждый. Audio-only нельзя.', true, '.mp3,.wav,audio/mpeg,audio/mp3,audio/wav,audio/x-wav,audio/wave');
+    }
+
+    addFields(`${fieldSelect('Duration', 'video_durationSeedance', state.video.duration || '5', [['5','5 sec'],['10','10 sec'],['15','15 sec']])}${fieldSelect('Aspect ratio', 'video_aspectRatioSeedance', state.video.aspectRatio || '16:9', [['16:9','16:9'],['9:16','9:16'],['1:1','1:1']])}`);
+    return parts.join('');
+  }
+  if (state.video.provider === 'switchx') {
+    const switchxAlphaMode = ['auto', 'fill'].includes(String(state.video.switchxAlphaMode || 'auto').toLowerCase()) ? String(state.video.switchxAlphaMode || 'auto').toLowerCase() : 'auto';
+    addUpload('Source video', 'video_sourceVideo', 'Исходное видео для замены/стилизации до 8 сек.', false, 'video/mp4,video/quicktime');
+    addUpload('Reference image', 'video_referenceImages', 'Можно загрузить свой референс вручную.', true, 'image/*');
+    parts.push(sectionTextarea('Prompt для AI-референса', 'video_switchxRefPrompt', state.video.switchxRefPrompt || '', 'Опиши, каким должен быть reference image из 1-го кадра: персонаж, одежда, стиль, свет, окружение.'));
+    parts.push(`<div class="inspector-card"><button class="btn secondary full" data-action="run-switchx-ref" ${state.video.switchxReferenceStatus === 'processing' ? 'disabled' : ''}>${state.video.switchxReferenceStatus === 'processing' ? 'Создание AI-референса...' : 'Создать AI-референс через Nano Banana Pro'}</button><div class="help-text" style="margin-top:10px;">Берём 1-й кадр из видео, генерируем ref через Nano Banana Pro и потом используем его в SwitchX. Стоимость AI-референса: 2 ток.</div></div>`);
+    addFields(`${fieldSelect('Mask mode', 'video_switchxAlphaMode', switchxAlphaMode, [['auto','Auto'],['fill','Fill']])}${fieldSelect('Resolution', 'video_resolutionSwitchx', state.video.resolution || '1080', [['720','720p'],['1080','1080p']])}`);
+    parts.push(`<div class="inspector-card"><div class="help-text">Auto — AI сам решает, что сохранить. Fill — меняет весь кадр целиком.</div></div>`);
     return parts.join('');
   }
   if (state.video.provider === 'sora') {
@@ -4396,7 +7720,7 @@ function renderImageInspector() {
     `;
   }
 
-  const providerOptions = Object.entries(IMAGE_REGISTRY).map(([id, provider]) => `<option value="${escapeHtml(id)}" ${state.image.provider === id ? 'selected' : ''}>${escapeHtml(provider.name)}</option>`).join('');
+  const providerOptions = Object.entries(IMAGE_REGISTRY).filter(([, provider]) => !provider?.hidden).map(([id, provider]) => `<option value="${escapeHtml(id)}" ${state.image.provider === id ? 'selected' : ''}>${escapeHtml(provider.name)}</option>`).join('');
   const providerModels = Object.entries(imageProviderConfig().models);
   const hasMultipleModels = providerModels.length > 1;
   const modelOptions = providerModels.map(([id, model]) => `<option value="${escapeHtml(id)}" ${state.image.model === id ? 'selected' : ''}>${escapeHtml(model.name)}</option>`).join('');
@@ -4433,11 +7757,23 @@ function renderImageModeFields() {
     parts.push(sectionUpload(label, id, hint, multiple, accept));
   };
   const addFields = (html) => parts.push(`<div class="inspector-card"><div class="field-grid two">${html}</div></div>`);
-  const addPrompt = (placeholder = 'Опиши, что нужно создать или изменить: стиль, композицию, свет, детали, фон.') => parts.push(sectionTextarea('Prompt', 'image_prompt', state.image.prompt, placeholder));
+  const addPrompt = () => {};
 
   if (imageNeedsBaseImage()) addUpload('Base image', 'image_baseImage', 'Главное фото или база, от которой нужно отталкиваться.');
   if (imageNeedsSourceImage() || (state.image.provider === 'posters' && state.image.mode === 'poster')) {
-    addUpload('Source image', 'image_sourceImage', state.image.provider === 'posters' && state.image.mode === 'poster' ? 'Опционально: фото, которое нужно встроить в афишу.' : 'Основное изображение для редактирования или фотосессии.');
+    const isProNewRefs = state.image.provider === 'nano_banana_pro_new' && state.image.mode === 'image_to_image';
+    const isGptRefs = state.image.provider === 'gpt_image_2' && state.image.mode === 'image_to_image';
+    addUpload(
+      (isProNewRefs || isGptRefs) ? 'Reference images' : 'Source image',
+      'image_sourceImage',
+      isProNewRefs
+        ? 'Можно добавить до 8 reference images для Nano Banana Pro - NEW.'
+        : (isGptRefs
+          ? 'Можно добавить до 4 reference images для GPT Image 2.0.'
+          : (state.image.provider === 'posters' && state.image.mode === 'poster' ? 'Опционально: фото, которое нужно встроить в афишу.' : 'Основное изображение для редактирования или фотосессии.')),
+      (isProNewRefs || isGptRefs),
+      'image/*'
+    );
   }
 
   if (state.image.provider === 'topaz_photo') {
@@ -4456,28 +7792,60 @@ function renderImageModeFields() {
     return parts.join('');
   }
 
-  if (state.image.provider === 'photosession') {
-    addPrompt('Опиши образ, локацию, свет, одежду, позу и итоговую атмосферу фотосессии.');
-    addFields(`${fieldSelect('Style', 'image_stylePreset', state.image.stylePreset || 'editorial', [['editorial','Editorial'],['fashion','Fashion'],['cinematic','Cinematic'],['street','Street'],['luxury','Luxury']])}${fieldSelect('Mood', 'image_moodPreset', state.image.moodPreset || 'premium', [['premium','Premium'],['soft','Soft'],['dramatic','Dramatic'],['bright','Bright'],['romantic','Romantic']])}`);
+  if (state.image.provider === 'gpt_image_2') {
+    const aspectOptions = state.image.mode === 'image_to_image'
+      ? [['match_input_image','Match input'],['16:9','16:9'],['9:16','9:16'],['1:1','1:1'],['4:5','4:5']]
+      : [['16:9','16:9'],['9:16','9:16'],['1:1','1:1'],['4:5','4:5']];
+    addFields(`${fieldSelect('Aspect ratio', state.image.mode === 'image_to_image' ? 'image_aspectRatio' : 'image_aspectRatioText', state.image.aspectRatio || (state.image.mode === 'image_to_image' ? 'match_input_image' : '1:1'), aspectOptions)}`);
+    parts.push(`
+      <div class="inspector-card">
+        <div class="help-text">GPT Image 2.0: два режима как в боте — Text → Image и Image → Image. Для Image → Image можно загрузить до 4 reference images, затем опиши правку.</div>
+      </div>
+    `);
     return parts.join('');
   }
 
-  if (state.image.provider === 'two_images') {
-    addPrompt('Опиши, как объединить два изображения: что взять из base image, что взять из source image, какой нужен итоговый стиль.');
-    addFields(`${fieldSelect('Resolution', 'image_resolution', state.image.resolution || '2K', [['1K','1K'],['2K','2K']])}${fieldSelect('Safety', 'image_safetyLevel', state.image.safetyLevel || 'high', [['high','High'],['medium','Medium'],['low','Low']])}`);
+  if (state.image.provider === 'seedream') {
+    let seedreamHelp = 'Промпт уйдёт как есть, без внутренней обвязки.';
+    if (state.image.mode === 'single') seedreamHelp = '1 фото + чистый промпт. Сначала загрузи фото, потом опиши, что сделать.';
+    if (state.image.mode === 'i2i') seedreamHelp = 'Фото 1 — основа, Фото 2 — референс. Промпт уйдёт как есть, без внутренней обвязки.';
+    if (state.image.mode === 't2i') seedreamHelp = 'Только текстовый промпт, без входного фото.';
+    parts.push(`<div class="inspector-card"><div class="help-text">${escapeHtml(seedreamHelp)}</div></div>`);
+    addFields(`${fieldSelect('Resolution', 'image_resolution', state.image.resolution || '2K', [['2K','2K'],['4K','4K']])}${fieldSelect('Aspect ratio', state.image.mode === 't2i' ? 'image_aspectRatioText' : 'image_aspectRatio', state.image.aspectRatio || (state.image.mode === 't2i' ? '9:16' : 'match_input_image'), state.image.mode === 't2i' ? [['16:9','16:9'],['9:16','9:16'],['1:1','1:1'],['4:5','4:5']] : [['match_input_image','Match input'],['16:9','16:9'],['9:16','9:16'],['1:1','1:1'],['4:5','4:5']])}`);
+    return parts.join('');
+  }
+
+  if (state.image.provider === 'midjourney') {
+    parts.push(`<div class="inspector-card"><div class="help-text">Midjourney V7: один запуск вернёт 4 изображения. После генерации будут доступны Reroll и Variation для каждой карточки.</div></div>`);
+    addUpload('Style ref', 'image_styleRefImage', 'Опционально: image style reference для --sref. Один файл.');
+    addUpload('Omni ref', 'image_omniRefImage', 'Опционально: person/object reference для --oref. Один файл.');
+    addFields(`${fieldSelect('Aspect ratio', 'image_aspectRatioText', state.image.aspectRatio || '1:1', [['1:1','1:1'],['16:9','16:9'],['9:16','9:16'],['4:5','4:5']])}${fieldSelect('Speed', 'image_mjSpeedMode', state.image.mjSpeedMode || 'fast', [['fast','Fast · 1 ток.'],['turbo','Turbo · 2 ток.']])}`);
+    addFields(`${fieldInput('Stylize (0-1000)', 'image_mjStylize', state.image.mjStylize || 100)}${fieldInput('Chaos (0-100)', 'image_mjChaos', state.image.mjChaos || 0)}`);
+    parts.push(`<div class="inspector-card">${fieldTogglePanel('Raw mode', 'image_mjRaw', !!state.image.mjRaw, 'Снижает авто-стилизацию Midjourney и делает результат более буквальным.', state.image.mjRaw ? 'RAW' : 'OFF')}</div>`);
     return parts.join('');
   }
 
   addPrompt();
   const showImageResolution = true;
   const showAspect = state.image.mode !== 'image_edit';
-  const aspectOptions = state.image.mode === 'image_to_image'
-    ? [['match_input_image','Match input'],['16:9','16:9'],['9:16','9:16'],['1:1','1:1'],['3:4','3:4'],['4:3','4:3']]
-    : [['16:9','16:9'],['9:16','9:16'],['1:1','1:1'],['3:4','3:4'],['4:3','4:3']];
+  const isNanoBanana2 = state.image.provider === 'nano_banana_2';
+  const isNanoBananaProNew = state.image.provider === 'nano_banana_pro_new';
+  const isKieNanoBanana = isNanoBanana2 || isNanoBananaProNew;
+  const isSeedream = state.image.provider === 'seedream';
+  const resolutionOptions = isKieNanoBanana
+    ? [['2K','2K • 1 ток.'],['4K','4K • 2 ток.']]
+    : [['1K','1K'],['2K','2K']];
+  const aspectOptions = isKieNanoBanana
+    ? (state.image.mode === 'image_to_image'
+      ? [['match_input_image','Match input'],['16:9','16:9'],['9:16','9:16'],['1:1','1:1'],['4:5','4:5']]
+      : [['16:9','16:9'],['9:16','9:16'],['1:1','1:1'],['4:5','4:5']])
+    : (state.image.mode === 'image_to_image'
+      ? [['match_input_image','Match input'],['16:9','16:9'],['9:16','9:16'],['1:1','1:1'],['3:4','3:4'],['4:3','4:3']]
+      : [['16:9','16:9'],['9:16','9:16'],['1:1','1:1'],['3:4','3:4'],['4:3','4:3']]);
   const fieldParts = [];
-  if (showImageResolution) fieldParts.push(fieldSelect('Resolution', 'image_resolution', state.image.resolution || '2K', [['1K','1K'],['2K','2K']]));
+  if (showImageResolution) fieldParts.push(fieldSelect('Resolution', 'image_resolution', state.image.resolution || '2K', resolutionOptions));
   if (showAspect) fieldParts.push(fieldSelect('Aspect ratio', state.image.mode === 'text_to_image' || state.image.mode === 't2i' ? 'image_aspectRatioText' : 'image_aspectRatio', state.image.aspectRatio || (state.image.mode === 'image_to_image' ? 'match_input_image' : '16:9'), aspectOptions));
-  fieldParts.push(fieldSelect('Safety', 'image_safetyLevel', state.image.safetyLevel || 'high', [['high','High'],['medium','Medium'],['low','Low']]));
+  if (!isKieNanoBanana && !isSeedream) fieldParts.push(fieldSelect('Safety', 'image_safetyLevel', state.image.safetyLevel || 'high', [['high','High'],['medium','Medium'],['low','Low']]));
   addFields(fieldParts.join(''));
   return parts.join('');
 }
@@ -4497,11 +7865,116 @@ function renderBillingInspector() {
   `;
 }
 
+function balanceHistoryBaseReasonLabel(reason) {
+  const normalized = String(reason || '').trim().toLowerCase();
+  const labels = {
+    yookassa_topup: 'Пополнение через ЮKassa',
+    stars_topup: 'Пополнение через Telegram Stars',
+    kling_hold: 'Генерация Kling',
+    kling3_create: 'Генерация Kling 3',
+    grok_video: 'Генерация Grok',
+    pixverse_c1_video: 'Генерация PixVerse C1',
+    veo_video: 'Генерация Veo',
+    sora_video: 'Генерация Sora',
+    seedance_video: 'Генерация Seedance 2.0 Preview',
+    seedance_extend: 'Продление Seedance 2.0 Preview',
+    seedance_kie_video: 'Генерация Seedance 2.0',
+    seedance_kie_extend: 'Продление Seedance 2.0',
+    switchx_video: 'Генерация SwitchX',
+    nano_banana: 'Генерация Nano Banana',
+    nano_banana_2: 'Генерация Nano Banana 2',
+    nano_banana_pro: 'Генерация Nano Banana Pro',
+    nano_banana_pro_new: 'Генерация Nano Banana Pro - NEW',
+    photosession_generation: 'Нейрофотосессия',
+    seedream_45_single: 'Генерация Seedream 4.5',
+    two_photos: 'Генерация Two Photos',
+    topaz_image_upscale: 'Апскейл фото Topaz',
+    topaz_video_upscale: 'Апскейл видео Topaz',
+    suno_generation: 'Генерация Suno',
+    suno_music: 'Генерация музыки Suno',
+    workspace_music: 'Генерация музыки',
+    site_create: 'Создание сайта',
+    site_revision: 'Правка сайта',
+  };
+  if (labels[normalized]) return labels[normalized];
+  if (!normalized) return 'Операция с балансом';
+  return normalized.replace(/_/g, ' ').replace(/\b\w/g, (ch) => ch.toUpperCase());
+}
+
+function balanceHistoryReasonLabel(item) {
+  const normalized = String(item?.reason || '').trim().toLowerCase();
+  if (!normalized) return 'Операция с балансом';
+  if (normalized === 'kling_rollback') return 'Возврат • Генерация Kling';
+  if (normalized.endsWith('_refund')) {
+    return `Возврат • ${balanceHistoryBaseReasonLabel(normalized.replace(/_refund$/, ''))}`;
+  }
+  return balanceHistoryBaseReasonLabel(normalized);
+}
+
+function balanceHistoryFilteredItems() {
+  const items = Array.isArray(state.balanceHistory.items) ? state.balanceHistory.items : [];
+  switch (state.balanceHistory.filter) {
+    case 'income':
+      return items.filter((item) => Number(item?.delta_tokens || 0) > 0);
+    case 'expense':
+      return items.filter((item) => Number(item?.delta_tokens || 0) < 0);
+    default:
+      return items;
+  }
+}
+
 function renderProfileInspector() {
+  if (!state.authToken || !state.me) {
+    return `
+      <div class="inspector-card">
+        <div class="section-title">Profile</div>
+        <div class="help-text">В профиле можно зарегистрироваться по email, привязать email к Telegram-аккаунту и позже привязать Telegram к email-аккаунту.</div>
+      </div>
+    `;
+  }
+
+  const items = balanceHistoryFilteredItems();
+  const totalItems = Array.isArray(state.balanceHistory.items) ? state.balanceHistory.items.length : 0;
+  const incomeCount = (state.balanceHistory.items || []).filter((item) => Number(item?.delta_tokens || 0) > 0).length;
+  const expenseCount = (state.balanceHistory.items || []).filter((item) => Number(item?.delta_tokens || 0) < 0).length;
+
   return `
     <div class="inspector-card">
-      <div class="section-title">Profile controls</div>
-      <div class="help-text">Здесь позже появятся Telegram Login, настройки аккаунта, профиль пользователя и связка сайта с ботом.</div>
+      <div class="section-title">Баланс</div>
+      <div class="tableish" style="margin-top:12px;">
+        <div class="table-row"><span class="muted">Текущий баланс</span><span>${escapeHtml(state.balance == null ? '—' : `${state.balance} ток.`)}</span><span class="badge muted">wallet</span></div>
+        <div class="table-row"><span class="muted">Операций загружено</span><span>${escapeHtml(String(totalItems))}</span><span class="badge muted">ledger</span></div>
+        <div class="table-row"><span class="muted">Зачисления</span><span>${escapeHtml(String(incomeCount))}</span><span class="badge ok">+</span></div>
+        <div class="table-row"><span class="muted">Списания</span><span>${escapeHtml(String(expenseCount))}</span><span class="badge warn">−</span></div>
+      </div>
+      <div class="actions compact-gap balance-history-filters" style="margin-top:12px; flex-wrap:wrap;">
+        <button class="btn ${state.balanceHistory.filter === 'all' ? 'primary' : 'ghost'} small" data-action="balance-history-filter" data-filter="all">Все</button>
+        <button class="btn ${state.balanceHistory.filter === 'income' ? 'primary' : 'ghost'} small" data-action="balance-history-filter" data-filter="income">Зачисления</button>
+        <button class="btn ${state.balanceHistory.filter === 'expense' ? 'primary' : 'ghost'} small" data-action="balance-history-filter" data-filter="expense">Списания</button>
+        <button class="btn ghost small" data-action="refresh-balance-history">Обновить</button>
+      </div>
+    </div>
+    <div class="inspector-card">
+      <div class="section-title">История токенов</div>
+      <div class="help-text" style="margin-top:10px;">Последние операции по балансу аккаунта.</div>
+      ${state.balanceHistory.loading ? `<div class="help-text" style="margin-top:12px;">Загружаю историю…</div>` : ''}
+      ${!state.balanceHistory.loading && state.balanceHistory.lastError ? `<div class="help-text" style="margin-top:12px;">${escapeHtml(state.balanceHistory.lastError)}</div>` : ''}
+      ${!state.balanceHistory.loading && !state.balanceHistory.lastError ? `
+        <div class="mini-list balance-history-list" style="margin-top:14px;">
+          ${items.length ? items.map((item) => {
+            const delta = Number(item?.delta_tokens || 0);
+            const deltaLabel = `${delta > 0 ? '+' : ''}${delta} ток.`;
+            const deltaTone = delta > 0 ? 'ok' : (delta < 0 ? 'warn' : 'muted');
+            const createdAtLabel = item?.created_at ? formatDate(item.created_at) : 'Дата не указана';
+            return `
+              <div class="history-item compact balance-history-item ${delta > 0 ? 'income' : (delta < 0 ? 'expense' : 'neutral')}">
+                <div class="history-item-row"><strong>${escapeHtml(balanceHistoryReasonLabel(item))}</strong><span class="badge ${deltaTone}">${escapeHtml(deltaLabel)}</span></div>
+                <small>${escapeHtml(createdAtLabel)}</small>
+              </div>
+            `;
+          }).join('') : `<div class="empty-state">Операций пока нет.</div>`}
+        </div>
+      ` : ''}
     </div>
   `;
 }
@@ -4517,11 +7990,70 @@ function sectionTextarea(label, id, value, placeholder = '') {
   `;
 }
 
+
+function renderWorkspacePromptCard(label, id, value, placeholder = '', help = '', extraContent = '') {
+  return `
+    <div class="result-card workspace-prompt-card">
+      <div class="input-group">
+        <div class="field-head workspace-prompt-head">
+          <label class="label" for="${id}" style="margin:0;">${escapeHtml(label)}</label>
+          <span class="workspace-prompt-counter">${escapeHtml(String((value || '').length))} симв.</span>
+        </div>
+        <textarea id="${id}" class="workspace-prompt-textarea" rows="7" placeholder="${escapeHtml(placeholder)}">${escapeHtml(value || '')}</textarea>
+      </div>
+      ${extraContent || ''}
+      ${help ? `<div class="help-text workspace-prompt-help">${escapeHtml(help)}</div>` : ''}
+    </div>
+  `;
+}
+
+function renderWorkspacePromptExtraTextarea(label, id, value, placeholder = '', rows = 4) {
+  return `
+    <div class="input-group" style="margin-top:14px;">
+      <div class="field-head workspace-prompt-head">
+        <label class="label" for="${id}" style="margin:0;">${escapeHtml(label)}</label>
+        <span class="workspace-prompt-counter">${escapeHtml(String((value || '').length))} симв.</span>
+      </div>
+      <textarea id="${id}" class="workspace-prompt-textarea" rows="${escapeHtml(String(rows || 4))}" placeholder="${escapeHtml(placeholder)}">${escapeHtml(value || '')}</textarea>
+    </div>
+  `;
+}
+
+function renderPixverseFusionAliasBar() {
+  if (!(state.video.provider === 'pixverse_c1' && state.video.mode === 'fusion')) return '';
+  const refs = getFile('video.referenceImages');
+  const items = Array.isArray(refs) ? refs.filter((item) => item?.file).slice(0, 7) : [];
+  const chips = items.length
+    ? items.map((item, index) => {
+        const tag = `@image${index + 1}`;
+        const filename = trimText(item.name || `Reference ${index + 1}`, 28);
+        return `<button class="btn ghost small" type="button" data-action="insert-video-prompt-ref" data-ref-tag="${escapeHtml(tag)}" title="${escapeHtml(item.name || tag)}">${escapeHtml(tag)}</button><span class="help-text" style="margin:0;">${escapeHtml(filename)}</span>`;
+      }).join('<span class="dot"></span>')
+    : '<span class="help-text">Загрузи референсы, и сайт сам даст им теги @image1 , @image2 и далее.</span>';
+  return `
+    <div class="inspector-card" style="margin-top:14px;">
+      <div class="field-head" style="margin-bottom:10px;"><div class="section-title" style="margin:0;">PixVerse Fusion tags</div></div>
+      <div class="actions compact-gap" style="flex-wrap:wrap; align-items:center;">${chips}</div>
+      <div class="help-text" style="margin-top:10px;">Используй в prompt только формат @image1 , @image2 , @image3 и далее.</div>
+    </div>
+  `;
+}
+
 function sectionUpload(label, id, help, multiple = false, accept = 'image/*') {
   const config = FILE_INPUT_MAP[id];
   const asset = config ? getFile(config.key) : null;
   const triggerTitle = multiple ? 'Добавить файлы' : 'Добавить файл';
-  const acceptLabel = accept === 'video/*' ? 'MP4 / MOV / WEBM' : 'PNG / JPG / WEBP';
+  const normalizedAccept = String(accept || '').toLowerCase();
+  let acceptLabel = 'PNG / JPG / WEBP';
+  if (normalizedAccept.includes('audio/') || normalizedAccept.includes('.mp3') || normalizedAccept.includes('.wav')) {
+    acceptLabel = 'MP3';
+  } else if (normalizedAccept.includes('video/') || normalizedAccept.includes('.mp4') || normalizedAccept.includes('.mov') || normalizedAccept.includes('.webm')) {
+    if (normalizedAccept.includes('quicktime') || normalizedAccept.includes('.mov')) {
+      acceptLabel = normalizedAccept.includes('webm') || normalizedAccept === 'video/*' ? 'MP4 / MOV / WEBM' : 'MP4 / MOV';
+    } else {
+      acceptLabel = 'MP4 / MOV / WEBM';
+    }
+  }
   const selectedMarkup = asset ? (
     Array.isArray(asset)
       ? `
@@ -4876,17 +8408,144 @@ async function loadBootstrap() {
   }
 }
 
-async function loadBalance() {
+function refreshBalanceUi() {
+  const balanceValueEl = document.getElementById('balanceValue');
+  if (balanceValueEl) balanceValueEl.textContent = state.balance == null ? '—' : `${state.balance} ток.`;
+  const balanceHintEl = document.getElementById('balanceHint');
+  if (balanceHintEl) balanceHintEl.textContent = state.authToken && state.me ? 'Данные из Личного Кабинета' : 'вход через Telegram или по почте';
+}
+
+async function loadBalance(options = {}) {
+  const { silent = false, renderNow = false } = options;
   if (!requireAuth()) return;
   try {
     const res = await apiFetch('/api/workspace/balance');
     const data = await res.json();
     state.balance = Number(data.balance_tokens || 0);
-    document.getElementById('balanceHint').textContent = 'данные из backend';
-    toast('success', 'Баланс обновлён', `Текущий баланс: ${state.balance} ток.`);
-    render();
+    refreshBalanceUi();
+    if (!silent) {
+      toast('success', 'Баланс обновлён', `Текущий баланс: ${state.balance} ток.`);
+      render();
+    } else if (renderNow) {
+      renderHeader();
+      renderAuthCard();
+    }
   } catch (e) {
-    toast('error', 'Не удалось получить баланс', String(e.message || e));
+    if (!silent) toast('error', 'Не удалось получить баланс', String(e.message || e));
+  }
+}
+
+async function loadBalanceHistory(options = {}) {
+  const { silent = true, force = false, renderNow = false } = options;
+  if (!state.authToken || !state.me) return false;
+  if (state.balanceHistory.loading) return false;
+  if (state.balanceHistory.loaded && !force) {
+    if (renderNow && state.studio === 'profile') renderInspector();
+    return true;
+  }
+
+  state.balanceHistory.loading = true;
+  state.balanceHistory.lastError = '';
+  if (renderNow && state.studio === 'profile') renderInspector();
+
+  try {
+    const qs = new URLSearchParams({ limit: String(state.balanceHistory.limit || 30) });
+    const res = await apiFetch(`/api/workspace/balance/history?${qs.toString()}`);
+    const data = await res.json();
+    state.balanceHistory.items = Array.isArray(data.items) ? data.items : [];
+    state.balanceHistory.loaded = true;
+    if (typeof data.balance_tokens !== 'undefined') state.balance = Number(data.balance_tokens || 0);
+    refreshBalanceUi();
+    if (state.studio === 'profile') renderInspector();
+    return true;
+  } catch (e) {
+    state.balanceHistory.items = [];
+    state.balanceHistory.loaded = false;
+    state.balanceHistory.lastError = String(e.message || e);
+    if (!silent) toast('error', 'Не удалось получить историю баланса', state.balanceHistory.lastError);
+    if (state.studio === 'profile') renderInspector();
+    return false;
+  } finally {
+    state.balanceHistory.loading = false;
+    if (renderNow && state.studio === 'profile') renderInspector();
+  }
+}
+
+
+async function bindPendingPartnerRef() {
+  if (!state.authToken || !state.me) return false;
+  let code = '';
+  try { code = normalizePartnerRefCode(localStorage.getItem(PARTNER_REF_KEY) || ''); } catch {}
+  if (!code) return false;
+  try {
+    await apiFetch('/api/partner/referral/bind', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ref_code: code, source: 'site' }),
+    });
+    localStorage.removeItem(PARTNER_REF_KEY);
+    return true;
+  } catch (e) {
+    console.warn('partner referral bind failed', e);
+    return false;
+  }
+}
+
+async function loadPartnerDashboard(options = {}) {
+  const { silent = true, force = false, renderNow = false } = options;
+  if (!state.authToken || !state.me) return false;
+  if (state.partner.loading) return false;
+  if (state.partner.loaded && !force) {
+    if (renderNow && state.studio === 'partner') render();
+    return true;
+  }
+  state.partner.loading = true;
+  state.partner.lastError = '';
+  if (renderNow && state.studio === 'partner') render();
+  try {
+    const res = await apiFetch('/api/partner/me');
+    const data = await res.json();
+    state.partner.dashboard = data;
+    state.partner.loaded = true;
+    try { localStorage.setItem('astrabot:partnerState', JSON.stringify({ dashboard: data })); } catch {}
+    if (state.studio === 'partner') render();
+    return true;
+  } catch (e) {
+    state.partner.lastError = String(e.message || e);
+    state.partner.loaded = false;
+    if (!silent) toast('error', 'Партнёрка недоступна', state.partner.lastError);
+    if (state.studio === 'partner') render();
+    return false;
+  } finally {
+    state.partner.loading = false;
+  }
+}
+
+async function submitPartnerPayout() {
+  if (!requireAuth()) return;
+  const amount = Number(document.getElementById('partnerPayoutAmount')?.value || '0');
+  const card = (document.getElementById('partnerPayoutCard')?.value || '').trim();
+  const name = (document.getElementById('partnerPayoutName')?.value || '').trim();
+  const comment = (document.getElementById('partnerPayoutComment')?.value || '').trim();
+  if (!Number.isFinite(amount) || amount <= 0) { toast('error', 'Укажи сумму', 'Минимальная сумма вывода — 1000 ₽.'); return; }
+  if (card.replace(/\D/g, '').length < 12) { toast('error', 'Проверь карту', 'Номер карты слишком короткий.'); return; }
+  if (name.length < 5) { toast('error', 'Проверь ФИО', 'Укажи ФИО получателя.'); return; }
+  state.partner.payoutSending = true;
+  render();
+  try {
+    await apiFetch('/api/partner/payouts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ amount_rub: amount, card_number: card, card_holder_name: name, comment }),
+    });
+    toast('success', 'Заявка отправлена', 'Выплата будет обработана до 3 рабочих дней.');
+    state.partner.loaded = false;
+    await loadPartnerDashboard({ silent: true, force: true, renderNow: true });
+  } catch (e) {
+    toast('error', 'Не удалось отправить заявку', String(e.message || e));
+  } finally {
+    state.partner.payoutSending = false;
+    if (state.studio === 'partner') render();
   }
 }
 
@@ -4923,9 +8582,22 @@ async function loadVoiceHistory(options = {}) {
     state.voiceHistory.selectedId = selected?.id || '';
     state.voiceHistory.selectedItem = selected || null;
 
-    if (selected && (!state.voice.audioUrl || selectId || String(state.voice.generationId || '') !== String(selected.id || ''))) {
-      applyVoiceHistoryItemToWorkspace(selected, { silent: true });
-      return;
+    if (selected) {
+      const selectedIdText = String(selected.id || '').trim();
+      const currentGenerationId = String(state.voice.generationId || '').trim();
+      const selectedStatus = voiceHistoryStatus(selected);
+      const isCurrentPending = !!currentGenerationId && currentGenerationId === selectedIdText && ['queued', 'processing', 'running'].includes(selectedStatus);
+
+      if (voiceHistoryCanHydrateWorkspace(selected) && (!state.voice.audioUrl || selectId || currentGenerationId !== selectedIdText)) {
+        applyVoiceHistoryItemToWorkspace(selected, { silent: true });
+        return;
+      }
+
+      if (isCurrentPending) {
+        state.voice.errorText = selected.error_message || '';
+        state.voice.lastGeneratedAt = selected.completed_at || selected.created_at || state.voice.lastGeneratedAt;
+        state.voice.isGenerating = true;
+      }
     }
 
     saveState();
@@ -4997,9 +8669,12 @@ async function loadPromptCategories() {
     const res = await apiFetch('/api/workspace/prompts/categories');
     const data = await res.json();
     state.prompts.categories = data.items || [];
-    if (!state.prompts.selectedCategory && state.prompts.categories[0]) {
-      state.prompts.selectedCategory = state.prompts.categories[0].slug;
-      await loadPromptGroups(state.prompts.selectedCategory);
+    if (state.prompts.selectedCategory && !state.prompts.categories.some((item) => item.slug === state.prompts.selectedCategory)) {
+      state.prompts.selectedCategory = '';
+      state.prompts.groups = [];
+      state.prompts.selectedGroupId = '';
+      state.prompts.items = [];
+      state.prompts.openItemId = '';
     }
     render();
   } catch (e) {
@@ -5010,16 +8685,21 @@ async function loadPromptCategories() {
 }
 
 async function loadPromptGroups(category) {
+  if (!category) return;
   state.prompts.selectedCategory = category;
   state.prompts.selectedGroupId = '';
   state.prompts.items = [];
+  state.prompts.openItemId = '';
   try {
     const res = await apiFetch(`/api/workspace/prompts/groups?category=${encodeURIComponent(category)}`);
     const data = await res.json();
     state.prompts.groups = data.items || [];
-    if (state.prompts.groups[0]) {
-      state.prompts.selectedGroupId = state.prompts.groups[0].id;
-      await loadPromptItems(state.prompts.selectedGroupId);
+    if (shouldAutoOpenSinglePromptGroup(category, state.prompts.groups)) {
+      const firstGroupId = state.prompts.groups[0]?.id;
+      if (firstGroupId) {
+        await loadPromptItems(firstGroupId);
+        return;
+      }
     }
     render();
   } catch (e) {
@@ -5028,7 +8708,9 @@ async function loadPromptGroups(category) {
 }
 
 async function loadPromptItems(groupId) {
+  if (!groupId) return;
   state.prompts.selectedGroupId = groupId;
+  state.prompts.openItemId = '';
   try {
     const res = await apiFetch(`/api/workspace/prompts/items?group_id=${encodeURIComponent(groupId)}`);
     const data = await res.json();
@@ -5039,6 +8721,24 @@ async function loadPromptItems(groupId) {
   }
 }
 
+
+async function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function pollWorkspaceChatJob(jobId) {
+  const cleanJobId = String(jobId || '').trim();
+  if (!cleanJobId) throw new Error('Пустой job_id чата.');
+  for (let attempt = 0; attempt < 160; attempt += 1) {
+    await sleep(attempt < 10 ? 1200 : 2000);
+    const res = await apiFetch(`/api/workspace/chat/status/${encodeURIComponent(cleanJobId)}`);
+    const data = await res.json();
+    const status = String(data.status || '').toLowerCase();
+    if (status === 'completed') return data;
+    if (status === 'failed') throw new Error(data.error || 'Чат-воркер вернул ошибку.');
+  }
+  throw new Error('Чат долго не отвечает. Проверь worker_chat.py и очередь Redis.');
+}
 
 async function sendChat() {
   ensureChatModeCompatibility();
@@ -5055,10 +8755,18 @@ async function sendChat() {
   const userMessage = [outgoing, filePreview].filter(Boolean).join('\n\n') || filePreview;
 
   state.chat.messages.push({ role: 'user', content: userMessage });
+  const pendingMessage = { role: 'system', content: '⏳ Думаю...', isPrompt: false };
+  state.chat.messages.push(pendingMessage);
   state.chat.input = '';
   render();
   scrollChatToBottom();
   saveState();
+
+  const replacePending = (message) => {
+    const idx = state.chat.messages.indexOf(pendingMessage);
+    if (idx >= 0) state.chat.messages.splice(idx, 1, message);
+    else state.chat.messages.push(message);
+  };
 
   try {
     const history = state.chat.messages.filter((m) => m.role === 'user' || m.role === 'assistant').slice(-12);
@@ -5068,6 +8776,7 @@ async function sendChat() {
       const form = new FormData();
       form.append('text', outgoing);
       form.append('history', JSON.stringify(history));
+      form.append('summary', state.chat.summary || '');
       form.append('model', state.chat.model);
       form.append('mode', state.chat.mode);
       form.append('temperature', String(state.chat.temperature));
@@ -5075,17 +8784,18 @@ async function sendChat() {
       attachments.forEach((item) => {
         if (item?.file) form.append('files', item.file, item.name || item.file.name || 'file');
       });
-      res = await apiFetch('/api/workspace/chat', {
+      res = await apiFetch('/api/workspace/chat/async', {
         method: 'POST',
         body: form,
       });
     } else {
-      res = await apiFetch('/api/workspace/chat', {
+      res = await apiFetch('/api/workspace/chat/async', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text: outgoing,
           history,
+          summary: state.chat.summary || '',
           model: state.chat.model,
           mode: state.chat.mode,
           temperature: state.chat.temperature,
@@ -5094,8 +8804,12 @@ async function sendChat() {
       });
     }
 
-    const data = await res.json();
-    state.chat.messages.push({ role: 'assistant', content: data.answer || 'Пустой ответ.', isPrompt: data.is_prompt !== false });
+    let data = await res.json();
+    if (data.job_id && String(data.status || '').toLowerCase() !== 'completed') {
+      data = await pollWorkspaceChatJob(data.job_id);
+    }
+    if (typeof data.summary === 'string') state.chat.summary = data.summary;
+    replacePending({ role: 'assistant', content: data.answer || 'Пустой ответ.', isPrompt: data.is_prompt !== false });
     pushRun({ studio: 'ChatGPT', title: `Chat · ${state.chat.mode === 'prompt_builder' ? 'Prompt Builder' : 'Chat'}`, summary: (outgoing || filePreview).slice(0, 100) });
     clearChatAttachments();
     render();
@@ -5103,7 +8817,7 @@ async function sendChat() {
     saveState();
   } catch (e) {
     state.chat.input = outgoing;
-    state.chat.messages.push({ role: 'system', content: `Ошибка: ${String(e.message || e)}`, isPrompt: false });
+    replacePending({ role: 'system', content: `Ошибка: ${String(e.message || e)}`, isPrompt: false });
     render();
     scrollChatToBottom();
     saveState();
@@ -5256,13 +8970,39 @@ function applyImageHistoryItemToWorkspace(item) {
   }
   state.image.generationId = selected.id || '';
   state.image.prompt = selected.prompt || state.image.prompt;
+  const imageUrls = imageHistoryUrls(selected);
   state.image.outputUrl = imageUrl;
   state.image.downloadUrl = imageUrl;
   state.image.beforeImageUrl = selected.before_image_url || selected.source_image_url || '';
   state.image.afterImageUrl = selected.after_image_url || imageUrl;
+  state.image.imageUrls = imageUrls;
+  state.image.availableActions = imageHistoryAvailableActions(selected);
+  state.image.activeImageIndex = 0;
   state.image.compareMode = !!selected.compare_mode;
   state.image.comparePosition = 50;
   if (selected.preset_slug) state.image.upscalePreset = selected.preset_slug;
+  if (selected.provider === 'midjourney') {
+    state.image.provider = 'midjourney';
+    state.image.model = 'midjourney-v7';
+    state.image.mode = 'text_to_image';
+    state.image.negativePrompt = selected.negative_prompt || '';
+    state.image.mjStylize = Number.isFinite(Number(selected.mj_stylize)) ? Number(selected.mj_stylize) : state.image.mjStylize;
+    state.image.mjChaos = Number.isFinite(Number(selected.mj_chaos)) ? Number(selected.mj_chaos) : state.image.mjChaos;
+    state.image.mjRaw = !!selected.mj_raw;
+    state.image.mjSpeedMode = selected.mj_speed_mode || state.image.mjSpeedMode || 'fast';
+    state.image.mjSeed = selected.mj_seed || '';
+    state.image.aspectRatio = selected.aspect_ratio || state.image.aspectRatio || '1:1';
+  } else if (selected.provider === 'gpt_image_2') {
+    state.image.provider = 'gpt_image_2';
+    state.image.model = 'gpt-image-2';
+    state.image.mode = selected.mode === 'image_to_image' ? 'image_to_image' : 'text_to_image';
+    state.image.aspectRatio = selected.aspect_ratio || state.image.aspectRatio || (state.image.mode === 'image_to_image' ? 'match_input_image' : '1:1');
+  } else if (selected.provider === 'posters') {
+    state.image.provider = 'gpt_image_2';
+    state.image.model = 'gpt-image-2';
+    state.image.mode = 'image_to_image';
+    state.image.aspectRatio = selected.aspect_ratio || state.image.aspectRatio || 'match_input_image';
+  }
   state.image.errorText = selected.error_message || '';
   state.image.statusText = selected.has_storage_file ? 'Открыт сохранённый результат из библиотеки AstraBot.' : 'Открыт результат из истории.';
   state.image.panel = 'library';
@@ -5405,7 +9145,7 @@ async function runVideo() {
   if (!requireAuth()) return;
   syncVideoSelection();
   if (state.video.isGenerating) return;
-  if (!state.video.prompt.trim()) {
+  if (!(state.video.model === 'kling-3.0-new' && state.video.mode === 'multi_shot') && !state.video.prompt.trim()) {
     toast('error', 'Нужен prompt', 'Введи prompt для генерации видео.');
     return;
   }
@@ -5419,51 +9159,227 @@ async function runVideo() {
   form.append('aspect_ratio', String(state.video.aspectRatio || ''));
   form.append('enable_audio', state.video.enableAudio ? '1' : '0');
   form.append('quality', String(state.video.quality || ''));
+  if (state.video.provider === 'grok') form.append('provider_mode', String(state.video.providerMode || 'normal'));
 
-  const fileFields = {
-    'video.startFrame': 'start_frame',
-    'video.endFrame': 'end_frame',
-    'video.lastFrame': 'last_frame',
-    'video.avatarImage': 'avatar_image',
-    'video.motionVideo': 'motion_video',
-  };
-  Object.entries(fileFields).forEach(([key, field]) => {
-    const file = getFile(key);
-    if (file?.file) form.append(field, file.file, file.name || file.file.name || field);
-  });
+  if (state.video.model === 'kling-3.0-new') {
+    form.set('resolution', normalizeKling3NewModeValue(state.video.resolution || 'std'));
+    if (state.video.mode === 'multi_shot') {
+      const shots = getKling3NewShots().filter((shot) => String(shot.prompt || '').trim());
+      const totalSeconds = shots.reduce((sum, shot) => sum + Math.max(1, Math.min(12, Number(shot.duration || 3) || 3)), 0);
+      if (shots.length < 2) {
+        toast('error', 'Нужны шоты', 'Для Multi-shot нужно минимум 2 заполненных shot prompt.');
+        return;
+      }
+      if (totalSeconds < 3 || totalSeconds > 15) {
+        toast('error', 'Проверь длительность', 'Сумма shot duration должна быть от 3 до 15 секунд.');
+        return;
+      }
+      form.set('prompt', shots.map((shot, idx) => `Shot ${idx + 1}: ${shot.prompt}`).join('\n'));
+      form.set('duration', String(totalSeconds));
+      form.append('multi_shots_json', JSON.stringify(shots.map((shot) => ({ prompt: shot.prompt, duration: Number(shot.duration || 3) || 3 }))));
+    }
+    const kling3NewElements = getKling3NewElements().filter((el) => el.name).map((el) => ({
+      name: el.name,
+      description: el.description,
+      element_input_urls: String(el.image_urls_text || '').split(/\r?\n/).map((x) => x.trim()).filter(Boolean),
+      element_input_video_urls: el.video_url ? [el.video_url] : [],
+    }));
+    for (const el of kling3NewElements) {
+      if (!el.element_input_video_urls.length && el.element_input_urls.length && (el.element_input_urls.length < 2 || el.element_input_urls.length > 4)) {
+        toast('error', 'Проверь element', `@${el.name}: image element должен содержать 2–4 фото.`);
+        return;
+      }
+    }
+    form.append('kling_elements_json', JSON.stringify(kling3NewElements));
+  }
+
+  const startFrame = getFile('video.startFrame');
+  const endFrame = getFile('video.endFrame');
+  const lastFrame = getFile('video.lastFrame');
+  const avatarImage = getFile('video.avatarImage');
+  const motionVideo = getFile('video.motionVideo');
+  const sourceVideo = getFile('video.sourceVideo');
   const refs = getFile('video.referenceImages');
-  if (Array.isArray(refs)) refs.forEach((item) => item?.file && form.append('reference_images', item.file, item.name || item.file.name || 'ref.jpg'));
+  const hasManualRef = Array.isArray(refs) && refs.some((item) => item?.file);
+
+  if (state.video.provider === 'switchx') {
+    if (!sourceVideo?.file && !state.video.switchxSourceUploadId) {
+      toast('error', 'Добавь исходное видео', 'Для SwitchX нужно исходное видео.');
+      return;
+    }
+    if (!state.video.switchxReferenceImageUrl && !hasManualRef) {
+      toast('error', 'Нужен reference image', 'Загрузи референс вручную или сначала создай AI-референс.');
+      return;
+    }
+    const switchxAlphaMode = ['auto', 'fill'].includes(String(state.video.switchxAlphaMode || '').toLowerCase())
+      ? String(state.video.switchxAlphaMode).toLowerCase()
+      : 'auto';
+    form.append('switchx_alpha_mode', switchxAlphaMode);
+    if (switchxAlphaMode === 'select') {
+      let selectMask = getFile('video.switchxSelectMask');
+      if (!selectMask?.file) {
+        toast('error', 'Нужна select mask', 'Для режима Select загрузи PNG/JPG маску 1-го кадра.');
+        return;
+      }
+      try {
+        const editor = runtime.switchxMaskEditor || {};
+        if ((!editor.frameWidth || !editor.frameHeight) && sourceVideo?.url) {
+          try { await ensureSwitchxMaskEditorFrame(); } catch (_e) {}
+        }
+        const targetWidth = Number(editor.frameWidth || 0);
+        const targetHeight = Number(editor.frameHeight || 0);
+        const normalizedMaskFile = await switchxMaskSourceToGrayscaleFile(selectMask.url, targetWidth, targetHeight, selectMask.name || selectMask.file.name || 'switchx_select_mask.png');
+        switchxMaskEditorSetGeneratedFile(normalizedMaskFile);
+        selectMask = getFile('video.switchxSelectMask') || selectMask;
+      } catch (_e) {}
+      form.append('switchx_select_mask', selectMask.file, selectMask.name || selectMask.file.name || 'select_mask.png');
+    }
+    if (state.video.switchxSourceUploadId) form.append('source_video_upload_id', state.video.switchxSourceUploadId);
+    if (sourceVideo?.file && !state.video.switchxSourceUploadId) form.append('source_video', sourceVideo.file, sourceVideo.name || sourceVideo.file.name || 'source.mp4');
+    if (!hasManualRef && state.video.switchxReferenceImageUrl) form.append('reference_image_url', state.video.switchxReferenceImageUrl);
+  }
+  if (state.video.provider === 'pixverse_c1') {
+    const pixVerseRefs = Array.isArray(refs) ? refs.filter((item) => item?.file) : [];
+    if (state.video.mode === 'image_to_video' && !startFrame?.file) {
+      toast('error', 'Нужен start frame', 'Для PixVerse C1 Image → Video нужен стартовый кадр.');
+      return;
+    }
+    if (state.video.mode === 'transition' && (!startFrame?.file || !lastFrame?.file)) {
+      toast('error', 'Нужны 2 кадра', 'Для PixVerse C1 Transition нужны первый и последний кадр.');
+      return;
+    }
+    if (state.video.mode === 'fusion' && !pixVerseRefs.length) {
+      toast('error', 'Нужны референсы', 'Для PixVerse C1 Fusion загрузи хотя бы одно изображение.');
+      return;
+    }
+    if (state.video.mode === 'fusion' && pixVerseRefs.length > 7) {
+      toast('error', 'Слишком много референсов', 'Для PixVerse C1 Fusion доступно максимум 7 изображений.');
+      return;
+    }
+  }
+  if (videoModeUsesField('startFrame') && startFrame?.file && (state.video.provider !== 'seedance_kie' || state.video.seedanceUseStartFrame)) {
+    form.append('start_frame', startFrame.file, startFrame.name || startFrame.file.name || 'start_frame');
+  }
+  if (videoModeUsesField('endFrame') && endFrame?.file) {
+    form.append('end_frame', endFrame.file, endFrame.name || endFrame.file.name || 'end_frame');
+  }
+  if (videoModeUsesField('lastFrame') && lastFrame?.file && (state.video.provider !== 'seedance_kie' || state.video.seedanceUseLastFrame)) {
+    form.append('last_frame', lastFrame.file, lastFrame.name || lastFrame.file.name || 'last_frame');
+  }
+  if (videoModeUsesField('avatarImage') && avatarImage?.file) {
+    form.append('avatar_image', avatarImage.file, avatarImage.name || avatarImage.file.name || 'avatar_image');
+  }
+  if (videoModeUsesField('motionVideo') && motionVideo?.file) {
+    form.append('motion_video', motionVideo.file, motionVideo.name || motionVideo.file.name || 'motion_video');
+  }
+  const audioRefs = getFile('video.referenceAudios');
+  const videoRefs = getFile('video.referenceVideos');
+  if (state.video.provider === 'seedance_kie' && state.video.mode === 'image_to_video') {
+    const imageRefCount = (Array.isArray(refs) ? refs.length : 0) + (state.video.seedanceUseStartFrame && startFrame?.file ? 1 : 0) + (state.video.seedanceUseLastFrame && lastFrame?.file ? 1 : 0);
+    const audioRefCount = Array.isArray(audioRefs) ? audioRefs.length : 0;
+    if (!imageRefCount) {
+      toast('error', 'Нужен image reference', 'Добавь хотя бы один референс, стартовый кадр или последний кадр.');
+      return;
+    }
+    if (imageRefCount > 7) {
+      toast('error', 'Слишком много изображений', 'Для Seedance 2.0 доступно максимум 7 изображений суммарно.');
+      return;
+    }
+    if (audioRefCount > 3) {
+      toast('error', 'Слишком много аудио', 'Для Seedance 2.0 доступно максимум 3 аудиофайла.');
+      return;
+    }
+  }
+  if (state.video.provider === 'seedance_kie' && state.video.mode === 'omni_reference') {
+    const imageRefCount = Array.isArray(refs) ? refs.length : 0;
+    const audioRefCount = Array.isArray(audioRefs) ? audioRefs.length : 0;
+    const videoRefCount = Array.isArray(videoRefs) ? videoRefs.length : 0;
+    const totalRefCount = imageRefCount + audioRefCount + videoRefCount;
+    if (!totalRefCount) {
+      toast('error', 'Нужны референсы', 'Для Omni Reference добавь хотя бы один image, video или audio reference.');
+      return;
+    }
+    if (totalRefCount > 12) {
+      toast('error', 'Слишком много референсов', 'Для Seedance 2.0 Omni Reference доступно максимум 12 refs суммарно.');
+      return;
+    }
+    if (audioRefCount > 3) {
+      toast('error', 'Слишком много аудио', 'Для Seedance 2.0 доступно максимум 3 аудиофайла.');
+      return;
+    }
+    if (audioRefCount && !imageRefCount && !videoRefCount) {
+      toast('error', 'Audio-only не поддерживается', 'Для Omni Reference вместе с audio нужен хотя бы один image или video reference.');
+      return;
+    }
+  }
+  if (videoModeUsesField('referenceImages') && Array.isArray(refs)) refs.forEach((item) => item?.file && form.append('reference_images', item.file, item.name || item.file.name || 'ref.jpg'));
+  if (state.video.provider === 'seedance_kie' && Array.isArray(audioRefs) && ['image_to_video', 'omni_reference'].includes(state.video.mode)) audioRefs.forEach((item) => item?.file && form.append('reference_audios', item.file, item.name || item.file.name || 'ref_audio'));
+  if (state.video.provider === 'seedance_kie' && state.video.mode === 'omni_reference' && Array.isArray(videoRefs)) videoRefs.forEach((item) => item?.file && form.append('reference_videos', item.file, item.name || item.file.name || 'ref_video'));
 
   state.video.isGenerating = true;
   state.video.outputUrl = '';
   state.video.downloadUrl = '';
   state.video.coverUrl = '';
+  state.video.percent = null;
+  state.video.generationId = '';
+  state.video.providerTaskId = '';
   state.video.errorText = '';
   state.video.lastStatus = 'submitted';
   state.video.statusText = 'Задача отправлена. Видео появится в рабочей зоне автоматически.';
+  state.video.requestStartedAt = new Date().toISOString();
+  saveState();
   render();
 
   try {
     const res = await apiFetch('/api/workspace/video/run', { method: 'POST', body: form });
     const data = await res.json();
     state.video.generationId = data.generation_id || '';
-    state.video.providerTaskId = data.task_id || '';
+    state.video.providerTaskId = data.task_id || data.generation_id || '';
+    if (!state.video.generationId) {
+      state.video.isGenerating = false;
+      state.video.lastStatus = 'error';
+      state.video.errorText = String(data?.detail || data?.error || data?.message || 'Backend не вернул generation_id.');
+      state.video.statusText = 'Не удалось запустить генерацию.';
+      state.video.requestStartedAt = '';
+      saveState();
+      render();
+      loadBalance({ silent: true, renderNow: true }).catch(() => {});
+      toast('error', 'Ошибка запуска', state.video.errorText);
+      return;
+    }
     state.video.statusText = data.status_text || 'Генерация началась.';
+    if (data.source_video_upload_id) state.video.switchxSourceUploadId = data.source_video_upload_id;
+    if (state.video.provider === 'switchx' && hasManualRef) {
+      state.video.switchxReferenceImageUrl = '';
+      state.video.switchxRefGenerationId = '';
+      state.video.switchxReferenceStatus = 'idle';
+    } else if (state.video.provider === 'switchx' && data.reference_image_url) {
+      state.video.switchxReferenceImageUrl = data.reference_image_url;
+    }
+    if (typeof data.balance_tokens !== 'undefined') state.balance = Number(data.balance_tokens || 0);
     pushRun({ studio: 'Video', title: `${currentMeta().provider} · ${currentMeta().model}`, summary: state.video.prompt.slice(0, 120) });
     saveState();
     startVideoPolling({ immediate: true });
+    loadBalance({ silent: true, renderNow: true }).catch(() => {});
     toast('success', 'Запуск выполнен', data.status_text || 'Генерация началась.');
   } catch (e) {
+    stopVideoPolling();
+    state.video.isGenerating = false;
+    state.video.requestStartedAt = '';
+    state.video.generationId = '';
+    state.video.providerTaskId = '';
+    state.video.percent = null;
     state.video.errorText = String(e.message || e);
     state.video.lastStatus = 'error';
     state.video.statusText = 'Не удалось запустить генерацию.';
+    loadBalance({ silent: true, renderNow: true }).catch(() => {});
     toast('error', 'Ошибка запуска', state.video.errorText);
   } finally {
-    state.video.isGenerating = false;
     saveState();
     render();
   }
 }
+
 
 
 async function runImage() {
@@ -5475,8 +9391,16 @@ async function runImage() {
     toast('error', 'Нужен prompt', 'Опиши, что нужно создать или изменить в изображении.');
     return;
   }
-  if (imageNeedsSourceImage() && !getFile('image.sourceImage')) {
-    toast('error', 'Нужно изображение', 'Для выбранного режима сначала загрузи source image.');
+  const sourceInputValue = getFile('image.sourceImage');
+  const sourceItems = Array.isArray(sourceInputValue) ? sourceInputValue.filter((item) => item?.file) : (sourceInputValue?.file ? [sourceInputValue] : []);
+
+  if (imageNeedsSourceImage() && !sourceItems.length) {
+    const sourceHint = state.image.provider === 'nano_banana_pro_new'
+      ? 'Для Nano Banana Pro - NEW сначала загрузи хотя бы один reference image.'
+      : (state.image.provider === 'gpt_image_2'
+        ? 'Для GPT Image 2.0 Image → Image сначала загрузи от 1 до 4 reference images.'
+        : 'Для выбранного режима сначала загрузи source image.');
+    toast('error', 'Нужно изображение', sourceHint);
     return;
   }
   if (imageNeedsBaseImage() && !getFile('image.baseImage')) {
@@ -5496,21 +9420,50 @@ async function runImage() {
   form.append('style_preset', String(state.image.stylePreset || ''));
   form.append('mood_preset', String(state.image.moodPreset || ''));
   form.append('preset_slug', String(state.image.upscalePreset || 'standard'));
+  if (state.image.provider === 'midjourney') {
+    form.append('negative_prompt', String(state.image.negativePrompt || ''));
+    form.append('mj_stylize', String(state.image.mjStylize || 100));
+    form.append('mj_chaos', String(state.image.mjChaos || 0));
+    form.append('mj_raw', state.image.mjRaw ? '1' : '0');
+    form.append('mj_speed_mode', String(state.image.mjSpeedMode || 'fast'));
+  }
 
   const source = getFile('image.sourceImage');
   const base = getFile('image.baseImage');
-  if (source?.file) form.append('source_image', source.file, source.name || source.file.name || 'source.png');
-  if (base?.file) form.append('base_image', base.file, base.name || base.file.name || 'base.png');
+  if (imageNeedsSourceImage()) {
+    if (state.image.provider === 'nano_banana_pro_new') {
+      sourceItems.slice(0, 8).forEach((item, index) => {
+        form.append('source_image', item.file, item.name || item.file?.name || `reference_${index + 1}.png`);
+      });
+    } else if (state.image.provider === 'gpt_image_2') {
+      sourceItems.slice(0, 4).forEach((item, index) => {
+        form.append('source_image', item.file, item.name || item.file?.name || `reference_${index + 1}.png`);
+      });
+    } else if (source?.file) {
+      form.append('source_image', source.file, source.name || source.file.name || 'source.png');
+    }
+  }
+  if (imageNeedsBaseImage() && base?.file) form.append('base_image', base.file, base.name || base.file.name || 'base.png');
+  if (state.image.provider === 'midjourney') {
+    const styleRef = getFile('image.styleRefImage');
+    const omniRef = getFile('image.omniRefImage');
+    if (styleRef?.file) form.append('style_ref_image', styleRef.file, styleRef.name || styleRef.file.name || 'style_ref.png');
+    if (omniRef?.file) form.append('omni_ref_image', omniRef.file, omniRef.name || omniRef.file.name || 'omni_ref.png');
+  }
 
   state.image.isGenerating = true;
   state.image.outputUrl = '';
   state.image.downloadUrl = '';
   state.image.beforeImageUrl = '';
   state.image.afterImageUrl = '';
+  state.image.imageUrls = [];
+  state.image.availableActions = {};
+  state.image.activeImageIndex = 0;
   state.image.compareMode = false;
   state.image.comparePosition = 50;
   state.image.generationId = '';
   state.image.errorText = '';
+  state.image.requestStartedAt = new Date().toISOString();
   state.image.statusText = 'Задача отправлена. Жди итоговую картинку в рабочей зоне.';
   saveState();
   render();
@@ -5519,23 +9472,31 @@ async function runImage() {
     const res = await apiFetch('/api/workspace/image/run', { method: 'POST', body: form });
     const data = await res.json();
     state.image.generationId = data.generation_id || '';
-    state.image.outputUrl = data.image_url || data.output_url || '';
-    state.image.downloadUrl = data.download_url || state.image.outputUrl;
-    state.image.beforeImageUrl = data.before_image_url || '';
-    state.image.afterImageUrl = data.after_image_url || state.image.outputUrl;
-    state.image.compareMode = !!data.compare_mode;
+    state.image.outputUrl = '';
+    state.image.downloadUrl = '';
+    state.image.beforeImageUrl = '';
+    state.image.afterImageUrl = '';
+    state.image.imageUrls = [];
+    state.image.availableActions = {};
+    state.image.activeImageIndex = 0;
+    state.image.compareMode = false;
     state.image.comparePosition = 50;
     if (data.preset_slug) state.image.upscalePreset = data.preset_slug;
-    state.image.statusText = data.status_text || 'Изображение готово.';
+    if (typeof data.balance_tokens !== 'undefined') state.balance = Number(data.balance_tokens || 0);
+    state.image.statusText = data.status_text || 'Изображение поставлено в очередь.';
     state.image.panel = 'params';
     pushRun({ studio: 'Image', title: `${currentMeta().provider} · ${currentMeta().model}`, summary: prompt.slice(0, 120) });
     if (state.image.generationId) {
+      startImagePolling({ immediate: true });
       loadImageHistory({ silent: true, keepSelection: true, selectId: state.image.generationId }).catch(() => {});
     }
-    toast('success', 'Изображение готово', state.image.statusText || 'Результат появился в рабочей зоне.');
+    loadBalance({ silent: true, renderNow: true }).catch(() => {});
+    toast('success', 'Запуск выполнен', state.image.statusText || 'Изображение поставлено в очередь.');
   } catch (e) {
+    state.image.requestStartedAt = '';
     state.image.errorText = String(e.message || e);
     state.image.statusText = 'Не удалось выполнить генерацию.';
+    loadBalance({ silent: true, renderNow: true }).catch(() => {});
     toast('error', 'Ошибка генерации', state.image.errorText);
   } finally {
     state.image.isGenerating = false;
@@ -5543,6 +9504,59 @@ async function runImage() {
     render();
   }
 }
+
+async function runMidjourneyAction(action, options = {}) {
+  if (!requireAuth()) return;
+  const actionName = String(action || '').trim().toLowerCase();
+  if (!['reroll', 'variation'].includes(actionName)) return;
+  const sourceGenerationId = String((state.image.panel === 'library' ? imageHistorySelectedItem()?.id : '') || state.image.generationId || '').trim();
+  if (!sourceGenerationId) {
+    toast('error', 'Нет исходной генерации', 'Сначала дождись готового Midjourney результата.');
+    return;
+  }
+  state.image.isGenerating = true;
+  state.image.errorText = '';
+  state.image.outputUrl = '';
+  state.image.downloadUrl = '';
+  state.image.imageUrls = [];
+  state.image.availableActions = {};
+  state.image.activeImageIndex = 0;
+  state.image.statusText = actionName === 'reroll' ? 'Запускаю Midjourney reroll...' : 'Запускаю Midjourney variation...';
+  saveState();
+  render();
+
+  try {
+    const body = {
+      generation_id: sourceGenerationId,
+      action: actionName,
+      image_no: actionName === 'variation' ? Number(options.imageIndex || 0) : null,
+      variation_type: actionName === 'variation' ? String(options.variationType || 'subtle') : null,
+      speed_mode: String(state.image.mjSpeedMode || 'fast'),
+    };
+    const res = await apiFetch('/api/workspace/image/action', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    state.image.generationId = data.generation_id || '';
+    state.image.statusText = data.status_text || 'Midjourney задача поставлена в очередь.';
+    if (typeof data.balance_tokens !== 'undefined') state.balance = Number(data.balance_tokens || 0);
+    startImagePolling({ immediate: true });
+    loadImageHistory({ silent: true, keepSelection: true, selectId: state.image.generationId }).catch(() => {});
+    loadBalance({ silent: true, renderNow: true }).catch(() => {});
+    toast('success', 'Midjourney запущен', state.image.statusText);
+  } catch (e) {
+    state.image.errorText = String(e.message || e);
+    state.image.statusText = 'Не удалось запустить Midjourney action.';
+    toast('error', 'Ошибка Midjourney', state.image.errorText);
+  } finally {
+    state.image.isGenerating = false;
+    saveState();
+    render();
+  }
+}
+
 
 async function pollVideoTask(options = {}) {
   const { silent = false } = options;
@@ -5564,25 +9578,32 @@ async function pollVideoTask(options = {}) {
 
     const readyUrl = historyVideoUrl(item);
     if (readyUrl && state.video.lastStatus === 'completed') {
+      state.video.isGenerating = false;
       state.video.outputUrl = readyUrl;
       state.video.downloadUrl = historyVideoDownloadUrl(item) || readyUrl;
       state.video.percent = 100;
+      state.video.requestStartedAt = '';
       syncVideoEditorWithHistoryItem(item);
       stopVideoPolling();
       saveState();
       render();
+      loadBalance({ silent: true, renderNow: true }).catch(() => {});
       if (!silent) toast('success', 'Видео готово', 'Результат появился в рабочей зоне.');
       return;
     }
 
     if (isVideoTaskFailed(state.video.lastStatus)) {
+      state.video.isGenerating = false;
+      state.video.requestStartedAt = '';
       stopVideoPolling();
       saveState();
       render();
+      loadBalance({ silent: true, renderNow: true }).catch(() => {});
       if (!silent) toast('error', 'Ошибка генерации', state.video.errorText || 'Провайдер вернул ошибку.');
       return;
     }
 
+    state.video.isGenerating = true;
     saveState();
     if (!silent) render();
   } catch (e) {
@@ -5590,7 +9611,122 @@ async function pollVideoTask(options = {}) {
   }
 }
 
+async function pollImageTask(options = {}) {
+  const { silent = false } = options;
+  if (!state.image.generationId || !state.authToken) return null;
+  try {
+    const item = await loadImageHistoryItem(state.image.generationId, { silent: true });
+    if (!item) return null;
+    const status = String(item.status || 'processing').toLowerCase();
+    const imageUrls = imageHistoryUrls(item);
+    const imageUrl = imageUrls[0] || imageHistoryUrl(item) || item.after_image_url || item.image_url || '';
+    state.image.errorText = item.error_message || '';
+    state.image.statusText = item.error_message || (status === 'completed' ? 'Изображение готово и восстановлено в рабочей зоне.' : 'Изображение ещё собирается. Рабочая зона будет восстановлена автоматически.');
+
+    if (status === 'completed' && imageUrl) {
+      stopImagePolling();
+      state.image.isGenerating = false;
+      state.image.requestStartedAt = '';
+      state.image.outputUrl = imageUrl;
+      state.image.downloadUrl = imageUrl;
+      state.image.beforeImageUrl = item.before_image_url || item.source_image_url || '';
+      state.image.afterImageUrl = item.after_image_url || imageUrl;
+      state.image.imageUrls = imageUrls;
+      state.image.availableActions = imageHistoryAvailableActions(item);
+      state.image.activeImageIndex = 0;
+      state.image.compareMode = !!item.compare_mode;
+      state.image.comparePosition = 50;
+      state.image.prompt = item.prompt || state.image.prompt;
+      if (item.provider === 'midjourney') {
+        state.image.provider = 'midjourney';
+        state.image.model = 'midjourney-v7';
+        state.image.mode = 'text_to_image';
+        state.image.negativePrompt = item.negative_prompt || state.image.negativePrompt || '';
+        state.image.mjStylize = Number.isFinite(Number(item.mj_stylize)) ? Number(item.mj_stylize) : state.image.mjStylize;
+        state.image.mjChaos = Number.isFinite(Number(item.mj_chaos)) ? Number(item.mj_chaos) : state.image.mjChaos;
+        state.image.mjRaw = !!item.mj_raw;
+        state.image.mjSpeedMode = item.mj_speed_mode || state.image.mjSpeedMode || 'fast';
+        state.image.mjSeed = item.mj_seed || state.image.mjSeed || '';
+        state.image.aspectRatio = item.aspect_ratio || state.image.aspectRatio || '1:1';
+      }
+      if (item.preset_slug) state.image.upscalePreset = item.preset_slug;
+      state.image.panel = 'params';
+      saveState();
+      render();
+      loadBalance({ silent: true, renderNow: true }).catch(() => {});
+      if (!silent) toast('success', 'Изображение готово', 'Результат появился в рабочей зоне.');
+      return item;
+    }
+
+    if (status === 'completed' && !imageUrl) {
+      state.image.isGenerating = true;
+      state.image.statusText = 'Провайдер уже завершил генерацию. Подтягиваем файл в рабочую зону.';
+      saveState();
+      if (!silent) render();
+      return item;
+    }
+
+    if (['failed', 'error', 'cancelled', 'canceled'].includes(status)) {
+      stopImagePolling();
+      state.image.isGenerating = false;
+      state.image.requestStartedAt = '';
+      saveState();
+      render();
+      loadBalance({ silent: true, renderNow: true }).catch(() => {});
+      if (!silent) toast('error', 'Ошибка генерации', state.image.errorText || 'Провайдер вернул ошибку.');
+      return item;
+    }
+
+    state.image.isGenerating = true;
+    saveState();
+    if (!silent) render();
+    return item;
+  } catch (e) {
+    if (!silent) toast('error', 'Не удалось проверить статус изображения', String(e.message || e));
+    return null;
+  }
+}
+
+
+async function pollVoiceTask(options = {}) {
+  const { silent = false } = options;
+  if (!state.voice.generationId || !state.authToken) return null;
+  try {
+    const item = await loadVoiceHistoryItem(state.voice.generationId, { silent: true });
+    if (!item) return null;
+    const status = String(item.status || 'processing').toLowerCase();
+    state.voice.errorText = item.error_message || '';
+
+    if (status === 'completed' && voiceHistoryAudioUrl(item)) {
+      stopVoicePolling();
+      applyVoiceHistoryItemToWorkspace(item, { silent: true });
+      saveState();
+      render();
+      if (!silent) toast('success', 'Аудио готово', 'Файл сгенерирован и сохранён в истории.');
+      return item;
+    }
+
+    if (['failed', 'error', 'cancelled', 'canceled'].includes(status)) {
+      stopVoicePolling();
+      state.voice.isGenerating = false;
+      saveState();
+      render();
+      if (!silent) toast('error', 'TTS error', state.voice.errorText || 'Провайдер вернул ошибку.');
+      return item;
+    }
+
+    state.voice.isGenerating = true;
+    saveState();
+    if (!silent) render();
+    return item;
+  } catch (e) {
+    if (!silent) toast('error', 'Не удалось проверить статус озвучки', String(e.message || e));
+    return null;
+  }
+}
+
 async function runVoice() {
+  state.voice.outputFormat = VOICE_FIXED_OUTPUT_FORMAT;
   if (!requireAuth()) return;
   if (!state.voice.text.trim()) {
     toast('error', 'Нужен текст', 'Введи текст для озвучки.');
@@ -5611,28 +9747,31 @@ async function runVoice() {
         text: state.voice.text,
         voice_id: state.voice.voiceId,
         model_id: state.voice.modelId,
-        output_format: state.voice.outputFormat,
+        output_format: VOICE_FIXED_OUTPUT_FORMAT,
         language_code: state.voice.languageCode || 'auto',
         manual_voice_settings: !!state.voice.manualVoiceSettings,
         stability: Number(state.voice.stability),
         similarity_boost: Number(state.voice.similarityBoost),
         style: Number(state.voice.style),
         speed: Number(state.voice.speed),
-        use_speaker_boost: !!state.voice.useSpeakerBoost,
+        use_speaker_boost: true,
       }),
     });
     const data = await res.json();
     revokeVoiceAudioUrl();
-    state.voice.audioUrl = data.audio_url || '';
-    state.voice.downloadUrl = data.download_url || data.audio_url || '';
+    state.voice.audioUrl = '';
+    state.voice.downloadUrl = '';
     state.voice.generationId = data.generation_id || '';
-    state.voice.lastGeneratedAt = data.completed_at || data.created_at || new Date().toISOString();
-    state.voice.isGenerating = false;
+    state.voice.lastGeneratedAt = data.created_at || new Date().toISOString();
+    state.voice.isGenerating = true;
     state.voice.errorText = '';
     pushRun({ studio: 'Voice', title: 'TTS generate', summary: state.voice.text.slice(0, 100) });
     saveState();
-    loadVoiceHistory({ silent: true, keepSelection: true, selectId: state.voice.generationId }).catch(() => {});
-    toast('success', 'Аудио готово', 'Файл сгенерирован и сохранён в истории.');
+    if (state.voice.generationId) {
+      startVoicePolling({ immediate: true });
+      loadVoiceHistory({ silent: true, keepSelection: true, selectId: state.voice.generationId }).catch(() => {});
+    }
+    toast('success', 'Запуск выполнен', data.status_text || 'Озвучка поставлена в очередь.');
     render();
   } catch (e) {
     state.voice.isGenerating = false;
@@ -5727,7 +9866,7 @@ async function loadMusicHistoryItem(generationId, options = {}) {
     state.music.lastCompletedAt = item.completed_at || state.music.lastCompletedAt || '';
 
     saveState();
-    render();
+    if (!silent) render();
 
     if (startPolling && ['queued', 'processing', 'running'].includes(String(item.status || '').toLowerCase())) startMusicPolling(item.id);
     return item;
@@ -5756,6 +9895,7 @@ function startMusicPolling(generationId) {
       state.music.isGenerating = false;
       saveState();
       render();
+      loadBalance({ silent: true, renderNow: true }).catch(() => {});
       if (item?.status === 'completed') {
         loadMusicHistory({ silent: true, keepSelection: true, selectId: generationIdText }).catch(() => {});
         toast('success', 'Музыка готова', 'Треки и история обновлены.');
@@ -5890,6 +10030,7 @@ async function runMusic() {
     const data = await res.json();
     state.music.generationId = data.generation_id || '';
     state.music.status = data.status || 'queued';
+    if (typeof data.balance_tokens !== 'undefined') state.balance = Number(data.balance_tokens || 0);
     state.music.statusText = state.music.ai === 'suno'
       ? 'Музыка поставлена в обработку. После завершения здесь появятся 2 трека.'
       : 'Музыка поставлена в обработку. После завершения результат появится в рабочей зоне.';
@@ -5900,6 +10041,7 @@ async function runMusic() {
       startMusicPolling(state.music.generationId);
       loadMusicHistory({ silent: true, keepSelection: true, selectId: state.music.generationId }).catch(() => {});
     }
+    loadBalance({ silent: true, renderNow: true }).catch(() => {});
   } catch (e) {
     state.music.isGenerating = false;
     state.music.status = 'failed';
@@ -5907,6 +10049,7 @@ async function runMusic() {
     state.music.errorText = String(e.message || e);
     saveState();
     render();
+    loadBalance({ silent: true, renderNow: true }).catch(() => {});
     toast('error', 'Music run error', state.music.errorText);
   }
 }
@@ -5984,8 +10127,11 @@ function startMusicToolPolling(taskId) {
       state.music.toolTaskMessage = item.error_message || (item.status === 'completed' ? 'Результат готов.' : 'Задача ещё обрабатывается.');
       state.music.toolTracks = Array.isArray(item.tracks) ? item.tracks : [];
       saveState();
-      render();
-      if (['completed', 'failed'].includes(String(item.status || '').toLowerCase())) {
+      const toolStatus = String(item.status || '').toLowerCase();
+      const shouldRenderToolState = ['completed', 'failed', 'error', 'cancelled', 'canceled'].includes(toolStatus)
+        || (state.studio === 'music' && state.music.activeTab === 'results');
+      if (shouldRenderToolState) render();
+      if (['completed', 'failed', 'error', 'cancelled', 'canceled'].includes(toolStatus)) {
         stopMusicToolPolling();
         if (item.status === 'completed') toast('success', 'Музыкальный инструмент готов', `Получено ${state.music.toolTracks.length || 0} ${musicTrackLabel(state.music.toolTracks.length || 0)}.`);
         else toast('error', 'Ошибка Suno tool', item.error_message || 'Задача завершилась ошибкой.');
@@ -5994,7 +10140,7 @@ function startMusicToolPolling(taskId) {
     } catch (e) {
       state.music.toolTaskMessage = String(e.message || e);
       saveState();
-      render();
+      if (state.studio === 'music' && state.music.activeTab === 'results') render();
     }
     runtime.musicToolPollTimer = setTimeout(tick, 5000);
   };
@@ -6239,17 +10385,12 @@ function resetCurrentStudio() {
       clearVoiceRunState({ keepText: false });
       break;
     case 'music':
-      stopMusicPolling();
+      resetMusicWorkspaceStage();
       state.music.ideaText = '';
       state.music.lyricsText = '';
       state.music.songwriter.input = '';
       state.music.songwriter.messages = [];
       state.music.songwriter.lastAnswer = '';
-      state.music.results = [];
-      state.music.generationId = '';
-      state.music.status = 'idle';
-      state.music.statusText = 'Заполни идею или текст и запусти генерацию.';
-      state.music.errorText = '';
       break;
     case 'workspace':
       state.workspaceNotes = '';
@@ -6277,6 +10418,23 @@ function updateMusicRangeValueLabel(id, value) {
   if (output) output.textContent = Number(value ?? 0).toFixed(2);
 }
 
+
+function isAllowedSeedanceAudioFile(file) {
+  if (!file) return false;
+  const name = String(file.name || '').toLowerCase();
+  const type = String(file.type || '').toLowerCase();
+  if (name.endsWith('.mp3') || name.endsWith('.wav')) return true;
+  return ['audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/wave'].includes(type);
+}
+
+function isAllowedSeedanceVideoFile(file) {
+  if (!file) return false;
+  const name = String(file.name || '').toLowerCase();
+  const type = String(file.type || '').toLowerCase();
+  if (name.endsWith('.mp4') || name.endsWith('.mov')) return true;
+  return ['video/mp4', 'video/quicktime'].includes(type);
+}
+
 function handleInputChange(target, eventType = 'change') {
   const { id, value, type, checked, files } = target;
   if (!id) return;
@@ -6302,13 +10460,163 @@ function handleInputChange(target, eventType = 'change') {
       return;
     }
     const { key, multiple } = fileConfig;
-    setFile(key, multiple ? files : files[0], multiple);
+    const effectiveMultiple = multiple || (id === 'image_sourceImage' && isImageSourceMultipleMode());
+    let normalizedFiles = effectiveMultiple ? files : files[0];
+    if (id === 'video_referenceAudios') {
+      const picked = Array.from(files || []);
+      const valid = picked.filter((item) => isAllowedSeedanceAudioFile(item));
+      if (valid.length !== picked.length) {
+        toast('error', 'Неподдерживаемый формат', 'Для Seedance 2.0 audio refs доступны только MP3 и WAV.');
+      }
+      if (!valid.length) {
+        target.value = '';
+        return;
+      }
+      normalizedFiles = valid;
+    }
+    if (id === 'video_referenceVideos') {
+      const picked = Array.from(files || []);
+      const valid = picked.filter((item) => isAllowedSeedanceVideoFile(item));
+      if (valid.length !== picked.length) {
+        toast('error', 'Неподдерживаемый формат', 'Для Seedance 2.0 video refs доступны только MP4 и MOV.');
+      }
+      if (!valid.length) {
+        target.value = '';
+        return;
+      }
+      normalizedFiles = valid;
+    }
+    setFile(key, normalizedFiles, effectiveMultiple);
+    if (id === 'image_sourceImage' && state.image.provider === 'gpt_image_2' && state.image.mode === 'image_to_image') {
+      const refs = getFile('image.sourceImage');
+      if (Array.isArray(refs) && refs.length > 4) {
+        const trimmed = refs.slice(0, 4);
+        refs.slice(4).forEach((entry) => revokeRuntimeFileEntry(entry));
+        runtime.files['image.sourceImage'] = trimmed;
+        toast('info', 'Ограничение GPT Image 2.0', 'Оставил только первые 4 reference images.');
+      }
+    }
+    if (id === 'image_sourceImage' && state.image.provider === 'nano_banana_pro_new' && state.image.mode === 'image_to_image') {
+      const refs = getFile('image.sourceImage');
+      if (Array.isArray(refs) && refs.length > 8) {
+        const trimmed = refs.slice(0, 8);
+        refs.slice(8).forEach((entry) => revokeRuntimeFileEntry(entry));
+        runtime.files['image.sourceImage'] = trimmed;
+        toast('info', 'Ограничение Nano Banana Pro - NEW', 'Оставил только первые 8 reference images.');
+      }
+    }
     if (id === 'video_motionVideo') probeMotionDuration(getFile('video.motionVideo'));
+    if (id === 'video_sourceVideo') {
+      state.video.switchxSourceUploadId = '';
+      state.video.switchxReferenceImageUrl = '';
+      state.video.switchxRefGenerationId = '';
+      state.video.switchxReferenceStatus = 'idle';
+      resetSwitchxMaskEditor({ clearMaskFile: true });
+      probeSourceVideoDuration(getFile('video.sourceVideo'));
+    }
+    if (id === 'video_referenceImages' && state.video.provider === 'switchx') {
+      const nextRefs = getFile('video.referenceImages');
+      const hasSwitchxManualRef = Array.isArray(nextRefs) && nextRefs.some((item) => item?.file);
+      if (hasSwitchxManualRef) {
+        stopSwitchxRefPolling();
+        state.video.switchxReferenceImageUrl = '';
+        state.video.switchxRefGenerationId = '';
+        state.video.switchxReferenceStatus = 'idle';
+      }
+    }
+    if (id === 'video_referenceImages' && state.video.provider === 'pixverse_c1') {
+      const nextRefs = getFile('video.referenceImages');
+      if (Array.isArray(nextRefs) && nextRefs.length > 7) {
+        const trimmed = nextRefs.slice(0, 7);
+        nextRefs.slice(7).forEach((entry) => revokeRuntimeFileEntry(entry));
+        runtime.files['video.referenceImages'] = trimmed;
+        toast('info', 'Ограничение PixVerse C1', 'Оставил только первые 7 референсов для Fusion.');
+      }
+    }
+    if (id === 'video_referenceAudios' && state.video.provider === 'seedance_kie') {
+      const nextAudios = getFile('video.referenceAudios');
+      if (Array.isArray(nextAudios) && nextAudios.length > 3) {
+        const trimmed = nextAudios.slice(0, 3);
+        nextAudios.slice(3).forEach((entry) => revokeRuntimeFileEntry(entry));
+        runtime.files['video.referenceAudios'] = trimmed;
+        toast('info', 'Ограничение Seedance 2.0', 'Оставил только первые 3 аудиореференса.');
+      }
+    }
+    if (id === 'video_referenceVideos' && state.video.provider === 'seedance_kie') {
+      const nextVideos = getFile('video.referenceVideos');
+      if (Array.isArray(nextVideos) && nextVideos.length > 12) {
+        const trimmed = nextVideos.slice(0, 12);
+        nextVideos.slice(12).forEach((entry) => revokeRuntimeFileEntry(entry));
+        runtime.files['video.referenceVideos'] = trimmed;
+        toast('info', 'Ограничение Seedance 2.0', 'Оставил только первые 12 video references.');
+      }
+    }
+    if (id === 'video_switchxSelectMask') {
+      const editor = runtime.switchxMaskEditor || {};
+      const current = getFile('video.switchxSelectMask');
+      Promise.resolve().then(async () => {
+        if (!current?.url) return;
+        if ((!editor.frameWidth || !editor.frameHeight) && getFile('video.sourceVideo')?.url) {
+          try { await ensureSwitchxMaskEditorFrame(); } catch (_e) {}
+        }
+        const targetWidth = Number(editor.frameWidth || 0);
+        const targetHeight = Number(editor.frameHeight || 0);
+        const normalizedFile = await switchxMaskSourceToGrayscaleFile(current.url, targetWidth, targetHeight, current.name || 'switchx_select_mask.png');
+        switchxMaskEditorSetGeneratedFile(normalizedFile);
+        editor.maskDataUrl = await normalizeSwitchxMaskToTransparent(getFile('video.switchxSelectMask')?.url || current.url, targetWidth, targetHeight);
+        renderWorkspace();
+        render();
+      }).catch(() => {});
+    }
     render();
     return;
   }
 
   const update = (obj, key, val) => { obj[key] = val; };
+
+  if (id.startsWith('video_kling3NewShotImageUpload_') || id.startsWith('video_kling3NewShotVideoUpload_')) {
+    const match = id.match(/^video_kling3NewShot(ImageUpload|VideoUpload)_(\d+)$/);
+    if (match && eventType === 'change') {
+      const shotIndex = Number(match[2]);
+      const kind = match[1] === 'VideoUpload' ? 'video' : 'image';
+      handleKling3NewShotElementUpload(shotIndex, event.target.files, kind)
+        .catch((err) => {
+          toast('error', 'Не удалось добавить element', String(err?.message || err));
+        })
+        .finally(() => {
+          try { event.target.value = ''; } catch (_) {}
+        });
+      return;
+    }
+  }
+
+  if (id.startsWith('video_kling3NewShotPrompt_') || id.startsWith('video_kling3NewShotDuration_')) {
+    const match = id.match(/^video_kling3NewShot(Prompt|Duration)_(\d+)$/);
+    if (match) {
+      const index = Number(match[2]);
+      state.video.kling3NewShots = getKling3NewShots();
+      if (state.video.kling3NewShots[index]) {
+        if (match[1] === 'Prompt') state.video.kling3NewShots[index].prompt = value;
+        if (match[1] === 'Duration') state.video.kling3NewShots[index].duration = value;
+        saveState();
+        if (eventType !== 'input') render();
+      }
+    }
+    return;
+  }
+  if (id.startsWith('video_kling3NewElement')) {
+    const match = id.match(/^video_kling3NewElement(Name|Description|ImageUrls|VideoUrl)_(\d+)$/);
+    if (match) {
+      const fieldMap = { Name: 'name', Description: 'description', ImageUrls: 'image_urls_text', VideoUrl: 'video_url' };
+      const index = Number(match[2]);
+      state.video.kling3NewElements = getKling3NewElements();
+      while (state.video.kling3NewElements.length <= index) state.video.kling3NewElements.push({ name: '', description: '', image_urls_text: '', video_url: '' });
+      state.video.kling3NewElements[index][fieldMap[match[1]]] = value;
+      saveState();
+      if (eventType !== 'input') render();
+    }
+    return;
+  }
 
   if (id.startsWith('editor_audio_')) {
     const match = id.match(/^editor_audio_(\d+)_(audio_start|audio_end|video_start|volume)$/);
@@ -6332,8 +10640,10 @@ function handleInputChange(target, eventType = 'change') {
     case 'apiBaseUrl': state.apiBaseUrl = value; break;
     case 'chatInput': state.chat.input = value; break;
     case 'chat_model':
-      state.chat.model = value;
-      ensureChatModeCompatibility(true);
+      switchChatSession(value, state.chat.mode, { showToast: true });
+      break;
+    case 'chat_mode':
+      switchChatSession(state.chat.model, value, { showToast: true });
       break;
     case 'chat_temperature': state.chat.temperature = Number(value); break;
     case 'chat_maxTokens': state.chat.maxTokens = Number(value); break;
@@ -6343,26 +10653,63 @@ function handleInputChange(target, eventType = 'change') {
       state.video.model = Object.keys(VIDEO_REGISTRY[value].models)[0];
       state.video.mode = Object.keys(VIDEO_REGISTRY[value].models[state.video.model].modes)[0];
       state.video.panel = 'params';
+      resetVideoTransientState({ keepPrompt: false, keepFiles: false });
       break;
     case 'video_model':
       state.video.model = value;
       state.video.mode = Object.keys(VIDEO_REGISTRY[state.video.provider].models[value].modes)[0];
       state.video.panel = 'params';
+      resetVideoTransientState({ keepPrompt: false, keepFiles: false });
       break;
-    case 'video_mode': state.video.mode = value; break;
+    case 'video_mode':
+      state.video.mode = value;
+      state.video.panel = 'params';
+      resetVideoTransientState({ keepPrompt: false, keepFiles: false });
+      break;
     case 'video_prompt': state.video.prompt = value; break;
+    case 'video_switchxRefPrompt': state.video.switchxRefPrompt = value; break;
+    case 'video_switchxAlphaMode':
+      state.video.switchxAlphaMode = ['auto', 'fill'].includes(String(value || '').toLowerCase()) ? String(value).toLowerCase() : 'auto';
+      resetSwitchxMaskEditor({ clearMaskFile: true });
+      break;
     case 'video_duration':
     case 'video_durationLegacy':
     case 'video_durationVeo':
     case 'video_durationSeedance':
-    case 'video_durationSora': state.video.duration = value; break;
-    case 'video_resolution': state.video.resolution = value; break;
+    case 'video_durationSora':
+    case 'video_durationGrok':
+    case 'video_durationPixVerse': state.video.duration = value; break;
+    case 'video_resolution':
+    case 'video_resolutionGrok':
+    case 'video_resolutionSwitchx':
+    case 'video_resolutionPixVerse': state.video.resolution = value; break;
+    case 'video_providerModeGrok': state.video.providerMode = value; break;
     case 'video_aspectRatio':
     case 'video_aspectRatioVeo':
     case 'video_aspectRatioSeedance':
-    case 'video_aspectRatioSora': state.video.aspectRatio = value; break;
+    case 'video_aspectRatioSora':
+    case 'video_aspectRatioGrok':
+    case 'video_aspectRatioPixVerse': state.video.aspectRatio = value; break;
     case 'video_enableAudio':
     case 'video_generateAudio': state.video.enableAudio = checked; break;
+    case 'video_seedanceUseStartFrame':
+      state.video.seedanceUseStartFrame = checked;
+      if (!checked) {
+        removeUploadFile('video_startFrame');
+        if (state.video.seedanceUseLastFrame) {
+          state.video.seedanceUseLastFrame = false;
+          removeUploadFile('video_lastFrame');
+        }
+      }
+      break;
+    case 'video_seedanceUseLastFrame':
+      state.video.seedanceUseLastFrame = checked;
+      if (checked) {
+        state.video.seedanceUseStartFrame = true;
+      } else {
+        removeUploadFile('video_lastFrame');
+      }
+      break;
     case 'video_quality': state.video.quality = value; break;
     case 'editor_trim_enabled':
       state.videoEditor.trim.enabled = checked;
@@ -6388,23 +10735,29 @@ function handleInputChange(target, eventType = 'change') {
       state.image.model = Object.keys(IMAGE_REGISTRY[value].models)[0];
       state.image.mode = Object.keys(IMAGE_REGISTRY[value].models[state.image.model].modes)[0];
       state.image.panel = 'params';
-      clearImageRunState({ keepPrompt: true, keepFiles: true });
+      clearImageRunState({ keepPrompt: false, keepFiles: false });
       break;
     case 'image_model':
       state.image.model = value;
       state.image.mode = Object.keys(IMAGE_REGISTRY[state.image.provider].models[value].modes)[0];
       state.image.panel = 'params';
-      clearImageRunState({ keepPrompt: true, keepFiles: true });
+      clearImageRunState({ keepPrompt: false, keepFiles: false });
       break;
     case 'image_mode':
       state.image.mode = value;
       state.image.panel = 'params';
-      clearImageRunState({ keepPrompt: true, keepFiles: true });
+      clearImageRunState({ keepPrompt: false, keepFiles: false });
       break;
     case 'image_prompt': state.image.prompt = value; break;
+    case 'image_negativePrompt': state.image.negativePrompt = value; break;
     case 'image_resolution': state.image.resolution = value; break;
     case 'image_aspectRatio':
     case 'image_aspectRatioText': state.image.aspectRatio = value; break;
+    case 'image_mjStylize': state.image.mjStylize = Number(value || 0); break;
+    case 'image_mjChaos': state.image.mjChaos = Number(value || 0); break;
+    case 'image_mjRaw': state.image.mjRaw = !!target.checked; break;
+    case 'image_mjSpeedMode': state.image.mjSpeedMode = value; break;
+    case 'image_mjSeed': state.image.mjSeed = value; break;
     case 'image_safetyLevel': state.image.safetyLevel = value; break;
     case 'image_posterStyle': state.image.posterStyle = value; break;
     case 'image_stylePreset': state.image.stylePreset = value; break;
@@ -6416,14 +10769,12 @@ function handleInputChange(target, eventType = 'change') {
 
     case 'voice_voiceId': state.voice.voiceId = value; break;
     case 'voice_modelId': state.voice.modelId = value; break;
-    case 'voice_outputFormat': state.voice.outputFormat = value; break;
     case 'voice_languageCode': state.voice.languageCode = value || 'auto'; break;
     case 'voice_manualVoiceSettings': state.voice.manualVoiceSettings = !!target.checked; break;
     case 'voice_stability': state.voice.stability = Number(value); break;
     case 'voice_similarityBoost': state.voice.similarityBoost = Number(value); break;
     case 'voice_style': state.voice.style = Number(value); break;
     case 'voice_speed': state.voice.speed = Number(value); break;
-    case 'voice_useSpeakerBoost': state.voice.useSpeakerBoost = !!target.checked; break;
     case 'voice_text': state.voice.text = value; break;
 
     case 'music_ai':
@@ -6469,11 +10820,12 @@ function handleInputChange(target, eventType = 'change') {
     default: return;
   }
   const structuralRerenderIds = new Set([
+    'chat_model',
     'chat_mode',
     'video_provider', 'video_model', 'video_mode',
     'image_provider', 'image_model', 'image_mode',
     'music_ai', 'music_backend', 'music_mode', 'music_model',
-    'voice_voiceId', 'voice_modelId', 'voice_outputFormat', 'voice_languageCode'
+    'voice_voiceId', 'voice_modelId', 'voice_languageCode'
   ]);
   const workspaceRerenderIds = new Set(['music_styleWeight', 'music_weirdnessConstraint', 'music_audioWeight']);
   const inspectorRerenderIds = new Set([
@@ -6482,7 +10834,6 @@ function handleInputChange(target, eventType = 'change') {
     'voice_similarityBoost',
     'voice_style',
     'voice_speed',
-    'voice_useSpeakerBoost',
   ]);
 
   if (workspaceRerenderIds.has(id)) {
@@ -6501,13 +10852,12 @@ function handleInputChange(target, eventType = 'change') {
     renderHeader();
   } else if (target.type === 'checkbox') {
     render();
-  } else {
-    renderHeader();
   }
 }
 
 
 function activateStudio(studio, options = {}) {
+  if (studio === 'workspace' || studio === 'billing') studio = 'chat';
   if (!studio || !STUDIO_META[studio]) return;
   const previousStudio = state.studio;
   state.studio = studio;
@@ -6519,6 +10869,12 @@ function activateStudio(studio, options = {}) {
   if (state.studio === 'history' && state.authToken) {
     loadSiteBuilderMeta({ silent: true }).catch(() => {});
     loadSiteBuilderProjects({ silent: true, keepSelection: true }).catch(() => {});
+  }
+  if (state.studio === 'profile' && state.authToken) {
+    loadBalanceHistory({ silent: true, force: true, renderNow: true }).catch(() => {});
+  }
+  if (state.studio === 'partner' && state.authToken) {
+    loadPartnerDashboard({ silent: true, force: false, renderNow: true }).catch(() => {});
   }
   if (state.studio === 'video' && state.video.panel === 'library' && state.authToken) loadVideoHistory({ silent: true, keepSelection: true });
   if (state.studio === 'image' && state.image.panel === 'library' && state.authToken) loadImageHistory({ silent: true, keepSelection: true });
@@ -6556,6 +10912,7 @@ function renderLandingView() {
 function handleAction(action, dataset = {}) {
   switch (action) {
     case 'switch-studio': {
+      closeMobileOverlays();
       activateStudio(dataset.studio);
       break;
     }
@@ -6578,11 +10935,41 @@ function handleAction(action, dataset = {}) {
       });
       break;
     }
-    case 'login-placeholder': {
-      toast('info', 'Вход скоро появится', 'Пока это заглушка. Позже сюда подключим полноценную авторизацию.');
+    case 'login-placeholder':
+    case 'open-auth-modal': {
+      openAuthModal(dataset.tab || 'login');
+      break;
+    }
+    case 'close-auth-modal': {
+      closeAuthModal();
+      break;
+    }
+    case 'auth-modal-tab-login': {
+      state.authUi.modalTab = 'login';
+      saveState();
+      render();
+      break;
+    }
+    case 'auth-modal-tab-register': {
+      state.authUi.modalTab = 'register';
+      saveState();
+      render();
+      break;
+    }
+    case 'auth-modal-tab-reset': {
+      state.authUi.modalTab = 'reset';
+      saveState();
+      render();
+      break;
+    }
+    case 'google-auth-placeholder': {
+      toast('info', 'Google скоро', 'Кнопку Google подготовили по UI. Подключим после настройки OAuth.');
       break;
     }
     case 'send-chat': sendChat(); break;
+    case 'start-new-chat':
+      startNewChatSession();
+      break;
     case 'pick-chat-files': {
       const input = document.getElementById('chat_attachments');
       if (input) input.click();
@@ -6602,6 +10989,31 @@ function handleAction(action, dataset = {}) {
       render();
       break;
     case 'run-video': runVideo(); break;
+    case 'insert-video-prompt-ref': {
+      const tag = String(dataset.refTag || '').trim();
+      if (!tag) break;
+      const current = String(state.video.prompt || '');
+      const needsSpace = current && !/\s$/.test(current);
+      state.video.prompt = `${current}${needsSpace ? ' ' : ''}${tag} `;
+      saveState();
+      render();
+      const input = document.getElementById('video_prompt');
+      if (input) {
+        input.focus();
+        try { input.setSelectionRange(input.value.length, input.value.length); } catch (_e) {}
+      }
+      break;
+    }
+    case 'run-switchx-ref': requestSwitchxReference(); break;
+    case 'remove-switchx-ai-reference':
+      stopSwitchxRefPolling();
+      state.video.switchxReferenceImageUrl = '';
+      state.video.switchxRefGenerationId = '';
+      state.video.switchxReferenceStatus = 'idle';
+      state.video.errorText = '';
+      saveState();
+      render();
+      break;
     case 'poll-video-task': pollVideoTask(); break;
     case 'editor-pick-audio': {
       const input = document.getElementById('editorAudioUpload');
@@ -6734,6 +11146,19 @@ function handleAction(action, dataset = {}) {
     case 'site-download-version':
       downloadSiteBuilderVersion(dataset.projectId || state.siteBuilder.selectedProjectId || '', Number(dataset.versionNumber || 0));
       break;
+    case 'dismiss-site-project':
+      dismissSiteBuilderItem('hiddenProjects', dataset.projectId || '');
+      break;
+    case 'dismiss-site-version': {
+      const key = siteBuilderVersionHideKey(dataset.projectId || state.siteBuilder.selectedProjectId || '', { id: dataset.versionNumber || '' });
+      dismissSiteBuilderItem('hiddenVersions', key, { projectId: dataset.projectId || state.siteBuilder.selectedProjectId || '' });
+      break;
+    }
+    case 'dismiss-site-job': {
+      const key = siteBuilderJobHideKey(dataset.projectId || state.siteBuilder.selectedProjectId || '', { id: dataset.jobKey || '', job_type: dataset.jobType || '' });
+      dismissSiteBuilderItem('hiddenJobs', key, { projectId: dataset.projectId || state.siteBuilder.selectedProjectId || '' });
+      break;
+    }
     case 'refresh-history': loadVideoHistory(); break;
     case 'preview-history-item':
       loadHistoryItem(dataset.generationId, { switchStudio: state.studio === 'history' }).then((item) => {
@@ -6765,6 +11190,66 @@ function handleAction(action, dataset = {}) {
     case 'delete-image-history-item':
       deleteImageHistoryItem(dataset.generationId);
       break;
+    case 'download-image-result': {
+      const historyItem = state.image.panel === 'library' ? imageHistorySelectedItem() : null;
+      const compareState = imageCompareState(historyItem);
+      const urls = imageActiveUrls(historyItem);
+      const safeIndex = Math.max(0, Math.min(urls.length - 1, Number(state.image.activeImageIndex || 0)));
+      const url = urls[safeIndex] || (historyItem ? imageHistoryUrl(historyItem) : (state.image.downloadUrl || state.image.outputUrl || compareState.afterUrl || ''));
+      forceDownloadFile(url, 'generated-image.png');
+      break;
+    }
+    case 'select-mj-image':
+      state.image.activeImageIndex = Number(dataset.imageIndex || 0);
+      saveState();
+      render();
+      break;
+    case 'midjourney-reroll':
+      runMidjourneyAction('reroll');
+      break;
+    case 'midjourney-variation':
+      runMidjourneyAction('variation', { imageIndex: Number(dataset.imageIndex || 0), variationType: dataset.variationType || 'subtle' });
+      break;
+    case 'kling3-new-add-shot': {
+      state.video.kling3NewShots = getKling3NewShots();
+      if (state.video.kling3NewShots.length >= 5) {
+        toast('info', 'Лимит', 'Максимум 5 shots.');
+        break;
+      }
+      state.video.kling3NewShots.push({ prompt: '', duration: '3', elements: [] });
+      saveState();
+      render();
+      break;
+    }
+    case 'kling3-new-remove-shot': {
+      const idx = Number(dataset.index || 0);
+      const currentShots = getKling3NewShots();
+      const removedShot = currentShots[idx] || null;
+      const removedElementNames = new Set((removedShot?.elements || []).map((el) => el.name).filter(Boolean));
+      state.video.kling3NewShots = currentShots.filter((_, i) => i !== idx);
+      state.video.kling3NewElements = getKling3NewElements().filter((el) => !removedElementNames.has(el.name));
+      if (state.video.kling3NewShots.length < 2) state.video.kling3NewShots.push({ prompt: '', duration: '3', elements: [] });
+      saveState();
+      render();
+      break;
+    }
+    case 'kling3-new-add-element': {
+      toast('info', 'Перенесено в Shot', 'Теперь элементы добавляются прямо внутри нужного shot под Prompt.');
+      break;
+    }
+    case 'kling3-new-remove-element': {
+      removeKling3NewShotElement(Number(dataset.index || 0), dataset.elementName || '');
+      break;
+    }
+    case 'kling3-new-preview-element-image': {
+      const url = String(dataset.url || '').trim();
+      if (url) window.open(url, '_blank', 'noopener,noreferrer');
+      break;
+    }
+    case 'kling3-new-remove-element-image': {
+      removeKling3NewShotElementImage(Number(dataset.index || 0), dataset.elementName || '', Number(dataset.refIndex || 0));
+      break;
+    }
     case 'remove-upload-file':
       removeUploadFile(dataset.uploadId, dataset.index);
       break;
@@ -6793,6 +11278,11 @@ function handleAction(action, dataset = {}) {
     case 'clear-voice-stage':
       clearVoiceRunState({ keepText: true });
       render();
+      break;
+    case 'voice-toggle-advanced':
+      state.voice.showAdvancedPanel = !state.voice.showAdvancedPanel;
+      saveState();
+      renderInspector();
       break;
     case 'run-voice': runVoice(); break;
     case 'run-music': runMusic(); break;
@@ -6834,12 +11324,16 @@ function handleAction(action, dataset = {}) {
         render();
       }
       break;
-    case 'music-set-ai':
-      state.music.ai = dataset.value || 'suno';
+    case 'music-set-ai': {
+      const nextAi = dataset.value || 'suno';
+      const aiChanged = nextAi !== state.music.ai;
+      state.music.ai = nextAi;
+      if (aiChanged) resetMusicWorkspaceStage();
       ensureMusicCompatibility({ preserveLyricsTab: false });
       saveState();
       render();
       break;
+    }
     case 'music-set-tool-action':
       state.music.toolAction = dataset.value || 'upload-cover';
       ensureMusicToolPromptForAction(state.music.toolAction);
@@ -6955,9 +11449,44 @@ function handleAction(action, dataset = {}) {
       render();
       break;
     }
-    case 'refresh-prompts': loadPromptCategories(); break;
-    case 'select-category': loadPromptGroups(dataset.category); break;
-    case 'select-group': loadPromptItems(dataset.groupId); break;
+    case 'refresh-prompts':
+      state.prompts.openItemId = '';
+      loadPromptCategories();
+      break;
+    case 'select-category': {
+      const category = dataset.category || '';
+      if (state.prompts.selectedCategory === category) {
+        state.prompts.selectedCategory = '';
+        state.prompts.groups = [];
+        state.prompts.selectedGroupId = '';
+        state.prompts.items = [];
+        state.prompts.openItemId = '';
+        render();
+      } else {
+        loadPromptGroups(category);
+      }
+      break;
+    }
+    case 'select-group': {
+      const groupId = dataset.groupId || '';
+      if (String(state.prompts.selectedGroupId) === String(groupId)) {
+        state.prompts.selectedGroupId = '';
+        state.prompts.items = [];
+        state.prompts.openItemId = '';
+        render();
+      } else {
+        loadPromptItems(groupId);
+      }
+      break;
+    }
+    case 'open-prompt-item':
+      state.prompts.openItemId = dataset.itemId || '';
+      render();
+      break;
+    case 'close-prompt-item':
+      state.prompts.openItemId = '';
+      render();
+      break;
     case 'copy-prompt': {
       const prompt = decodeURIComponent(dataset.prompt || '');
       navigator.clipboard.writeText(prompt).then(() => toast('success', 'Скопировано', 'Prompt скопирован в буфер обмена.')).catch(() => toast('error', 'Не удалось скопировать', 'Скопируй текст вручную.'));
@@ -6984,6 +11513,60 @@ function handleAction(action, dataset = {}) {
       render();
       break;
     case 'load-balance': loadBalance(); break;
+    case 'profile-tab-login': state.authUi.profileTab = 'login'; saveState(); render(); break;
+    case 'profile-tab-register': state.authUi.profileTab = 'register'; saveState(); render(); break;
+    case 'balance-history-filter':
+      state.balanceHistory.filter = dataset.filter || 'all';
+      renderInspector();
+      break;
+    case 'refresh-balance-history':
+      loadBalanceHistory({ silent: false, force: true, renderNow: true }).catch(() => {});
+      break;
+    case 'partner-refresh':
+      loadPartnerDashboard({ silent: false, force: true, renderNow: true }).catch(() => {});
+      break;
+    case 'partner-copy-link':
+    case 'partner-copy-site-link': {
+      const link = partnerSiteLink(partnerDashboard()?.profile || {});
+      if (link) navigator.clipboard?.writeText(link).then(() => toast('success', 'Ссылка на сайт скопирована', link)).catch(() => toast('info', 'Ссылка на сайт', link));
+      break;
+    }
+    case 'partner-copy-bot-link': {
+      const link = partnerBotLink(partnerDashboard()?.profile || {});
+      if (link) navigator.clipboard?.writeText(link).then(() => toast('success', 'Ссылка на бота скопирована', link)).catch(() => toast('info', 'Ссылка на бота', link));
+      break;
+    }
+
+    case 'mobile-open-menu':
+      runtime.mobileUi.navOpen = true;
+      runtime.mobileUi.sheetOpen = false;
+      renderMobileChrome();
+      break;
+    case 'mobile-close-overlays':
+      closeMobileOverlays();
+      renderMobileChrome();
+      break;
+    case 'mobile-close-sheet':
+      runtime.mobileUi.sheetOpen = false;
+      renderMobileChrome();
+      break;
+    case 'mobile-open-settings':
+      openMobileSettingsPanel();
+      break;
+    case 'mobile-open-history':
+      openMobileHistoryPanel();
+      break;
+    case 'mobile-show-result':
+      scrollWorkspaceToResult();
+      break;
+    case 'mobile-show-create':
+      closeMobileOverlays();
+      renderMobileChrome();
+      requestAnimationFrame(() => {
+        const prompt = document.querySelector('.workspace-prompt-card, .chat-composer, .music-panel textarea, .voice-editor-card textarea');
+        if (prompt) prompt.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+      break;
     default:
       break;
   }
@@ -7000,24 +11583,95 @@ function runCurrentStudio() {
     case 'workspace': saveState(); toast('success', 'Workspace сохранён', 'Заметки сохранены локально.'); break;
     case 'history': loadSiteBuilderProjects({ silent: false, keepSelection: true }); break;
     case 'billing': loadBalance(); break;
+    case 'partner': loadPartnerDashboard({ silent: false, force: true, renderNow: true }); break;
     default: toast('info', 'Нет действия', 'Для этой студии глобальная кнопка пока не назначена.');
   }
 }
 
+function escapeSelectorValue(value) {
+  const source = String(value || '');
+  if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(source);
+  return source.replace(/(["\#.;?+*~':^$\[\]()=>|/@])/g, '\\$1');
+}
+
+function captureRenderSnapshot() {
+  const active = document.activeElement;
+  const workspaceBody = document.getElementById('workspaceBody');
+  const chatMessages = document.getElementById('chatMessages');
+  const snapshot = {
+    windowScrollX: window.scrollX || 0,
+    windowScrollY: window.scrollY || 0,
+    workspaceScrollTop: workspaceBody ? workspaceBody.scrollTop : 0,
+    chatScrollTop: chatMessages ? chatMessages.scrollTop : 0,
+    activeId: '',
+    activeName: '',
+    selectionStart: null,
+    selectionEnd: null,
+    selectionDirection: null,
+    inputScrollTop: null,
+    inputScrollLeft: null,
+  };
+  if (!(active instanceof HTMLElement)) return snapshot;
+  snapshot.activeId = active.id || '';
+  snapshot.activeName = active.getAttribute('name') || '';
+  if (typeof active.selectionStart === 'number') snapshot.selectionStart = active.selectionStart;
+  if (typeof active.selectionEnd === 'number') snapshot.selectionEnd = active.selectionEnd;
+  if (typeof active.selectionDirection === 'string') snapshot.selectionDirection = active.selectionDirection;
+  if (typeof active.scrollTop === 'number') snapshot.inputScrollTop = active.scrollTop;
+  if (typeof active.scrollLeft === 'number') snapshot.inputScrollLeft = active.scrollLeft;
+  return snapshot;
+}
+
+function restoreRenderSnapshot(snapshot) {
+  if (!snapshot) return;
+  const workspaceBody = document.getElementById('workspaceBody');
+  if (workspaceBody && typeof snapshot.workspaceScrollTop === 'number') workspaceBody.scrollTop = snapshot.workspaceScrollTop;
+  const chatMessages = document.getElementById('chatMessages');
+  if (chatMessages && typeof snapshot.chatScrollTop === 'number') chatMessages.scrollTop = snapshot.chatScrollTop;
+
+  let target = null;
+  if (snapshot.activeId) target = document.getElementById(snapshot.activeId);
+  if (!target && snapshot.activeName) {
+    target = document.querySelector(`[name="${escapeSelectorValue(snapshot.activeName)}"]`);
+  }
+  if (target instanceof HTMLElement) {
+    try { target.focus({ preventScroll: true }); } catch (_) { try { target.focus(); } catch (_) {} }
+    if (typeof snapshot.selectionStart === 'number' && typeof target.setSelectionRange === 'function') {
+      const valueLength = String(target.value || '').length;
+      const start = Math.max(0, Math.min(snapshot.selectionStart, valueLength));
+      const endRaw = typeof snapshot.selectionEnd === 'number' ? snapshot.selectionEnd : snapshot.selectionStart;
+      const end = Math.max(start, Math.min(endRaw, valueLength));
+      try { target.setSelectionRange(start, end, snapshot.selectionDirection || 'none'); } catch (_) {}
+    }
+    if (typeof snapshot.inputScrollTop === 'number') target.scrollTop = snapshot.inputScrollTop;
+    if (typeof snapshot.inputScrollLeft === 'number') target.scrollLeft = snapshot.inputScrollLeft;
+  }
+  window.scrollTo(snapshot.windowScrollX || 0, snapshot.windowScrollY || 0);
+}
+
 function render() {
+  const snapshot = captureRenderSnapshot();
   ensureChatModeCompatibility();
   renderNav();
   renderHeader();
   renderRecentRuns();
   renderWorkspace();
   renderInspector();
+  renderMobileChrome();
+  renderPromptItemModal();
+  renderAuthModal();
+  mountTelegramLogin('telegramLoginMount', 'login');
+  mountTelegramLogin('profileTelegramLinkMount', 'link');
   renderLandingView();
   enhanceCustomSelects();
   attachImageCompareInteractions();
-  initShowcaseMedia();
+  if (state.view !== 'workspace') initShowcaseMedia();
+  restoreRenderSnapshot(snapshot);
 }
 
 document.addEventListener('click', (e) => {
+  if (e.target?.id === 'authModalBackdrop') { closeAuthModal(); return; }
+  if (e.target?.id === 'promptLibraryModalBackdrop') { state.prompts.openItemId = ''; render(); return; }
   const clickedInsideCustomSelect = e.target.closest('.ab-select');
   if (!clickedInsideCustomSelect) closeCustomSelects();
   const btn = e.target.closest('[data-action]');
@@ -7026,15 +11680,120 @@ document.addEventListener('click', (e) => {
     return;
   }
   if (e.target.id === 'saveSettingsBtn') {
-    state.apiBaseUrl = document.getElementById('apiBaseUrl').value.trim();
+    state.apiBaseUrl = FIXED_API_BASE;
+    localStorage.removeItem('astrabot:apiBaseUrl');
     saveState();
     renderHeader();
-    toast('success', 'Настройки сохранены', 'API Base URL сохранён.');
+    toast('success', 'Настройки сохранены', 'API Base URL зафиксирован: https://nabex.ru');
     return;
   }
   if (e.target.id === 'checkApiBtn') { checkApi(); return; }
   if (e.target.id === 'loadBalanceBtn') { loadBalance(); return; }
   if (e.target.id === 'logoutBtn') { logoutWorkspace(); return; }
+  if (e.target.id === 'profileLoginBtn') {
+    const email = (document.getElementById('profile_login_email')?.value || '').trim();
+    const password = document.getElementById('profile_login_password')?.value || '';
+    if (!validateEmailValue(email)) { toast('error', 'Проверь email', 'Укажи корректный email.'); return; }
+    if (!password) { toast('error', 'Нужен пароль', 'Введите пароль.'); return; }
+    submitEmailLogin(email, password).then(() => toast('success', 'Вход выполнен', 'Ты вошёл по email.')).catch((err) => toast('error', 'Не удалось войти', String(err.message || err)));
+    return;
+  }
+  if (e.target.id === 'profileRegisterStartBtn') {
+    const email = (document.getElementById('profile_register_email')?.value || '').trim();
+    const password = document.getElementById('profile_register_password')?.value || '';
+    const password2 = document.getElementById('profile_register_password2')?.value || '';
+    if (!validateEmailValue(email)) { toast('error', 'Проверь email', 'Укажи корректный email.'); return; }
+    if (password.length < 6) { toast('error', 'Слабый пароль', 'Минимум 6 символов.'); return; }
+    if (password !== password2) { toast('error', 'Пароли не совпадают', 'Проверь оба поля пароля.'); return; }
+    submitEmailRegisterStart(email, password).then(() => { state.authUi.registerPendingEmail = email; saveState(); render(); toast('success', 'Код отправлен', 'Проверь почту и введи код подтверждения.'); }).catch((err) => toast('error', 'Не удалось отправить код', String(err.message || err)));
+    return;
+  }
+  if (e.target.id === 'profileRegisterConfirmBtn') {
+    const email = state.authUi.registerPendingEmail || (document.getElementById('profile_register_email')?.value || '').trim();
+    const code = (document.getElementById('profile_register_code')?.value || '').trim();
+    if (!email || !validateEmailValue(email)) { toast('error', 'Нет email', 'Сначала запроси код.'); return; }
+    if (!code) { toast('error', 'Нет кода', 'Введи код из письма.'); return; }
+    submitEmailRegisterConfirm(email, code).then(() => toast('success', 'Почта подтверждена', 'Аккаунт создан и вход выполнен.')).catch((err) => toast('error', 'Не удалось подтвердить', String(err.message || err)));
+    return;
+  }
+  if (e.target.id === 'profileLinkEmailStartBtn') {
+    const email = (document.getElementById('profile_link_email')?.value || '').trim();
+    const password = document.getElementById('profile_link_password')?.value || '';
+    const password2 = document.getElementById('profile_link_password2')?.value || '';
+    if (!validateEmailValue(email)) { toast('error', 'Проверь email', 'Укажи корректный email.'); return; }
+    if (password.length < 6) { toast('error', 'Слабый пароль', 'Минимум 6 символов.'); return; }
+    if (password !== password2) { toast('error', 'Пароли не совпадают', 'Проверь оба поля пароля.'); return; }
+    submitLinkEmailStart(email, password).then(() => { state.authUi.linkPendingEmail = email; saveState(); render(); toast('success', 'Код отправлен', 'Проверь почту и введи код подтверждения.'); }).catch((err) => toast('error', 'Не удалось отправить код', String(err.message || err)));
+    return;
+  }
+  if (e.target.id === 'profileLinkEmailConfirmBtn') {
+    const email = state.authUi.linkPendingEmail || (document.getElementById('profile_link_email')?.value || '').trim();
+    const code = (document.getElementById('profile_link_code')?.value || '').trim();
+    if (!email || !validateEmailValue(email)) { toast('error', 'Нет email', 'Сначала запроси код.'); return; }
+    if (!code) { toast('error', 'Нет кода', 'Введи код из письма.'); return; }
+    submitLinkEmailConfirm(email, code).then(() => toast('success', 'Email привязан', 'Теперь в этот же аккаунт можно входить по почте.')).catch((err) => toast('error', 'Не удалось подтвердить', String(err.message || err)));
+    return;
+  }
+
+  if (e.target.id === 'partnerPayoutSubmitBtn') { submitPartnerPayout(); return; }
+
+  if (e.target.id === 'profileLogoutBtn') { logoutWorkspace(); return; }
+  if (e.target.id === 'profileOpenResetBtn') { openAuthModal('reset'); return; }
+  if (e.target.id === 'profileChangePasswordScrollBtn') { document.getElementById('profileChangePasswordCard')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
+  if (e.target.id === 'profileChangePasswordBtn') {
+    const currentPassword = document.getElementById('profile_change_current_password')?.value || '';
+    const newPassword = document.getElementById('profile_change_new_password')?.value || '';
+    const newPassword2 = document.getElementById('profile_change_new_password2')?.value || '';
+    if (!currentPassword) { toast('error', 'Нужен текущий пароль', 'Введи текущий пароль.'); return; }
+    if (newPassword.length < 6) { toast('error', 'Слабый пароль', 'Минимум 6 символов.'); return; }
+    if (newPassword !== newPassword2) { toast('error', 'Пароли не совпадают', 'Проверь оба поля нового пароля.'); return; }
+    submitChangePassword(currentPassword, newPassword).then(() => toast('success', 'Пароль обновлён', 'Теперь можно входить с новым паролем.')).catch((err) => toast('error', 'Не удалось сменить пароль', String(err.message || err)));
+    return;
+  }
+  if (e.target.id === 'authModalLoginBtn') {
+    const email = (document.getElementById('auth_modal_login_email')?.value || '').trim();
+    const password = document.getElementById('auth_modal_login_password')?.value || '';
+    if (!validateEmailValue(email)) { toast('error', 'Проверь email', 'Укажи корректный email.'); return; }
+    if (!password) { toast('error', 'Нужен пароль', 'Введите пароль.'); return; }
+    submitEmailLogin(email, password).then(() => { closeAuthModal(); toast('success', 'Вход выполнен', 'Ты вошёл по email.'); }).catch((err) => toast('error', 'Не удалось войти', String(err.message || err)));
+    return;
+  }
+  if (e.target.id === 'authModalRegisterStartBtn') {
+    const email = (document.getElementById('auth_modal_register_email')?.value || '').trim();
+    const password = document.getElementById('auth_modal_register_password')?.value || '';
+    const password2 = document.getElementById('auth_modal_register_password2')?.value || '';
+    if (!validateEmailValue(email)) { toast('error', 'Проверь email', 'Укажи корректный email.'); return; }
+    if (password.length < 6) { toast('error', 'Слабый пароль', 'Минимум 6 символов.'); return; }
+    if (password !== password2) { toast('error', 'Пароли не совпадают', 'Проверь оба поля пароля.'); return; }
+    submitEmailRegisterStart(email, password).then(() => { state.authUi.registerPendingEmail = email; state.authUi.modalTab = 'register'; saveState(); render(); toast('success', 'Код отправлен', 'Проверь почту и введи код подтверждения.'); }).catch((err) => toast('error', 'Не удалось отправить код', String(err.message || err)));
+    return;
+  }
+  if (e.target.id === 'authModalRegisterConfirmBtn') {
+    const email = state.authUi.registerPendingEmail || (document.getElementById('auth_modal_register_email')?.value || '').trim();
+    const code = (document.getElementById('auth_modal_register_code')?.value || '').trim();
+    if (!email || !validateEmailValue(email)) { toast('error', 'Нет email', 'Сначала запроси код.'); return; }
+    if (!code) { toast('error', 'Нет кода', 'Введи код из письма.'); return; }
+    submitEmailRegisterConfirm(email, code).then(() => { closeAuthModal(); toast('success', 'Почта подтверждена', 'Аккаунт создан и вход выполнен.'); }).catch((err) => toast('error', 'Не удалось подтвердить', String(err.message || err)));
+    return;
+  }
+  if (e.target.id === 'authModalResetStartBtn') {
+    const email = (document.getElementById('auth_modal_reset_email')?.value || '').trim();
+    if (!validateEmailValue(email)) { toast('error', 'Проверь email', 'Укажи корректный email.'); return; }
+    submitPasswordResetStart(email).then(() => { state.authUi.resetPendingEmail = email; state.authUi.modalTab = 'reset'; saveState(); render(); toast('success', 'Код отправлен', 'Проверь почту и введи код для смены пароля.'); }).catch((err) => toast('error', 'Не удалось отправить код', String(err.message || err)));
+    return;
+  }
+  if (e.target.id === 'authModalResetConfirmBtn') {
+    const email = state.authUi.resetPendingEmail || (document.getElementById('auth_modal_reset_email')?.value || '').trim();
+    const code = (document.getElementById('auth_modal_reset_code')?.value || '').trim();
+    const password = document.getElementById('auth_modal_reset_password')?.value || '';
+    const password2 = document.getElementById('auth_modal_reset_password2')?.value || '';
+    if (!email || !validateEmailValue(email)) { toast('error', 'Нет email', 'Сначала запроси код.'); return; }
+    if (!code) { toast('error', 'Нет кода', 'Введи код из письма.'); return; }
+    if (password.length < 6) { toast('error', 'Слабый пароль', 'Минимум 6 символов.'); return; }
+    if (password !== password2) { toast('error', 'Пароли не совпадают', 'Проверь оба поля нового пароля.'); return; }
+    submitPasswordResetConfirm(email, code, password).then(() => { closeAuthModal(); toast('success', 'Пароль обновлён', 'Теперь можно входить с новым паролем.'); }).catch((err) => toast('error', 'Не удалось сменить пароль', String(err.message || err)));
+    return;
+  }
   if (e.target.id === 'clearRunsBtn') { state.recentRuns = []; saveState(); renderRecentRuns(); renderWorkspace(); return; }
   if (e.target.id === 'seedDemoBtn') { seedDemo(); return; }
   if (e.target.id === 'globalRunBtn') { runCurrentStudio(); return; }
@@ -7044,19 +11803,129 @@ document.addEventListener('click', (e) => {
 document.addEventListener('input', (e) => handleInputChange(e.target, 'input'));
 document.addEventListener('change', (e) => handleInputChange(e.target, 'change'));
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closeCustomSelects();
+  if (e.key === 'Escape') {
+    closeCustomSelects();
+    if (state.authUi.modalOpen) closeAuthModal();
+  }
   if (state.studio === 'chat' && e.target.id === 'chatInput' && e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
     e.preventDefault();
     sendChat();
   }
 });
 
+async function restorePendingVideoRun() {
+  if (!state.authToken) return;
+  if (state.video.generationId && !state.video.outputUrl && !isVideoTaskFinished(state.video.lastStatus)) {
+    startVideoPolling({ immediate: true });
+    return;
+  }
+  if (!state.video.requestStartedAt || state.video.outputUrl) return;
+  const items = await loadVideoHistory({ silent: true, keepSelection: true });
+  const candidate = findRecentHistoryCandidate(items, {
+    startedAt: state.video.requestStartedAt,
+    provider: state.video.provider,
+    model: state.video.model,
+    prompt: state.video.prompt,
+  });
+  if (!candidate) return;
+  state.video.generationId = candidate.id || state.video.generationId;
+  state.video.providerTaskId = candidate.task_id || candidate.id || state.video.providerTaskId;
+  state.video.lastStatus = String(candidate.status || 'processing').toLowerCase();
+  state.video.errorText = candidate.error_message || '';
+  state.video.statusText = candidate.error_message || (state.video.lastStatus === 'completed' ? 'Видео восстановлено после перезагрузки.' : 'Восстановлен активный запуск. Видео появится автоматически.');
+  const readyUrl = historyVideoUrl(candidate);
+  if (readyUrl && state.video.lastStatus === 'completed') {
+    state.video.outputUrl = readyUrl;
+    state.video.downloadUrl = historyVideoDownloadUrl(candidate) || readyUrl;
+    state.video.coverUrl = candidate.thumbnail_url || '';
+    state.video.percent = 100;
+    state.video.requestStartedAt = '';
+    syncVideoEditorWithHistoryItem(candidate);
+  } else {
+    startVideoPolling({ immediate: true });
+  }
+  saveState();
+  render();
+}
+
+async function restorePendingImageRun() {
+  if (!state.authToken) return;
+  if (state.image.generationId && state.image.isGenerating) {
+    startImagePolling({ immediate: true });
+    return;
+  }
+  if (!state.image.requestStartedAt || state.image.outputUrl) return;
+  const items = await loadImageHistory({ silent: true, keepSelection: true });
+  const candidate = findRecentHistoryCandidate(items, {
+    startedAt: state.image.requestStartedAt,
+    provider: state.image.provider,
+    model: state.image.model,
+    prompt: state.image.prompt,
+  });
+  if (!candidate) return;
+
+  const candidateStatus = String(candidate.status || '').toLowerCase();
+  const candidateUrl = imageHistoryUrl(candidate) || candidate.after_image_url || candidate.image_url || '';
+
+  state.image.generationId = candidate.id || state.image.generationId;
+  state.image.errorText = candidate.error_message || '';
+
+  if (candidateStatus === 'completed' && candidateUrl) {
+    state.image.isGenerating = false;
+    state.image.requestStartedAt = '';
+    state.image.outputUrl = candidateUrl;
+    state.image.downloadUrl = candidateUrl;
+    state.image.beforeImageUrl = candidate.before_image_url || candidate.source_image_url || '';
+    state.image.afterImageUrl = candidate.after_image_url || candidateUrl;
+    state.image.compareMode = !!candidate.compare_mode;
+    state.image.comparePosition = 50;
+    state.image.statusText = candidate.error_message || 'Изображение восстановлено после перезагрузки.';
+    state.image.panel = 'params';
+    saveState();
+    render();
+    loadBalance({ silent: true, renderNow: true }).catch(() => {});
+    return;
+  }
+
+  state.image.statusText = candidate.error_message || (candidateStatus === 'completed'
+    ? 'Провайдер уже завершил генерацию. Подтягиваем файл в рабочую зону.'
+    : 'Восстановлен активный запуск изображения.');
+  state.image.isGenerating = !isTerminalTaskStatus(candidate.status) || candidateStatus === 'completed';
+  saveState();
+  render();
+
+  await pollImageTask({ silent: true });
+  if (state.image.isGenerating && !state.image.outputUrl) {
+    startImagePolling({ immediate: false });
+  }
+}
+
+
+async function restorePendingVoiceRun() {
+  if (!state.authToken || !state.voice.generationId || !state.voice.isGenerating || state.voice.audioUrl) return;
+  await pollVoiceTask({ silent: true });
+  if (state.voice.isGenerating && !state.voice.audioUrl) {
+    startVoicePolling({ immediate: false });
+  }
+}
+
 async function init() {
+  if (BOOT_QUERY.get('auth') === 'login' && !state.authToken) {
+    state.view = 'workspace';
+    state.authUi.modalOpen = true;
+    state.authUi.modalTab = 'login';
+  }
   render();
   await loadBootstrap();
   await checkApi();
   if (state.authToken) {
     await loadMe();
+    if (state.authToken && state.me) {
+      bindPendingPartnerRef().catch(() => {});
+      loadBalanceHistory({ silent: true, force: state.studio === 'profile', renderNow: state.studio === 'profile' }).catch(() => {});
+      if (state.studio === 'partner') loadPartnerDashboard({ silent: true, force: true, renderNow: true }).catch(() => {});
+    }
+    await resumePendingTopup();
     loadVideoHistory({ silent: true }).catch(() => {});
     loadVoiceHistory({ silent: true, keepSelection: true }).catch(() => {});
     if (state.image.panel === 'library') loadImageHistory({ silent: true }).catch(() => {});
@@ -7067,8 +11936,17 @@ async function init() {
   }
   if (state.voice.voices.length === 0) loadVoices();
   if (state.studio === 'library' || state.prompts.categories.length === 0) loadPromptCategories();
-  if (state.video.providerTaskId && !state.video.outputUrl && !isVideoTaskFailed(state.video.lastStatus)) {
-    startVideoPolling({ immediate: true });
+  await restorePendingVideoRun();
+  await restorePendingImageRun();
+  await restorePendingVoiceRun();
+  if (state.video.switchxRefGenerationId && !state.video.switchxReferenceImageUrl && !['failed', 'error', 'completed'].includes(String(state.video.switchxReferenceStatus || '').toLowerCase())) {
+    startSwitchxRefPolling({ immediate: true });
+  }
+  if (state.music.generationId && ['queued', 'processing', 'running'].includes(String(state.music.status || '').toLowerCase())) {
+    startMusicPolling(state.music.generationId);
+  }
+  if (state.music.toolTaskId && !['completed', 'failed', 'error', 'cancelled', 'canceled'].includes(String(state.music.toolTaskStatus || '').toLowerCase())) {
+    startMusicToolPolling(state.music.toolTaskId);
   }
   if (state.videoEditor.lastJobId && ['queued', 'processing'].includes(String(state.videoEditor.status || ''))) {
     startVideoEditPolling({ immediate: true });
