@@ -4729,6 +4729,11 @@ body.workspace-view .workspace-main.placeholder-stage.chat {
   display: none;
 }
 
+.mobile-settings-save-card,
+.mobile-balance-pill {
+  display: none;
+}
+
 @media (max-width: 900px) {
   body.workspace-view {
     background:
@@ -4764,7 +4769,7 @@ body.workspace-view .workspace-main.placeholder-stage.chat {
     z-index: 1600;
     height: 66px;
     display: grid;
-    grid-template-columns: 46px minmax(0, 1fr) 46px 46px;
+    grid-template-columns: 46px minmax(0, 1fr) auto 46px;
     align-items: center;
     gap: 8px;
     padding: max(10px, env(safe-area-inset-top)) 12px 10px;
@@ -4787,6 +4792,31 @@ body.workspace-view .workspace-main.placeholder-stage.chat {
     background: linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.035));
     font-size: 22px;
     line-height: 1;
+  }
+
+  body.workspace-view .mobile-balance-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 72px;
+    max-width: 96px;
+    height: 42px;
+    padding: 0 10px;
+    border-radius: 16px;
+    border: 1px solid rgba(255,179,71,0.24);
+    background: linear-gradient(135deg, rgba(255,138,26,0.24), rgba(255,194,56,0.12));
+    color: #fff6ec;
+    font-size: 12px;
+    font-weight: 800;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  body.workspace-view .mobile-balance-pill.is-guest {
+    min-width: 64px;
+    color: #1d130b;
+    background: linear-gradient(135deg, #ffc36d, #ff8a1a);
   }
 
   body.workspace-view .mobile-appbar__title {
@@ -4942,33 +4972,25 @@ body.workspace-view .workspace-main.placeholder-stage.chat {
   }
 
   body.workspace-view .workspace-prompt-card {
-    position: sticky;
-    bottom: 82px;
-    z-index: 120;
+    position: static !important;
+    bottom: auto !important;
+    z-index: auto !important;
     margin: 12px 0 14px;
     padding: 12px !important;
     border-color: rgba(255,179,71,0.16) !important;
-    background: rgba(17,15,13,0.96) !important;
-    box-shadow: 0 -14px 38px rgba(0,0,0,0.32) !important;
-    backdrop-filter: blur(14px);
+    background: rgba(17,15,13,0.94) !important;
+    box-shadow: 0 14px 34px rgba(0,0,0,0.24) !important;
+    backdrop-filter: none;
   }
 
   body.workspace-view .workspace-prompt-card::before {
-    content: 'Промпт';
-    display: inline-flex;
-    align-items: center;
-    min-height: 32px;
-    padding: 0 12px;
-    margin-bottom: 10px;
-    border-radius: 999px;
-    color: #1d130b;
-    background: linear-gradient(135deg, #ffbf6a, #ff8a1a);
-    font-weight: 800;
-    font-size: 12px;
+    display: none !important;
+    content: none !important;
   }
 
   body.workspace-view .workspace-prompt-head .label {
-    display: none;
+    display: inline-flex;
+    color: rgba(255,244,231,0.86);
   }
 
   body.workspace-view .workspace-prompt-counter {
@@ -5077,9 +5099,12 @@ body.workspace-view .workspace-main.placeholder-stage.chat {
   }
 
   body.workspace-view .mobile-bottom-item strong {
+    max-width: 100%;
     font-size: 10px;
-    font-weight: 700;
+    font-weight: 800;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   body.workspace-view .mobile-bottom-item.active,
@@ -5236,9 +5261,9 @@ body.workspace-view .workspace-main.placeholder-stage.chat {
     bottom: 0;
     z-index: 1690;
     display: flex !important;
-    max-height: min(82dvh, 720px);
-    min-height: 280px !important;
-    padding: 16px 14px calc(92px + env(safe-area-inset-bottom)) !important;
+    max-height: min(78dvh, 700px);
+    min-height: 0 !important;
+    padding: 16px 14px calc(18px + env(safe-area-inset-bottom)) !important;
     border-radius: 28px 28px 0 0 !important;
     transform: translateY(108%);
     transition: transform .24s ease;
@@ -5315,6 +5340,18 @@ body.workspace-view .workspace-main.placeholder-stage.chat {
     border-radius: 18px;
   }
 
+  body.workspace-view.mobile-sheet-open .mobile-bottom-bar {
+    display: none;
+  }
+
+  body.workspace-view .inspector .studio-run-card {
+    display: none !important;
+  }
+
+  body.workspace-view .inspector .mobile-settings-save-card {
+    display: block !important;
+  }
+
   body.workspace-view .selector-stack {
     gap: 10px;
   }
@@ -5328,7 +5365,7 @@ body.workspace-view .workspace-main.placeholder-stage.chat {
 
 @media (max-width: 420px) {
   body.workspace-view .mobile-appbar {
-    grid-template-columns: 42px minmax(0, 1fr) 42px 42px;
+    grid-template-columns: 42px minmax(0, 1fr) auto 42px;
     gap: 6px;
     padding-left: 10px;
     padding-right: 10px;
@@ -5338,6 +5375,15 @@ body.workspace-view .workspace-main.placeholder-stage.chat {
     width: 40px;
     height: 40px;
     border-radius: 14px;
+  }
+
+  body.workspace-view .mobile-balance-pill {
+    min-width: 62px;
+    max-width: 82px;
+    height: 40px;
+    border-radius: 14px;
+    padding: 0 8px;
+    font-size: 11px;
   }
 
   body.workspace-view .mobile-appbar__title strong {
