@@ -3763,6 +3763,78 @@ function scrollWorkspaceToResult() {
   });
 }
 
+
+function mobileTopBalanceLabel() {
+  if (state.authToken && state.me) return state.balance == null ? 'Баланс' : `${state.balance} ток.`;
+  return 'Войти';
+}
+
+function mobilePrimaryRunMeta() {
+  if (state.studio === 'chat') {
+    return { label: 'Отправить', icon: '➤', disabled: false, runnable: true };
+  }
+  if (state.studio === 'video') {
+    const locked = isVideoRunLocked();
+    const cost = getVideoRunCost();
+    const label = locked ? 'Генерация…' : (cost.known ? `Создать · ${cost.tokens} ток.` : 'Создать');
+    return { label, icon: locked ? '⏳' : '✦', disabled: locked, runnable: true };
+  }
+  if (state.studio === 'image') {
+    const cost = imageRunCost();
+    const label = state.image.isGenerating ? 'Генерация…' : (cost > 0 ? `Создать · ${cost} ток.` : 'Создать');
+    return { label, icon: state.image.isGenerating ? '⏳' : '✦', disabled: !!state.image.isGenerating, runnable: true };
+  }
+  if (state.studio === 'voice') {
+    return { label: state.voice.isGenerating ? 'Генерация…' : 'Создать звук', icon: state.voice.isGenerating ? '⏳' : '✦', disabled: !!state.voice.isGenerating, runnable: true };
+  }
+  if (state.studio === 'music') {
+    const cfg = musicInspectorRunConfig();
+    const label = state.music.ai === 'suno'
+      ? (cfg.loading ? 'Генерация…' : 'Создать · 2 ток.')
+      : (cfg.loading ? 'Генерация…' : 'Создать · бесплатно');
+    return { label, icon: cfg.loading ? '⏳' : '✦', disabled: !!cfg.disabled, runnable: true };
+  }
+  if (state.studio === 'profile') {
+    return { label: state.authToken && state.me ? 'Профиль' : 'Войти', icon: '👤', disabled: false, runnable: false };
+  }
+  return { label: 'Создать', icon: '✦', disabled: true, runnable: false };
+}
+
+function runMobilePrimaryAction() {
+  const meta = mobilePrimaryRunMeta();
+  if (meta.disabled) return;
+  runtime.mobileUi.navOpen = false;
+  runtime.mobileUi.sheetOpen = false;
+  renderMobileChrome();
+  if (meta.runnable) {
+    runCurrentStudio();
+    return;
+  }
+  if (state.studio === 'profile') {
+    if (state.authToken && state.me) {
+      render();
+    } else {
+      openAuthModal('login');
+    }
+  }
+}
+
+function saveMobileSettingsAndClose() {
+  saveState();
+  runtime.mobileUi.sheetOpen = false;
+  renderMobileChrome();
+  toast('success', 'Настройки сохранены', 'Запуск генерации теперь через нижнюю кнопку «Создать».');
+}
+
+function renderMobileSettingsSaveCard() {
+  return `
+    <div class="inspector-card mobile-settings-save-card">
+      <button class="btn primary full" type="button" data-action="mobile-save-settings">Сохранить настройки</button>
+      <div class="help-text" style="margin-top:10px;">Настройки применяются сразу. Генерация запускается нижней кнопкой «Создать».</div>
+    </div>
+  `;
+}
+
 function renderMobileChrome() {
   const chrome = document.getElementById('mobileWorkspaceChrome');
   if (!chrome) return;
@@ -3775,9 +3847,14 @@ function renderMobileChrome() {
   const title = document.getElementById('mobileStudioTitle');
   const subtitle = document.getElementById('mobileStudioSubtitle');
   const balance = document.getElementById('mobileDrawerBalance');
+  const topBalance = document.getElementById('mobileTopBalance');
   if (title) title.textContent = mobileStudioShortTitle();
   if (subtitle) subtitle.textContent = mobileStudioSubtitle();
-  if (balance) balance.textContent = state.balance == null ? 'Баланс: —' : `Баланс: ${state.balance} ток.`;
+  if (balance) balance.textContent = state.balance == null ? (state.authToken && state.me ? 'Баланс: —' : 'Войдите, чтобы видеть токены') : `Баланс: ${state.balance} ток.`;
+  if (topBalance) {
+    topBalance.textContent = mobileTopBalanceLabel();
+    topBalance.classList.toggle('is-guest', !(state.authToken && state.me));
+  }
 
   const menu = document.getElementById('mobileStudioMenu');
   if (menu) {
@@ -3815,10 +3892,16 @@ function renderMobileChrome() {
   const activeBottomAction = runtime.mobileUi.sheetOpen
     ? (runtime.mobileUi.sheetKind === 'history' ? 'mobile-open-history' : 'mobile-open-settings')
     : 'mobile-show-create';
+  const primaryMeta = mobilePrimaryRunMeta();
+  const createLabel = document.getElementById('mobileCreateLabel');
+  const createIcon = document.getElementById('mobileCreateIcon');
+  if (createLabel) createLabel.textContent = primaryMeta.label;
+  if (createIcon) createIcon.textContent = primaryMeta.icon;
   document.querySelectorAll('.mobile-bottom-item').forEach((btn) => {
     const action = btn.dataset.action || '';
     const disabled = (action === 'mobile-open-settings' && !hasMobileSettingsPanel())
-      || (action === 'mobile-open-history' && !hasMobileHistoryPanel());
+      || (action === 'mobile-open-history' && !hasMobileHistoryPanel())
+      || (action === 'mobile-show-create' && primaryMeta.disabled);
     btn.classList.toggle('active', action === activeBottomAction && !disabled);
     btn.toggleAttribute('disabled', disabled);
     btn.setAttribute('aria-disabled', disabled ? 'true' : 'false');
@@ -3828,12 +3911,6 @@ function renderMobileChrome() {
     btn.toggleAttribute('disabled', disabled);
     btn.setAttribute('aria-disabled', disabled ? 'true' : 'false');
   });
-  document.querySelectorAll('.mobile-appbar [data-action="mobile-open-history"]').forEach((btn) => {
-    const disabled = !hasMobileHistoryPanel();
-    btn.toggleAttribute('disabled', disabled);
-    btn.setAttribute('aria-disabled', disabled ? 'true' : 'false');
-  });
-
   const inspectorHead = document.querySelector('.inspector-head');
   if (inspectorHead && !inspectorHead.querySelector('[data-action="mobile-close-sheet"]')) {
     const closeBtn = document.createElement('button');
@@ -5422,10 +5499,11 @@ function renderVoiceInspector() {
       ${state.voiceHistory.lastError ? `<div class="help-text" style="margin-top:10px; color:#ff9b9b;">${escapeHtml(state.voiceHistory.lastError)}</div>` : ''}
     </div>
 
-    <div class="inspector-card">
+    <div class="inspector-card studio-run-card">
       <button class="btn primary full ${state.voice.isGenerating ? 'loading' : ''}" data-action="run-voice" ${state.voice.isGenerating ? 'disabled' : ''}>${state.voice.isGenerating ? 'Генерация...' : 'Сгенерировать звук'}</button>
       <div class="help-text" style="margin-top:10px;">Введённый текст из центра отправится в TTS, сохранится в истории и вернётся готовым аудио-файлом прямо в рабочую область.</div>
     </div>
+    ${renderMobileSettingsSaveCard()}
   `;
 }
 
@@ -6332,11 +6410,12 @@ function renderMusicInspector() {
         </div>
       ` : ''}
 
-      <div class="inspector-card music-inspector-card music-inspector-run">
+      <div class="inspector-card music-inspector-card music-inspector-run studio-run-card">
         ${state.music.errorText ? `<div class="music-warning">${escapeHtml(state.music.errorText)}</div>` : ''}
         ${isSuno && state.music.activeTab === 'tools' ? `<div class="help-text" style="margin-bottom:10px;">Сейчас активен режим инструментов Suno. Нижняя кнопка запускает выбранное действие для готового аудио.</div>` : ''}
         <button class="btn primary music-run-btn ${musicInspectorRunConfig().loading ? 'loading' : ''}" data-action="${escapeHtml(musicInspectorRunConfig().action)}" ${musicInspectorRunConfig().disabled ? 'disabled' : ''}>${escapeHtml(musicInspectorRunConfig().label)}</button>
       </div>
+      ${renderMobileSettingsSaveCard()}
     </div>
   `;
 }
@@ -7279,6 +7358,10 @@ function renderProfileWorkspace() {
         <div class="workspace-main scroll">
           <div class="profile-card">
             <h4>Вход и регистрация</h4>
+            <div style="margin:0 0 16px;">
+              ${renderTelegramAuthSlot('profileTelegramLoginMount')}
+              <small class="muted" style="display:block; margin-top:10px;">Для пользователей Telegram-бота это основной способ входа.</small>
+            </div>
             <div class="actions compact-gap" style="margin-bottom:14px; flex-wrap:wrap;">
               <button class="btn ${state.authUi.profileTab === 'login' ? 'primary' : 'ghost'}" data-action="profile-tab-login">Вход по почте</button>
               <button class="btn ${state.authUi.profileTab === 'register' ? 'primary' : 'ghost'}" data-action="profile-tab-register">Регистрация</button>
@@ -7289,7 +7372,7 @@ function renderProfileWorkspace() {
                 <div class="input-group"><label class="label">Пароль</label><input id="profile_login_password" type="password" placeholder="Пароль"></div>
               </div>
               <div class="actions compact-gap" style="margin-top:14px;"><button id="profileLoginBtn" class="btn primary">Войти по почте</button></div>
-              <small class="muted" style="display:block; margin-top:10px;">Если аккаунт уже существует в Telegram, войди через Telegram в правом верхнем углу и привяжи почту внутри профиля.</small>
+              <small class="muted" style="display:block; margin-top:10px;">Если аккаунт уже существует в Telegram, используй кнопку «Продолжить с Telegram» выше.</small>
             ` : `
               <div class="field-grid two">
                 <div class="input-group"><label class="label">Email</label><input id="profile_register_email" type="email" placeholder="name@example.com" value="${escapeHtml(registerPending)}"></div>
@@ -7489,10 +7572,11 @@ function renderVideoInspector() {
       </div>
     </div>
     ${renderVideoModeFields(videoModelConfig())}
-    <div class="inspector-card">
+    <div class="inspector-card studio-run-card">
       <button class="btn primary full video-run-btn ${isVideoRunLocked() ? 'loading' : ''}" id="videoRunPrimaryBtn" data-action="run-video" ${isVideoRunLocked() ? 'disabled' : ''}>${escapeHtml(videoRunButtonLabel())}</button>
       <div class="help-text" style="margin-top:10px;">${escapeHtml(getVideoRunCost().helper || 'Стоимость генерации пересчитывается прямо в кнопке.')}</div>
     </div>
+    ${renderMobileSettingsSaveCard()}
   `;
 }
 
@@ -7744,10 +7828,11 @@ function renderImageInspector() {
       </div>
     </div>
     ${renderImageModeFields()}
-    <div class="inspector-card">
+    <div class="inspector-card studio-run-card">
       <button class="btn primary full ${state.image.isGenerating ? 'loading' : ''}" data-action="run-image" ${state.image.isGenerating ? 'disabled' : ''}>${escapeHtml(imageRunButtonLabel())}</button>
       <div class="help-text" style="margin-top:10px;">${escapeHtml(state.image.statusText || 'Стоимость и режим генерации зависят от выбранного семейства.')}</div>
     </div>
+    ${renderMobileSettingsSaveCard()}
   `;
 }
 
@@ -11560,12 +11645,20 @@ function handleAction(action, dataset = {}) {
       scrollWorkspaceToResult();
       break;
     case 'mobile-show-create':
+      runMobilePrimaryAction();
+      break;
+    case 'mobile-save-settings':
+      saveMobileSettingsAndClose();
+      break;
+    case 'mobile-auth-entry':
       closeMobileOverlays();
-      renderMobileChrome();
-      requestAnimationFrame(() => {
-        const prompt = document.querySelector('.workspace-prompt-card, .chat-composer, .music-panel textarea, .voice-editor-card textarea');
-        if (prompt) prompt.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      });
+      if (state.authToken && state.me) {
+        state.studio = 'profile';
+        render();
+        saveState();
+      } else {
+        openAuthModal('login');
+      }
       break;
     default:
       break;
@@ -11661,6 +11754,7 @@ function render() {
   renderPromptItemModal();
   renderAuthModal();
   mountTelegramLogin('telegramLoginMount', 'login');
+  mountTelegramLogin('profileTelegramLoginMount', 'login');
   mountTelegramLogin('profileTelegramLinkMount', 'link');
   renderLandingView();
   enhanceCustomSelects();
