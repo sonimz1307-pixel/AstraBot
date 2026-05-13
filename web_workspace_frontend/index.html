@@ -9,8 +9,31 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./styles.css" />
+  <script>
+    (function () {
+      try {
+        if (window.matchMedia && window.matchMedia('(max-width: 900px)').matches) {
+          document.documentElement.classList.add('mobile-device-boot');
+          if (sessionStorage.getItem('nabex:mobileSplashSeen') === '1') {
+            document.documentElement.classList.add('mobile-splash-seen');
+          }
+        }
+      } catch (_) {}
+    })();
+  </script>
 </head>
 <body class="showcase-view">
+  <div id="mobileSplashScreen" class="mobile-splash-screen" aria-hidden="true">
+    <div class="mobile-splash-glow"></div>
+    <div class="mobile-splash-card">
+      <picture>
+        <source srcset="./nabex-splash-logo.webp" type="image/webp" />
+        <img class="mobile-splash-logo" src="./favicon.png" alt="Nabex" decoding="async" />
+      </picture>
+      <div class="mobile-splash-title">NABEX</div>
+      <div class="mobile-splash-subtitle">AI Workspace</div>
+    </div>
+  </div>
   <header class="site-topbar">
     <div class="site-topbar__brand">
       <div class="site-mark">A</div>
@@ -279,7 +302,6 @@
             <span id="mobileStudioSubtitle">Workspace</span>
           </div>
           <button id="mobileTopBalance" class="mobile-balance-pill" type="button" data-action="mobile-auth-entry" aria-label="Баланс">Войти</button>
-          <button class="mobile-icon-btn" type="button" data-action="mobile-open-settings" aria-label="Настройки">⚙</button>
         </header>
 
         <div id="mobileNavBackdrop" class="mobile-overlay-backdrop" data-action="mobile-close-overlays"></div>
@@ -302,7 +324,7 @@
 
         <nav class="mobile-bottom-bar" aria-label="Быстрые действия">
           <button class="mobile-bottom-item active" type="button" data-action="mobile-show-create">
-            <span id="mobileCreateIcon">✦</span><strong id="mobileCreateLabel">Создать</strong>
+            <span id="mobileCreateIcon">✦</span><strong id="mobileCreateLabel">— ток.</strong>
           </button>
           <button class="mobile-bottom-item" type="button" data-action="mobile-show-result">
             <span>▣</span><strong>Результат</strong>
