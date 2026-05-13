@@ -3801,7 +3801,7 @@ input:focus, select:focus, textarea:focus {
 .auth-modal-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 1200;
+  z-index: 4200;
   display: flex;
   align-items: flex-start;
   justify-content: center;
@@ -3873,6 +3873,23 @@ input:focus, select:focus, textarea:focus {
   font-weight: 700;
   cursor: pointer;
   margin-bottom: 12px;
+}
+
+.auth-modal-social-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  align-items: stretch;
+  margin-bottom: 6px;
+}
+
+.auth-modal-social-col {
+  min-width: 0;
+}
+
+.auth-modal-social-row .auth-social-btn {
+  min-height: 64px;
+  margin-bottom: 0;
 }
 
 .auth-social-btn--telegram {
@@ -3951,17 +3968,25 @@ input:focus, select:focus, textarea:focus {
 
 @media (max-width: 720px) {
   .auth-modal-backdrop {
-    padding: 16px;
+    z-index: 4200;
+    padding: 12px;
     align-items: flex-start;
   }
 
   .auth-modal-card {
-    max-height: calc(100dvh - 32px);
+    width: 100%;
+    max-height: calc(100dvh - 24px);
     border-radius: 22px;
     padding: 22px 18px 18px;
   }
 
+  .auth-modal-social-row {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
   .auth-social-btn {
+    min-height: 58px;
     font-size: 17px;
   }
 }
@@ -4710,6 +4735,112 @@ body.workspace-view .workspace-main.placeholder-stage.chat {
   }
 }
 
+
+
+/* Mobile splash screen: mobile only, desktop unchanged */
+.mobile-splash-screen {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  html.mobile-device-boot:not(.mobile-splash-seen) .mobile-splash-screen,
+  body.mobile-splash-active .mobile-splash-screen {
+    position: fixed;
+    inset: 0;
+    z-index: 6000;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+    background:
+      radial-gradient(circle at 50% 42%, rgba(255, 138, 26, 0.22), transparent 28%),
+      radial-gradient(circle at 50% 100%, rgba(255, 194, 56, 0.11), transparent 34%),
+      linear-gradient(180deg, #050505 0%, #090806 48%, #030303 100%);
+    opacity: 1;
+    visibility: visible;
+    transition: opacity .38s ease, visibility .38s ease;
+  }
+
+  body.mobile-splash-hiding .mobile-splash-screen {
+    opacity: 0;
+    visibility: hidden;
+  }
+
+  body.mobile-splash-gone .mobile-splash-screen,
+  html.mobile-splash-seen .mobile-splash-screen {
+    display: none !important;
+  }
+
+  .mobile-splash-glow {
+    position: absolute;
+    width: 66vw;
+    max-width: 360px;
+    aspect-ratio: 1;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(255, 138, 26, 0.26), transparent 64%);
+    filter: blur(20px);
+    animation: mobileSplashGlow 1.45s ease both;
+  }
+
+  .mobile-splash-card {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    justify-items: center;
+    gap: 10px;
+    transform: translateY(6px) scale(.96);
+    opacity: 0;
+    animation: mobileSplashCard 1.25s cubic-bezier(.2,.8,.2,1) both;
+  }
+
+  .mobile-splash-logo {
+    width: min(42vw, 176px);
+    height: min(42vw, 176px);
+    display: block;
+    border-radius: 36px;
+    object-fit: cover;
+    filter: drop-shadow(0 0 22px rgba(255, 126, 18, .48));
+  }
+
+  .mobile-splash-title {
+    margin-top: 4px;
+    font-size: clamp(26px, 8vw, 42px);
+    line-height: 1;
+    font-weight: 900;
+    letter-spacing: .16em;
+    color: #fff7ed;
+    text-shadow: 0 0 18px rgba(255, 138, 26, .42);
+  }
+
+  .mobile-splash-subtitle {
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: .22em;
+    text-transform: uppercase;
+    color: rgba(255, 224, 184, .62);
+  }
+
+  @keyframes mobileSplashCard {
+    0% { opacity: 0; transform: translateY(14px) scale(.9); filter: blur(8px); }
+    42% { opacity: 1; transform: translateY(0) scale(1.03); filter: blur(0); }
+    100% { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+  }
+
+  @keyframes mobileSplashGlow {
+    0% { opacity: 0; transform: scale(.72); }
+    45% { opacity: 1; transform: scale(1.08); }
+    100% { opacity: .74; transform: scale(1); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .mobile-splash-glow,
+    .mobile-splash-card {
+      animation: none;
+      opacity: 1;
+      transform: none;
+    }
+  }
+}
+
 /* =====================================================================
    MOBILE AI APP LAYOUT 2026-05-12
    Separate mobile chrome inspired by compact AI apps: top bar, drawer,
@@ -4769,7 +4900,7 @@ body.workspace-view .workspace-main.placeholder-stage.chat {
     z-index: 1600;
     height: 66px;
     display: grid;
-    grid-template-columns: 46px minmax(0, 1fr) auto 46px;
+    grid-template-columns: 46px minmax(0, 1fr) auto;
     align-items: center;
     gap: 8px;
     padding: max(10px, env(safe-area-inset-top)) 12px 10px;
@@ -4799,7 +4930,7 @@ body.workspace-view .workspace-main.placeholder-stage.chat {
     align-items: center;
     justify-content: center;
     min-width: 72px;
-    max-width: 96px;
+    max-width: 118px;
     height: 42px;
     padding: 0 10px;
     border-radius: 16px;
@@ -5100,7 +5231,7 @@ body.workspace-view .workspace-main.placeholder-stage.chat {
 
   body.workspace-view .mobile-bottom-item strong {
     max-width: 100%;
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 800;
     white-space: nowrap;
     overflow: hidden;
@@ -5261,7 +5392,8 @@ body.workspace-view .workspace-main.placeholder-stage.chat {
     bottom: 0;
     z-index: 1690;
     display: flex !important;
-    max-height: min(78dvh, 700px);
+    height: calc(100dvh - 78px);
+    max-height: calc(100dvh - 78px);
     min-height: 0 !important;
     padding: 16px 14px calc(18px + env(safe-area-inset-bottom)) !important;
     border-radius: 28px 28px 0 0 !important;
@@ -5365,7 +5497,7 @@ body.workspace-view .workspace-main.placeholder-stage.chat {
 
 @media (max-width: 420px) {
   body.workspace-view .mobile-appbar {
-    grid-template-columns: 42px minmax(0, 1fr) auto 42px;
+    grid-template-columns: 42px minmax(0, 1fr) auto;
     gap: 6px;
     padding-left: 10px;
     padding-right: 10px;
@@ -5379,7 +5511,7 @@ body.workspace-view .workspace-main.placeholder-stage.chat {
 
   body.workspace-view .mobile-balance-pill {
     min-width: 62px;
-    max-width: 82px;
+    max-width: 108px;
     height: 40px;
     border-radius: 14px;
     padding: 0 8px;
