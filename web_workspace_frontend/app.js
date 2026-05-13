@@ -141,7 +141,10 @@ const runtime = {
   },
 };
 
-const DEFAULT_APP_VIEW = localStorage.getItem('astrabot:view') || (window.location.hash === '#workspace' ? 'workspace' : 'showcase');
+const MOBILE_SPLASH_SESSION_KEY = 'nabex:mobileSplashSeen';
+const MOBILE_WORKSPACE_MEDIA = window.matchMedia ? window.matchMedia('(max-width: 900px)') : null;
+const IS_MOBILE_BOOT = !!MOBILE_WORKSPACE_MEDIA?.matches;
+const DEFAULT_APP_VIEW = IS_MOBILE_BOOT ? 'workspace' : (localStorage.getItem('astrabot:view') || (window.location.hash === '#workspace' ? 'workspace' : 'showcase'));
 
 const FILE_INPUT_MAP = {
   chat_attachments: { key: 'chat.attachments', multiple: true },
@@ -3613,6 +3616,53 @@ function renderNav() {
   }).join('');
 }
 
+
+function isMobileViewport() {
+  return !!(window.matchMedia && window.matchMedia('(max-width: 900px)').matches);
+}
+
+function normalizeMobileStartupView() {
+  if (!isMobileViewport()) return;
+  state.view = 'workspace';
+  localStorage.setItem('astrabot:view', 'workspace');
+}
+
+function closeMobileSplash({ immediate = false } = {}) {
+  const splash = document.getElementById('mobileSplashScreen');
+  if (!splash) return;
+  const finish = () => {
+    splash.setAttribute('aria-hidden', 'true');
+    document.body.classList.add('mobile-splash-gone');
+    document.body.classList.remove('mobile-splash-active', 'mobile-splash-hiding');
+    document.documentElement.classList.add('mobile-splash-seen');
+    try { sessionStorage.setItem(MOBILE_SPLASH_SESSION_KEY, '1'); } catch (_) {}
+  };
+  if (immediate) {
+    finish();
+    return;
+  }
+  document.body.classList.add('mobile-splash-hiding');
+  window.setTimeout(finish, 420);
+}
+
+function initMobileSplash() {
+  const splash = document.getElementById('mobileSplashScreen');
+  if (!splash) return;
+  if (!isMobileViewport()) {
+    closeMobileSplash({ immediate: true });
+    return;
+  }
+  let seen = false;
+  try { seen = sessionStorage.getItem(MOBILE_SPLASH_SESSION_KEY) === '1'; } catch (_) {}
+  if (seen || document.documentElement.classList.contains('mobile-splash-seen')) {
+    closeMobileSplash({ immediate: true });
+    return;
+  }
+  splash.setAttribute('aria-hidden', 'false');
+  document.body.classList.add('mobile-splash-active');
+  window.setTimeout(() => closeMobileSplash(), 1450);
+}
+
 function mobileStudioShortTitle() {
   const meta = STUDIO_META[state.studio] || STUDIO_META.chat;
   const current = currentMeta();
@@ -3776,28 +3826,28 @@ function mobilePrimaryRunMeta() {
   if (state.studio === 'video') {
     const locked = isVideoRunLocked();
     const cost = getVideoRunCost();
-    const label = locked ? 'Генерация…' : (cost.known ? `Создать · ${cost.tokens} ток.` : 'Создать');
+    const label = locked ? 'Идёт…' : (cost.known ? `${cost.tokens} ток.` : 'Запуск');
     return { label, icon: locked ? '⏳' : '✦', disabled: locked, runnable: true };
   }
   if (state.studio === 'image') {
     const cost = imageRunCost();
-    const label = state.image.isGenerating ? 'Генерация…' : (cost > 0 ? `Создать · ${cost} ток.` : 'Создать');
+    const label = state.image.isGenerating ? 'Идёт…' : (cost > 0 ? `${cost} ток.` : 'Запуск');
     return { label, icon: state.image.isGenerating ? '⏳' : '✦', disabled: !!state.image.isGenerating, runnable: true };
   }
   if (state.studio === 'voice') {
-    return { label: state.voice.isGenerating ? 'Генерация…' : 'Создать звук', icon: state.voice.isGenerating ? '⏳' : '✦', disabled: !!state.voice.isGenerating, runnable: true };
+    return { label: state.voice.isGenerating ? 'Идёт…' : 'Запуск', icon: state.voice.isGenerating ? '⏳' : '✦', disabled: !!state.voice.isGenerating, runnable: true };
   }
   if (state.studio === 'music') {
     const cfg = musicInspectorRunConfig();
     const label = state.music.ai === 'suno'
-      ? (cfg.loading ? 'Генерация…' : 'Создать · 2 ток.')
-      : (cfg.loading ? 'Генерация…' : 'Создать · бесплатно');
+      ? (cfg.loading ? 'Идёт…' : '2 ток.')
+      : (cfg.loading ? 'Идёт…' : '0 ток.');
     return { label, icon: cfg.loading ? '⏳' : '✦', disabled: !!cfg.disabled, runnable: true };
   }
   if (state.studio === 'profile') {
     return { label: state.authToken && state.me ? 'Профиль' : 'Войти', icon: '👤', disabled: false, runnable: false };
   }
-  return { label: 'Создать', icon: '✦', disabled: true, runnable: false };
+  return { label: 'Запуск', icon: '✦', disabled: true, runnable: false };
 }
 
 function runMobilePrimaryAction() {
@@ -3903,11 +3953,6 @@ function renderMobileChrome() {
       || (action === 'mobile-open-history' && !hasMobileHistoryPanel())
       || (action === 'mobile-show-create' && primaryMeta.disabled);
     btn.classList.toggle('active', action === activeBottomAction && !disabled);
-    btn.toggleAttribute('disabled', disabled);
-    btn.setAttribute('aria-disabled', disabled ? 'true' : 'false');
-  });
-  document.querySelectorAll('.mobile-appbar [data-action="mobile-open-settings"]').forEach((btn) => {
-    const disabled = !hasMobileSettingsPanel();
     btn.toggleAttribute('disabled', disabled);
     btn.setAttribute('aria-disabled', disabled ? 'true' : 'false');
   });
@@ -4200,12 +4245,12 @@ function renderAuthModal() {
         <div class="auth-modal-subtitle">${tab === 'register' ? 'Зарегистрируйся, чтобы создавать контент' : tab === 'reset' ? 'Получите код на почту и задайте новый пароль' : 'Войдите, чтобы создавать'}</div>
 
         ${tab !== 'reset' ? `
-          <div style="display:flex; gap:12px; align-items:stretch; flex-wrap:nowrap; margin-bottom:6px;">
-            <div style="flex:1 1 0; min-width:0;">
-              ${renderTelegramAuthSlot('authModalTelegramMount', 'native-inline')}
+          <div class="auth-modal-social-row">
+            <div class="auth-modal-social-col">
+              ${renderTelegramAuthSlot('authModalTelegramMount')}
             </div>
-            <div style="flex:1 1 0; min-width:0;">
-              <button class="auth-social-btn" type="button" data-action="google-auth-placeholder" style="min-height:56px; width:100%; display:flex; align-items:center; justify-content:center; gap:10px; padding:0 16px;">
+            <div class="auth-modal-social-col">
+              <button class="auth-social-btn" type="button" data-action="google-auth-placeholder">
                 <span class="auth-social-icon">G</span>
                 <span>Google</span>
                 <span class="auth-soon-tag">скоро</span>
@@ -10968,7 +11013,8 @@ function activateStudio(studio, options = {}) {
 }
 
 function setAppView(view, options = {}) {
-  state.view = view === 'workspace' ? 'workspace' : 'showcase';
+  const requestedView = view === 'workspace' ? 'workspace' : 'showcase';
+  state.view = isMobileViewport() ? 'workspace' : requestedView;
   localStorage.setItem('astrabot:view', state.view);
   renderLandingView();
   if (options.updateHash !== false) {
@@ -12004,6 +12050,8 @@ async function restorePendingVoiceRun() {
 }
 
 async function init() {
+  normalizeMobileStartupView();
+  initMobileSplash();
   if (BOOT_QUERY.get('auth') === 'login' && !state.authToken) {
     state.view = 'workspace';
     state.authUi.modalOpen = true;
