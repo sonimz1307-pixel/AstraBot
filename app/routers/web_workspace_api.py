@@ -391,6 +391,7 @@ WORKSPACE_TOPUP_PACKS: List[Dict[str, Any]] = [
     {"tokens": 20, "rub": 180, "stars": 99, "badge": "⭐", "code": "plus"},
     {"tokens": 50, "rub": 450, "stars": 247, "badge": "🚀", "code": "pro"},
     {"tokens": 100, "rub": 850, "stars": 467, "badge": "👑", "code": "ultra"},
+    {"tokens": 200, "rub": 1600, "stars": 879, "badge": "💎", "code": "max"},
 ]
 
 
