@@ -1018,6 +1018,7 @@ TOPUP_PACKS = [
     {"tokens": 20, "rub": 180, "stars": 99, "badge": "⭐"},
     {"tokens": 50, "rub": 450, "stars": 247, "badge": "🚀"},
     {"tokens": 100, "rub": 850, "stars": 467, "badge": "👑"},
+    {"tokens": 200, "rub": 1600, "stars": 879, "badge": "💎"},
 ]
 
 def _find_pack_by_tokens(tokens: int) -> Optional[Dict[str, int]]:
