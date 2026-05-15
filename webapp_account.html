@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Личный кабинет — NABEX</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      --bg: #090909;
+      --card: #141414;
+      --line: rgba(255, 255, 255, 0.08);
+      --text: #f5f5f5;
+      --muted: rgba(245, 245, 245, 0.62);
+      --muted-2: rgba(245, 245, 245, 0.42);
+      --accent: #ff8a00;
+      --accent-2: #ffb000;
+      --radius: 22px;
+      --shadow: 0 20px 50px rgba(0, 0, 0, 0.32);
+    }
+
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+    html,
+    body {
+      margin: 0;
+      min-height: 100%;
+      background:
+        radial-gradient(circle at top left, rgba(255, 138, 0, 0.16), transparent 32%),
+        radial-gradient(circle at top right, rgba(255, 176, 0, 0.09), transparent 28%),
+        var(--bg);
+      color: var(--text);
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    }
+
+    body { padding: max(14px, env(safe-area-inset-top)) 14px max(22px, env(safe-area-inset-bottom)); }
+
+    .app { width: min(100%, 520px); margin: 0 auto; }
+
+    .top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+
+    .logo {
+      width: 38px;
+      height: 38px;
+      border-radius: 14px;
+      display: grid;
+      place-items: center;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color: #111;
+      font-weight: 900;
+      box-shadow: 0 12px 24px rgba(255, 138, 0, 0.22);
+      flex: 0 0 auto;
+    }
+
+    .brand-title {
+      font-size: 18px;
+      line-height: 1.1;
+      font-weight: 800;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .brand-subtitle { margin-top: 2px; font-size: 12px; color: var(--muted); }
+
+    .pill {
+      padding: 8px 11px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid rgba(255, 138, 0, 0.18);
+      border-radius: 28px;
+      padding: 20px;
+      background:
+        linear-gradient(135deg, rgba(255, 138, 0, 0.18), transparent 56%),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.03)),
+        var(--card);
+      box-shadow: var(--shadow);
+      margin-bottom: 12px;
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      right: -60px;
+      top: -60px;
+      width: 170px;
+      height: 170px;
+      border-radius: 50%;
+      background: rgba(255, 138, 0, 0.13);
+      filter: blur(4px);
+    }
+
+    .label { position: relative; z-index: 1; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+
+    .balance {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+
+    .balance-value {
+      font-size: clamp(34px, 10vw, 48px);
+      line-height: 0.95;
+      font-weight: 900;
+      letter-spacing: -1.5px;
+    }
+
+    .balance-unit { font-size: 16px; color: var(--muted); font-weight: 650; }
+
+    .hint {
+      position: relative;
+      z-index: 1;
+      font-size: 12px;
+      line-height: 1.45;
+      color: var(--muted);
+      margin: 0 0 16px;
+    }
+
+    .grid { display: grid; gap: 12px; }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 16px;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.025)),
+        var(--card);
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.18);
+    }
+
+    .card-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 9px;
+      font-size: 16px;
+      font-weight: 800;
+    }
+
+    .badge {
+      padding: 5px 8px;
+      border-radius: 999px;
+      background: rgba(255, 138, 0, 0.12);
+      color: #ffb24a;
+      font-size: 11px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .text { margin: 0 0 12px; color: var(--muted); font-size: 13px; line-height: 1.45; }
+
+    .link-box {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 11px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.045);
+      border: 1px solid var(--line);
+      margin-bottom: 8px;
+      min-width: 0;
+    }
+
+    .link-text {
+      min-width: 0;
+      flex: 1;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      color: rgba(255, 255, 255, 0.82);
+      font-size: 12px;
+    }
+
+    .mini-copy {
+      border: 0;
+      border-radius: 11px;
+      padding: 8px 10px;
+      background: rgba(255, 138, 0, 0.16);
+      color: #ffc06a;
+      font-size: 12px;
+      font-weight: 750;
+      cursor: pointer;
+      flex: 0 0 auto;
+    }
+
+    .actions { display: grid; grid-template-columns: 1fr; gap: 9px; }
+
+    button,
+    .btn {
+      width: 100%;
+      min-height: 46px;
+      border: 0;
+      border-radius: 16px;
+      padding: 12px 14px;
+      font: inherit;
+      font-size: 14px;
+      font-weight: 800;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      text-decoration: none;
+      transition: transform 0.15s ease, opacity 0.15s ease, background 0.15s ease;
+    }
+
+    button:active,
+    .btn:active { transform: scale(0.985); }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color: #111;
+      box-shadow: 0 14px 28px rgba(255, 138, 0, 0.22);
+    }
+
+    .btn-secondary { background: rgba(255, 255, 255, 0.075); color: var(--text); border: 1px solid var(--line); }
+
+    .btn-soft { background: rgba(255, 138, 0, 0.11); color: #ffb24a; border: 1px solid rgba(255, 138, 0, 0.18); }
+
+    .nav-panel {
+      display: none;
+      margin-top: 12px;
+      padding: 13px;
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.045);
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+      white-space: pre-line;
+    }
+
+    .nav-panel.show { display: block; }
+    .nav-panel b { color: var(--text); }
+
+    .doc-list { display: grid; gap: 9px; }
+
+    .doc-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 13px;
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.045);
+      border: 1px solid var(--line);
+      color: var(--text);
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 750;
+    }
+
+    .doc-row small { display: block; margin-top: 2px; color: var(--muted-2); font-size: 11px; font-weight: 600; }
+    .arrow { color: var(--muted-2); font-size: 18px; flex: 0 0 auto; }
+
+    .toast {
+      position: fixed;
+      left: 50%;
+      bottom: calc(18px + env(safe-area-inset-bottom));
+      transform: translateX(-50%) translateY(20px);
+      opacity: 0;
+      pointer-events: none;
+      padding: 11px 14px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.92);
+      color: #111;
+      font-size: 13px;
+      font-weight: 800;
+      transition: opacity 0.18s ease, transform 0.18s ease;
+      z-index: 20;
+      box-shadow: 0 14px 32px rgba(0, 0, 0, 0.32);
+      white-space: nowrap;
+    }
+
+    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+    @media (max-width: 360px) {
+      body { padding-left: 10px; padding-right: 10px; }
+      .hero, .card { padding: 15px; }
+      .brand-title { font-size: 16px; }
+      .pill { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header class="top">
+      <div class="brand">
+        <div class="logo">N</div>
+        <div>
+          <div class="brand-title">Личный кабинет</div>
+          <div class="brand-subtitle">NABEX.RU</div>
+        </div>
+      </div>
+      <div class="pill">Telegram WebApp</div>
+    </header>
+
+    <section class="hero">
+      <div class="label">Ваш баланс</div>
+      <div class="balance">
+        <div class="balance-value" id="balanceValue">—</div>
+        <div class="balance-unit">токенов</div>
+      </div>
+      <p class="hint" id="balanceHint">Загружаю данные аккаунта…</p>
+      <button class="btn-primary" type="button" data-open="topup">Пополнить баланс</button>
+    </section>
+
+    <section class="grid">
+      <article class="card">
+        <div class="card-title">
+          <span>Реферальная программа</span>
+          <span class="badge">до 30%</span>
+        </div>
+        <p class="text">Основные ссылки для приглашений. Расширенная информация по реферальной системе доступна на сайте.</p>
+
+        <div class="link-box">
+          <div class="link-text" id="siteRefText">Загрузка ссылки…</div>
+          <button class="mini-copy" type="button" data-copy="site_ref">Скопировать</button>
+        </div>
+
+        <div class="link-box">
+          <div class="link-text" id="botRefText">Загрузка ссылки…</div>
+          <button class="mini-copy" type="button" data-copy="bot_ref">Скопировать</button>
+        </div>
+
+        <div class="actions">
+          <button class="btn-soft" type="button" data-open="ref_site">Открыть реферальный кабинет на сайте</button>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-title">
+          <span>Навигация</span>
+          <span class="badge">подсказка</span>
+        </div>
+        <p class="text">Краткая навигация по основным разделам бота и сайта.</p>
+        <button class="btn-secondary" type="button" data-toggle="navigation">Открыть навигацию</button>
+        <div class="nav-panel" id="navigationPanel"><b>🤖 NABEX.RU - Наш Сайт.</b>
+• 🖼 Фото будущего: редактирование, афиши, нейро-фотосессии.
+  — фото → потом текст
+  — нужен текст/цена/надпись → сделаю афишу GPT Image2
+  — 'без текста' / описание сцены → фото-редактирование
+• 🎬 Видео будущего: текст → видео или фото → видео.
+• 🎵 Музыка будущего: генерация треков (Suno / Udio).
+• 🔊 Озвучить текст: профессиональная AI-озвучка.
+• 🍌 Nano Banana 2: генерация или редактирование изображений через PiAPI.
+• 🍌 Nano Banana Pro: продвинутый AI-редактор изображений.
+• 🍌 Nano Banana Pro - NEW: новая ветка с выбором 2K / 4K.
+• 💰 Баланс: токены, пополнение, история операций.
+• 🔄 Сбросить генерацию — если зациклилась/зависла
+• /reset — сбросить текущий режим</div>
+      </article>
+
+      <article class="card">
+        <div class="card-title"><span>Сайт</span></div>
+        <p class="text">Полная версия кабинета, история генераций, тарифы и подробная информация доступны на сайте.</p>
+        <button class="btn-secondary" type="button" data-open="site">Открыть Nabex.ru</button>
+      </article>
+
+      <article class="card">
+        <div class="card-title"><span>Поддержка</span></div>
+        <p class="text">Если генерация зависла, токены списались или возникла ошибка — напишите в поддержку.</p>
+        <button class="btn-secondary" type="button" data-open="support">Написать в поддержку</button>
+      </article>
+
+      <article class="card">
+        <div class="card-title"><span>Настройки</span></div>
+        <p class="text">Документы сервиса и условия использования.</p>
+        <div class="doc-list">
+          <a class="doc-row" href="#" data-open-link="offer">
+            <span>Согласие с офертой<small>Условия использования сервиса</small></span>
+            <span class="arrow">›</span>
+          </a>
+          <a class="doc-row" href="#" data-open-link="policy">
+            <span>Политика сервиса<small>Правила и обработка данных</small></span>
+            <span class="arrow">›</span>
+          </a>
+        </div>
+      </article>
+    </section>
+  </main>
+
+  <div class="toast" id="toast">Скопировано</div>
+
+  <script>
+    const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+    const query = new URLSearchParams(window.location.search || "");
+
+    const state = {
+      balance: 0,
+      siteRef: "",
+      botRef: "",
+      topupUrl: "https://nabex.ru/tariffs.html",
+      siteUrl: "https://nabex.ru",
+      refCabinetUrl: "https://nabex.ru/#workspace",
+      supportUrl: "https://t.me/HelpNeiroAstra",
+      offerUrl: "https://nabex.ru/terms.html",
+      policyUrl: "https://nabex.ru/privacy.html"
+    };
+
+    if (tg) {
+      tg.ready();
+      tg.expand();
+      tg.setHeaderColor("#090909");
+      tg.setBackgroundColor("#090909");
+    }
+
+    const balanceValue = document.getElementById("balanceValue");
+    const balanceHint = document.getElementById("balanceHint");
+    const siteRefText = document.getElementById("siteRefText");
+    const botRefText = document.getElementById("botRefText");
+    const toast = document.getElementById("toast");
+
+    function renderAccount() {
+      balanceValue.textContent = Number.isFinite(Number(state.balance)) ? String(Math.trunc(Number(state.balance))) : "0";
+      balanceHint.textContent = "Баланс общий для сайта и Telegram. После пополнения токены доступны во всех разделах сервиса.";
+      siteRefText.textContent = state.siteRef || "Ссылка недоступна";
+      botRefText.textContent = state.botRef || "Ссылка недоступна";
+    }
+
+    function openUrl(url) {
+      if (!url) return;
+      if (tg && typeof tg.openLink === "function") {
+        tg.openLink(url);
+        return;
+      }
+      window.location.href = url;
+    }
+
+    function showToast(text) {
+      toast.textContent = text || "Готово";
+      toast.classList.add("show");
+      clearTimeout(showToast.timer);
+      showToast.timer = setTimeout(() => toast.classList.remove("show"), 1600);
+    }
+
+    async function copyText(text) {
+      if (!text) {
+        showToast("Ссылка недоступна");
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(text);
+        showToast("Ссылка скопирована");
+      } catch (error) {
+        const temp = document.createElement("textarea");
+        temp.value = text;
+        temp.style.position = "fixed";
+        temp.style.left = "-9999px";
+        document.body.appendChild(temp);
+        temp.focus();
+        temp.select();
+        document.execCommand("copy");
+        temp.remove();
+        showToast("Ссылка скопирована");
+      }
+    }
+
+    async function loadAccount() {
+      const params = new URLSearchParams();
+      const uid = query.get("uid") || query.get("tg_user_id") || query.get("user_id") || "";
+      if (uid) params.set("uid", uid);
+
+      const apiUrl = "/api/tg/account" + (params.toString() ? "?" + params.toString() : "");
+      try {
+        const response = await fetch(apiUrl, {
+          headers: { "X-Telegram-Init-Data": tg && tg.initData ? tg.initData : "" }
+        });
+        const data = await response.json();
+        state.balance = data.balance ?? 0;
+        state.siteRef = data.site_ref || "";
+        state.botRef = data.bot_ref || "";
+        state.topupUrl = data.topup_url || state.topupUrl;
+        state.siteUrl = data.site_url || state.siteUrl;
+        state.refCabinetUrl = data.ref_cabinet_url || state.refCabinetUrl;
+        state.supportUrl = data.support_url || state.supportUrl;
+        state.offerUrl = data.offer_url || state.offerUrl;
+        state.policyUrl = data.policy_url || state.policyUrl;
+
+        if (!data.ok && data.error) {
+          balanceHint.textContent = "Не удалось определить аккаунт. Откройте кабинет из Telegram-бота.";
+        }
+      } catch (error) {
+        balanceHint.textContent = "Не удалось загрузить данные. Попробуйте открыть кабинет заново.";
+      } finally {
+        renderAccount();
+      }
+    }
+
+    document.addEventListener("click", (event) => {
+      const copyBtn = event.target.closest("[data-copy]");
+      if (copyBtn) {
+        const key = copyBtn.dataset.copy;
+        copyText(key === "site_ref" ? state.siteRef : state.botRef);
+        return;
+      }
+
+      const toggleBtn = event.target.closest("[data-toggle]");
+      if (toggleBtn && toggleBtn.dataset.toggle === "navigation") {
+        const panel = document.getElementById("navigationPanel");
+        const isOpen = panel.classList.toggle("show");
+        toggleBtn.textContent = isOpen ? "Скрыть навигацию" : "Открыть навигацию";
+        return;
+      }
+
+      const openBtn = event.target.closest("[data-open]");
+      if (openBtn) {
+        const map = {
+          topup: state.topupUrl,
+          site: state.siteUrl,
+          ref_site: state.refCabinetUrl,
+          support: state.supportUrl
+        };
+        openUrl(map[openBtn.dataset.open]);
+        return;
+      }
+
+      const openLink = event.target.closest("[data-open-link]");
+      if (openLink) {
+        event.preventDefault();
+        const map = { offer: state.offerUrl, policy: state.policyUrl };
+        openUrl(map[openLink.dataset.openLink]);
+      }
+    });
+
+    loadAccount();
+  </script>
+</body>
+</html>
