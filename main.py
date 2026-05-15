@@ -89,6 +89,7 @@ from app.routers.web_workspace_api import router as workspace_router
 from app.routers.video_editor_v2 import router as video_editor_v2_router, page_router as video_editor_v2_page_router
 from app.routers.site_builder_api import router as site_builder_router
 from app.routers.partner_program_api import router as partner_program_router
+from app.services.partner_program import ensure_partner_profile
 app.include_router(leads_router, prefix="/api/leads", tags=["leads"])
 app.include_router(kling3_router, prefix="/api/kling3", tags=["kling3"])
 app.include_router(kling3_kie_router, prefix="/api/kling3-kie", tags=["kling3-kie"])
@@ -785,6 +786,12 @@ async def webapp_prompts():
 async def webapp_prompts_admin():
     with open(os.path.join(BASE_DIR, "webapp_prompts_admin.html"), "r", encoding="utf-8") as f:
         return f.read()
+
+
+@app.get("/webapp/account", response_class=HTMLResponse)
+async def webapp_account():
+    with open(os.path.join(BASE_DIR, "webapp_account.html"), "r", encoding="utf-8") as f:
+        return f.read()
         
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 WEBAPP_KLING_URL = os.getenv("WEBAPP_KLING_URL", "https://astrabot-tchj.onrender.com/webapp/kling")
@@ -792,6 +799,122 @@ WEBAPP_MUSIC_URL = os.getenv("WEBAPP_MUSIC_URL", "https://astrabot-tchj.onrender
 WEBAPP_TOP_ANALIZATOR_URL = os.getenv("WEBAPP_TOP_ANALIZATOR_URL", "https://astrabot-tchj.onrender.com/webapp/top_analizator")
 WEBAPP_PROMPTS_URL = os.getenv("WEBAPP_PROMPTS_URL", "https://astrabot-tchj.onrender.com/webapp/prompts")
 WEBAPP_PROMPTS_ADMIN_URL = os.getenv("WEBAPP_PROMPTS_ADMIN_URL", "https://astrabot-tchj.onrender.com/webapp/prompts_admin")
+WEBAPP_ACCOUNT_URL = os.getenv("WEBAPP_ACCOUNT_URL", "https://astrabot-tchj.onrender.com/webapp/account")
+NABEX_PUBLIC_SITE_URL = (os.getenv("NABEX_PUBLIC_SITE_URL") or os.getenv("PARTNER_SITE_URL") or os.getenv("PUBLIC_SITE_URL") or "https://nabex.ru").strip().rstrip("/")
+NABEX_SUPPORT_URL = (os.getenv("NABEX_SUPPORT_URL") or os.getenv("SUPPORT_URL") or "https://t.me/HelpNeiroAstra").strip()
+NABEX_PARTNER_BOT_USERNAME = (os.getenv("PARTNER_BOT_USERNAME") or os.getenv("TELEGRAM_BOT_USERNAME") or os.getenv("BOT_USERNAME") or "NeiroAstraBot").strip().lstrip("@")
+
+
+def _verify_telegram_webapp_init_data(init_data: str) -> Optional[dict]:
+    """Verify Telegram WebApp initData and return parsed user dict if valid."""
+    raw = str(init_data or "").strip()
+    if not raw or not TELEGRAM_BOT_TOKEN:
+        return None
+    try:
+        parsed = urllib.parse.parse_qsl(raw, keep_blank_values=True)
+        data = dict(parsed)
+        received_hash = data.pop("hash", "")
+        if not received_hash:
+            return None
+        check_string = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
+        secret_key = hmac.new(b"WebAppData", TELEGRAM_BOT_TOKEN.encode("utf-8"), hashlib.sha256).digest()
+        calculated_hash = hmac.new(secret_key, check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(calculated_hash, received_hash):
+            return None
+        user_raw = data.get("user") or "{}"
+        user = json.loads(user_raw) if isinstance(user_raw, str) else {}
+        return user if isinstance(user, dict) else None
+    except Exception:
+        return None
+
+
+def _tg_account_ref_links_for(user_id: int) -> Tuple[str, str, str]:
+    """Return (ref_code, site_ref, bot_ref) for Telegram account cabinet."""
+    ref_code = ""
+    try:
+        partner_user_id = _resolve_partner_referred_user_id(int(user_id))
+        profile = ensure_partner_profile(partner_user_id)
+        ref_code = str((profile or {}).get("ref_code") or "").strip().upper()
+    except Exception as exc:
+        try:
+            print(f"[webapp_account] partner profile unavailable for user_id={user_id}: {exc}", flush=True)
+        except Exception:
+            pass
+
+    if ref_code:
+        site_ref = f"{NABEX_PUBLIC_SITE_URL}/?ref={urllib.parse.quote(ref_code)}"
+        bot_ref = f"https://t.me/{NABEX_PARTNER_BOT_USERNAME}?start=ref_{urllib.parse.quote(ref_code)}" if NABEX_PARTNER_BOT_USERNAME else ""
+    else:
+        # Fallback: links stay usable for display even if partner tables are temporarily unavailable.
+        site_ref = f"{NABEX_PUBLIC_SITE_URL}/?ref={int(user_id)}"
+        bot_ref = f"https://t.me/{NABEX_PARTNER_BOT_USERNAME}?start={int(user_id)}" if NABEX_PARTNER_BOT_USERNAME else ""
+    return ref_code, site_ref, bot_ref
+
+
+@app.get("/api/tg/account")
+async def tg_account_info(request: Request):
+    init_data = request.headers.get("X-Telegram-Init-Data", "")
+    tg_user = _verify_telegram_webapp_init_data(init_data)
+
+    user_id = 0
+    if tg_user and tg_user.get("id"):
+        try:
+            user_id = int(tg_user.get("id") or 0)
+        except Exception:
+            user_id = 0
+
+    # Fallback for testing in browser and for old Telegram clients.
+    if user_id <= 0:
+        for key in ("uid", "tg_user_id", "user_id"):
+            try:
+                user_id = int(request.query_params.get(key) or 0)
+            except Exception:
+                user_id = 0
+            if user_id > 0:
+                break
+
+    if user_id <= 0:
+        return {
+            "ok": False,
+            "error": "user_id_required",
+            "balance": 0,
+            "site_ref": "",
+            "bot_ref": "",
+            "site_url": NABEX_PUBLIC_SITE_URL,
+            "ref_cabinet_url": f"{NABEX_PUBLIC_SITE_URL}/#workspace",
+            "topup_url": f"{NABEX_PUBLIC_SITE_URL}/tariffs.html",
+            "support_url": NABEX_SUPPORT_URL,
+            "offer_url": f"{NABEX_PUBLIC_SITE_URL}/terms.html",
+            "policy_url": f"{NABEX_PUBLIC_SITE_URL}/privacy.html",
+        }
+
+    balance = 0
+    try:
+        ensure_user_row(user_id)
+        balance = int(get_balance(user_id) or 0)
+    except Exception as exc:
+        try:
+            print(f"[webapp_account] balance unavailable for user_id={user_id}: {exc}", flush=True)
+        except Exception:
+            pass
+
+    ref_code, site_ref, bot_ref = _tg_account_ref_links_for(user_id)
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "balance": balance,
+        "ref_code": ref_code,
+        "site_ref": site_ref,
+        "bot_ref": bot_ref,
+        "site_url": NABEX_PUBLIC_SITE_URL,
+        "ref_cabinet_url": f"{NABEX_PUBLIC_SITE_URL}/#workspace",
+        "topup_url": f"{NABEX_PUBLIC_SITE_URL}/tariffs.html",
+        "support_url": NABEX_SUPPORT_URL,
+        "offer_url": f"{NABEX_PUBLIC_SITE_URL}/terms.html",
+        "policy_url": f"{NABEX_PUBLIC_SITE_URL}/privacy.html",
+    }
+
+
 SORA_QUEUE_NAME = os.getenv("SORA_QUEUE_NAME", "sora").strip() or "sora"
 TOPAZ_PHOTO_QUEUE_NAME = os.getenv("TOPAZ_PHOTO_QUEUE_NAME", "topaz_photo").strip() or "topaz_photo"
 GPT_IMAGE2_QUEUE_NAME = os.getenv("GPT_IMAGE2_QUEUE_NAME", "gpt_image2").strip() or "gpt_image2"
@@ -1794,7 +1917,8 @@ def _clear_music_ctx(st: dict, chat_id: int, user_id: int) -> None:
     except Exception:
         pass
 
-def _main_menu_keyboard(is_admin: bool = False) -> dict:
+def _main_menu_keyboard(is_admin: bool = False, user_id: Optional[int] = None) -> dict:
+    account_url = _with_uid(WEBAPP_ACCOUNT_URL, int(user_id)) if user_id else WEBAPP_ACCOUNT_URL
     rows = [
         [{"text": "ИИ (чат)"}, {"text": "Фото будущего"}],
         [
@@ -1805,7 +1929,7 @@ def _main_menu_keyboard(is_admin: bool = False) -> dict:
             {"text": "🔊 Озвучить текст"},
             {"text": "📚 Промпты", "web_app": {"url": WEBAPP_PROMPTS_URL}},
         ],
-        [{"text": "💰 Баланс"}, {"text": "Помощь"}],
+        [{"text": "💰 Баланс"}, {"text": "👤 Кабинет", "web_app": {"url": account_url}}],
     ]
     if is_admin:
         rows.append([{"text": "📊 Статистика"}, {"text": "📣 Рассылка"}])
@@ -1820,7 +1944,7 @@ def _main_menu_keyboard(is_admin: bool = False) -> dict:
 
 
 def _main_menu_for(user_id: int) -> dict:
-    return _main_menu_keyboard(_is_admin(user_id))
+    return _main_menu_keyboard(_is_admin(user_id), user_id=user_id)
 
 
 
@@ -1912,7 +2036,7 @@ def _tts_voices_keyboard(gender: str) -> dict:
     
 def _help_menu_for(user_id: int) -> dict:
     """Главное меню + экстренная кнопка сброса генерации (показываем ТОЛЬКО в «Помощь»)."""
-    base = _main_menu_keyboard(_is_admin(user_id))
+    base = _main_menu_keyboard(_is_admin(user_id), user_id=user_id)
     # defensive copy
     rows = [list(r) for r in (base.get("keyboard") or [])]
     rows.append([{"text": "🔄 Сбросить генерацию"}])
