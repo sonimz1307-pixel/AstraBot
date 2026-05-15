@@ -35,7 +35,7 @@
 
     body { padding: max(14px, env(safe-area-inset-top)) 14px max(22px, env(safe-area-inset-bottom)); }
 
-    .app { width: min(100%, 520px); margin: 0 auto; }
+    .app { width: min(100%, 520px); margin: 0 auto; padding-bottom: 76px; }
 
     .top {
       display: flex;
@@ -182,6 +182,15 @@
       min-width: 0;
     }
 
+    .ref-item { display: grid; gap: 6px; margin-bottom: 10px; }
+
+    .ref-label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 750;
+      padding-left: 2px;
+    }
+
     .link-text {
       min-width: 0;
       flex: 1;
@@ -193,6 +202,8 @@
     }
 
     .mini-copy {
+      width: auto;
+      min-height: 36px;
       border: 0;
       border-radius: 11px;
       padding: 8px 10px;
@@ -334,14 +345,20 @@
         </div>
         <p class="text">Основные ссылки для приглашений. Расширенная информация по реферальной системе доступна на сайте.</p>
 
-        <div class="link-box">
-          <div class="link-text" id="siteRefText">Загрузка ссылки…</div>
-          <button class="mini-copy" type="button" data-copy="site_ref">Скопировать</button>
+        <div class="ref-item">
+          <div class="ref-label">Ссылка на сайт</div>
+          <div class="link-box">
+            <div class="link-text" id="siteRefText">Загрузка ссылки…</div>
+            <button class="mini-copy" type="button" data-copy="site_ref">Скопировать</button>
+          </div>
         </div>
 
-        <div class="link-box">
-          <div class="link-text" id="botRefText">Загрузка ссылки…</div>
-          <button class="mini-copy" type="button" data-copy="bot_ref">Скопировать</button>
+        <div class="ref-item">
+          <div class="ref-label">Ссылка на Telegram-бота</div>
+          <div class="link-box">
+            <div class="link-text" id="botRefText">Загрузка ссылки…</div>
+            <button class="mini-copy" type="button" data-copy="bot_ref">Скопировать</button>
+          </div>
         </div>
 
         <div class="actions">
