@@ -8,7 +8,7 @@ import urllib.parse
 import hashlib
 import hmac
 import logging
-from uuid import uuid4
+from uuid import uuid4, uuid5, NAMESPACE_URL
 from io import BytesIO
 from typing import Optional, Literal, Dict, Any, Tuple, List, Union
 
@@ -34,6 +34,7 @@ from billing_db import (
     ensure_user_row,
     get_balance,
     add_tokens,
+    ledger_ref_exists,
     charge_photosession_generation,
     refund_photosession_generation,
     grant_welcome_bonus_once,
@@ -1144,6 +1145,21 @@ TOPUP_PACKS = [
     {"tokens": 200, "rub": 1600, "stars": 879, "badge": "💎"},
 ]
 
+# Admin-only Stars invoice.
+# Нужен только для того, чтобы админ мог купить Stars-инвойс у своего бота
+# и одновременно получить +200 внутренних токенов. Обычные тарифы не трогаем.
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)) or default)
+    except Exception:
+        return int(default)
+
+ADMIN_STARS_200_TOKENS = _env_int("ADMIN_STARS_200_TOKENS", 200)
+ADMIN_STARS_200_AMOUNT = _env_int("ADMIN_STARS_200_AMOUNT", 879)
+ADMIN_STARS_200_BUTTON_TEXT = "⭐ Админ Stars 200"
+ADMIN_STARS_200_REASON = "telegram_stars_admin_200"
+ADMIN_STARS_200_PROVIDER = "telegram_stars_admin"
+
 def _find_pack_by_tokens(tokens: int) -> Optional[Dict[str, int]]:
     try:
         t = int(tokens)
@@ -1263,6 +1279,41 @@ async def tg_send_stars_invoice(chat_id: int, title: str, description: str, payl
             j = {}
         if not isinstance(j, dict) or not j.get("ok"):
             raise RuntimeError(f"sendInvoice failed: {r.status_code} {r.text[:800]}")
+
+def _admin_stars_200_payload(user_id: int) -> str:
+    return f"admin_stars_200:{int(ADMIN_STARS_200_TOKENS)}:{int(user_id)}:{uuid4().hex}"
+
+
+def _parse_admin_stars_200_payload(payload: str) -> Optional[Dict[str, Any]]:
+    # admin_stars_200:<tokens>:<admin_user_id>:<nonce>
+    parts = str(payload or "").strip().split(":")
+    if len(parts) != 4 or parts[0] != "admin_stars_200":
+        return None
+    try:
+        tokens = int(parts[1])
+        admin_user_id = int(parts[2])
+    except Exception:
+        return None
+    nonce = str(parts[3] or "").strip()
+    if tokens != int(ADMIN_STARS_200_TOKENS) or admin_user_id <= 0 or not nonce:
+        return None
+    return {"tokens": tokens, "admin_user_id": admin_user_id, "nonce": nonce}
+
+
+def _payment_ledger_ref(*, provider: str, charge_id: str, payload: str) -> str:
+    # bot_balance_ledger.ref_id is UUID in this project, so use stable UUIDv5
+    # for idempotency instead of storing raw Telegram charge_id in ref_id.
+    key = f"{provider}:{charge_id or payload}"
+    return str(uuid5(NAMESPACE_URL, key))
+
+
+async def tg_answer_pre_checkout_query(cq_id: str, *, ok: bool, error_message: str = "") -> None:
+    body = {"pre_checkout_query_id": str(cq_id), "ok": bool(ok)}
+    if not ok and error_message:
+        body["error_message"] = str(error_message)[:200]
+    async with httpx.AsyncClient(timeout=15) as client:
+        await client.post(f"{TELEGRAM_API_BASE}/answerPreCheckoutQuery", json=body)
+
 
 # --- YooKassa helpers (payments in RUB: cards + SBP on hosted checkout) ---
 _YK_PROCESSED: Dict[str, float] = {}  # payment_id -> ts
@@ -1933,7 +1984,7 @@ def _main_menu_keyboard(is_admin: bool = False, user_id: Optional[int] = None) -
     ]
     if is_admin:
         rows.append([{"text": "📊 Статистика"}, {"text": "📣 Рассылка"}])
-        rows.append([{"text": "Для Pro"}])
+        rows.append([{"text": ADMIN_STARS_200_BUTTON_TEXT}, {"text": "Для Pro"}])
 
     return {
         "keyboard": rows,
@@ -4782,12 +4833,29 @@ async def webhook(secret: str, request: Request):
     pre = update.get("pre_checkout_query")
     if pre:
         cq_id = pre.get("id")
+        payload = (pre.get("invoice_payload") or "").strip()
+        pre_user = pre.get("from") or {}
+        pre_user_id = int(pre_user.get("id") or 0)
+
+        ok = True
+        err = ""
+
+        # Admin-only Stars invoice: accept only exact 200-token admin payload
+        # and only from ADMIN_IDS. Client topups keep the old behavior.
+        admin_payload = _parse_admin_stars_200_payload(payload)
+        if payload.startswith("admin_stars_200"):
+            if not admin_payload:
+                ok = False
+                err = "Некорректный админский Stars-платёж."
+            elif not _is_admin(pre_user_id):
+                ok = False
+                err = "Этот Stars-платёж доступен только админу."
+            elif int(admin_payload.get("admin_user_id") or 0) != pre_user_id:
+                ok = False
+                err = "Платёж создан для другого администратора."
+
         if cq_id:
-            async with httpx.AsyncClient(timeout=15) as client:
-                await client.post(
-                    f"{TELEGRAM_API_BASE}/answerPreCheckoutQuery",
-                    json={"pre_checkout_query_id": str(cq_id), "ok": True},
-                )
+            await tg_answer_pre_checkout_query(str(cq_id), ok=ok, error_message=err)
         return {"ok": True}
 
 
@@ -4828,6 +4896,67 @@ async def webhook(secret: str, request: Request):
 
         if currency != "XTR":
             await tg_send_message(chat_id, f"Оплата получена, но валюта не XTR: {currency}", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+
+        # Admin-only package: +200 tokens for ADMIN_IDS, paid via Telegram Stars.
+        admin_payload = _parse_admin_stars_200_payload(payload)
+        if payload.startswith("admin_stars_200"):
+            if not admin_payload:
+                await tg_send_message(chat_id, "Оплата прошла, но админский payload некорректный. Напиши админу.", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            if not _is_admin(user_id):
+                if ADMIN_IDS:
+                    try:
+                        admin_id = next(iter(ADMIN_IDS))
+                        await tg_send_message(admin_id, f"⚠️ Не-админ оплатил admin_stars_200: user={user_id} payload={payload}")
+                    except Exception:
+                        pass
+                await tg_send_message(chat_id, "Оплата прошла, но этот пакет доступен только админу. Напиши админу.", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            if int(admin_payload.get("admin_user_id") or 0) != user_id:
+                await tg_send_message(chat_id, "Оплата прошла, но user_id админского платежа не совпал. Напиши админу.", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            tokens = int(admin_payload["tokens"])
+            ref_id = _payment_ledger_ref(provider=ADMIN_STARS_200_PROVIDER, charge_id=tg_charge_id, payload=payload)
+
+            try:
+                if not ledger_ref_exists(reason=ADMIN_STARS_200_REASON, ref_id=ref_id):
+                    ensure_user_row(user_id)
+                    add_tokens(
+                        user_id,
+                        tokens,
+                        reason=ADMIN_STARS_200_REASON,
+                        ref_id=ref_id,
+                        meta={
+                            "tokens": tokens,
+                            "stars": total_amount,
+                            "currency": "XTR",
+                            "payload": payload,
+                            "charge_id": tg_charge_id,
+                            "provider": ADMIN_STARS_200_PROVIDER,
+                            "admin_only": True,
+                        },
+                    )
+                    # Не отправляем admin-only покупку в партнёрскую/реферальную аналитику:
+                    # это служебное пополнение через Stars, а не клиентская оплата.
+
+                bal = int(get_balance(user_id) or 0)
+                await tg_send_message(
+                    chat_id,
+                    f"✅ Админский Stars-платёж прошёл!\nНачислено: +{tokens} токенов\nБаланс: {bal}",
+                    reply_markup=_main_menu_for(user_id),
+                )
+            except Exception as e:
+                if ADMIN_IDS:
+                    try:
+                        admin_id = next(iter(ADMIN_IDS))
+                        await tg_send_message(admin_id, f"❌ Admin Stars начисление упало: {e}\nuser={user_id} payload={payload}")
+                    except Exception:
+                        pass
+                await tg_send_message(chat_id, f"Оплата прошла, но не смог начислить токены: {e}", reply_markup=_main_menu_for(user_id))
             return {"ok": True}
 
         if not payload.startswith("stars_topup:"):
@@ -5911,6 +6040,28 @@ async def webhook(secret: str, request: Request):
 
         return {"ok": True}
         
+    # ----- Admin-only Stars topup -----
+    if incoming_text == ADMIN_STARS_200_BUTTON_TEXT:
+        if not _is_admin(user_id):
+            await tg_send_message(chat_id, "Нет доступа.", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+
+        tokens = int(ADMIN_STARS_200_TOKENS)
+        stars = int(ADMIN_STARS_200_AMOUNT)
+        title = f"Админ-пополнение: {tokens} токенов"
+        description = f"Только для администратора • {tokens} токенов • {stars}⭐"
+        payload = _admin_stars_200_payload(user_id)
+
+        try:
+            await tg_send_stars_invoice(chat_id, title, description, payload, stars)
+        except Exception as e:
+            await tg_send_message(
+                chat_id,
+                f"❌ Не смог создать Stars-инвойс: {e}",
+                reply_markup=_main_menu_for(user_id),
+            )
+        return {"ok": True}
+
     # ----- Admin stats -----
     if incoming_text == "📊 Статистика":
         if not _is_admin(user_id):
