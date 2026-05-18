@@ -172,6 +172,13 @@ def get_workspace_account_by_telegram(telegram_user_id: int) -> Optional[Dict[st
     return _select_one("workspace_accounts", telegram_user_id=int(telegram_user_id))
 
 
+def get_workspace_account_by_google_sub(google_sub: str) -> Optional[Dict[str, Any]]:
+    value = str(google_sub or "").strip()
+    if not value:
+        return None
+    return _select_one("workspace_accounts", google_sub=value)
+
+
 def _sync_linked_telegram_balance(row: Dict[str, Any]) -> None:
     """Best-effort переносит старый TG-баланс на workspace account после привязки."""
     try:
@@ -207,6 +214,12 @@ def _account_payload_from_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "is_premium": bool(row.get("is_premium", False)),
         "email": row.get("email"),
         "email_verified": bool(row.get("email_verified", False)),
+        "has_password": bool(row.get("password_hash")),
+        "google_sub": row.get("google_sub"),
+        "google_email": row.get("google_email"),
+        "google_email_verified": bool(row.get("google_email_verified", False)),
+        "google_name": row.get("google_name"),
+        "google_picture": row.get("google_picture"),
     }
 
 
@@ -218,6 +231,8 @@ def account_to_workspace_user_payload(row: Dict[str, Any]) -> Dict[str, Any]:
         payload["auth_methods"].append("telegram")
     if payload.get("email"):
         payload["auth_methods"].append("email")
+    if payload.get("google_sub"):
+        payload["auth_methods"].append("google")
     payload["balance_tokens"] = int(get_balance(int(payload["workspace_user_id"])) or 0)
     return payload
 
@@ -523,6 +538,234 @@ def login_with_email(email: str, password: str) -> Dict[str, Any]:
     return fresh
 
 
+def get_or_create_workspace_account_for_google(verified: Dict[str, Any], *, current_account_id: Optional[int] = None) -> Dict[str, Any]:
+    google_sub = str(verified.get("sub") or "").strip()
+    if not google_sub:
+        raise WorkspaceAccountError("Google account id is missing")
+
+    email = normalize_email(str(verified.get("email") or ""))
+    sb = _require_supabase()
+
+    existing_by_google = get_workspace_account_by_google_sub(google_sub)
+    existing_by_email = get_workspace_account_by_email(email)
+
+    if current_account_id is not None:
+        account = get_workspace_account_by_id(int(current_account_id))
+        if not account:
+            raise WorkspaceAccountNotFound("Аккаунт не найден")
+        current_id = int(current_account_id)
+        if existing_by_google and int(existing_by_google.get("id") or 0) != current_id:
+            # Пользователь мог сначала создать отдельный Google-аккаунт,
+            # а потом войти через Telegram и нажать «Привязать Google».
+            # Если текущий аккаунт уже Telegram-аккаунт, объединяем в него
+            # временную Google-строку вместо ошибки.
+            linked_tg = account.get("telegram_user_id")
+            if linked_tg not in (None, ""):
+                merged = _merge_current_account_into_existing_telegram_account(
+                    current_account=existing_by_google,
+                    target_account=account,
+                    verified={
+                        "id": int(linked_tg),
+                        "username": account.get("username"),
+                        "first_name": account.get("first_name"),
+                        "last_name": account.get("last_name"),
+                        "photo_url": account.get("photo_url"),
+                    },
+                )
+                return merged
+            raise WorkspaceAccountError("Этот Google уже привязан к другому аккаунту.")
+        if existing_by_email and int(existing_by_email.get("id") or 0) != current_id:
+            raise WorkspaceAccountError("Email этого Google уже используется в другом аккаунте.")
+        row = account
+    else:
+        # google_sub — главный стабильный идентификатор Google. Если он уже найден,
+        # не блокируем вход из-за старой временной строки с таким же email.
+        row = existing_by_google or existing_by_email
+
+    payload = {
+        "google_sub": google_sub,
+        "google_email": email,
+        "google_email_verified": bool(verified.get("email_verified", True)),
+        "google_name": verified.get("name"),
+        "google_picture": verified.get("photo_url"),
+        "updated_at": _now_iso(),
+        "last_login_at": _now_iso(),
+    }
+
+    # Если аккаунт создаётся/заходит через Google, считаем email подтверждённым Google.
+    # Пароль не задаём и существующий пароль не трогаем.
+    if not row or not row.get("email"):
+        payload["email"] = email
+        payload["email_verified"] = True
+    elif str(row.get("email") or "").strip().lower() == email and not bool(row.get("email_verified", False)):
+        payload["email_verified"] = True
+
+    if verified.get("first_name") and not (row or {}).get("first_name"):
+        payload["first_name"] = verified.get("first_name")
+    if verified.get("last_name") and not (row or {}).get("last_name"):
+        payload["last_name"] = verified.get("last_name")
+    if verified.get("photo_url") and not (row or {}).get("photo_url"):
+        payload["photo_url"] = verified.get("photo_url")
+    if verified.get("locale") and not (row or {}).get("language_code"):
+        payload["language_code"] = verified.get("locale")
+
+    if row:
+        current_google = str(row.get("google_sub") or "").strip()
+        if current_google and current_google != google_sub:
+            raise WorkspaceAccountError("К этому аккаунту уже привязан другой Google.")
+        res = sb.table("workspace_accounts").update(payload).eq("id", int(row["id"])).execute()
+        out = (getattr(res, "data", None) or [None])[0] or get_workspace_account_by_id(int(row["id"]))
+    else:
+        res = sb.table("workspace_accounts").insert(payload).execute()
+        out = (getattr(res, "data", None) or [None])[0] or get_workspace_account_by_google_sub(google_sub) or get_workspace_account_by_email(email)
+
+    if not out:
+        raise WorkspaceAccountError("Не удалось создать или обновить Google-аккаунт")
+
+    _sync_linked_telegram_balance(out)
+    ensure_user_row(int(out["id"]))
+    return out
+
+
+
+def _merge_current_account_into_existing_telegram_account(
+    *,
+    current_account: Dict[str, Any],
+    target_account: Dict[str, Any],
+    verified: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Сценарий: пользователь уже входил через Telegram, потом вошёл через Google/email,
+    и теперь привязывает тот же Telegram. Вместо ошибки объединяем аккаунты:
+    целевым оставляем аккаунт, где уже стоит telegram_user_id, чтобы старый TG-баланс
+    и Telegram-идентичность не потерялись.
+    """
+    sb = _require_supabase()
+    tg_id = int(verified["id"])
+    current_id = int(current_account.get("id") or 0)
+    target_id = int(target_account.get("id") or 0)
+    if current_id <= 0 or target_id <= 0:
+        raise WorkspaceAccountError("Не удалось определить аккаунты для объединения.")
+    if current_id == target_id:
+        return target_account
+
+    current_google_sub = str(current_account.get("google_sub") or "").strip()
+    target_google_sub = str(target_account.get("google_sub") or "").strip()
+    if target_google_sub and current_google_sub and target_google_sub != current_google_sub:
+        raise WorkspaceAccountError("Этот Telegram уже привязан к аккаунту с другим Google.")
+
+    def _normalize_optional_email(value: Any) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        return normalize_email(raw)
+
+    current_email = _normalize_optional_email(current_account.get("email") or current_account.get("google_email"))
+    target_email = _normalize_optional_email(target_account.get("email"))
+    can_move_email = bool(current_email) and (not target_email or target_email == current_email)
+    should_clear_current_email = bool(current_google_sub) or can_move_email
+
+    # Сначала освобождаем уникальные email/google поля на временном аккаунте,
+    # иначе обновление целевого аккаунта упрётся в unique index. Старую строку не удаляем:
+    # на неё могут ссылаться истории генераций/ledger.
+    clear_payload = {
+        "google_sub": None,
+        "google_email": None,
+        "google_email_verified": False,
+        "google_name": None,
+        "google_picture": None,
+        "updated_at": _now_iso(),
+    }
+    if should_clear_current_email:
+        clear_payload["email"] = None
+        clear_payload["email_verified"] = False
+        clear_payload["password_hash"] = None
+    restore_payload = {
+        "google_sub": current_account.get("google_sub"),
+        "google_email": current_account.get("google_email"),
+        "google_email_verified": bool(current_account.get("google_email_verified", False)),
+        "google_name": current_account.get("google_name"),
+        "google_picture": current_account.get("google_picture"),
+        "email": current_account.get("email"),
+        "email_verified": bool(current_account.get("email_verified", False)),
+        "password_hash": current_account.get("password_hash"),
+        "updated_at": _now_iso(),
+    }
+    try:
+        sb.table("workspace_accounts").update(clear_payload).eq("id", current_id).execute()
+    except Exception as exc:
+        raise WorkspaceAccountError(f"Не удалось подготовить аккаунт к объединению: {exc}")
+
+    payload = {
+        "telegram_user_id": tg_id,
+        "username": verified.get("username") or target_account.get("username") or current_account.get("username"),
+        "first_name": verified.get("first_name") or target_account.get("first_name") or current_account.get("first_name"),
+        "last_name": verified.get("last_name") or target_account.get("last_name") or current_account.get("last_name"),
+        "photo_url": verified.get("photo_url") or target_account.get("photo_url") or current_account.get("photo_url"),
+        "updated_at": _now_iso(),
+        "last_login_at": _now_iso(),
+    }
+
+    if current_google_sub and not target_google_sub:
+        payload["google_sub"] = current_google_sub
+    if current_account.get("google_email") or current_email:
+        payload["google_email"] = current_account.get("google_email") or current_email
+        payload["google_email_verified"] = bool(
+            current_account.get("google_email_verified") or current_account.get("email_verified")
+        )
+    if current_account.get("google_name") and not target_account.get("google_name"):
+        payload["google_name"] = current_account.get("google_name")
+    if current_account.get("google_picture") and not target_account.get("google_picture"):
+        payload["google_picture"] = current_account.get("google_picture")
+
+    if can_move_email and not target_email:
+        payload["email"] = current_email
+        payload["email_verified"] = bool(current_account.get("email_verified") or current_account.get("google_email_verified"))
+    if can_move_email and current_account.get("password_hash") and not target_account.get("password_hash"):
+        payload["password_hash"] = current_account.get("password_hash")
+
+    try:
+        res = sb.table("workspace_accounts").update(payload).eq("id", target_id).execute()
+    except Exception as exc:
+        try:
+            sb.table("workspace_accounts").update(restore_payload).eq("id", current_id).execute()
+        except Exception as restore_exc:
+            try:
+                print(f"[workspace_account] failed to restore current account after merge error: {restore_exc}")
+            except Exception:
+                pass
+        raise WorkspaceAccountError(f"Не удалось объединить аккаунты: {exc}")
+
+    out = (getattr(res, "data", None) or [None])[0] or get_workspace_account_by_id(target_id)
+    if not out:
+        raise WorkspaceAccountError("Не удалось объединить аккаунты.")
+
+    # Переносим баланс временного Google/email аккаунта в целевой Telegram-аккаунт.
+    # Старый чистый Telegram-баланс также подтянется через _sync_linked_telegram_balance.
+    try:
+        merge_user_balance_records(source_user_id=current_id, target_user_id=target_id)
+    except Exception as exc:
+        try:
+            print(f"[workspace_account] current account balance merge skipped: {exc}")
+        except Exception:
+            pass
+
+    _sync_linked_telegram_balance(out)
+    ensure_user_row(target_id)
+    track_user_activity(
+        {
+            "id": tg_id,
+            "username": payload.get("username"),
+            "first_name": payload.get("first_name"),
+            "last_name": payload.get("last_name"),
+            "photo_url": payload.get("photo_url"),
+            "is_premium": target_account.get("is_premium") or current_account.get("is_premium"),
+            "language_code": target_account.get("language_code") or current_account.get("language_code"),
+        }
+    )
+    return get_workspace_account_by_id(target_id) or out
+
+
 def link_telegram_to_account(*, account_id: int, verified: Dict[str, Any]) -> Dict[str, Any]:
     account = get_workspace_account_by_id(account_id)
     if not account:
@@ -530,7 +773,11 @@ def link_telegram_to_account(*, account_id: int, verified: Dict[str, Any]) -> Di
     tg_id = int(verified["id"])
     existing_tg = get_workspace_account_by_telegram(tg_id)
     if existing_tg and int(existing_tg.get("id") or 0) != int(account_id):
-        raise WorkspaceAccountError("Этот Telegram уже привязан к другому аккаунту.")
+        return _merge_current_account_into_existing_telegram_account(
+            current_account=account,
+            target_account=existing_tg,
+            verified=verified,
+        )
 
     payload = {
         "telegram_user_id": tg_id,
@@ -558,5 +805,5 @@ def link_telegram_to_account(*, account_id: int, verified: Dict[str, Any]) -> Di
             "language_code": account.get("language_code"),
         }
     )
-    ensure_user_row(int(account_id))
+    ensure_user_row(int(out["id"]))
     return out
