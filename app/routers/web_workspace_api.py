@@ -46,6 +46,7 @@ from app.routers.prompts import groups as prompts_groups
 from app.routers.prompts import items as prompts_items
 from app.routers.tts import ALLOWED_VOICE_IDS, ALLOWED_VOICES
 from app.services.eleven_tts import ElevenTTS
+from app.services.google_auth import GoogleAuthError, get_google_client_id, verify_google_id_token
 from app.services.telegram_webauth import TelegramWebAuthError, validate_telegram_login_data
 from app.services.workspace_account_service import (
     WorkspaceAccountError,
@@ -59,6 +60,7 @@ from app.services.workspace_account_service import (
     confirm_link_email,
     confirm_password_reset,
     ensure_workspace_account_from_claims,
+    get_or_create_workspace_account_for_google,
     get_or_create_workspace_account_for_telegram,
     link_telegram_to_account,
     login_with_email,
@@ -2189,6 +2191,10 @@ class TelegramAuthPayload(BaseModel):
     auth_data: Dict[str, Any]
 
 
+class GoogleAuthPayload(BaseModel):
+    credential: str = Field(..., min_length=40, max_length=6000)
+
+
 class EmailAuthStartPayload(BaseModel):
     email: str = Field(..., min_length=5, max_length=200)
     password: str = Field(..., min_length=6, max_length=200)
@@ -2966,6 +2972,38 @@ async def workspace_auth_telegram(payload: TelegramAuthPayload) -> Dict[str, Any
         raise HTTPException(status_code=403, detail="Пользователь не найден в AstraBot. Сначала открой Telegram-бота и запусти его хотя бы один раз.")
 
     account = get_or_create_workspace_account_for_telegram(verified, existing)
+    token_user = account_to_workspace_user_payload(account)
+    access_token = create_access_token(user=token_user)
+    return {
+        "ok": True,
+        "access_token": access_token,
+        "token_type": "Bearer",
+        "expires_in": WORKSPACE_SESSION_TTL_SEC,
+        "user": token_user,
+        "balance_tokens": int(get_balance(int(account["id"])) or 0),
+    }
+
+
+@router.get("/auth/google/config")
+async def workspace_auth_google_config() -> Dict[str, Any]:
+    try:
+        client_id = get_google_client_id()
+    except GoogleAuthError:
+        return {"ok": False, "enabled": False, "client_id": ""}
+    return {"ok": True, "enabled": True, "client_id": client_id}
+
+
+@router.post("/auth/google")
+async def workspace_auth_google(payload: GoogleAuthPayload, user: Optional[Dict[str, Any]] = Depends(get_optional_workspace_user)) -> Dict[str, Any]:
+    try:
+        verified = verify_google_id_token(payload.credential)
+        current_account_id = int(user.get("workspace_user_id") or 0) if user else None
+        account = get_or_create_workspace_account_for_google(verified, current_account_id=current_account_id)
+    except GoogleAuthError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    except WorkspaceAccountError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     token_user = account_to_workspace_user_payload(account)
     access_token = create_access_token(user=token_user)
     return {
