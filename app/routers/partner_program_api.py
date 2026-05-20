@@ -976,6 +976,116 @@ def _fetch_admin_ledger_rows_for_stats(*, since: datetime, until: datetime, max_
     return rows[:limit_total]
 
 
+
+_PAYMENT_STATS_REASONS = {"yookassa_topup"}
+_PAYMENT_STATS_PACK_RUB_BY_TOKENS = {
+    5: 60,
+    20: 180,
+    50: 450,
+    100: 850,
+    200: 1600,
+}
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _fetch_admin_payment_rows_for_stats(*, since: datetime, until: datetime, max_rows: int) -> List[Dict[str, Any]]:
+    """Successful YooKassa topups only.
+
+    Failed/created-but-unpaid YooKassa payments are not written as yookassa_topup
+    ledger rows, so they are intentionally not counted here.
+    """
+    rows: List[Dict[str, Any]] = []
+    page_size = 1000
+    offset = 0
+    limit_total = max(1, min(int(max_rows or 10000), 50000))
+    sb = _admin_sb()
+    reasons = sorted(_PAYMENT_STATS_REASONS)
+
+    while len(rows) < limit_total:
+        end = min(offset + page_size - 1, limit_total - 1)
+        try:
+            res = (
+                sb.table("bot_balance_ledger")
+                .select("id,telegram_user_id,delta_tokens,reason,ref_id,meta,created_at")
+                .gt("delta_tokens", 0)
+                .in_("reason", reasons)
+                .gte("created_at", _admin_iso_z(since))
+                .lt("created_at", _admin_iso_z(until))
+                .order("created_at", desc=False)
+                .range(offset, end)
+                .execute()
+            )
+            batch = list(getattr(res, "data", None) or [])
+        except Exception:
+            try:
+                res = (
+                    sb.table("bot_balance_ledger")
+                    .select("id,telegram_user_id,delta_tokens,reason,ref_id,meta,created_at")
+                    .order("created_at", desc=False)
+                    .range(offset, end)
+                    .execute()
+                )
+                batch = []
+                for row in list(getattr(res, "data", None) or []):
+                    reason = str((row or {}).get("reason") or "")
+                    dt = _parse_admin_dt((row or {}).get("created_at"))
+                    if (
+                        _safe_int((row or {}).get("delta_tokens")) > 0
+                        and reason in _PAYMENT_STATS_REASONS
+                        and dt is not None
+                        and since <= dt < until
+                    ):
+                        batch.append(row)
+            except Exception:
+                break
+
+        if not batch:
+            break
+        rows.extend(batch)
+        if len(batch) < page_size:
+            break
+        offset += page_size
+
+    return rows[:limit_total]
+
+
+def _admin_payment_amount_rub(row: Dict[str, Any]) -> float:
+    meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+
+    for key in ("amount_rub", "rub", "amount"):
+        amount = _safe_float(meta.get(key), 0.0)
+        if amount > 0:
+            return amount
+
+    metadata = meta.get("metadata") if isinstance(meta.get("metadata"), dict) else {}
+    for key in ("amount_rub", "rub", "amount"):
+        amount = _safe_float(metadata.get(key), 0.0)
+        if amount > 0:
+            return amount
+
+    tokens = _safe_int(meta.get("tokens")) or _safe_int(row.get("delta_tokens"))
+    if tokens > 0:
+        pack_amount = _PAYMENT_STATS_PACK_RUB_BY_TOKENS.get(tokens)
+        if pack_amount is not None:
+            return float(pack_amount)
+
+    return 0.0
+
+
+def _admin_payment_id(row: Dict[str, Any]) -> str:
+    meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+    for key in ("payment_id", "ref_tag"):
+        value = str(meta.get(key) or "").strip()
+        if value:
+            return value[:180]
+    return str(row.get("ref_id") or row.get("id") or "")[:180]
+
 def _fetch_admin_free_usage_rows_for_stats(*, since: datetime, until: datetime, max_rows: int) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     page_size = 1000
@@ -1140,6 +1250,73 @@ def _make_empty_buckets(*, since: datetime, until: datetime, period: str) -> Lis
             cur += timedelta(hours=1)
     return buckets
 
+
+
+@router.get("/admin/payments/stats")
+async def partner_admin_payments_stats(
+    period: str = Query("day", pattern="^(day|month)$"),
+    date_msk: Optional[str] = Query(None),
+    max_rows: int = Query(20000, ge=1, le=50000),
+    x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token"),
+) -> Dict[str, Any]:
+    _require_admin(x_admin_token)
+    period_key = str(period or "day").strip().lower()
+    since, until, since_local, until_local, period_label = _admin_stats_period_bounds(period_key, date_msk=date_msk)
+    rows = _fetch_admin_payment_rows_for_stats(since=since, until=until, max_rows=max_rows)
+
+    raw_user_ids = [_safe_int((row or {}).get("telegram_user_id")) for row in rows]
+    user_map = _build_admin_canonical_user_map(raw_user_ids)
+
+    total_rub = 0.0
+    total_tokens = 0
+    users = set()
+    items: List[Dict[str, Any]] = []
+
+    for row in rows:
+        reason = str(row.get("reason") or "")
+        raw_uid = _safe_int(row.get("telegram_user_id"))
+        uid = int(user_map.get(raw_uid, raw_uid)) if raw_uid > 0 else 0
+        amount_rub = _admin_payment_amount_rub(row)
+        tokens = _safe_int(row.get("delta_tokens"))
+        dt = _parse_admin_dt(row.get("created_at")) or since
+
+        total_rub += amount_rub
+        total_tokens += max(0, tokens)
+        if uid:
+            users.add(uid)
+
+        items.append({
+            "created_at": row.get("created_at"),
+            "created_at_msk": dt.astimezone(_admin_stats_tz()).strftime("%d.%m.%Y %H:%M"),
+            "user_id": uid or raw_uid,
+            "raw_user_id": raw_uid,
+            "provider": "yookassa",
+            "reason": reason,
+            "amount_rub": round(amount_rub, 2),
+            "tokens": max(0, tokens),
+            "payment_id": _admin_payment_id(row),
+        })
+
+    items.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
+
+    return {
+        "ok": True,
+        "period": period_key,
+        "timezone": _STAT_TZ_NAME,
+        "date_msk": since_local.strftime("%Y-%m-%d") if period_key == "day" else None,
+        "period_label": period_label,
+        "since": _admin_iso_z(since),
+        "until": _admin_iso_z(until),
+        "since_label_msk": _admin_stats_label(since),
+        "until_label_msk": _admin_stats_label(until - timedelta(seconds=1)),
+        "total_amount_rub": round(total_rub, 2),
+        "payments_count": len(rows),
+        "unique_payers": len(users),
+        "tokens_sold": int(total_tokens),
+        "items": items[:200],
+        "source": "bot_balance_ledger: yookassa_topup",
+        "note": "Считаются только успешные рублёвые оплаты YooKassa. Неудачные/созданные, но неоплаченные платежи не учитываются.",
+    }
 
 @router.get("/admin/stats")
 async def partner_admin_stats(
