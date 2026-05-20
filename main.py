@@ -4257,18 +4257,26 @@ async def yookassa_webhook(request: Request):
         return {"ok": True}
 
     try:
-        ensure_user_row(uid)
-        add_tokens(
-            uid,
-            tokens,
-            reason="yookassa_topup",
-            meta={"payment_id": payment_id, "event": event, "status": status, "metadata": md},
-        )
         amount_obj = obj.get("amount") or {}
         try:
             amount_rub = float(amount_obj.get("value") or md.get("amount_rub") or 0)
         except Exception:
             amount_rub = 0.0
+
+        ensure_user_row(uid)
+        add_tokens(
+            uid,
+            tokens,
+            reason="yookassa_topup",
+            meta={
+                "payment_id": payment_id,
+                "event": event,
+                "status": status,
+                "amount_rub": amount_rub,
+                "provider": "yookassa",
+                "metadata": md,
+            },
+        )
         await _enqueue_partner_topup_event(
             user_id=uid,
             payment_id=payment_id,
