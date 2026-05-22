@@ -188,6 +188,7 @@ async def run_motion_control_from_bytes(
     keep_original_sound: bool = True,
     duration_seconds: Optional[int] = None,
     billing_meta: Optional[Dict[str, Any]] = None,
+    bill_user: bool = True,
 ) -> str:
     """
     Motion Control для legacy-ветки.
@@ -209,7 +210,7 @@ async def run_motion_control_from_bytes(
     tokens_cost = calc_kling_tokens(seconds=seconds, mode=mode_norm)
 
     job_id: Optional[str] = None
-    if BILLING_ENABLED:
+    if BILLING_ENABLED and bill_user:
         ensure_user_row(user_id)
         bal = get_balance(user_id)
         if bal < tokens_cost:
@@ -238,13 +239,13 @@ async def run_motion_control_from_bytes(
             keep_original_sound=keep_original_sound,
         )
 
-        if BILLING_ENABLED and job_id:
+        if BILLING_ENABLED and bill_user and job_id:
             confirm_kling_job(job_id, out_url=out_url, meta={"seconds": seconds, "mode": mode_norm, "tokens_cost": tokens_cost})
 
         return out_url
 
     except Exception as e:
-        if BILLING_ENABLED and job_id:
+        if BILLING_ENABLED and bill_user and job_id:
             try:
                 rollback_kling_job(job_id, error=str(e))
             except Exception:
