@@ -8330,7 +8330,7 @@ async def webhook(secret: str, request: Request):
 
                 await tg_send_message(
                     chat_id,
-                    "Фото аватара получил ✅\nТеперь пришли ВИДЕО с движением (3–10 сек).",
+                    "Фото аватара получил ✅\nТеперь пришли ВИДЕО с движением (3–30 сек).",
                     reply_markup=_help_menu_for(user_id),
                 )
                 return {"ok": True}
