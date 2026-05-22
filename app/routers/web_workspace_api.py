@@ -343,6 +343,17 @@ def _probe_seedance_video_duration_seconds(raw: bytes, ext: str) -> float:
     return 0.0
 
 
+
+def _billable_motion_reference_seconds(value: Any) -> int:
+    """Bill near-integer MP4 metadata like 6.03s as 6s, not 7s."""
+    try:
+        seconds = float(value or 0)
+    except Exception:
+        seconds = 0.0
+    if seconds <= 0:
+        return 0
+    return max(1, int(math.ceil(seconds - 0.25)))
+
 def _prepare_seedance_video_file(upload: Any, raw: bytes) -> tuple[bytes, str, float]:
     ext = _guess_seedance_video_ext(
         filename=getattr(upload, "filename", None),
@@ -4050,7 +4061,7 @@ async def workspace_video_run(
         ) or "mp4"
         motion_duration = _probe_seedance_video_duration_seconds(motion_video, motion_ext)
         if motion_duration > 0:
-            duration = int(math.ceil(float(motion_duration)))
+            duration = _billable_motion_reference_seconds(motion_duration)
             motion_duration_detected = True
     source_video = await _read_optional(source_video_file)
     switchx_select_mask = await _read_optional(switchx_select_mask_file)
