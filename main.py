@@ -938,6 +938,17 @@ def _yookassa_enabled() -> bool:
 PIAPI_API_KEY = os.getenv("PIAPI_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
+OPENAI_TRANSCRIBE_MODEL = os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe").strip() or "gpt-4o-mini-transcribe"
+AI_CHAT_VOICE_ENABLED = os.getenv("AI_CHAT_VOICE_ENABLED", "true").strip().lower() in ("1", "true", "yes", "y", "on")
+try:
+    AI_CHAT_VOICE_MAX_SECONDS = int(os.getenv("AI_CHAT_VOICE_MAX_SECONDS", "60") or 60)
+except Exception:
+    AI_CHAT_VOICE_MAX_SECONDS = 60
+try:
+    AI_CHAT_VOICE_MAX_BYTES = int(os.getenv("AI_CHAT_VOICE_MAX_BYTES", str(20 * 1024 * 1024)) or (20 * 1024 * 1024))
+except Exception:
+    AI_CHAT_VOICE_MAX_BYTES = 20 * 1024 * 1024
+AI_CHAT_VOICE_LANGUAGE = os.getenv("AI_CHAT_VOICE_LANGUAGE", "ru").strip()
 PROMPT_BUILDER_MODEL = os.getenv("PROMPT_BUILDER_MODEL", "gpt-5.4").strip() or "gpt-5.4"
 PROMPT_BUILDER_MAX_IMAGES = int(os.getenv("PROMPT_BUILDER_MAX_IMAGES", "9") or 9)
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change_me")
@@ -2870,6 +2881,109 @@ async def tg_download_file_bytes(file_path: str) -> bytes:
         r = await client.get(url)
     r.raise_for_status()
     return r.content
+
+
+async def _ffmpeg_convert_audio_to_mp3(audio_bytes: bytes) -> bytes:
+    """Convert Telegram voice/video-note audio to a compact MP3 for OpenAI STT."""
+    if not audio_bytes:
+        raise RuntimeError("Пустой аудиофайл.")
+
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        "pipe:0",
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-b:a",
+        "48k",
+        "-f",
+        "mp3",
+        "pipe:1",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(audio_bytes), timeout=45)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        raise RuntimeError("ffmpeg не успел подготовить голосовое сообщение.")
+
+    if proc.returncode != 0 or not stdout:
+        err = (stderr or b"").decode("utf-8", "ignore")[:700]
+        raise RuntimeError(f"ffmpeg не смог подготовить голосовое сообщение: {err or 'unknown error'}")
+    return stdout
+
+
+async def openai_transcribe_audio_bytes(
+    audio_bytes: bytes,
+    *,
+    filename: str = "voice.mp3",
+    mime_type: str = "audio/mpeg",
+) -> str:
+    """Speech-to-text for Telegram AI chat voice messages."""
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY не задан в переменных окружения.")
+    if not audio_bytes:
+        raise RuntimeError("Пустой аудиофайл.")
+
+    data = {
+        "model": OPENAI_TRANSCRIBE_MODEL,
+        "response_format": "json",
+    }
+    if AI_CHAT_VOICE_LANGUAGE:
+        data["language"] = AI_CHAT_VOICE_LANGUAGE
+
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+    files = {"file": (filename, audio_bytes, mime_type)}
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        r = await client.post(
+            "https://api.openai.com/v1/audio/transcriptions",
+            headers=headers,
+            data=data,
+            files=files,
+        )
+
+    if r.status_code >= 300:
+        raise RuntimeError(f"OpenAI STT error {r.status_code}: {r.text[:1200]}")
+
+    try:
+        payload = r.json()
+    except Exception:
+        payload = {}
+    text = str((payload or {}).get("text") or "").strip()
+    if not text:
+        raise RuntimeError("OpenAI STT вернул пустой текст.")
+    return text
+
+
+async def transcribe_tg_voice_to_text(file_id: str) -> str:
+    """Download Telegram voice by file_id, convert it, and return recognized text."""
+    file_path = await tg_get_file_path(file_id)
+    raw_audio = await tg_download_file_bytes(file_path)
+    if len(raw_audio) > AI_CHAT_VOICE_MAX_BYTES:
+        mb = max(1, AI_CHAT_VOICE_MAX_BYTES // (1024 * 1024))
+        raise RuntimeError(f"Голосовое слишком большое. Лимит: до {mb} МБ.")
+
+    try:
+        mp3_audio = await _ffmpeg_convert_audio_to_mp3(raw_audio)
+        return await openai_transcribe_audio_bytes(mp3_audio, filename="voice.mp3", mime_type="audio/mpeg")
+    except Exception as convert_error:
+        # Fallback: try original Telegram file. Useful if ffmpeg is temporarily unavailable.
+        try:
+            return await openai_transcribe_audio_bytes(raw_audio, filename="voice.ogg", mime_type="audio/ogg")
+        except Exception:
+            raise convert_error
 
 
 def tg_build_file_url(file_path: str) -> str:
@@ -5073,6 +5187,73 @@ async def webhook(secret: str, request: Request):
         except Exception:
             pass
         await tg_send_message(chat_id, "✅ Сброс выполнен. Возвращаю в главное меню.", reply_markup=_main_menu_for(user_id))
+        return {"ok": True}
+
+    # ---------------- Голосовые сообщения в режиме ИИ-чата ----------------
+    voice = message.get("voice") or {}
+    if voice and st.get("mode") == "chat":
+        if not AI_CHAT_VOICE_ENABLED:
+            await tg_send_message(chat_id, "Голосовой ввод в ИИ-чате сейчас отключён.", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+
+        if st.get("ai_chat_mode") != "chat":
+            await tg_send_message(
+                chat_id,
+                "Голосовое получил, но сначала выбери модель чата: Claude Sonnet или ChatGPT.",
+                reply_markup=_ai_chat_mode_inline_kb(),
+            )
+            return {"ok": True}
+
+        file_id = str(voice.get("file_id") or "").strip()
+        duration = int(voice.get("duration") or 0)
+        size_bytes = int(voice.get("file_size") or 0)
+
+        if not file_id:
+            await tg_send_message(chat_id, "Не смог прочитать file_id голосового. Отправь голосовое ещё раз.", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+
+        if AI_CHAT_VOICE_MAX_SECONDS > 0 and duration > AI_CHAT_VOICE_MAX_SECONDS:
+            await tg_send_message(
+                chat_id,
+                f"Голосовое слишком длинное. Сейчас лимит для ИИ-чата: до {AI_CHAT_VOICE_MAX_SECONDS} сек.",
+                reply_markup=_main_menu_for(user_id),
+            )
+            return {"ok": True}
+
+        if size_bytes > AI_CHAT_VOICE_MAX_BYTES:
+            mb = max(1, AI_CHAT_VOICE_MAX_BYTES // (1024 * 1024))
+            await tg_send_message(chat_id, f"Голосовое слишком большое. Лимит: до {mb} МБ.", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+
+        try:
+            await tg_send_chat_action(chat_id, "typing")
+        except Exception:
+            pass
+
+        try:
+            recognized_text = await transcribe_tg_voice_to_text(file_id)
+        except Exception as e:
+            await tg_send_message(
+                chat_id,
+                f"❌ Не смог распознать голосовое: {e}",
+                reply_markup=_main_menu_for(user_id),
+            )
+            return {"ok": True}
+
+        if not recognized_text:
+            await tg_send_message(chat_id, "❌ Не смог распознать текст в голосовом.", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+
+        queued = await _enqueue_tg_ai_chat_job(
+            chat_id=chat_id,
+            user_id=user_id,
+            text=recognized_text,
+            model_key=_ai_chat_model_key(st),
+        )
+        if queued:
+            return {"ok": True}
+
+        await tg_send_message(chat_id, "❌ Не удалось поставить чат в очередь. Проверь REDIS_URL и worker_chat.py.", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
 
     # ---------------- Документы в режиме ИИ-чата ----------------
