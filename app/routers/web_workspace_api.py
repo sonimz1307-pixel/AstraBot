@@ -80,6 +80,11 @@ from kling_flow import (
     run_text_to_video_from_prompt,
     upload_bytes_to_supabase,
 )
+from kling3_motion_kie import (
+    calculate_kling3_motion_tokens,
+    normalize_kling3_motion_resolution,
+    run_kling3_motion_kie_from_bytes,
+)
 from veo_flow import VeoFlowError, run_veo_image_to_video, run_veo_text_to_video
 from veo_billing import calc_veo_charge
 from grok_video_replicate import (
@@ -1821,13 +1826,32 @@ async def _run_workspace_video_job(
             if model == "motion-control":
                 if not avatar_image or not motion_video:
                     raise RuntimeError("Для Motion Control нужны avatar_image и motion_video")
-                provider_video_url = await run_motion_control_from_bytes(
-                    user_id=user_id,
-                    avatar_bytes=avatar_image,
-                    motion_video_bytes=motion_video,
-                    prompt=prompt,
-                    mode=("std" if quality == "standard" else "pro"),
-                )
+                if mode == "motion_control_3_0":
+                    resolution_label = normalize_kling3_motion_resolution(
+                        resolution or ("1080p" if quality == "pro" else "720p")
+                    )
+                    provider_video_url = await run_kling3_motion_kie_from_bytes(
+                        user_id=user_id,
+                        avatar_bytes=avatar_image,
+                        motion_video_bytes=motion_video,
+                        prompt=prompt,
+                        resolution=resolution_label,
+                        character_orientation="video",
+                        duration_seconds=duration,
+                        bill_user=False,
+                        billing_meta={"origin": "workspace_video", "generation_id": generation_id},
+                    )
+                else:
+                    provider_video_url = await run_motion_control_from_bytes(
+                        user_id=user_id,
+                        avatar_bytes=avatar_image,
+                        motion_video_bytes=motion_video,
+                        prompt=prompt,
+                        mode=("std" if quality == "standard" else "pro"),
+                        duration_seconds=duration,
+                        billing_meta={"origin": "workspace_video", "generation_id": generation_id},
+                        bill_user=False,
+                    )
             elif mode == "text_to_video":
                 provider_video_url = await run_text_to_video_from_prompt(
                     user_id=user_id,
@@ -3798,21 +3822,34 @@ def _workspace_video_charge_spec(
                 "refund_reason": "kling_video_refund",
                 "meta": {"origin": "workspace_video", "provider": provider, "model": model, "mode": mode, "duration": duration},
             }
-        if model == "kling-1.6":
+        if model == "motion-control":
+            if mode == "motion_control_3_0":
+                resolution_label = normalize_kling3_motion_resolution(
+                    resolution or ("1080p" if quality == "pro" else "720p")
+                )
+                tokens = int(calculate_kling3_motion_tokens(resolution_label, duration))
+                return {
+                    "tokens": tokens,
+                    "charge_reason": "kling3_motion_kie_create",
+                    "refund_reason": "kling3_motion_kie_refund",
+                    "meta": {
+                        "origin": "workspace_video",
+                        "provider": provider,
+                        "model": "Kling 3.0 Motion Control",
+                        "provider_model": "kling-3.0/motion-control",
+                        "mode": mode,
+                        "duration": duration,
+                        "resolution": resolution_label,
+                        "quality": quality,
+                    },
+                }
             rate = 1 if quality == "standard" else 2
             tokens = int(duration) * int(rate)
             return {
                 "tokens": tokens,
-                "charge_reason": "kling_video",
-                "refund_reason": "kling_video_refund",
-                "meta": {"origin": "workspace_video", "provider": provider, "model": model, "mode": mode, "duration": duration, "quality": quality},
-            }
-        if model == "motion-control":
-            return {
-                "tokens": 0,
-                "charge_reason": "",
-                "refund_reason": "workspace_video_refund",
-                "meta": {"origin": "workspace_video", "provider": provider, "model": model, "mode": mode, "billing": "todo_motion_control"},
+                "charge_reason": "kling_motion_26_create",
+                "refund_reason": "kling_motion_26_refund",
+                "meta": {"origin": "workspace_video", "provider": provider, "model": "Kling Motion Control 2.6", "mode": mode, "duration": duration, "quality": quality},
             }
 
     if provider == "veo":
@@ -4004,6 +4041,17 @@ async def workspace_video_run(
     last_frame = await _read_optional(last_file)
     avatar_image = await _read_optional(avatar_file)
     motion_video = await _read_optional(motion_file)
+    motion_duration_detected = False
+    if provider == "kling" and model == "motion-control" and motion_video:
+        motion_ext = _guess_seedance_video_ext(
+            filename=getattr(motion_file, "filename", None),
+            content_type=getattr(motion_file, "content_type", None),
+            raw=motion_video,
+        ) or "mp4"
+        motion_duration = _probe_seedance_video_duration_seconds(motion_video, motion_ext)
+        if motion_duration > 0:
+            duration = int(math.ceil(float(motion_duration)))
+            motion_duration_detected = True
     source_video = await _read_optional(source_video_file)
     switchx_select_mask = await _read_optional(switchx_select_mask_file)
     print("[switchx form]", {
@@ -4171,8 +4219,15 @@ async def workspace_video_run(
             raise HTTPException(status_code=400, detail="Для Sora доступны только 4, 8 или 12 секунд.")
         if aspect_ratio not in {"16:9", "9:16"}:
             raise HTTPException(status_code=400, detail="Для Sora доступны только 16:9 или 9:16.")
-    if model == "motion-control" and (not avatar_image or not motion_video):
-        raise HTTPException(status_code=400, detail="Для Motion Control нужны avatar image и motion video.")
+    if model == "motion-control":
+        if not avatar_image or not motion_video:
+            raise HTTPException(status_code=400, detail="Для Motion Control нужны avatar image и motion video.")
+        if not motion_duration_detected:
+            raise HTTPException(status_code=400, detail="Не удалось определить длительность reference video. Перезагрузи MP4/MOV с корректными metadata.")
+        if duration < 3 or duration > 30:
+            raise HTTPException(status_code=400, detail="Для Motion Control reference video должно быть 3–30 сек.")
+        if mode == "motion_control_3_0":
+            resolution = normalize_kling3_motion_resolution(resolution or ("1080p" if quality == "pro" else "720p"))
     if provider == "switchx":
         resolution = _normalize_switchx_resolution(resolution)
         switchx_alpha_mode = _normalize_switchx_alpha_mode(switchx_alpha_mode)
