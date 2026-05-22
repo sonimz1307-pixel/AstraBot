@@ -28,6 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from db_supabase import track_user_activity, get_basic_stats, supabase as sb
 from kling_flow import run_motion_control_from_bytes, run_image_to_video_from_bytes, run_text_to_video_from_prompt, upload_bytes_to_supabase
+from kling3_motion_kie import run_kling3_motion_kie_from_bytes, normalize_kling3_motion_resolution
 from veo_flow import run_veo_text_to_video, run_veo_image_to_video
 from veo_billing import calc_veo_charge, format_veo_charge_line
 from billing_db import (
@@ -5999,52 +6000,43 @@ async def webhook(secret: str, request: Request):
                 )
             return {"ok": True}
 
-        # legacy Kling 1.6
-        if flow in ("motion", "motion_control", "mc"):
+        # Motion Control container. Старый Kling 1.6 больше не показываем в UI:
+        # flow=motion -> Kling Motion Control 2.6 через Replicate;
+        # flow=i2v    -> Kling 3.0 Motion Control через KIE.
+        motion_version = str(payload.get("motion_version") or "").lower().strip()
+        if flow in ("motion", "motion_control", "mc", "2_6", "2.6"):
             flow = "motion"
-        elif flow in ("i2v", "image_to_video", "image2video", "image->video"):
-            flow = "i2v"
+        elif flow in ("i2v", "image_to_video", "image2video", "image->video", "motion_3_0", "motion3", "3_0", "3.0", "kling3_motion") or motion_version in ("3_0", "3.0"):
+            flow = "motion_3_0"
         else:
-            flow = "motion" if not flow else flow
+            flow = "motion"
 
-        quality = "pro" if quality in ("pro", "professional") else "std"
+        quality = "pro" if quality in ("pro", "professional", "1080", "1080p") else "std"
+        resolution_label = "1080p" if quality == "pro" else "720p"
+        motion_label = "Kling 3.0 Motion Control" if flow == "motion_3_0" else "Kling 2.6 Motion Control"
 
-        st["kling_settings"] = {"kling_version": "1_6", "flow": flow, "quality": quality}
+        st["kling_settings"] = {
+            "kling_version": "motion_control",
+            "flow": flow,
+            "quality": quality,
+            "motion_version": "3_0" if flow == "motion_3_0" else "2_6",
+            "resolution": resolution_label if flow == "motion_3_0" else quality,
+        }
         st["ts"] = _now()
 
-        if flow == "motion":
-            _set_mode(chat_id, user_id, "kling_mc")
-            st["kling_mc"] = {"step": "need_avatar", "avatar_bytes": None, "video_bytes": None}
+        _set_mode(chat_id, user_id, "kling_mc")
+        st["kling_mc"] = {"step": "need_avatar", "avatar_bytes": None, "video_bytes": None, "video_duration": None}
 
-            await tg_send_message(
-                chat_id,
-                f"✅ Настройки сохранены: Motion Control • {quality.upper()}\n\n"
-                "Шаг 1) Пришли ФОТО аватара (кого анимируем).\n"
-                "Шаг 2) Потом пришли ВИДЕО с движением (3–30 сек).\n"
-                "Шаг 3) Потом текстом напиши, что должно происходить (или просто: Старт).",
-                reply_markup=_help_menu_for(user_id),
-            )
-        else:
-            try:
-                duration = int(payload.get("duration") or payload.get("seconds") or payload.get("sec") or 5)
-            except Exception:
-                duration = 5
-            if duration not in (5, 10):
-                duration = 5
-
-            st["kling_settings"]["duration"] = duration
-
-            _set_mode(chat_id, user_id, "kling_i2v")
-            st["kling_i2v"] = {"step": "need_image", "image_bytes": None, "duration": duration}
-            st["ts"] = _now()
-
-            await tg_send_message(
-                chat_id,
-                f"✅ Настройки сохранены: Image → Video • {quality.upper()} • {duration} сек\n\n"
-                "Шаг 1) Пришли СТАРТОВОЕ ФОТО.\n"
-                "Шаг 2) Потом текстом опиши, что должно происходить (или просто: Старт).",
-                reply_markup=_help_menu_for(user_id),
-            )
+        price_line = "720p = 2 ток/сек, 1080p = 3 ток/сек" if flow == "motion_3_0" else "Standard = 1 ток/сек, Pro = 2 ток/сек"
+        await tg_send_message(
+            chat_id,
+            f"✅ Настройки сохранены: {motion_label} • {resolution_label if flow == 'motion_3_0' else quality.upper()}\n"
+            f"Цена: {price_line}\n\n"
+            "Шаг 1) Пришли ФОТО аватара (кого анимируем).\n"
+            "Шаг 2) Потом пришли ВИДЕО с движением (3–30 сек).\n"
+            "Шаг 3) Потом текстом напиши, что должно происходить (или просто: Старт).",
+            reply_markup=_help_menu_for(user_id),
+        )
 
         return {"ok": True}
         
@@ -8583,6 +8575,10 @@ async def webhook(secret: str, request: Request):
                 return {"ok": True}
 
             km["video_bytes"] = video_bytes
+            try:
+                km["video_duration"] = int(float(vid.get("duration") or 0)) or None
+            except Exception:
+                km["video_duration"] = None
             km["step"] = "need_prompt"
             st["kling_mc"] = km
             st["ts"] = _now()
@@ -8626,6 +8622,7 @@ async def webhook(secret: str, request: Request):
                 return {"ok": True}
 
             km["video_bytes"] = video_bytes
+            km["video_duration"] = None
             km["step"] = "need_prompt"
             st["kling_mc"] = km
             st["ts"] = _now()
@@ -9923,26 +9920,44 @@ async def webhook(secret: str, request: Request):
             _busy_start(int(user_id), "Kling Motion")
 
             try:
-                # настройки Kling из WebApp (если нет — дефолт std)
+                # настройки Motion Control из WebApp
                 ks = st.get("kling_settings") or {}
                 quality = (ks.get("quality") or "std").lower()
-                kling_mode = "pro" if quality in ("pro", "professional") else "std"
+                kling_mode = "pro" if quality in ("pro", "professional", "1080", "1080p") else "std"
+                flow = str(ks.get("flow") or "motion").lower().strip()
+                video_duration = km.get("video_duration")
 
-                out_url = await run_motion_control_from_bytes(
-                    user_id=user_id,
-                    avatar_bytes=avatar_bytes,
-                    motion_video_bytes=video_bytes,
-                    prompt=user_prompt or "A person performs the same motion as in the reference video.",
-                    mode=kling_mode,
-                    character_orientation="video",
-                    keep_original_sound=True,
-                    duration_seconds=vid.get("duration"),
-                )
+                if flow == "motion_3_0":
+                    resolution = normalize_kling3_motion_resolution(
+                        ks.get("resolution") or ("1080p" if kling_mode == "pro" else "720p")
+                    )
+                    out_url = await run_kling3_motion_kie_from_bytes(
+                        user_id=user_id,
+                        avatar_bytes=avatar_bytes,
+                        motion_video_bytes=video_bytes,
+                        prompt=user_prompt or "A person performs the same motion as in the reference video.",
+                        resolution=resolution,
+                        character_orientation="video",
+                        duration_seconds=video_duration,
+                        bill_user=True,
+                        billing_meta={"origin": "telegram", "ui_flow": "motion_control_3_0"},
+                    )
+                else:
+                    out_url = await run_motion_control_from_bytes(
+                        user_id=user_id,
+                        avatar_bytes=avatar_bytes,
+                        motion_video_bytes=video_bytes,
+                        prompt=user_prompt or "A person performs the same motion as in the reference video.",
+                        mode=kling_mode,
+                        character_orientation="video",
+                        keep_original_sound=True,
+                        duration_seconds=video_duration,
+                    )
                 await tg_send_message(chat_id, f"✅ Готово!\n{out_url}", reply_markup=_main_menu_for(user_id))
             except Exception as e:
                 await tg_send_message(chat_id, f"❌ Ошибка Kling Motion Control: {e}", reply_markup=_main_menu_for(user_id))
             finally:
-                st["kling_mc"] = {"step": "need_avatar", "avatar_bytes": None, "video_bytes": None}
+                st["kling_mc"] = {"step": "need_avatar", "avatar_bytes": None, "video_bytes": None, "video_duration": None}
                 _set_mode(chat_id, user_id, "chat")
                 _busy_end(int(user_id))
 
