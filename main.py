@@ -2239,6 +2239,7 @@ def _ai_chat_mode_inline_kb() -> dict:
             ],
             [
                 {"text": "🪄 Промт", "callback_data": "aichat:mode:prompt"},
+                {"text": "🆕 New Chat", "callback_data": "aichat:new_chat"},
             ],
         ]
     }
@@ -2292,6 +2293,24 @@ def _tg_chat_queue_for_model(model_key: str) -> str:
     return TG_CHAT_OPENAI_QUEUE_NAME if _ai_chat_model_key_from_value(model_key) == "openai" else TG_CHAT_CLAUDE_QUEUE_NAME
 
 
+def _clear_ai_chat_memory_state(st: Dict[str, Any]) -> None:
+    """Clear only Telegram AI-chat dialogue memory; keep the selected model and other bot modes."""
+    for key in ("ai_hist", "ai_summary", "ai_pending", "ai_ts"):
+        st.pop(key, None)
+
+
+async def _reset_tg_ai_chat_dialogue(chat_id: int, user_id: int, st: Dict[str, Any]) -> Optional[str]:
+    """Start a clean Telegram AI-chat thread for one user without touching site/workspace chat."""
+    _clear_ai_chat_memory_state(st)
+    st["ai_prompt"] = _new_ai_prompt_state()
+    st["ts"] = _now()
+    try:
+        await reset_tg_chat_memory(chat_id, user_id)
+    except Exception as exc:
+        return str(exc)
+    return None
+
+
 async def _enqueue_tg_ai_chat_job(
     *,
     chat_id: int,
@@ -2320,7 +2339,9 @@ async def _enqueue_tg_ai_chat_job(
         "model_key": normalized_model_key,
         "model": _ai_chat_model_actual(normalized_model_key),
         "system_prompt": _ai_chat_system_prompt(normalized_model_key),
-        "reply_markup": _main_menu_for(user_id),
+        # Показываем inline-меню ИИ-чата под ответом, чтобы New Chat всегда был под рукой.
+        # Reply-клавиатура главного меню при этом не ломается — Telegram оставляет её внизу.
+        "reply_markup": _ai_chat_mode_inline_kb(),
     }
     if status_message_id:
         job["status_message_id"] = int(status_message_id)
@@ -4727,6 +4748,35 @@ async def webhook(secret: str, request: Request):
                     "🤖 ИИ помощник. Выбери модель чата или генератор промтов:",
                     reply_markup=_ai_chat_mode_inline_kb(),
                 )
+                return {"ok": True}
+
+            if data == "aichat:new_chat":
+                _set_mode(chat_id, user_id, "chat")
+                err = await _reset_tg_ai_chat_dialogue(chat_id, user_id, st)
+                if err:
+                    await tg_send_message(
+                        chat_id,
+                        f"❌ Не смог очистить историю ИИ-чата: {err}",
+                        reply_markup=_ai_chat_mode_inline_kb(),
+                    )
+                    return {"ok": True}
+
+                model = st.get("ai_chat_model")
+                if model:
+                    st["ai_chat_mode"] = "chat"
+                    msg = (
+                        "✅ New Chat создан. История очищена.\n"
+                        f"Текущая модель: {_ai_chat_model_title(model)}.\n\n"
+                        "Можешь писать новую идею — старый диалог больше не будет подмешиваться."
+                    )
+                else:
+                    st["ai_chat_mode"] = "menu"
+                    msg = (
+                        "✅ New Chat создан. История очищена.\n\n"
+                        "Выбери модель чата: Claude Sonnet, Claude Opus 4.7 или ChatGPT."
+                    )
+                st["ts"] = _now()
+                await tg_send_message(chat_id, msg, reply_markup=_ai_chat_mode_inline_kb())
                 return {"ok": True}
 
             if data in ("aichat:model:claude", "aichat:model:opus", "aichat:model:openai", "aichat:mode:chat"):
