@@ -14,8 +14,39 @@ class LegnextMidjourneyError(RuntimeError):
     pass
 
 
-def normalize_midjourney_speed_mode(value: Any, default: str = "fast") -> str:
+MIDJOURNEY_MODEL_VERSIONS = {
+    "midjourney-v7": "7",
+    "midjourney-v8.1": "8.1",
+}
+
+
+def normalize_midjourney_model(value: Any, default: str = "midjourney-v7") -> str:
+    raw = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
+    aliases = {
+        "mj-v7": "midjourney-v7",
+        "v7": "midjourney-v7",
+        "7": "midjourney-v7",
+        "midjourney-7": "midjourney-v7",
+        "mj-v8.1": "midjourney-v8.1",
+        "mj-v81": "midjourney-v8.1",
+        "v8.1": "midjourney-v8.1",
+        "v81": "midjourney-v8.1",
+        "8.1": "midjourney-v8.1",
+        "81": "midjourney-v8.1",
+        "midjourney-8.1": "midjourney-v8.1",
+        "midjourney-v81": "midjourney-v8.1",
+    }
+    candidate = aliases.get(raw, raw)
+    if candidate in MIDJOURNEY_MODEL_VERSIONS:
+        return candidate
+    return default if default in MIDJOURNEY_MODEL_VERSIONS else "midjourney-v7"
+
+
+def normalize_midjourney_speed_mode(value: Any, default: str = "fast", model: Any = None) -> str:
+    model_key = normalize_midjourney_model(model) if model else "midjourney-v7"
     raw = str(value or "").strip().lower()
+    if model_key == "midjourney-v8.1":
+        return "fast"
     if raw == "turbo":
         return "turbo"
     return default if default in {"fast", "turbo"} else "fast"
@@ -77,6 +108,7 @@ def _normalize_http_urls(items: Iterable[Any]) -> List[str]:
 def build_midjourney_v7_prompt(
     *,
     prompt: str,
+    model: Any = "midjourney-v7",
     aspect_ratio: str = "1:1",
     stylize: Any = 100,
     chaos: Any = 0,
@@ -86,15 +118,21 @@ def build_midjourney_v7_prompt(
     speed_mode: str = "fast",
     style_ref_urls: Optional[Iterable[Any]] = None,
     omni_ref_url: Optional[str] = None,
+    image_prompt_urls: Optional[Iterable[Any]] = None,
+    image_weight: Any = None,
 ) -> str:
     base_prompt = str(prompt or "").strip()
     if not base_prompt:
         raise LegnextMidjourneyError("Midjourney prompt is empty")
 
-    parts: List[str] = [base_prompt]
+    model_key = normalize_midjourney_model(model)
+    model_version = MIDJOURNEY_MODEL_VERSIONS[model_key]
+
+    image_prompts = _normalize_http_urls(image_prompt_urls or [])[:4]
+    parts: List[str] = [*image_prompts, base_prompt]
     safe_ar = str(aspect_ratio or "1:1").strip() or "1:1"
     parts.append(f"--ar {safe_ar}")
-    parts.append("--v 7")
+    parts.append(f"--v {model_version}")
 
     try:
         stylize_value = max(0, min(1000, int(stylize if stylize is not None else 100)))
@@ -109,8 +147,9 @@ def build_midjourney_v7_prompt(
     if chaos_value > 0:
         parts.append(f"--chaos {chaos_value}")
 
+    # V8.1 rejects --no, so negative prompt remains available only for V7.
     negative = str(negative_prompt or "").strip()
-    if negative:
+    if model_key == "midjourney-v7" and negative:
         parts.append(f"--no {negative}")
 
     if _boolish(raw_mode):
@@ -125,15 +164,25 @@ def build_midjourney_v7_prompt(
         except Exception:
             pass
 
-    speed = normalize_midjourney_speed_mode(speed_mode)
+    speed = normalize_midjourney_speed_mode(speed_mode, model=model_key)
     parts.append("--turbo" if speed == "turbo" else "--fast")
 
     style_refs = _normalize_http_urls(style_ref_urls or [])
     if style_refs:
         parts.append("--sref " + " ".join(style_refs[:4]))
 
+    if image_prompts:
+        try:
+            iw_value = float(image_weight if image_weight not in {None, ""} else 1)
+        except Exception:
+            iw_value = 1.0
+        iw_value = max(0.0, min(3.0, iw_value))
+        iw_text = str(int(iw_value)) if abs(iw_value - int(iw_value)) < 1e-9 else (f"{iw_value:.2f}".rstrip("0").rstrip("."))
+        parts.append(f"--iw {iw_text}")
+
+    # V8.1 alpha rejects --oref/--ow. Keep Omni Reference only for V7.
     omni = str(omni_ref_url or "").strip()
-    if omni.startswith("http://") or omni.startswith("https://"):
+    if model_key == "midjourney-v7" and (omni.startswith("http://") or omni.startswith("https://")):
         parts.append(f"--oref {omni}")
 
     return " ".join(part for part in parts if str(part or "").strip())
