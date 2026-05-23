@@ -154,6 +154,7 @@ from app.services.legnext_midjourney import (
     create_midjourney_reroll,
     create_midjourney_variation,
     get_midjourney_job,
+    normalize_midjourney_model,
     normalize_midjourney_speed_mode,
 )
 from app.services.video_editor_service import (
@@ -2612,13 +2613,16 @@ def _workspace_boolish(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _workspace_speed_mode(value: Any, default: str = "fast") -> str:
-    return normalize_midjourney_speed_mode(value, default=default)
+def _workspace_speed_mode(value: Any, default: str = "fast", model: Any = None) -> str:
+    return normalize_midjourney_speed_mode(value, default=default, model=model)
 
 
-def _workspace_midjourney_action_cost(action_type: str, speed_mode: str) -> int:
+def _workspace_midjourney_action_cost(action_type: str, speed_mode: str, model: Any = None) -> int:
+    model_key = normalize_midjourney_model(model) if model else "midjourney-v7"
+    if model_key == "midjourney-v8.1":
+        return 1
     action = str(action_type or "generate").strip().lower() or "generate"
-    speed = _workspace_speed_mode(speed_mode)
+    speed = _workspace_speed_mode(speed_mode, model=model_key)
     if action in {"variation", "variation_subtle", "variation_strong"}:
         return 2 if speed == "turbo" else 1
     if action == "reroll":
@@ -2930,7 +2934,7 @@ def _workspace_gpt_image_2_size(aspect_ratio: Any, mode: str = "text_to_image") 
     return mapping.get(ratio, "1024x1024")
 
 
-def _workspace_image_cost(provider: str, mode: str, preset_slug: str = "", resolution: str = "2K", speed_mode: str = "fast", action_type: str = "generate") -> int:
+def _workspace_image_cost(provider: str, mode: str, preset_slug: str = "", resolution: str = "2K", speed_mode: str = "fast", action_type: str = "generate", model: Any = None) -> int:
     provider_key = str(provider or "").strip().lower()
     mode_key = str(mode or "").strip().lower()
     preset_key = str(preset_slug or "").strip().lower()
@@ -2962,7 +2966,7 @@ def _workspace_image_cost(provider: str, mode: str, preset_slug: str = "", resol
     if provider_key == "gpt_image_2":
         return 0
     if provider_key == "midjourney":
-        return _workspace_midjourney_action_cost(action_type, speed_mode)
+        return _workspace_midjourney_action_cost(action_type, speed_mode, model=model)
 
     raise HTTPException(status_code=400, detail=f"Unsupported image provider: {provider_key} / {mode_key}")
 
@@ -6127,6 +6131,7 @@ async def workspace_image_run(
     mj_raw = _workspace_boolish(form.get("mj_raw"))
     mj_speed_mode = _workspace_speed_mode(form.get("mj_speed_mode") or form.get("speed_mode") or "fast")
     mj_seed = str(form.get("mj_seed") or "").strip()
+    mj_iw_raw = form.get("mj_iw")
 
     if not provider:
         raise HTTPException(status_code=400, detail="Missing provider")
@@ -6167,6 +6172,9 @@ async def workspace_image_run(
     omni_ref_upload = form.get("omni_ref_image")
     omni_ref_image = await _read_optional_upload_bytes(omni_ref_upload)
     omni_ref_url = None
+    mj_image_prompt_uploads_raw = [item for item in form.getlist("mj_image_prompt_image") if item]
+    mj_image_prompt_uploads: list[tuple[Any, bytes, Optional[str]]] = []
+    mj_image_prompt_urls: list[str] = []
 
     if provider == "nano_banana" and not source_image:
         raise HTTPException(status_code=400, detail="Для Nano Banana нужен source image.")
@@ -6192,7 +6200,19 @@ async def workspace_image_run(
         raise HTTPException(status_code=400, detail="Для Topaz Photo Upscale нужен source image.")
     if provider == "midjourney":
         mode = "text_to_image"
-        model = model or "midjourney-v7"
+        model = normalize_midjourney_model(model or "midjourney-v7")
+        mj_speed_mode = _workspace_speed_mode(mj_speed_mode, model=model)
+        if model == "midjourney-v8.1":
+            # V8.1 alpha rejects --no and --oref/--ow; do not persist or send them.
+            negative_prompt = ""
+            omni_ref_image = None
+            omni_ref_upload = None
+            for upload in mj_image_prompt_uploads_raw[:4]:
+                raw = await _read_optional_upload_bytes(upload)
+                if raw:
+                    mj_image_prompt_uploads.append((upload, raw, getattr(upload, "filename", None)))
+        else:
+            mj_image_prompt_uploads_raw = []
 
     if provider in {"nano_banana_2", "nano_banana_pro", "nano_banana_pro_new", "text_to_image", "seedream"} and mode in {"text_to_image", "t2i"} and aspect_ratio == "match_input_image":
         aspect_ratio = "9:16" if provider == "seedream" else "16:9"
@@ -6220,9 +6240,12 @@ async def workspace_image_run(
             if not raw:
                 continue
             style_ref_urls.append(_upload_workspace_input_image(uid, raw, filename=getattr(upload, "filename", None), slot=f"workspace_midjourney_style_{index}"))
+        for index, (_upload_obj, raw_bytes, upload_name) in enumerate(mj_image_prompt_uploads[:4], start=1):
+            mj_image_prompt_urls.append(_upload_workspace_input_image(uid, raw_bytes, filename=upload_name, slot=f"workspace_midjourney_prompt_{index}"))
         omni_ref_url = _upload_workspace_input_image(uid, omni_ref_image, filename=getattr(omni_ref_upload, "filename", None), slot="workspace_midjourney_omni") if omni_ref_image else None
         run_prompt = build_midjourney_v7_prompt(
             prompt=prompt,
+            model=model,
             aspect_ratio=aspect_ratio or "1:1",
             stylize=mj_stylize,
             chaos=mj_chaos,
@@ -6232,6 +6255,8 @@ async def workspace_image_run(
             speed_mode=mj_speed_mode,
             style_ref_urls=style_ref_urls,
             omni_ref_url=omni_ref_url,
+            image_prompt_urls=mj_image_prompt_urls,
+            image_weight=mj_iw_raw,
         )
 
     if provider != "topaz_photo" and not run_prompt:
@@ -6242,7 +6267,7 @@ async def workspace_image_run(
         bal = float(get_balance(uid) or 0)
     except Exception:
         bal = 0
-    cost = int(_workspace_image_cost(provider, mode, preset_slug, resolution, speed_mode=mj_speed_mode, action_type="generate"))
+    cost = int(_workspace_image_cost(provider, mode, preset_slug, resolution, speed_mode=mj_speed_mode, action_type="generate", model=model if provider == "midjourney" else None))
     if cost > 0 and bal < cost:
         raise HTTPException(status_code=402, detail=f"Недостаточно токенов. Нужно: {cost} ток.")
 
@@ -6314,6 +6339,7 @@ async def workspace_image_run(
                 "source_image_url": source_image_url,
                 "source_image_urls": source_image_urls,
                 "base_image_url": base_image_url,
+                "mj_image_prompt_urls": mj_image_prompt_urls,
                 "source_filename": getattr(source_upload, "filename", None),
                 "base_filename": getattr(base_upload, "filename", None),
                 "negative_prompt": negative_prompt,
@@ -6423,7 +6449,8 @@ async def workspace_image_action(
     if action == "variation" and variation_type not in {"subtle", "strong"}:
         raise HTTPException(status_code=400, detail="variation_type must be subtle or strong")
 
-    speed_mode = _workspace_speed_mode(payload.speed_mode or source_row.get("mj_speed_mode") or "fast")
+    source_model = normalize_midjourney_model(source_row.get("model") or "midjourney-v7")
+    speed_mode = _workspace_speed_mode(payload.speed_mode or source_row.get("mj_speed_mode") or "fast", model=source_model)
     prompt = str(source_row.get("prompt") or "").strip()
     aspect_ratio = str(source_row.get("aspect_ratio") or "1:1").strip() or "1:1"
     negative_prompt = str(source_row.get("negative_prompt") or "").strip()
@@ -6440,7 +6467,7 @@ async def workspace_image_action(
     except Exception:
         bal = 0
 
-    cost = int(_workspace_image_cost("midjourney", "text_to_image", "", "2K", speed_mode=speed_mode, action_type=action))
+    cost = int(_workspace_image_cost("midjourney", "text_to_image", "", "2K", speed_mode=speed_mode, action_type=action, model=source_model))
     reason = _workspace_image_charge_reason("midjourney", "text_to_image", action_type=action)
     if cost > 0 and bal < cost:
         raise HTTPException(status_code=402, detail=f"Недостаточно токенов. Нужно: {cost} ток.")
@@ -6451,7 +6478,7 @@ async def workspace_image_action(
         {
             "user_id": str(uid),
             "provider": "midjourney",
-            "model": str(source_row.get("model") or "midjourney-v7"),
+            "model": source_model,
             "mode": "text_to_image",
             "prompt": prompt,
             "status": "queued",
@@ -6487,11 +6514,12 @@ async def workspace_image_action(
                 "generation_id": new_generation_id,
                 "user_id": uid,
                 "provider": "midjourney",
-                "model": str(source_row.get("model") or "midjourney-v7"),
+                "model": source_model,
                 "mode": "text_to_image",
                 "prompt": prompt,
                 "run_prompt": build_midjourney_v7_prompt(
                     prompt=prompt,
+                    model=source_model,
                     aspect_ratio=aspect_ratio,
                     stylize=mj_stylize,
                     chaos=mj_chaos,
