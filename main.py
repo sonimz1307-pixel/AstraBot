@@ -20,8 +20,11 @@ from kie_claude_chat import (
     KIE_CLAUDE_DISPLAY_NAME,
     KIE_CLAUDE_HISTORY_MESSAGES,
     KIE_CLAUDE_MODEL_ID,
+    KIE_CLAUDE_OPUS_MODEL_ID,
     kie_claude_answer,
+    kie_claude_display_name,
     kie_claude_summarize_dialogue,
+    normalize_kie_claude_model,
 )
 from fastapi import FastAPI, Request, Response
 from fastapi.staticfiles import StaticFiles
@@ -2229,6 +2232,9 @@ def _ai_chat_mode_inline_kb() -> dict:
         "inline_keyboard": [
             [
                 {"text": "💬 Claude Sonnet", "callback_data": "aichat:model:claude"},
+                {"text": "💬 Claude Opus 4.7", "callback_data": "aichat:model:opus"},
+            ],
+            [
                 {"text": "💬 ChatGPT", "callback_data": "aichat:model:openai"},
             ],
             [
@@ -2238,22 +2244,52 @@ def _ai_chat_mode_inline_kb() -> dict:
     }
 
 
-def _ai_chat_model_title(model: str) -> str:
-    model = (model or "claude").strip().lower()
-    if model in ("openai", "chatgpt", "gpt"):
-        return "ChatGPT"
-    return "Claude Sonnet"
-
-
-def _ai_chat_model_key(st: Dict[str, Any]) -> str:
-    model = str((st or {}).get("ai_chat_model") or "claude").strip().lower()
+def _ai_chat_model_key_from_value(value: Any) -> str:
+    model = str(value or "claude").strip().lower()
     if model in ("openai", "chatgpt", "gpt"):
         return "openai"
+    if model in ("opus", "claude_opus", "claude-opus", "claude-opus-4-7", "opus-4-7"):
+        return "claude_opus"
     return "claude"
 
 
+def _ai_chat_model_title(model: str) -> str:
+    key = _ai_chat_model_key_from_value(model)
+    if key == "openai":
+        return "ChatGPT"
+    if key == "claude_opus":
+        return kie_claude_display_name(KIE_CLAUDE_OPUS_MODEL_ID)
+    return kie_claude_display_name(KIE_CLAUDE_MODEL_ID)
+
+
+def _ai_chat_model_key(st: Dict[str, Any]) -> str:
+    return _ai_chat_model_key_from_value((st or {}).get("ai_chat_model") or "claude")
+
+
+def _ai_chat_model_actual(model_key: str) -> str:
+    key = _ai_chat_model_key_from_value(model_key)
+    if key == "openai":
+        return OPENAI_CHAT_MODEL
+    if key == "claude_opus":
+        return normalize_kie_claude_model(KIE_CLAUDE_OPUS_MODEL_ID) or KIE_CLAUDE_OPUS_MODEL_ID
+    return normalize_kie_claude_model(KIE_CLAUDE_MODEL_ID) or KIE_CLAUDE_MODEL_ID
+
+
+def _ai_chat_system_prompt(model_key: str) -> str:
+    key = _ai_chat_model_key_from_value(model_key)
+    if key == "openai":
+        return DEFAULT_TEXT_SYSTEM_PROMPT
+    title = _ai_chat_model_title(key)
+    return (
+        f"Ты {title} внутри AstraBot. Отвечай на русском, кратко и по делу. "
+        "Рассуждение включено, но не раскрывай внутренние рассуждения — сразу давай готовый ответ. "
+        "Интернет выключен. Если нужны актуальные данные, честно скажи, что без интернета их нельзя проверить. "
+        "Файлы анализируй только по тексту, который передал backend. Не используй LaTeX/TeX."
+    )
+
+
 def _tg_chat_queue_for_model(model_key: str) -> str:
-    return TG_CHAT_OPENAI_QUEUE_NAME if str(model_key or "").strip().lower() == "openai" else TG_CHAT_CLAUDE_QUEUE_NAME
+    return TG_CHAT_OPENAI_QUEUE_NAME if _ai_chat_model_key_from_value(model_key) == "openai" else TG_CHAT_CLAUDE_QUEUE_NAME
 
 
 async def _enqueue_tg_ai_chat_job(
@@ -2274,15 +2310,16 @@ async def _enqueue_tg_ai_chat_job(
     except Exception:
         status_message_id = None
 
+    normalized_model_key = _ai_chat_model_key_from_value(model_key)
     job: Dict[str, Any] = {
         "job_id": f"tg_ai_chat_{uuid4().hex}",
         "kind": "tg_ai_chat",
         "chat_id": int(chat_id),
         "user_id": int(user_id),
         "text": str(text or ""),
-        "model_key": "openai" if model_key == "openai" else "claude",
-        "model": OPENAI_CHAT_MODEL if model_key == "openai" else KIE_CLAUDE_MODEL_ID,
-        "system_prompt": CLAUDE_TEXT_SYSTEM_PROMPT,
+        "model_key": normalized_model_key,
+        "model": _ai_chat_model_actual(normalized_model_key),
+        "system_prompt": _ai_chat_system_prompt(normalized_model_key),
         "reply_markup": _main_menu_for(user_id),
     }
     if status_message_id:
@@ -4692,9 +4729,9 @@ async def webhook(secret: str, request: Request):
                 )
                 return {"ok": True}
 
-            if data in ("aichat:model:claude", "aichat:model:openai", "aichat:mode:chat"):
+            if data in ("aichat:model:claude", "aichat:model:opus", "aichat:model:openai", "aichat:mode:chat"):
                 _set_mode(chat_id, user_id, "chat")
-                model = "openai" if data == "aichat:model:openai" else "claude"
+                model = "openai" if data == "aichat:model:openai" else ("claude_opus" if data == "aichat:model:opus" else "claude")
                 st["ai_chat_mode"] = "chat"
                 st["ai_chat_model"] = model
                 st["ai_prompt"] = _new_ai_prompt_state()
@@ -5199,7 +5236,7 @@ async def webhook(secret: str, request: Request):
         if st.get("ai_chat_mode") != "chat":
             await tg_send_message(
                 chat_id,
-                "Голосовое получил, но сначала выбери модель чата: Claude Sonnet или ChatGPT.",
+                "Голосовое получил, но сначала выбери модель чата: Claude Sonnet, Claude Opus 4.7 или ChatGPT.",
                 reply_markup=_ai_chat_mode_inline_kb(),
             )
             return {"ok": True}
@@ -5268,13 +5305,13 @@ async def webhook(secret: str, request: Request):
             await tg_send_message(chat_id, "Не смог прочитать file_id файла. Отправь файл ещё раз.", reply_markup=_main_menu_for(user_id))
             return {"ok": True}
         if size_bytes > AI_CHAT_FILE_MAX_BYTES:
-            await tg_send_message(chat_id, "Файл больше 10 МБ. Для бесплатного Claude можно отправлять файлы до 10 МБ.", reply_markup=_main_menu_for(user_id))
+            await tg_send_message(chat_id, "Файл больше 10 МБ. Для бесплатного ИИ-чата можно отправлять файлы до 10 МБ.", reply_markup=_main_menu_for(user_id))
             return {"ok": True}
 
         if st.get("ai_chat_mode") != "chat":
             await tg_send_message(
                 chat_id,
-                "Файл получил, но сначала выбери модель чата: Claude Sonnet или ChatGPT.",
+                "Файл получил, но сначала выбери модель чата: Claude Sonnet, Claude Opus 4.7 или ChatGPT.",
                 reply_markup=_ai_chat_mode_inline_kb(),
             )
             return {"ok": True}
@@ -6669,7 +6706,7 @@ async def webhook(secret: str, request: Request):
     if st.get("mode") == "chat" and st.get("ai_chat_mode") == "menu" and incoming_text and not _is_nav_or_menu_text(incoming_text):
         await tg_send_message(
             chat_id,
-            "Сначала выбери модель чата: Claude Sonnet или ChatGPT. Либо выбери 🪄 Промт.",
+            "Сначала выбери модель чата: Claude Sonnet, Claude Opus 4.7 или ChatGPT. Либо выбери 🪄 Промт.",
             reply_markup=_ai_chat_mode_inline_kb(),
         )
         return {"ok": True}
@@ -10550,7 +10587,7 @@ async def webhook(secret: str, request: Request):
             if st.get("ai_chat_mode") != "chat":
                 await tg_send_message(
                     chat_id,
-                    "Сначала выбери модель чата: Claude Sonnet или ChatGPT. Либо выбери 🪄 Промт.",
+                    "Сначала выбери модель чата: Claude Sonnet, Claude Opus 4.7 или ChatGPT. Либо выбери 🪄 Промт.",
                     reply_markup=_ai_chat_mode_inline_kb(),
                 )
                 return {"ok": True}
