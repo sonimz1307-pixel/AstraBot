@@ -1126,6 +1126,11 @@ def _admin_ai_label_from_free_event(row: Dict[str, Any]) -> str:
     service = str((row or {}).get("service") or "").strip()
     model = str((row or {}).get("model") or "").strip()
     joined = f"{service} {model}".lower()
+    service_low = service.lower()
+    if "claude-opus-4-7" in joined or "opus 4.7" in joined or service_low == "claude opus 4.7":
+        return "Claude Opus 4.7"
+    if "claude-sonnet-4-6" in joined or "sonnet 4.6" in joined or service_low == "claude sonnet 4.6":
+        return "Claude Sonnet 4.6"
     if "claude" in joined:
         return "Claude"
     if "chatgpt" in joined or "openai" in joined or "gpt" in joined:
