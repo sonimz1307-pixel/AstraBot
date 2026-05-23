@@ -1,24 +1,26 @@
 #!/usr/bin/env python3
-"""Nightly janitor for temporary Supabase Storage files.
-
-This version uses the Supabase Storage SDK to list files/folders instead of
-querying PostgREST on the `storage` schema.
+"""Nightly janitor for old Supabase Storage files.
 
 Default cleanup targets for this AstraBot project:
-- bucket SB_MEDIA_BUCKET / SUPABASE_MEDIA_BUCKET / SUPABASE_BUCKET / Kling -> kling3/
-- bucket SUPABASE_BUCKET / Kling -> kling_inputs/
-- bucket SUPABASE_BUCKET / Kling -> veo_inputs/ (or VEO_BUCKET_PREFIX)
-- bucket SEEDANCE_REF_BUCKET / seedance-refs -> refs/ (or SEEDANCE_REF_PREFIX)
+- bucket WORKSPACE_VIDEOS_BUCKET / workspace-videos -> whole bucket
+- bucket SUPABASE_BUCKET / Kling -> known generated media/input prefixes
+- bucket SEEDANCE_REF_BUCKET / seedance-refs -> refs/
 
 Safe behavior:
-- deletes only files older than CLEANUP_MAX_AGE_HOURS (default: 72)
-- touches only known temp prefixes
+- deletes only files older than CLEANUP_MAX_AGE_HOURS (default: 336 = 14 days)
+- never touches the prompts bucket by default
+- never touches site-builds by default
+- skips files whose Storage timestamp cannot be read
 - supports dry-run mode
 
 Usage:
-  python cleanup_storage_fixed.py
-  python cleanup_storage_fixed.py --dry-run
-  python cleanup_storage_fixed.py --hours 48
+  python cleanup_storage.py --dry-run
+  python cleanup_storage.py
+  python cleanup_storage.py --hours 336
+
+Extra rules:
+  CLEANUP_EXTRA_RULES="bucket:prefix;other-bucket:some/prefix"
+  Use "bucket:" for a whole bucket, but do that only for buckets where all files may be deleted by age.
 """
 
 from __future__ import annotations
@@ -39,7 +41,7 @@ LOG = logging.getLogger("cleanup_storage")
 @dataclass(frozen=True)
 class CleanupRule:
     bucket: str
-    prefix: str
+    prefix: str = ""
 
 
 def _env(name: str, default: str = "") -> str:
@@ -67,7 +69,7 @@ def _unique_rules(rules: Iterable[CleanupRule]) -> List[CleanupRule]:
     for rule in rules:
         bucket = rule.bucket.strip()
         prefix = rule.prefix.strip().strip("/")
-        if not bucket or not prefix:
+        if not bucket:
             continue
         key = (bucket, prefix)
         if key in seen:
@@ -78,21 +80,45 @@ def _unique_rules(rules: Iterable[CleanupRule]) -> List[CleanupRule]:
 
 
 def _default_rules() -> List[CleanupRule]:
-    kling3_bucket = (
+    """Return conservative project cleanup rules.
+
+    Prompts are stored in a separate `prompts` bucket and are intentionally not
+    included here. `site-builds` is also excluded because those ZIPs can be user
+    deliverables.
+    """
+    workspace_videos_bucket = _env("WORKSPACE_VIDEOS_BUCKET") or "workspace-videos"
+    media_bucket = (
         _env("SB_MEDIA_BUCKET")
         or _env("SUPABASE_MEDIA_BUCKET")
         or _env("SUPABASE_BUCKET")
         or "Kling"
     )
-    main_bucket = _env("SUPABASE_BUCKET") or kling3_bucket or "Kling"
+    main_bucket = _env("SUPABASE_BUCKET") or media_bucket or "Kling"
     veo_prefix = _env("VEO_BUCKET_PREFIX") or "veo_inputs"
     seedance_bucket = _env("SEEDANCE_REF_BUCKET") or "seedance-refs"
     seedance_prefix = _env("SEEDANCE_REF_PREFIX") or "refs"
 
     rules = [
-        CleanupRule(bucket=kling3_bucket, prefix="kling3"),
+        # All generated videos, uploaded source videos/audio, music inputs, editor files.
+        CleanupRule(bucket=workspace_videos_bucket, prefix=""),
+
+        # Main image/reference/video-input bucket used by site and bot flows.
+        CleanupRule(bucket=main_bucket, prefix="workspace_image_inputs"),
+        CleanupRule(bucket=main_bucket, prefix="workspace_images"),
+        CleanupRule(bucket=main_bucket, prefix="workspace_refs"),
+        CleanupRule(bucket=main_bucket, prefix="workspace_voice"),
         CleanupRule(bucket=main_bucket, prefix="kling_inputs"),
+        CleanupRule(bucket=main_bucket, prefix="grok_inputs"),
+        CleanupRule(bucket=main_bucket, prefix="gpt_image2_inputs"),
+        CleanupRule(bucket=main_bucket, prefix="kling3"),
+        CleanupRule(bucket=main_bucket, prefix="kling3-kie"),
         CleanupRule(bucket=main_bucket, prefix=veo_prefix),
+
+        # KIE Kling 3.0 may use SB_MEDIA_BUCKET/SUPABASE_MEDIA_BUCKET separately.
+        CleanupRule(bucket=media_bucket, prefix="kling3"),
+        CleanupRule(bucket=media_bucket, prefix="kling3-kie"),
+
+        # Legacy Seedance public references.
         CleanupRule(bucket=seedance_bucket, prefix=seedance_prefix),
     ]
 
@@ -139,7 +165,7 @@ def _normalize_list_response(rows):
 
 
 def _is_folder_entry(entry: dict) -> bool:
-    # Supabase docs note that folder entries have id/created_at/updated_at/metadata == null.
+    # Supabase folder entries normally have id/created_at/updated_at/metadata == null.
     return (
         entry.get("id") is None
         and entry.get("created_at") is None
@@ -156,6 +182,11 @@ def _join_path(parent: str, name: str) -> str:
     if not name:
         return parent
     return f"{parent}/{name}"
+
+
+def _display_prefix(prefix: str) -> str:
+    prefix = prefix.strip().strip("/")
+    return f"{prefix}/" if prefix else "<bucket-root>"
 
 
 def _list_old_paths(
@@ -227,7 +258,7 @@ def _delete_paths(*, sb_client, bucket: str, paths: List[str], chunk_size: int) 
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Cleanup old temp files from Supabase Storage.")
+    parser = argparse.ArgumentParser(description="Cleanup old files from Supabase Storage.")
     parser.add_argument("--hours", type=int, default=None, help="Delete files older than this many hours.")
     parser.add_argument("--dry-run", action="store_true", help="Only print what would be deleted.")
     parser.add_argument("--verbose", action="store_true", help="Verbose logging.")
@@ -244,7 +275,7 @@ def main() -> int:
         LOG.error("Config error: %s", exc)
         return 2
 
-    max_age_hours = args.hours or int(_env("CLEANUP_MAX_AGE_HOURS", "72"))
+    max_age_hours = args.hours or int(_env("CLEANUP_MAX_AGE_HOURS", "336"))
     page_size = int(_env("CLEANUP_PAGE_SIZE", "1000"))
     delete_chunk_size = int(_env("CLEANUP_DELETE_CHUNK_SIZE", "100"))
     dry_run = args.dry_run or _env_bool("CLEANUP_DRY_RUN", False)
@@ -262,7 +293,7 @@ def main() -> int:
         cutoff.isoformat(),
     )
     for rule in rules:
-        LOG.info("Rule: bucket=%s prefix=%s/", rule.bucket, rule.prefix)
+        LOG.info("Rule: bucket=%s prefix=%s", rule.bucket, _display_prefix(rule.prefix))
 
     try:
         sb = create_client(supabase_url, service_key)
@@ -285,16 +316,16 @@ def main() -> int:
             )
             total_found += len(old_paths)
             if not old_paths:
-                LOG.info("No expired files | bucket=%s prefix=%s/", rule.bucket, rule.prefix)
+                LOG.info("No expired files | bucket=%s prefix=%s", rule.bucket, _display_prefix(rule.prefix))
                 continue
 
             preview = ", ".join(old_paths[:5])
             suffix = " ..." if len(old_paths) > 5 else ""
             LOG.info(
-                "Expired files found: %s | bucket=%s prefix=%s/ | sample=%s%s",
+                "Expired files found: %s | bucket=%s prefix=%s | sample=%s%s",
                 len(old_paths),
                 rule.bucket,
-                rule.prefix,
+                _display_prefix(rule.prefix),
                 preview,
                 suffix,
             )
@@ -309,10 +340,10 @@ def main() -> int:
                 chunk_size=delete_chunk_size,
             )
             total_deleted += deleted_now
-            LOG.info("Deleted: %s | bucket=%s prefix=%s/", deleted_now, rule.bucket, rule.prefix)
+            LOG.info("Deleted: %s | bucket=%s prefix=%s", deleted_now, rule.bucket, _display_prefix(rule.prefix))
         except Exception as exc:
             had_errors = True
-            LOG.exception("Cleanup failed for bucket=%s prefix=%s/: %s", rule.bucket, rule.prefix, exc)
+            LOG.exception("Cleanup failed for bucket=%s prefix=%s: %s", rule.bucket, _display_prefix(rule.prefix), exc)
 
     LOG.info(
         "Cleanup finished | dry_run=%s | found=%s | deleted=%s | errors=%s",
