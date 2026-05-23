@@ -18,6 +18,8 @@ import httpx
 
 KIE_CLAUDE_MODEL_ID = (os.getenv("KIE_CLAUDE_MODEL", "claude-sonnet-4-6") or "claude-sonnet-4-6").strip()
 KIE_CLAUDE_DISPLAY_NAME = "Claude Sonnet 4.6"
+KIE_CLAUDE_OPUS_MODEL_ID = (os.getenv("KIE_CLAUDE_OPUS_MODEL", "claude-opus-4-7") or "claude-opus-4-7").strip()
+KIE_CLAUDE_OPUS_DISPLAY_NAME = "Claude Opus 4.7"
 KIE_CLAUDE_API_URL = (
     os.getenv("KIE_CLAUDE_API_URL", "https://api.kie.ai/claude/v1/messages")
     or "https://api.kie.ai/claude/v1/messages"
@@ -28,16 +30,66 @@ KIE_CLAUDE_SUMMARY_MAX_CHARS = int(os.getenv("KIE_CLAUDE_SUMMARY_MAX_CHARS", "50
 KIE_CLAUDE_HISTORY_MESSAGES = int(os.getenv("KIE_CLAUDE_HISTORY_MESSAGES", "10") or "10")
 
 
-def is_kie_claude_model(model: Any) -> bool:
-    value = str(model or "").strip().lower()
-    return value in {
+def _unique_nonempty(values: List[str]) -> List[str]:
+    out: List[str] = []
+    for value in values:
+        clean = str(value or "").strip()
+        if clean and clean not in out:
+            out.append(clean)
+    return out
+
+
+def kie_claude_model_ids() -> List[str]:
+    return _unique_nonempty([KIE_CLAUDE_MODEL_ID, KIE_CLAUDE_OPUS_MODEL_ID])
+
+
+def normalize_kie_claude_model(model: Any) -> str:
+    value = str(model or "").strip()
+    low = value.lower()
+    if not low:
+        return ""
+
+    sonnet_aliases = {
         KIE_CLAUDE_MODEL_ID.lower(),
         "claude-sonnet-4-6",
         "claude sonnet 4.6",
         "sonnet-4-6",
         "sonnet 4.6",
+        "claude",
+        "claude-sonnet",
     }
+    opus_aliases = {
+        KIE_CLAUDE_OPUS_MODEL_ID.lower(),
+        "claude-opus-4-7",
+        "claude opus 4.7",
+        "claude_opus_4_7",
+        "opus-4-7",
+        "opus 4.7",
+        "claude-opus",
+        "opus",
+        "claude_opus",
+    }
+    if low in opus_aliases:
+        return KIE_CLAUDE_OPUS_MODEL_ID
+    if low in sonnet_aliases:
+        return KIE_CLAUDE_MODEL_ID
+    # Не пропускаем произвольные claude-* из client-side запроса.
+    # Бесплатными должны быть только явно разрешённые модели выше.
+    return ""
 
+
+def is_kie_claude_model(model: Any) -> bool:
+    return bool(normalize_kie_claude_model(model))
+
+
+def kie_claude_display_name(model: Any) -> str:
+    resolved = normalize_kie_claude_model(model) or KIE_CLAUDE_MODEL_ID
+    if resolved.lower() == KIE_CLAUDE_OPUS_MODEL_ID.lower():
+        return KIE_CLAUDE_OPUS_DISPLAY_NAME
+    if resolved.lower() == KIE_CLAUDE_MODEL_ID.lower():
+        return KIE_CLAUDE_DISPLAY_NAME
+    cleaned = resolved.replace("claude-", "Claude ").replace("-", " ").strip()
+    return cleaned[:1].upper() + cleaned[1:]
 
 def _api_key() -> str:
     return (os.getenv("KIE_API_KEY") or os.getenv("KIE_AI_API_KEY") or "").strip()
@@ -155,6 +207,7 @@ async def kie_claude_answer(
     thinking: bool = True,
     timeout_sec: float = KIE_CLAUDE_TIMEOUT_SEC,
     image_bytes_list: Optional[List[bytes]] = None,
+    model: Optional[str] = None,
 ) -> str:
     api_key = _api_key()
     if not api_key:
@@ -167,8 +220,10 @@ async def kie_claude_answer(
     if not messages:
         return "Пустой запрос."
 
+    resolved_model = normalize_kie_claude_model(model) or KIE_CLAUDE_MODEL_ID
+
     payload: Dict[str, Any] = {
-        "model": KIE_CLAUDE_MODEL_ID,
+        "model": resolved_model,
         "system": build_claude_system_prompt(system_prompt, summary),
         "messages": messages,
         "thinkingFlag": bool(thinking),
