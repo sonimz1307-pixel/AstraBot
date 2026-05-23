@@ -39,7 +39,10 @@ from kie_claude_chat import (
     KIE_CLAUDE_SUMMARY_MAX_CHARS,
     is_kie_claude_model,
     kie_claude_answer,
+    kie_claude_display_name,
+    kie_claude_model_ids,
     kie_claude_summarize_dialogue,
+    normalize_kie_claude_model,
 )
 from app.routers.prompts import categories as prompts_categories
 from app.routers.prompts import groups as prompts_groups
@@ -485,8 +488,9 @@ def _resolve_workspace_chat_model(requested_model: Any, mode: str) -> Dict[str, 
     requested = str(requested_model or "").strip()
     if mode_value == "prompt_builder":
         return {"label": PROMPT_MODEL_LABEL, "actual": PROMPT_BUILDER_MODEL}
-    if is_kie_claude_model(requested):
-        return {"label": KIE_CLAUDE_DISPLAY_NAME, "actual": KIE_CLAUDE_MODEL_ID}
+    claude_model = normalize_kie_claude_model(requested)
+    if claude_model:
+        return {"label": kie_claude_display_name(claude_model), "actual": claude_model}
     if requested in {OPENAI_CHAT_MODEL, PROMPT_BUILDER_MODEL}:
         return {"label": requested, "actual": requested}
     return {"label": CHAT_MODEL_LABEL_DEFAULT, "actual": OPENAI_CHAT_MODEL}
@@ -723,7 +727,7 @@ async def _prepare_workspace_chat_attachments(files: List[UploadFile], *, user_i
 
 def _chat_models() -> List[str]:
     out: List[str] = []
-    for m in [OPENAI_CHAT_MODEL, PROMPT_BUILDER_MODEL, KIE_CLAUDE_MODEL_ID]:
+    for m in [OPENAI_CHAT_MODEL, PROMPT_BUILDER_MODEL, *kie_claude_model_ids()]:
         m = (m or "").strip()
         if m and m not in out:
             out.append(m)
@@ -3360,6 +3364,7 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
             max_tokens=1500,
             thinking=True,
             image_bytes_list=prepared_files.get("image_bytes_list") or None,
+            model=model_actual,
         )
     else:
         answer = await openai_chat_answer(
