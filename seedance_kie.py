@@ -12,7 +12,7 @@ from kling_flow import upload_bytes_to_supabase
 PIAPI_BASE_URL = (os.getenv("PIAPI_BASE_URL", "https://api.piapi.ai") or "https://api.piapi.ai").strip().rstrip("/")
 PIAPI_API_KEY = (os.getenv("PIAPI_API_KEY") or os.getenv("PIAPI_KEY") or "").strip()
 PIAPI_SEEDANCE_SERVICE_MODE = (os.getenv("PIAPI_SEEDANCE_SERVICE_MODE") or "public").strip() or "public"
-PIAPI_SEEDANCE_TIMEOUT_SECONDS = float(os.getenv("PIAPI_SEEDANCE_TIMEOUT_SECONDS", "1800") or "1800")
+PIAPI_SEEDANCE_TIMEOUT_SECONDS = float(os.getenv("PIAPI_SEEDANCE_TIMEOUT_SECONDS", "7200") or "7200")
 PIAPI_SEEDANCE_POLL_SECONDS = float(os.getenv("PIAPI_SEEDANCE_POLL_SECONDS", "6") or "6")
 
 SEEDANCE_KIE_ALLOWED_MODELS = {"seedance-kie", "seedance-kie-fast"}
