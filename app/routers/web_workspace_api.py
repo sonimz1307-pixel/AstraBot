@@ -100,6 +100,15 @@ from grok_video_replicate import (
     run_grok_image_to_video,
     run_grok_text_to_video,
 )
+from gemini_omni_video import (
+    GeminiOmniVideoError,
+    gemini_omni_tokens_for_duration,
+    normalize_gemini_omni_aspect_ratio,
+    normalize_gemini_omni_duration,
+    normalize_gemini_omni_mode,
+    normalize_gemini_omni_resolution,
+    run_gemini_omni_video,
+)
 from seedance_kie import (
     SeedanceKieError,
     normalize_seedance_kie_aspect_ratio,
@@ -1423,6 +1432,8 @@ def _normalize_workspace_video_resolution(provider: str, model: str, resolution:
         return "1080p" if model == "veo-3.1-pro" else "720p"
     if provider == "grok":
         return normalize_grok_resolution(value or "480p")
+    if provider == "google" and model == "gemini-omni-video":
+        return normalize_gemini_omni_resolution(value or "1080p")
     if provider == "seedance_kie":
         normalized_model = normalize_seedance_kie_model(model)
         return "480p" if normalized_model == "seedance-kie-fast" else "720p"
@@ -1813,6 +1824,7 @@ async def _run_workspace_video_job(
     reference_video_clips: List[bytes],
     source_video_upload_id: Optional[str] = None,
     reference_image_url: Optional[str] = None,
+    reference_image_urls_direct: Optional[List[str]] = None,
     switchx_alpha_mode: Optional[str] = None,
     switchx_select_mask_url: Optional[str] = None,
     charge_tokens: int = 0,
@@ -1942,6 +1954,21 @@ async def _run_workspace_video_job(
                     aspect_ratio=aspect_ratio,
                     provider_mode=provider_mode,
                 )
+
+        elif provider == "google":
+            direct_refs = [str(u or "").strip() for u in (reference_image_urls_direct or []) if str(u or "").strip()]
+            refs = list(reference_images or [])
+            if mode == "image_to_video" and not direct_refs and not refs and start_frame:
+                refs = [start_frame]
+            provider_video_url = await run_gemini_omni_video(
+                user_id=user_id,
+                prompt=prompt,
+                duration=duration,
+                aspect_ratio=aspect_ratio,
+                resolution=resolution,
+                reference_images=(refs if mode == "image_to_video" and not direct_refs else None),
+                reference_image_urls=(direct_refs if mode == "image_to_video" and direct_refs else None),
+            )
 
         elif provider == "pixverse_c1":
             pixverse_video_id = ""
@@ -3915,6 +3942,25 @@ def _workspace_video_charge_spec(
             },
         }
 
+    if provider == "google":
+        normalized_mode = normalize_gemini_omni_mode(mode)
+        normalized_duration = normalize_gemini_omni_duration(duration)
+        normalized_resolution = normalize_gemini_omni_resolution(resolution)
+        tokens = int(gemini_omni_tokens_for_duration(normalized_duration, normalized_resolution))
+        return {
+            "tokens": tokens,
+            "charge_reason": "gemini_omni_video",
+            "refund_reason": "gemini_omni_video_refund",
+            "meta": {
+                "origin": "workspace_video",
+                "provider": provider,
+                "model": model or "gemini-omni-video",
+                "mode": normalized_mode,
+                "duration": normalized_duration,
+                "resolution": normalized_resolution,
+                            },
+        }
+
     if provider == "pixverse_c1":
         normalized_mode = normalize_pixverse_c1_mode(mode)
         normalized_duration = normalize_pixverse_c1_duration(duration)
@@ -4029,10 +4075,10 @@ async def workspace_video_run(
         raise HTTPException(status_code=400, detail="Missing model")
     if not mode:
         raise HTTPException(status_code=400, detail="Missing mode")
-    if not prompt and provider != "seedance":
+    if not prompt and provider not in {"seedance"}:
         raise HTTPException(status_code=400, detail="Missing prompt")
 
-    supported = {"kling", "veo", "grok", "seedance", "seedance_kie", "sora", "switchx", "pixverse_c1"}
+    supported = {"kling", "veo", "grok", "google", "seedance", "seedance_kie", "sora", "switchx", "pixverse_c1"}
     if provider not in supported:
         raise HTTPException(status_code=400, detail=f"Provider {provider} is not supported in /video/run yet")
 
@@ -4157,6 +4203,29 @@ async def workspace_video_run(
         provider_mode = normalize_grok_provider_mode(provider_mode)
         if mode == "image_to_video" and not start_frame:
             raise HTTPException(status_code=400, detail="Для Grok Image→Video нужен start frame.")
+    if provider == "google":
+        model = "gemini-omni-video"
+        mode = normalize_gemini_omni_mode(mode)
+        duration = normalize_gemini_omni_duration(duration)
+        resolution = normalize_gemini_omni_resolution(resolution)
+        aspect_ratio = normalize_gemini_omni_aspect_ratio(aspect_ratio)
+        enable_audio = False
+        if mode == "image_to_video":
+            if start_frame:
+                reference_images = [start_frame] + list(reference_images or [])
+                start_frame = None
+            if len(reference_images) < 1:
+                raise HTTPException(status_code=400, detail="Для Google Omni Flash нужен хотя бы один reference image.")
+            if len(reference_images) > 7:
+                raise HTTPException(status_code=400, detail="Для Google Omni Flash доступно максимум 7 reference images.")
+        else:
+            reference_images = []
+            start_frame = None
+            end_frame = None
+            last_frame = None
+        reference_audios = []
+        reference_videos = []
+
     if provider == "seedance_kie":
         model = normalize_seedance_kie_model(model)
         mode = normalize_seedance_kie_mode(mode)
