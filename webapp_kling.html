@@ -579,6 +579,16 @@
           </div>
         </label>
 
+        <input id="provider_google" type="radio" name="provider" value="google">
+        <label for="provider_google" aria-label="Google">
+          <img class="pimg" src="/static/img/providers/google.png" alt="Google">
+          <div class="poverlay"></div>
+          <div class="ptxt">
+            <div class="pname">Google</div>
+            <div class="pnote">Omni Flash</div>
+          </div>
+        </label>
+
         <input id="provider_sora" type="radio" name="provider" value="sora">
         <label for="provider_sora" aria-label="Sora 2">
           <img class="pimg" src="/static/img/providers/sora2.png" alt="Sora 2">
@@ -977,6 +987,57 @@
         </div>
 
         <div class="hint">Grok Mode = Fun / Normal / Spicy, resolution = 480p / 720p, длительности 6 / 12 / 18 / 24 / 30 сек.</div>
+      </div>
+    </div>
+
+    <!-- ===================== GOOGLE OMNI FLASH BLOCK ===================== -->
+    <div id="omniFlashBlock" style="display:none;">
+      <div class="card">
+        <h3>Google Omni Flash</h3>
+        <div class="hint">Новая Google video AI модель. После сохранения ты продолжишь в боте. В Image → Video можно загрузить до 7 фото-референсов.</div>
+      </div>
+
+      <div class="card">
+        <h3>Режим</h3>
+        <div class="seg" role="radiogroup" aria-label="Режим Google Omni Flash">
+          <input id="omni_flow_text" type="radio" name="omni_flow" value="text" checked>
+          <label for="omni_flow_text">
+            <span class="name">Text → Video</span>
+            <span class="desc">Только промпт</span>
+          </label>
+
+          <input id="omni_flow_image" type="radio" name="omni_flow" value="image">
+          <label for="omni_flow_image">
+            <span class="name">Image → Video</span>
+            <span class="desc">До 7 фото + промпт</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Параметры</h3>
+        <div class="row">
+          <select id="omni_duration" aria-label="Длительность Google Omni Flash">
+            <option value="6">6 секунд</option>
+            <option value="8" selected>8 секунд</option>
+            <option value="10">10 секунд</option>
+          </select>
+
+          <select id="omni_resolution" aria-label="Разрешение Google Omni Flash">
+            <option value="720p">720p</option>
+            <option value="1080p" selected>1080p</option>
+            <option value="4k">4K</option>
+          </select>
+        </div>
+
+        <div class="row" style="margin-top:10px;">
+          <select id="omni_aspect" aria-label="Формат Google Omni Flash">
+            <option value="16:9" selected>16:9</option>
+            <option value="9:16">9:16</option>
+          </select>
+        </div>
+
+        <div class="hint">Длительности только 6 / 8 / 10 сек. 4 секунды отключены. Цена сейчас считается по нашей внутренней сетке.</div>
       </div>
     </div>
 
@@ -1561,6 +1622,9 @@
     function getGrokFlow(){ return qs('input[name="grok_flow"]:checked')?.value || "text"; }
     function getGrokProviderMode(){ return qs('#grok_mode')?.value || "normal"; }
 
+    // Google Omni Flash getters
+    function getOmniFlow(){ return qs('input[name="omni_flow"]:checked')?.value || "text"; }
+
     // Seedance getters
     function getSeedanceVariant(){ return qs('input[name="seedance_variant"]:checked')?.value || "preview"; }
     function getSeedancePreviewModel(){ return qs('input[name="seedance_model"]:checked')?.value || "preview"; }
@@ -1806,12 +1870,14 @@
       const veoBlock = qs('#veoBlock');
       const grokBlock = qs('#grokBlock');
       const seedanceBlock = qs('#seedanceBlock');
+      const omniFlashBlock = qs('#omniFlashBlock');
       const soraBlock = qs('#soraBlock');
 
       if (klingBlock) klingBlock.style.display = (provider === 'kling') ? 'block' : 'none';
       if (veoBlock) veoBlock.style.display   = (provider === 'veo')   ? 'block' : 'none';
       if (grokBlock) grokBlock.style.display = (provider === 'grok') ? 'block' : 'none';
       if (seedanceBlock) seedanceBlock.style.display = (provider === 'seedance') ? 'block' : 'none';
+      if (omniFlashBlock) omniFlashBlock.style.display = (provider === 'google') ? 'block' : 'none';
       if (soraBlock) soraBlock.style.display = (provider === 'sora') ? 'block' : 'none';
 
       if (provider === 'kling'){
@@ -1844,7 +1910,8 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
       setVeoAdvancedEnabled();
       updateCostUI();
     }));
-    ['#veo_duration', '#veo_aspect'].forEach(sel => {
+    qsa('input[name="omni_flow"]').forEach(el => el.addEventListener('change', () => { updateCostUI(); }));
+    ['#veo_duration', '#veo_aspect', '#omni_duration', '#omni_resolution', '#omni_aspect'].forEach(sel => {
       const el = qs(sel);
       if (el) el.addEventListener('change', () => {
         setVeoAdvancedEnabled();
@@ -1938,6 +2005,18 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
         const resolution = (qs('#grok_resolution')?.value || '480p');
         const secondsPerToken = resolution === '720p' ? 6 : 12;
         const tokens = Math.max(1, Math.ceil(seconds / secondsPerToken));
+        return { known:true, tokens, note:'' };
+      }
+
+      if (provider === 'google'){
+        const seconds = parseInt((qs('#omni_duration')?.value || "8"), 10);
+        const resolution = (qs('#omni_resolution')?.value || '1080p');
+        const map = {
+          '720p': {6:8, 8:10, 10:12},
+          '1080p': {6:8, 8:10, 10:12},
+          '4k': {6:16, 8:18, 10:20}
+        };
+        const tokens = (map[resolution] && map[resolution][seconds]) ? map[resolution][seconds] : 10;
         return { known:true, tokens, note:'' };
       }
 
@@ -2136,6 +2215,16 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
             duration,
             resolution,
             aspect_ratio
+          };
+        } else if (provider === 'google'){
+          payload = {
+            type: "omni_flash_settings",
+            provider: "google",
+            model: "gemini-omni-video",
+            flow: getOmniFlow(),
+            duration: parseInt((qs('#omni_duration')?.value || "8"), 10),
+            resolution: (qs('#omni_resolution')?.value || '1080p'),
+            aspect_ratio: (qs('#omni_aspect')?.value || '16:9')
           };
         } else if (provider === 'seedance'){
           const variant = getSeedanceVariant();
