@@ -19,6 +19,14 @@ from grok_video_replicate import (
     run_grok_image_to_video,
     run_grok_text_to_video,
 )
+from gemini_omni_video import (
+    GeminiOmniVideoError,
+    normalize_gemini_omni_aspect_ratio,
+    normalize_gemini_omni_duration,
+    normalize_gemini_omni_mode,
+    normalize_gemini_omni_resolution,
+    run_gemini_omni_video,
+)
 from app.routers import web_workspace_api as ww
 from app.services.legnext_midjourney import (
     LegnextMidjourneyError,
@@ -77,7 +85,7 @@ async def _tg_send_video_url(chat_id: int, video_url: str, caption: Optional[str
     try:
         await _tg_post("sendVideo", json_payload=payload)
     except Exception:
-        await _tg_send_message(chat_id, f"✅ Grok готов. Видео: {video_url}")
+        await _tg_send_message(chat_id, f"✅ Видео готово: {video_url}")
 
 
 async def _download_bytes(url: str, *, timeout: float = 300.0) -> bytes:
@@ -129,12 +137,12 @@ async def process_workspace_video_job(job: Dict[str, Any]) -> None:
     if motion_video_upload_id:
         motion_video = await _download_bytes(_workspace_upload_url(user_id, motion_video_upload_id), timeout=600.0)
 
+    provider_name = str(job.get("provider") or "").strip()
+    reference_image_urls_direct = [str(url or "").strip() for url in (job.get("reference_image_urls") or []) if str(url or "").strip()]
     reference_images: List[bytes] = []
-    for url in job.get("reference_image_urls") or []:
-        target = str(url or "").strip()
-        if not target:
-            continue
-        reference_images.append(await _download_bytes(target))
+    if provider_name != "google":
+        for url in reference_image_urls_direct:
+            reference_images.append(await _download_bytes(url))
 
     reference_audio_clips: List[bytes] = []
     for upload_id in job.get("reference_audio_upload_ids") or []:
@@ -162,7 +170,7 @@ async def process_workspace_video_job(job: Dict[str, Any]) -> None:
     await ww._run_workspace_video_job(
         generation_id=generation_id,
         user_id=user_id,
-        provider=str(job.get("provider") or "").strip(),
+        provider=provider_name,
         model=str(job.get("model") or "").strip(),
         mode=str(job.get("mode") or "").strip(),
         prompt=str(job.get("prompt") or ""),
@@ -182,6 +190,7 @@ async def process_workspace_video_job(job: Dict[str, Any]) -> None:
         reference_video_clips=reference_video_clips,
         source_video_upload_id=str(job.get("source_video_upload_id") or "").strip() or None,
         reference_image_url=str(job.get("reference_image_url") or "").strip() or None,
+        reference_image_urls_direct=reference_image_urls_direct if provider_name == "google" else None,
         switchx_alpha_mode=str(job.get("switchx_alpha_mode") or "").strip() or None,
         switchx_select_mask_url=str(job.get("switchx_select_mask_url") or "").strip() or None,
         charge_tokens=int(job.get("charge_tokens") or 0),
@@ -325,6 +334,59 @@ async def process_tg_grok_video_job(job: Dict[str, Any]) -> None:
                 pass
         try:
             await _tg_send_message(chat_id, f"❌ Ошибка Grok: {e}")
+        except Exception:
+            pass
+
+
+async def process_tg_omni_flash_video_job(job: Dict[str, Any]) -> None:
+    chat_id = int(job.get("chat_id") or 0)
+    user_id = int(job.get("user_id") or 0)
+    mode = normalize_gemini_omni_mode(job.get("mode") or "text_to_video")
+    prompt = str(job.get("prompt") or "")
+    duration = normalize_gemini_omni_duration(job.get("duration") or 8)
+    resolution = normalize_gemini_omni_resolution(job.get("resolution") or "1080p")
+    aspect_ratio = normalize_gemini_omni_aspect_ratio(job.get("aspect_ratio") or "16:9")
+    charge_tokens = int(job.get("charge_tokens") or 0)
+    charge_ref_id = str(job.get("charge_ref_id") or "")
+    refund_reason = str(job.get("refund_reason") or "gemini_omni_video_refund")
+
+    if not chat_id or not user_id:
+        raise RuntimeError("tg_omni_flash_video_run job missing chat_id/user_id")
+
+    try:
+        refs = [str(url or "").strip() for url in (job.get("reference_image_urls") or []) if str(url or "").strip()]
+        if mode == "image_to_video" and not refs:
+            raise GeminiOmniVideoError("Для Google Omni Flash нужен хотя бы один reference image")
+        video_url = await run_gemini_omni_video(
+            user_id=user_id,
+            prompt=prompt,
+            duration=duration,
+            resolution=resolution,
+            aspect_ratio=aspect_ratio,
+            reference_image_urls=refs if mode == "image_to_video" else None,
+        )
+        if not video_url:
+            raise GeminiOmniVideoError("Google Omni Flash did not return video url")
+        if resolution == "4k":
+            await _tg_send_message(chat_id, f"✅ Google Omni Flash готов:\n{video_url}")
+        else:
+            await _tg_send_video_url(chat_id, video_url, caption="✅ Google Omni Flash готов")
+    except Exception as e:
+        if charge_tokens > 0:
+            try:
+                add_tokens(
+                    int(user_id),
+                    int(charge_tokens),
+                    reason=refund_reason,
+                    ref_id=charge_ref_id or None,
+                    meta={"origin": "tg_omni_flash_video", "error": str(e)[:300]},
+                )
+            except TypeError:
+                add_tokens(int(user_id), int(charge_tokens), reason=refund_reason)
+            except Exception:
+                pass
+        try:
+            await _tg_send_message(chat_id, f"❌ Ошибка Google Omni Flash: {e}")
         except Exception:
             pass
 
