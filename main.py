@@ -62,6 +62,13 @@ from grok_video_replicate import (
     normalize_grok_provider_mode,
     normalize_grok_resolution,
 )
+from gemini_omni_video import (
+    gemini_omni_tokens_for_duration,
+    normalize_gemini_omni_aspect_ratio,
+    normalize_gemini_omni_duration,
+    normalize_gemini_omni_mode,
+    normalize_gemini_omni_resolution,
+)
 from app.routers.tts import router as tts_router
 
 app = FastAPI()
@@ -1682,6 +1689,7 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
         st.pop("veo_t2v", None)
         st.pop("veo_i2v", None)
         st.pop("grok_settings", None)
+        st.pop("omni_flash_settings", None)
         st.pop("grok_t2v", None)
         st.pop("grok_i2v", None)
         st.pop("ai_chat_mode", None)
@@ -1963,6 +1971,68 @@ async def _enqueue_tg_grok_job(*, chat_id: int, user_id: int, mode: str, prompt:
         "charge_tokens": int(charge_tokens or 0),
         "charge_ref_id": str(charge_ref_id or ""),
         "refund_reason": "grok_video_refund",
+        "origin": "telegram",
+    }
+    await enqueue_job(job, queue_name=WORKSPACE_MEDIA_QUEUE_NAME)
+    return job
+
+
+async def _enqueue_tg_omni_flash_job(*, chat_id: int, user_id: int, mode: str, prompt: str, settings: dict, reference_images: list[tuple[bytes, str]] | None = None, reference_image_urls: list[str] | None = None, charge_tokens: int = 0, charge_ref_id: str = "") -> dict:
+    settings = dict(settings or {})
+    duration = normalize_gemini_omni_duration(settings.get("duration") or 8)
+    resolution = normalize_gemini_omni_resolution(settings.get("resolution") or "1080p")
+    aspect_ratio = normalize_gemini_omni_aspect_ratio(settings.get("aspect_ratio") or "16:9")
+    reference_image_urls = [str(url or "").strip() for url in (reference_image_urls or []) if str(url or "").strip()][:7]
+    if mode == "image_to_video":
+        # В нормальном Telegram flow фото уже загружены в Supabase сразу при получении,
+        # чтобы не хранить bytes в user state/Redis. Этот fallback оставлен для старых вызовов.
+        if not reference_image_urls:
+            pairs = list(reference_images or [])
+            for idx, pair in enumerate(pairs[:7], start=1):
+                image_bytes, image_name = pair
+                ext = "jpg"
+                mime = "image/jpeg"
+                head = bytes((image_bytes or b"")[:16])
+                if head.startswith(b"\x89PNG"):
+                    ext = "png"
+                    mime = "image/png"
+                elif head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+                    ext = "webp"
+                    mime = "image/webp"
+                elif isinstance(image_name, str) and "." in image_name:
+                    tail = image_name.rsplit(".", 1)[-1].lower().strip()
+                    if tail in ("jpg", "jpeg"):
+                        ext = "jpg"
+                        mime = "image/jpeg"
+                    elif tail == "png":
+                        ext = "png"
+                        mime = "image/png"
+                    elif tail == "webp":
+                        ext = "webp"
+                        mime = "image/webp"
+                path = f"omni_flash_inputs/{int(user_id)}/{int(time.time())}_{idx}_{uuid4().hex[:10]}.{ext}"
+                uploaded_url = upload_bytes_to_supabase(path, image_bytes, mime)
+                if uploaded_url:
+                    reference_image_urls.append(str(uploaded_url).strip())
+        if not reference_image_urls:
+            raise RuntimeError("Для Google Omni Flash нужен хотя бы один reference image")
+
+    job = {
+        "job_id": uuid4().hex,
+        "kind": "tg_omni_flash_video_run",
+        "chat_id": int(chat_id),
+        "user_id": int(user_id),
+        "provider": "google",
+        "model": "gemini-omni-video",
+        "mode": "image_to_video" if mode == "image_to_video" else "text_to_video",
+        "prompt": str(prompt or "").strip(),
+        "duration": duration,
+        "resolution": resolution,
+        "aspect_ratio": aspect_ratio,
+        "reference_image_urls": reference_image_urls,
+        "charge_tokens": int(charge_tokens or 0),
+        "charge_ref_id": str(charge_ref_id or ""),
+        "refund_reason": "gemini_omni_video_refund",
         "origin": "telegram",
     }
     await enqueue_job(job, queue_name=WORKSPACE_MEDIA_QUEUE_NAME)
@@ -5980,6 +6050,53 @@ async def webhook(secret: str, request: Request):
             )
             return {"ok": True}
 
+        # ----- WebApp data (Google Omni Flash settings) -----
+        is_omni_flash = (
+            (str(payload.get("type") or "").lower().strip() in {"omni_flash_settings", "google_omni_flash_settings", "gemini_omni_settings"})
+            or (str(payload.get("provider") or provider_raw or "").lower().strip() in {"google", "google_omni", "omni_flash"})
+            or (str(payload.get("model") or "").lower().strip() == "gemini-omni-video")
+        )
+
+        if is_omni_flash:
+            flow = str(payload.get("flow") or payload.get("mode") or "text").lower().strip()
+            if flow in ("image", "i2v", "image_to_video", "image2video", "image->video"):
+                flow = "image"
+            else:
+                flow = "text"
+
+            duration = normalize_gemini_omni_duration(payload.get("duration") or 8)
+            resolution = normalize_gemini_omni_resolution(payload.get("resolution") or "1080p")
+            aspect_ratio = normalize_gemini_omni_aspect_ratio(payload.get("aspect_ratio") or "16:9")
+
+            st["omni_flash_settings"] = {
+                "provider": "google",
+                "model": "gemini-omni-video",
+                "flow": flow,
+                "duration": duration,
+                "resolution": resolution,
+                "aspect_ratio": aspect_ratio,
+                "max_images": 7,
+            }
+            st["ts"] = _now()
+
+            if flow == "text":
+                _set_mode(chat_id, user_id, "omni_flash_t2v")
+                st["omni_flash_t2v"] = {"step": "need_prompt"}
+                await tg_send_message(
+                    chat_id,
+                    f"✅ Настройки Google Omni Flash сохранены: Text → Video • {duration} сек • {resolution} • {aspect_ratio}\n\nТеперь пришли промпт одним сообщением.",
+                    reply_markup=_help_menu_for(user_id),
+                )
+            else:
+                _set_mode(chat_id, user_id, "omni_flash_i2v")
+                st["omni_flash_i2v"] = {"step": "need_images", "images": []}
+                await tg_send_message(
+                    chat_id,
+                    f"✅ Настройки Google Omni Flash сохранены: Image → Video • {duration} сек • {resolution} • {aspect_ratio}\n\nТеперь пришли 1–7 фото. Когда все фото загрузишь — напиши «Готово», потом пришлёшь промпт.",
+                    reply_markup=_help_menu_for(user_id),
+                )
+            return {"ok": True}
+
         # ----- WebApp data (Grok settings) -----
         is_grok = (
             (str(payload.get("type") or "").lower().strip() == "grok_settings")
@@ -7349,6 +7466,118 @@ async def webhook(secret: str, request: Request):
         st.pop("grok_t2v", None)
         st.pop("grok_i2v", None)
         st.pop("grok_settings", None)
+        st.pop("omni_flash_settings", None)
+        st["ts"] = _now()
+        return {"ok": True}
+
+    # ---- GOOGLE OMNI FLASH Text→Video / Image→Video ----
+    if st.get("mode") in ("omni_flash_t2v", "omni_flash_i2v") and incoming_text:
+        if _is_nav_or_menu_text(incoming_text):
+            _set_mode(chat_id, user_id, "chat")
+            st.pop("omni_flash_t2v", None)
+            st.pop("omni_flash_i2v", None)
+            st.pop("omni_flash_settings", None)
+            st["ts"] = _now()
+            await tg_send_message(chat_id, "Ок. Вышел из Google Omni Flash. Главное меню.", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+
+        if st.get("mode") == "omni_flash_i2v":
+            oi = st.get("omni_flash_i2v") or {}
+            step = (oi.get("step") or "need_images")
+            if step == "need_images" and incoming_text.strip().lower() in {"готово", "готов", "старт"}:
+                images = [str(url or "").strip() for url in (oi.get("image_urls") or []) if str(url or "").strip()]
+                if not images:
+                    await tg_send_message(chat_id, "Сначала пришли хотя бы одно фото-референс.", reply_markup=_help_menu_for(user_id))
+                    return {"ok": True}
+                oi["image_urls"] = images[:7]
+                oi.pop("images", None)
+                oi["step"] = "need_prompt"
+                st["omni_flash_i2v"] = oi
+                st["ts"] = _now()
+                await tg_send_message(chat_id, "Фото собраны ✅ Теперь пришли промпт текстом.", reply_markup=_help_menu_for(user_id))
+                return {"ok": True}
+
+        settings = st.get("omni_flash_settings") or {}
+        duration = normalize_gemini_omni_duration(settings.get("duration") or 8)
+        resolution = normalize_gemini_omni_resolution(settings.get("resolution") or "1080p")
+        aspect_ratio = normalize_gemini_omni_aspect_ratio(settings.get("aspect_ratio") or "16:9")
+        cost_tokens = int(gemini_omni_tokens_for_duration(duration, resolution))
+
+        try:
+            ensure_user_row(user_id)
+            bal = int(get_balance(user_id) or 0)
+        except Exception:
+            bal = 0
+
+        if bal < cost_tokens:
+            await tg_send_message(chat_id, f"❌ Недостаточно токенов.\nНужно: {cost_tokens}\nБаланс: {bal}", reply_markup=_topup_balance_inline_kb())
+            return {"ok": True}
+
+        charge_ref_id = uuid4().hex
+        try:
+            add_tokens(
+                user_id,
+                -cost_tokens,
+                reason="gemini_omni_video",
+                ref_id=charge_ref_id,
+                meta={
+                    "provider": "google",
+                    "model": "gemini-omni-video",
+                    "duration": duration,
+                    "resolution": resolution,
+                    "aspect_ratio": aspect_ratio,
+                    "flow": ("i2v" if st.get("mode") == "omni_flash_i2v" else "t2v"),
+                },
+            )
+        except TypeError:
+            add_tokens(user_id, -int(cost_tokens), reason="gemini_omni_video")
+
+        try:
+            if st.get("mode") == "omni_flash_i2v":
+                oi = st.get("omni_flash_i2v") or {}
+                if (oi.get("step") or "need_images") != "need_prompt":
+                    await tg_send_message(chat_id, "Сначала пришли 1–7 фото для Google Omni Flash Image → Video.", reply_markup=_help_menu_for(user_id))
+                    add_tokens(user_id, int(cost_tokens), reason="gemini_omni_video_refund", ref_id=uuid4().hex, meta={"stage": "need_images"})
+                    return {"ok": True}
+                image_urls = [str(url or "").strip() for url in (oi.get("image_urls") or []) if str(url or "").strip()]
+                if not image_urls:
+                    await tg_send_message(chat_id, "Не хватает фото-референсов. Пришли фото и повтори промпт.", reply_markup=_help_menu_for(user_id))
+                    add_tokens(user_id, int(cost_tokens), reason="gemini_omni_video_refund", ref_id=uuid4().hex, meta={"stage": "missing_images"})
+                    return {"ok": True}
+                await _enqueue_tg_omni_flash_job(
+                    chat_id=int(chat_id),
+                    user_id=int(user_id),
+                    mode="image_to_video",
+                    prompt=incoming_text.strip(),
+                    settings=settings,
+                    reference_image_urls=image_urls,
+                    charge_tokens=cost_tokens,
+                    charge_ref_id=charge_ref_id,
+                )
+                await tg_send_message(chat_id, f"⏳ Google Omni Flash — генерация началась: Image → Video • {duration} сек • {resolution} • {aspect_ratio}", reply_markup=_help_menu_for(user_id))
+            else:
+                await _enqueue_tg_omni_flash_job(
+                    chat_id=int(chat_id),
+                    user_id=int(user_id),
+                    mode="text_to_video",
+                    prompt=incoming_text.strip(),
+                    settings=settings,
+                    charge_tokens=cost_tokens,
+                    charge_ref_id=charge_ref_id,
+                )
+                await tg_send_message(chat_id, f"⏳ Google Omni Flash — генерация началась: Text → Video • {duration} сек • {resolution} • {aspect_ratio}", reply_markup=_help_menu_for(user_id))
+        except Exception as e:
+            try:
+                add_tokens(user_id, int(cost_tokens), reason="gemini_omni_video_refund", ref_id=uuid4().hex, meta={"stage": "enqueue_failed", "error": str(e)[:300]})
+            except TypeError:
+                add_tokens(user_id, int(cost_tokens), reason="gemini_omni_video_refund")
+            await tg_send_message(chat_id, f"❌ Не удалось поставить Google Omni Flash в очередь: {e}", reply_markup=_main_menu_for(user_id))
+            return {"ok": True}
+
+        _set_mode(chat_id, user_id, "chat")
+        st.pop("omni_flash_t2v", None)
+        st.pop("omni_flash_i2v", None)
+        st.pop("omni_flash_settings", None)
         st["ts"] = _now()
         return {"ok": True}
 
@@ -8336,6 +8565,50 @@ async def webhook(secret: str, request: Request):
                 "Стартовое фото уже есть ✅ Теперь жду ТЕКСТ для Grok.",
                 reply_markup=_help_menu_for(user_id),
             )
+            return {"ok": True}
+
+        # ---- GOOGLE OMNI FLASH Image → Video: сбор фото-референсов ----
+        if st.get("mode") == "omni_flash_i2v":
+            oi = st.get("omni_flash_i2v") or {}
+            step = (oi.get("step") or "need_images")
+            if step == "need_images":
+                images = [str(url or "").strip() for url in (oi.get("image_urls") or []) if str(url or "").strip()]
+                limit = int((st.get("omni_flash_settings") or {}).get("max_images") or 7)
+                limit = max(1, min(7, limit))
+                if len(images) >= limit:
+                    oi["image_urls"] = images[:limit]
+                    oi.pop("images", None)
+                    oi["step"] = "need_prompt"
+                    st["omni_flash_i2v"] = oi
+                    st["ts"] = _now()
+                    await tg_send_message(chat_id, f"Уже получено {limit}/{limit} фото ✅ Теперь пришли ТЕКСТ (промпт), что должно происходить в видео.", reply_markup=_help_menu_for(user_id))
+                    return {"ok": True}
+                if img_bytes:
+                    try:
+                        ext, mime = _detect_image_type(img_bytes)
+                        input_path = f"omni_flash_inputs/{int(user_id)}/{int(time.time())}_{uuid4().hex[:10]}_{len(images) + 1}.{ext}"
+                        uploaded_url = upload_bytes_to_supabase(input_path, img_bytes, mime)
+                    except Exception:
+                        logging.exception("Google Omni Flash Telegram input upload failed")
+                        await tg_send_message(chat_id, "❌ Не удалось загрузить фото-референс. Попробуй отправить фото ещё раз.", reply_markup=_help_menu_for(user_id))
+                        return {"ok": True}
+                    if uploaded_url:
+                        images.append(str(uploaded_url).strip())
+                images = images[:limit]
+                oi["image_urls"] = images
+                oi.pop("images", None)
+                st["omni_flash_i2v"] = oi
+                st["ts"] = _now()
+                if len(images) >= limit:
+                    oi["step"] = "need_prompt"
+                    st["omni_flash_i2v"] = oi
+                    st["ts"] = _now()
+                    await tg_send_message(chat_id, f"Получил {limit}/{limit} фото ✅ Теперь пришли ТЕКСТ (промпт), что должно происходить в видео.", reply_markup=_help_menu_for(user_id))
+                    return {"ok": True}
+                await tg_send_message(chat_id, f"Фото #{len(images)} получил ✅\nПришли ещё фото (до {limit}) или напиши «Готово», чтобы перейти к промпту.", reply_markup=_help_menu_for(user_id))
+                return {"ok": True}
+
+            await tg_send_message(chat_id, "Фото уже собраны ✅ Теперь жду промпт текстом.", reply_markup=_help_menu_for(user_id))
             return {"ok": True}
 
         # ---- KLING 3.0 - New: приём общего стартового/последнего кадра через фото ----
