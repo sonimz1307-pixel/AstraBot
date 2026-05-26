@@ -1011,6 +1011,12 @@
             <span class="name">Image → Video</span>
             <span class="desc">До 7 фото + промпт</span>
           </label>
+
+          <input id="omni_flow_video_edit" type="radio" name="omni_flow" value="video_edit">
+          <label for="omni_flow_video_edit">
+            <span class="name">Video Edit</span>
+            <span class="desc">Видео до 60 сек + промпт</span>
+          </label>
         </div>
       </div>
 
@@ -1037,7 +1043,7 @@
           </select>
         </div>
 
-        <div class="hint">Длительности только 6 / 8 / 10 сек. 4 секунды отключены. Цена сейчас считается по нашей внутренней сетке.</div>
+        <div id="omni_hint" class="hint">Длительности только 6 / 8 / 10 сек. 4 секунды отключены. Цена сейчас считается по нашей внутренней сетке.</div>
       </div>
     </div>
 
@@ -1624,6 +1630,16 @@
 
     // Google Omni Flash getters
     function getOmniFlow(){ return qs('input[name="omni_flow"]:checked')?.value || "text"; }
+    function updateOmniUI(){
+      const flow = getOmniFlow();
+      const isVideoEdit = flow === 'video_edit';
+      const durationSelect = qs('#omni_duration');
+      const hint = qs('#omni_hint');
+      if (durationSelect) durationSelect.style.display = isVideoEdit ? 'none' : '';
+      if (hint) hint.textContent = isVideoEdit
+        ? 'Video Edit: исходное видео до 60 сек. Цена фиксированная: 720p/1080p — 20 ток., 4K — 30 ток. Длительность результата определяет модель.'
+        : 'Длительности только 6 / 8 / 10 сек. 4 секунды отключены. Цена сейчас считается по нашей внутренней сетке.';
+    }
 
     // Seedance getters
     function getSeedanceVariant(){ return qs('input[name="seedance_variant"]:checked')?.value || "preview"; }
@@ -1886,6 +1902,8 @@
         setVeoAdvancedEnabled();
       } else if (provider === 'seedance') {
         updateSeedanceUI();
+      } else if (provider === 'google') {
+        updateOmniUI();
       }
       updateCostUI();
     }
@@ -1910,7 +1928,7 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
       setVeoAdvancedEnabled();
       updateCostUI();
     }));
-    qsa('input[name="omni_flow"]').forEach(el => el.addEventListener('change', () => { updateCostUI(); }));
+    qsa('input[name="omni_flow"]').forEach(el => el.addEventListener('change', () => { updateOmniUI(); updateCostUI(); }));
     ['#veo_duration', '#veo_aspect', '#omni_duration', '#omni_resolution', '#omni_aspect'].forEach(sel => {
       const el = qs(sel);
       if (el) el.addEventListener('change', () => {
@@ -2009,8 +2027,13 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
       }
 
       if (provider === 'google'){
+        const flow = getOmniFlow();
         const seconds = parseInt((qs('#omni_duration')?.value || "8"), 10);
         const resolution = (qs('#omni_resolution')?.value || '1080p');
+        if (flow === 'video_edit') {
+          const tokens = resolution === '4k' ? 30 : 20;
+          return { known:true, tokens, note:'фикс за Video Edit до 60 сек' };
+        }
         const map = {
           '720p': {6:8, 8:10, 10:12},
           '1080p': {6:8, 8:10, 10:12},
