@@ -10,4 +10,3 @@ python-multipart
 redis>=5.0.0
 pypdf>=4.3.1
 google-auth>=2.29.0
-pi-heif==0.22.0
