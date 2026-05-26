@@ -1273,40 +1273,6 @@ def _seedream_aspect_inline_kb(mode_key: str, current: str = "9:16") -> dict:
     return {"inline_keyboard": [row]}
 
 
-def _gpt_image_2_size_for_aspect_ratio(aspect_ratio: str) -> str:
-    ratio = str(aspect_ratio or "").strip() or "1:1"
-    mapping = {
-        "1:1": "1024x1024",
-        "4:5": "1024x1280",
-        "9:16": "864x1536",
-        "16:9": "1536x864",
-    }
-    return mapping.get(ratio, "1024x1024")
-
-
-def _gpt_image_2_aspect_for_size(size: str) -> str:
-    normalized = str(size or "").strip().lower()
-    mapping = {
-        "1024x1024": "1:1",
-        "1024x1280": "4:5",
-        "864x1536": "9:16",
-        "1536x864": "16:9",
-        # Backward compatibility with earlier standard portrait/landscape sizes.
-        "1024x1536": "9:16",
-        "1536x1024": "16:9",
-    }
-    return mapping.get(normalized, "1:1")
-
-
-def _gpt_image_2_aspect_inline_kb(mode_key: str, current: str = "1:1") -> dict:
-    values = ("1:1", "4:5", "9:16", "16:9")
-    row = []
-    for value in values:
-        text = f"✅ {value}" if value == current else value
-        row.append({"text": text, "callback_data": f"gi2:{mode_key}:aspect:{value}"})
-    return {"inline_keyboard": [row]}
-
-
 def _seedream_model_for_bot() -> str:
     return (ARK_IMAGE_MODEL_SEEDREAM_45 or ARK_IMAGE_MODEL or "").strip()
 
@@ -1633,10 +1599,10 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
         st["t2i"] = {"step": "need_prompt", "aspect_ratio": "9:16", "model": "seedream_45"}
 
     elif mode == "gpt_image_2_t2i":
-        st["gpt_image_2_t2i"] = {"step": "need_prompt", "aspect_ratio": "1:1", "size": "1024x1024"}
+        st["gpt_image_2_t2i"] = {"step": "need_prompt", "size": "1024x1024"}
 
     elif mode == "gpt_image_2_i2i":
-        st["gpt_image_2_i2i"] = {"step": "need_image", "photo_file_id": None, "photo_file_ids": [], "photo_urls": [], "aspect_ratio": "1:1", "size": "1024x1024"}
+        st["gpt_image_2_i2i"] = {"step": "need_image", "photo_bytes": None, "photo_file_id": None, "photo_file_ids": [], "photo_urls": [], "size": "1024x1024"}
 
     elif mode == "two_photos":
         # 2 фото: multi-image (если эндпоинт поддерживает)
@@ -3434,15 +3400,6 @@ async def openai_chat_answer(
     return (data["choices"][0]["message"]["content"] or "").strip() or "Пустой ответ от модели."
 
 
-def _looks_like_heif_image(b: bytes) -> bool:
-    if not b or len(b) < 12:
-        return False
-    if b[4:8] != b"ftyp":
-        return False
-    brand = b[8:12].lower()
-    return brand in {b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1"}
-
-
 def _detect_image_type(b: bytes) -> Tuple[str, str]:
     if not b:
         return ("jpg", "image/jpeg")
@@ -3452,61 +3409,7 @@ def _detect_image_type(b: bytes) -> Tuple[str, str]:
         return ("png", "image/png")
     if b.startswith(b"RIFF") and len(b) >= 12 and b[8:12] == b"WEBP":
         return ("webp", "image/webp")
-    if _looks_like_heif_image(b):
-        return ("heic", "image/heic")
     return ("jpg", "image/jpeg")
-
-
-def _normalize_openai_image_input(image_bytes: bytes, *, source_label: str = "image") -> Tuple[bytes, str, str]:
-    """Normalize user/reference image bytes before sending them to OpenAI Images Edit.
-
-    Fixes common phone uploads: HEIC/HEIF, EXIF orientation, CMYK/P/16-bit modes,
-    and returns a provider-safe JPEG/PNG payload.
-    """
-    if not isinstance(image_bytes, (bytes, bytearray)) or not image_bytes:
-        raise RuntimeError(f"{source_label}: empty image bytes")
-
-    try:
-        try:
-            from pi_heif import register_heif_opener  # type: ignore
-        except ImportError:
-            from pillow_heif import register_heif_opener  # type: ignore
-        register_heif_opener()
-    except Exception:
-        # JPEG/PNG/WebP still work without pillow-heif. If the file is HEIC, PIL will fail below
-        # and we will return a clear error for logs/admins.
-        pass
-
-    try:
-        from PIL import Image, ImageOps  # type: ignore
-
-        with Image.open(BytesIO(bytes(image_bytes))) as img:
-            img.load()
-            img = ImageOps.exif_transpose(img)
-
-            has_alpha = img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info)
-            if has_alpha:
-                if img.mode != "RGBA":
-                    img = img.convert("RGBA")
-                out = BytesIO()
-                img.save(out, format="PNG", optimize=True)
-                return out.getvalue(), "png", "image/png"
-
-            if img.mode != "RGB":
-                img = img.convert("RGB")
-
-            out = BytesIO()
-            img.save(out, format="JPEG", quality=95, optimize=True, progressive=True)
-            return out.getvalue(), "jpg", "image/jpeg"
-    except Exception as e:
-        ext, mime = _detect_image_type(bytes(image_bytes))
-        hint = ""
-        if ext == "heic":
-            hint = " Установи зависимость pillow-heif из requirements.txt для HEIC/HEIF."
-        raise RuntimeError(
-            f"{source_label}: не удалось нормализовать изображение для GPT Image 2.0 "
-            f"(detected={ext}/{mime}, first_bytes={bytes(image_bytes)[:16].hex()}).{hint} Ошибка: {e}"
-        ) from e
 
 
 
@@ -3743,11 +3646,10 @@ async def openai_edit_image_v2(
 
     files: List[Tuple[str, Tuple[str, bytes, str]]] = []
     for idx, raw in enumerate(normalized_items, start=1):
-        safe_bytes, ext, mime = _normalize_openai_image_input(bytes(raw), source_label=f"GPT Image 2.0 source_{idx}")
-        files.append(("image[]", (f"source_{idx}.{ext}", safe_bytes, mime)))
+        ext, mime = _detect_image_type(bytes(raw))
+        files.append(("image[]", (f"source_{idx}.{ext}", bytes(raw), mime)))
     if mask_png_bytes:
-        safe_mask, mask_ext, mask_mime = _normalize_openai_image_input(mask_png_bytes, source_label="GPT Image 2.0 mask")
-        files.append(("mask", (f"mask.{mask_ext}", safe_mask, mask_mime)))
+        files.append(("mask", ("mask.png", mask_png_bytes, "image/png")))
 
     data = {"model": "gpt-image-2", "prompt": prompt, "size": size, "n": "1"}
 
@@ -4917,52 +4819,6 @@ async def webhook(secret: str, request: Request):
                 chat_id,
                 f"✅ Формат Nano Banana 2: {aspect_ratio}\nТеперь пришли фото или сразу напиши текст.",
                 reply_markup=_nano_banana_2_aspect_inline_kb(aspect_ratio),
-            )
-            return {"ok": True}
-
-        if chat_id and user_id and data.startswith("gi2:"):
-            parts = data.split(":")
-            mode_key = parts[1].strip() if len(parts) > 1 else ""
-            aspect_ratio = ":".join(parts[3:]).strip() if len(parts) > 3 else ""
-            if mode_key not in ("t2i", "i2i"):
-                return {"ok": True}
-            if aspect_ratio not in ("1:1", "4:5", "9:16", "16:9"):
-                return {"ok": True}
-
-            size = _gpt_image_2_size_for_aspect_ratio(aspect_ratio)
-            st = _ensure_state(chat_id, user_id)
-
-            if mode_key == "t2i":
-                st["mode"] = "gpt_image_2_t2i"
-                gi2 = st.get("gpt_image_2_t2i") or {"step": "need_prompt"}
-                gi2["step"] = "need_prompt"
-                gi2["aspect_ratio"] = aspect_ratio
-                gi2["size"] = size
-                st["gpt_image_2_t2i"] = gi2
-                st["ts"] = _now()
-                await tg_send_message(
-                    chat_id,
-                    f"✅ Формат GPT Image 2.0: {aspect_ratio} ({size})\nТеперь пришли текст для генерации.",
-                    reply_markup=_gpt_image_2_aspect_inline_kb("t2i", aspect_ratio),
-                )
-                return {"ok": True}
-
-            st["mode"] = "gpt_image_2_i2i"
-            gi2 = st.get("gpt_image_2_i2i") or {
-                "step": "need_image",
-                "photo_file_id": None,
-                "photo_file_ids": [],
-                "photo_urls": [],
-            }
-            gi2["aspect_ratio"] = aspect_ratio
-            gi2["size"] = size
-            st["gpt_image_2_i2i"] = gi2
-            st["ts"] = _now()
-            refs_count = len([x for x in (gi2.get("photo_file_ids") or []) if str(x or "").strip()])
-            await tg_send_message(
-                chat_id,
-                f"✅ Формат GPT Image 2.0: {aspect_ratio} ({size})\nФото: {refs_count}/4\nТеперь пришли фото или prompt, если фото уже загружены.",
-                reply_markup=_gpt_image_2_aspect_inline_kb("i2i", aspect_ratio),
             )
             return {"ok": True}
 
@@ -8356,16 +8212,11 @@ async def webhook(secret: str, request: Request):
         if str(st.get("photo_submenu") or "").strip().lower() == "gpt_image_2":
             _set_mode(chat_id, user_id, "gpt_image_2_t2i")
             st.pop("photo_submenu", None)
-            st["gpt_image_2_t2i"] = {"step": "need_prompt", "aspect_ratio": "1:1", "size": "1024x1024"}
+            st["gpt_image_2_t2i"] = {"step": "need_prompt", "size": "1024x1024"}
             await tg_send_message(
                 chat_id,
                 "GPT Image 2.0 • режим «Текст→Картинка».\nНапиши одним сообщением, что нужно сгенерировать.",
                 reply_markup=_photo_future_menu_keyboard(),
-            )
-            await tg_send_message(
-                chat_id,
-                "Выбери формат GPT Image 2.0:",
-                reply_markup=_gpt_image_2_aspect_inline_kb("t2i", "1:1"),
             )
             return {"ok": True}
 
@@ -8390,16 +8241,11 @@ async def webhook(secret: str, request: Request):
     if incoming_text == "Картинка→Картинка":
         _set_mode(chat_id, user_id, "gpt_image_2_i2i")
         st.pop("photo_submenu", None)
-        st["gpt_image_2_i2i"] = {"step": "need_image", "photo_file_id": None, "photo_file_ids": [], "photo_urls": [], "aspect_ratio": "1:1", "size": "1024x1024"}
+        st["gpt_image_2_i2i"] = {"step": "need_image", "photo_bytes": None, "photo_file_id": None, "photo_file_ids": [], "photo_urls": [], "size": "1024x1024"}
         await tg_send_message(
             chat_id,
             "GPT Image 2.0 • режим «Картинка→Картинка».\n1) Пришли от 1 до 4 фото.\n2) Можно отправить несколько сообщений с фото.\n3) Потом одним сообщением напиши, что нужно изменить.",
             reply_markup=_photo_future_menu_keyboard(),
-        )
-        await tg_send_message(
-            chat_id,
-            "Выбери формат результата GPT Image 2.0:",
-            reply_markup=_gpt_image_2_aspect_inline_kb("i2i", "1:1"),
         )
         return {"ok": True}
     if incoming_text == "Помощь":
@@ -8462,24 +8308,22 @@ async def webhook(secret: str, request: Request):
             except Exception:
                 logging.exception("GPT Image 2.0 input upload failed")
 
+            gi2["photo_bytes"] = img_bytes
             gi2["photo_file_id"] = str(photo_ids[0]) if photo_ids else None
             gi2["photo_file_ids"] = photo_ids[:4]
             gi2["photo_urls"] = photo_urls[:4]
-            gi2["aspect_ratio"] = str(gi2.get("aspect_ratio") or _gpt_image_2_aspect_for_size(gi2.get("size")) or "1:1")
-            gi2["size"] = _gpt_image_2_size_for_aspect_ratio(gi2["aspect_ratio"])
             gi2["step"] = "need_prompt"
             st["gpt_image_2_i2i"] = gi2
             st["ts"] = _now()
             count_refs = len(gi2.get("photo_file_ids") or [])
-            current_aspect = str(gi2.get("aspect_ratio") or "1:1")
             if count_refs >= 4:
-                msg = f"Фото принято 4/4 ✅\nФормат результата: {current_aspect}\nТеперь напиши одним сообщением, что нужно изменить через GPT Image 2.0."
+                msg = "Фото принято 4/4 ✅ Теперь напиши одним сообщением, что нужно изменить через GPT Image 2.0."
             else:
-                msg = f"Фото принято {count_refs}/4 ✅\nФормат результата: {current_aspect}\nМожешь отправить ещё фото или сразу написать, что нужно изменить через GPT Image 2.0."
+                msg = f"Фото принято {count_refs}/4 ✅ Можешь отправить ещё фото или сразу написать, что нужно изменить через GPT Image 2.0."
             await tg_send_message(
                 chat_id,
                 msg,
-                reply_markup=_gpt_image_2_aspect_inline_kb("i2i", current_aspect),
+                reply_markup=_photo_future_menu_keyboard(),
             )
             return {"ok": True}
 
@@ -9496,12 +9340,6 @@ async def webhook(secret: str, request: Request):
     if doc:
         mime = (doc.get("mime_type") or "").lower()
         file_id = doc.get("file_id")
-        filename = str(doc.get("file_name") or "").strip()
-        filename_l = filename.lower()
-        is_image_document = bool(file_id) and (
-            mime.startswith("image/")
-            or filename_l.endswith((".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"))
-        )
 
         if file_id and mime.startswith("video/") and st.get("mode") == "omni_flash_video_edit":
             ov = st.get("omni_flash_video_edit") or {}
@@ -9567,7 +9405,7 @@ async def webhook(secret: str, request: Request):
                 reply_markup=_help_menu_for(user_id),
             )
             return {"ok": True}
-        if file_id and is_image_document:
+        if file_id and mime.startswith("image/"):
             try:
                 file_path = await tg_get_file_path(file_id)
                 img_bytes = await tg_download_file_bytes(file_path)
@@ -9575,59 +9413,8 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(chat_id, f"Ошибка при загрузке фото: {e}", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
-            # ---- GPT Image 2.0: accept reference images sent as document, including iPhone HEIC/HEIF ----
-            if st.get("mode") == "gpt_image_2_i2i":
-                gi2 = st.get("gpt_image_2_i2i") or {}
-                photo_ids = [str(item or "").strip() for item in (gi2.get("photo_file_ids") or []) if str(item or "").strip()]
-                if not photo_ids and str(gi2.get("photo_file_id") or "").strip():
-                    photo_ids = [str(gi2.get("photo_file_id") or "").strip()]
-                photo_urls = [str(item or "").strip() for item in (gi2.get("photo_urls") or []) if str(item or "").strip()]
-                if len(photo_ids) >= 4:
-                    await tg_send_message(
-                        chat_id,
-                        "У GPT Image 2.0 можно использовать максимум 4 фото в этом режиме. Уже набрано 4/4 ✅ Теперь просто напиши, что нужно изменить.",
-                        reply_markup=_gpt_image_2_aspect_inline_kb("i2i", str(gi2.get("aspect_ratio") or _gpt_image_2_aspect_for_size(gi2.get("size")) or "1:1")),
-                    )
-                    return {"ok": True}
 
-                photo_ids.append(str(file_id))
-                try:
-                    ext, detected_mime = _detect_image_type(img_bytes)
-                    safe_ext = (filename_l.rsplit(".", 1)[-1] if "." in filename_l else ext)
-                    if safe_ext not in {"jpg", "jpeg", "png", "webp", "heic", "heif"}:
-                        safe_ext = ext
-                    input_path = f"gpt_image2_inputs/{int(user_id)}/{int(time.time())}_{uuid4().hex[:10]}_{len(photo_ids)}.{safe_ext}"
-                    uploaded_url = upload_bytes_to_supabase(input_path, img_bytes, detected_mime)
-                    if uploaded_url:
-                        photo_urls.append(str(uploaded_url).strip())
-                except Exception:
-                    logging.exception("GPT Image 2.0 document input upload failed")
-
-                gi2["photo_file_id"] = str(photo_ids[0]) if photo_ids else None
-                gi2["photo_file_ids"] = photo_ids[:4]
-                gi2["photo_urls"] = photo_urls[:4]
-                gi2["aspect_ratio"] = str(gi2.get("aspect_ratio") or _gpt_image_2_aspect_for_size(gi2.get("size")) or "1:1")
-                gi2["size"] = _gpt_image_2_size_for_aspect_ratio(gi2["aspect_ratio"])
-                gi2["step"] = "need_prompt"
-                st["gpt_image_2_i2i"] = gi2
-                st["ts"] = _now()
-                count_refs = len(gi2.get("photo_file_ids") or [])
-                current_aspect = str(gi2.get("aspect_ratio") or "1:1")
-                if count_refs >= 4:
-                    msg = f"Файл-фото принято 4/4 ✅\nФормат результата: {current_aspect}\nТеперь напиши одним сообщением, что нужно изменить через GPT Image 2.0."
-                else:
-                    msg = f"Файл-фото принято {count_refs}/4 ✅\nФормат результата: {current_aspect}\nМожешь отправить ещё фото или сразу написать, что нужно изменить через GPT Image 2.0."
-                await tg_send_message(
-                    chat_id,
-                    msg,
-                    reply_markup=_gpt_image_2_aspect_inline_kb("i2i", current_aspect),
-                )
-                return {"ok": True}
-
-        elif st.get("mode") in {"gpt_image_2_i2i", "nano_banana", "nano_banana_2", "nano_banana_pro", "nano_banana_pro_new", "topaz_photo", "kling_i2v", "two_photos", "photosession", "poster"}:
-            await tg_send_message(chat_id, "Это не похоже на изображение. Пришли JPG/PNG/WebP/HEIC/HEIF как фото или файл.", reply_markup=_main_menu_for(user_id))
-            return {"ok": True}
-
+            
         # ---- NANO BANANA: ждём фото ----
         if st.get("mode") == "nano_banana":
             nb = st.get("nano_banana") or {}
@@ -10771,6 +10558,7 @@ async def webhook(secret: str, request: Request):
 
             st["seedream_single"] = {
                 "step": "need_photo",
+                "photo_bytes": None,
                 "photo_file_id": None,
                 "aspect_ratio": aspect_ratio,
                 "model": "seedream_45",
@@ -10960,15 +10748,13 @@ async def webhook(secret: str, request: Request):
                 return {"ok": True}
 
             try:
-                aspect_ratio = str(gi2.get("aspect_ratio") or _gpt_image_2_aspect_for_size(gi2.get("size")) or "1:1")
-                size = _gpt_image_2_size_for_aspect_ratio(aspect_ratio)
+                size = str(gi2.get("size") or "1024x1024")
                 await enqueue_job({
                     "job_id": uuid4().hex,
                     "type": "gpt_image_2_t2i",
                     "chat_id": int(chat_id),
                     "user_id": int(user_id),
                     "prompt": user_prompt,
-                    "aspect_ratio": aspect_ratio,
                     "size": size,
                 }, queue_name=GPT_IMAGE2_QUEUE_NAME)
             except Exception as e:
@@ -10980,7 +10766,7 @@ async def webhook(secret: str, request: Request):
                 "✅ GPT Image 2.0: запрос принят. Пришлю результат, как будет готово.",
                 reply_markup=_main_menu_for(user_id),
             )
-            st["gpt_image_2_t2i"] = {"step": "need_prompt", "aspect_ratio": aspect_ratio, "size": size}
+            st["gpt_image_2_t2i"] = {"step": "need_prompt", "size": str((st.get("gpt_image_2_t2i") or {}).get("size") or gi2.get("size") or "1024x1024")}
             st["ts"] = _now()
             return {"ok": True}
         # GPT Image 2.0: image-to-image
@@ -11002,15 +10788,13 @@ async def webhook(secret: str, request: Request):
                 return {"ok": True}
 
             try:
-                aspect_ratio = str(gi2.get("aspect_ratio") or _gpt_image_2_aspect_for_size(gi2.get("size")) or "1:1")
-                size = _gpt_image_2_size_for_aspect_ratio(aspect_ratio)
+                size = str(gi2.get("size") or "1024x1024")
                 await enqueue_job({
                     "job_id": uuid4().hex,
                     "type": "gpt_image_2_i2i",
                     "chat_id": int(chat_id),
                     "user_id": int(user_id),
                     "prompt": user_prompt,
-                    "aspect_ratio": aspect_ratio,
                     "size": size,
                     "photo_file_id": photo_file_ids[0],
                     "photo_file_ids": photo_file_ids[:4],
@@ -11027,11 +10811,11 @@ async def webhook(secret: str, request: Request):
             )
             st["gpt_image_2_i2i"] = {
                 "step": "need_image",
+                "photo_bytes": None,
                 "photo_file_id": None,
                 "photo_file_ids": [],
                 "photo_urls": [],
-                "aspect_ratio": aspect_ratio,
-                "size": size,
+                "size": str((st.get("gpt_image_2_i2i") or {}).get("size") or gi2.get("size") or "1024x1024"),
             }
             st["ts"] = _now()
             return {"ok": True}
