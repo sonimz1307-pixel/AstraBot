@@ -427,8 +427,8 @@
     }
     .seg.providerSeg{
       display:grid;
-      grid-template-columns: repeat(6, minmax(0, 1fr));
-      gap:4px;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap:8px;
       overflow:visible;
       padding: 2px 0 0;
       margin: 0;
@@ -439,9 +439,9 @@
 
     .seg.providerSeg label{
       min-width: 0;
-      height: 38px;
-      padding: 0 2px;
-      border-radius: 12px;
+      height: 52px;
+      padding: 0 8px;
+      border-radius: 14px;
       overflow: hidden;
       position: relative;
       display:flex;
@@ -471,8 +471,8 @@
 
     .seg.providerSeg label .pname{
       font-weight:900;
-      font-size: clamp(8.8px, 2.55vw, 13px);
-      line-height:1;
+      font-size: 15px;
+      line-height:1.1;
       letter-spacing:0;
       color:#e9dfd2;
       text-shadow:none;
@@ -483,9 +483,9 @@
     }
 
     @media (max-width: 360px){
-      .seg.providerSeg{ gap:3px; }
-      .seg.providerSeg label{ height:36px; padding:0 1px; border-radius:10px; }
-      .seg.providerSeg label .pname{ font-size:8.8px; letter-spacing:-.15px; }
+      .seg.providerSeg{ gap:6px; }
+      .seg.providerSeg label{ height:48px; padding:0 6px; border-radius:12px; }
+      .seg.providerSeg label .pname{ font-size:14px; letter-spacing:-.15px; }
     }
 
     .seg.providerSeg input:checked + label{
@@ -557,7 +557,7 @@
     <div class="card providerCard" style="padding:12px 12px 10px;">
       <h3 style="margin-bottom:8px;">Модель видео</h3>
       <div class="seg providerSeg" role="radiogroup" aria-label="Провайдер">
-        <input id="provider_kling" type="radio" name="provider" value="kling" checked>
+        <input id="provider_kling" type="radio" name="provider" value="kling">
         <label for="provider_kling" aria-label="Kling">
           <img class="pimg" src="/static/img/providers/kling.png" alt="Kling">
           <div class="poverlay"></div>
@@ -567,7 +567,7 @@
         </label>
 
 
-        <input id="provider_seedance" type="radio" name="provider" value="seedance">
+        <input id="provider_seedance" type="radio" name="provider" value="seedance" checked>
         <label for="provider_seedance" aria-label="Seedance 2.0">
           <img class="pimg" src="/static/img/providers/seedance.png" alt="Seedance">
           <div class="poverlay"></div>
@@ -620,7 +620,7 @@
     </div>
 
     <!-- ===================== KLING BLOCK ===================== -->
-    <div id="klingBlock">
+    <div id="klingBlock" style="display:none;">
       <div class="card">
         <h3>Kling — версия</h3>
         <div class="seg cols4" role="radiogroup" aria-label="Версия Kling">
@@ -1091,7 +1091,7 @@
 
 
     <!-- ===================== SEEDANCE BLOCK ===================== -->
-    <div id="seedanceBlock" style="display:none;">
+    <div id="seedanceBlock">
       <div class="card">
         <h3>Тип Seedance</h3>
         <div class="seg" role="radiogroup" aria-label="Тип Seedance">
@@ -1236,7 +1236,7 @@
 
     const DEBUG = new URLSearchParams(location.search).get('debug') === '1';
 
-    function getProvider(){ return qs('input[name="provider"]:checked')?.value || "kling"; }
+    function getProvider(){ return qs('input[name="provider"]:checked')?.value || "seedance"; }
 
     // Kling getters
     function getFlow(){ return qs('input[name="flow"]:checked')?.value || "motion"; }
