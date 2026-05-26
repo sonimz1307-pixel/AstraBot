@@ -21,6 +21,7 @@ from grok_video_replicate import (
 )
 from gemini_omni_video import (
     GeminiOmniVideoError,
+    KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC,
     normalize_gemini_omni_aspect_ratio,
     normalize_gemini_omni_duration,
     normalize_gemini_omni_mode,
@@ -355,15 +356,54 @@ async def process_tg_omni_flash_video_job(job: Dict[str, Any]) -> None:
 
     try:
         refs = [str(url or "").strip() for url in (job.get("reference_image_urls") or []) if str(url or "").strip()]
+        source_video_url = ""
+        source_video_end = None
+
+        if mode == "video_edit":
+            source_video_upload_id = str(job.get("source_video_upload_id") or "").strip()
+            source_duration = 0.0
+
+            if source_video_upload_id:
+                upload_row = get_workspace_upload_row(user_id, source_video_upload_id)
+                if not upload_row:
+                    raise GeminiOmniVideoError("Исходное видео Google Omni Flash не найдено в workspace uploads")
+                if str(upload_row.get("file_type") or "").strip().lower() != "video":
+                    raise GeminiOmniVideoError("Исходный файл Google Omni Flash не является видео")
+
+                source_duration = float(upload_row.get("duration_sec") or 0.0)
+                access = build_workspace_video_access_urls(
+                    storage_path=str(upload_row.get("storage_path") or "").strip(),
+                    fallback_url=str(upload_row.get("download_url") or upload_row.get("video_url") or upload_row.get("signed_url") or "").strip() or None,
+                    expires_in=3600,
+                )
+                source_video_url = str(access.get("download_url") or access.get("video_url") or "").strip()
+            else:
+                # Backward compatibility for already queued v3 jobs. New Telegram jobs must pass source_video_upload_id.
+                source_video_url = str(job.get("source_video_url") or "").strip()
+
+            if not source_video_url:
+                raise GeminiOmniVideoError("Для Google Omni Flash Video Edit нужно исходное видео")
+
+            end_seed = job.get("source_video_end") or source_duration or KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC
+            try:
+                source_video_end = int(max(1, min(float(KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC), float(end_seed))))
+            except Exception:
+                source_video_end = int(KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC)
+
         if mode == "image_to_video" and not refs:
             raise GeminiOmniVideoError("Для Google Omni Flash нужен хотя бы один reference image")
+        if mode == "video_edit" and len(refs) > 5:
+            raise GeminiOmniVideoError("Для Google Omni Flash Video Edit доступно максимум 5 фото-референсов")
         video_url = await run_gemini_omni_video(
             user_id=user_id,
             prompt=prompt,
             duration=duration,
             resolution=resolution,
             aspect_ratio=aspect_ratio,
-            reference_image_urls=refs if mode == "image_to_video" else None,
+            reference_image_urls=refs if mode in {"image_to_video", "video_edit"} else None,
+            source_video_url=source_video_url if mode == "video_edit" else None,
+            source_video_start=0,
+            source_video_end=source_video_end if mode == "video_edit" else None,
         )
         if not video_url:
             raise GeminiOmniVideoError("Google Omni Flash did not return video url")
