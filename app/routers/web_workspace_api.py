@@ -102,7 +102,9 @@ from grok_video_replicate import (
 )
 from gemini_omni_video import (
     GeminiOmniVideoError,
+    KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC,
     gemini_omni_tokens_for_duration,
+    gemini_omni_tokens_for_run,
     normalize_gemini_omni_aspect_ratio,
     normalize_gemini_omni_duration,
     normalize_gemini_omni_mode,
@@ -171,6 +173,7 @@ from app.services.video_editor_service import (
     MAX_AUDIO_CLIPS,
     MAX_MERGE_ITEMS,
     MAX_OUTPUT_DURATION_SEC,
+    build_workspace_video_access_urls,
     create_workspace_upload_record,
     extract_first_frame_bytes,
     get_workspace_edit_job_row,
@@ -1958,16 +1961,44 @@ async def _run_workspace_video_job(
         elif provider == "google":
             direct_refs = [str(u or "").strip() for u in (reference_image_urls_direct or []) if str(u or "").strip()]
             refs = list(reference_images or [])
+            source_video_url = None
+            source_video_end = None
             if mode == "image_to_video" and not direct_refs and not refs and start_frame:
                 refs = [start_frame]
+            if mode == "video_edit":
+                upload_id = str(source_video_upload_id or "").strip()
+                if not upload_id:
+                    raise RuntimeError("Для Google Omni Flash Video Edit нужно исходное видео")
+                source_row = get_workspace_upload_row(int(user_id), upload_id)
+                if not source_row:
+                    raise RuntimeError("Исходное видео для Google Omni Flash Video Edit не найдено")
+                if str(source_row.get("file_type") or "") != "video":
+                    raise RuntimeError("Google Omni Flash Video Edit source upload должен быть видео")
+                source_duration = float(source_row.get("duration_sec") or 0)
+                if source_duration <= 0:
+                    raise RuntimeError("Не удалось определить длительность исходного видео для Google Omni Flash Video Edit")
+                if source_duration > float(KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC):
+                    raise RuntimeError(f"Google Omni Flash Video Edit принимает видео до {KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC} сек")
+                access = build_workspace_video_access_urls(
+                    storage_path=source_row.get("storage_path"),
+                    fallback_url=source_row.get("download_url") or source_row.get("video_url"),
+                    expires_in=3600,
+                )
+                source_video_url = str(access.get("download_url") or access.get("video_url") or "").strip()
+                if not source_video_url:
+                    raise RuntimeError("Не удалось получить URL исходного видео для Google Omni Flash Video Edit")
+                source_video_end = int(max(1, min(float(KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC), source_duration)))
             provider_video_url = await run_gemini_omni_video(
                 user_id=user_id,
                 prompt=prompt,
                 duration=duration,
                 aspect_ratio=aspect_ratio,
                 resolution=resolution,
-                reference_images=(refs if mode == "image_to_video" and not direct_refs else None),
-                reference_image_urls=(direct_refs if mode == "image_to_video" and direct_refs else None),
+                reference_images=(refs if mode in {"image_to_video", "video_edit"} and not direct_refs else None),
+                reference_image_urls=(direct_refs if mode in {"image_to_video", "video_edit"} and direct_refs else None),
+                source_video_url=source_video_url,
+                source_video_start=0,
+                source_video_end=source_video_end,
             )
 
         elif provider == "pixverse_c1":
@@ -3946,7 +3977,7 @@ def _workspace_video_charge_spec(
         normalized_mode = normalize_gemini_omni_mode(mode)
         normalized_duration = normalize_gemini_omni_duration(duration)
         normalized_resolution = normalize_gemini_omni_resolution(resolution)
-        tokens = int(gemini_omni_tokens_for_duration(normalized_duration, normalized_resolution))
+        tokens = int(gemini_omni_tokens_for_run(normalized_mode, normalized_duration, normalized_resolution))
         return {
             "tokens": tokens,
             "charge_reason": "gemini_omni_video",
@@ -3956,9 +3987,10 @@ def _workspace_video_charge_spec(
                 "provider": provider,
                 "model": model or "gemini-omni-video",
                 "mode": normalized_mode,
-                "duration": normalized_duration,
+                "duration": normalized_duration if normalized_mode != "video_edit" else None,
                 "resolution": normalized_resolution,
-                            },
+                "pricing": "fixed_per_video" if normalized_mode == "video_edit" else "duration_based",
+            },
         }
 
     if provider == "pixverse_c1":
@@ -4165,10 +4197,11 @@ async def workspace_video_run(
         reference_video_total_duration_sec += float(duration_sec or 0.0)
 
     source_upload_row: Optional[Dict[str, Any]] = None
-    if provider == "switchx" and not source_video_upload_id and source_video:
+    google_requested_mode = normalize_gemini_omni_mode(mode) if provider == "google" else ""
+    if provider in {"switchx", "google"} and not source_video_upload_id and source_video and (provider == "switchx" or google_requested_mode == "video_edit"):
         source_upload_row = create_workspace_upload_record(
             user_id=uid,
-            filename=getattr(source_video_file, "filename", None) or "switchx_source.mp4",
+            filename=getattr(source_video_file, "filename", None) or ("google_omni_video_edit_source.mp4" if provider == "google" else "switchx_source.mp4"),
             content_type=getattr(source_video_file, "content_type", None) or "video/mp4",
             raw_bytes=source_video,
         )
@@ -4218,6 +4251,26 @@ async def workspace_video_run(
                 raise HTTPException(status_code=400, detail="Для Google Omni Flash нужен хотя бы один reference image.")
             if len(reference_images) > 7:
                 raise HTTPException(status_code=400, detail="Для Google Omni Flash доступно максимум 7 reference images.")
+        elif mode == "video_edit":
+            if not source_video_upload_id:
+                raise HTTPException(status_code=400, detail="Для Google Omni Flash Video Edit нужно исходное видео.")
+            if source_upload_row is None:
+                source_upload_row = get_workspace_upload_row(uid, source_video_upload_id)
+            if not source_upload_row:
+                raise HTTPException(status_code=400, detail="Исходное видео для Google Omni Flash Video Edit не найдено.")
+            if str(source_upload_row.get("file_type") or "") != "video":
+                raise HTTPException(status_code=400, detail="Google Omni Flash Video Edit принимает только видео.")
+            source_duration = float(source_upload_row.get("duration_sec") or 0)
+            if source_duration <= 0:
+                raise HTTPException(status_code=400, detail="Не удалось определить длительность исходного видео для Google Omni Flash Video Edit.")
+            if source_duration > float(KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC):
+                raise HTTPException(status_code=400, detail=f"Google Omni Flash Video Edit принимает видео до {KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC} секунд.")
+            if len(reference_images) > 5:
+                raise HTTPException(status_code=400, detail="Для Google Omni Flash Video Edit доступно максимум 5 фото-референсов, потому что видео занимает 2 слота из 7.")
+            start_frame = None
+            end_frame = None
+            last_frame = None
+            duration = int(max(1, round(source_duration)))
         else:
             reference_images = []
             start_frame = None
