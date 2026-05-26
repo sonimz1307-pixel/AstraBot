@@ -2,6 +2,9 @@ import os
 import asyncio
 import json
 import base64
+import shutil
+import subprocess
+import tempfile
 import uuid
 from typing import Any, Dict, Optional
 
@@ -13,7 +16,7 @@ from nano_banana_pro import handle_nano_banana_pro
 from nano_banana_pro_new_kie import handle_nano_banana_pro_new
 from nano_banana_2_piapi import handle_nano_banana_2
 from billing_db import add_tokens
-from seedance_kie import run_seedance_kie_image_to_video, run_seedance_kie_text_to_video
+from seedance_kie import run_seedance_kie_image_to_video, run_seedance_kie_omni_reference, run_seedance_kie_text_to_video
 
 # --- Telegram ---
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # must be set in Render env
@@ -31,6 +34,113 @@ GEN_QUEUE_NAME = (os.getenv("GEN_QUEUE_NAME", "gen") or "gen").strip() or "gen"
 # progress behavior (Telegram edits)
 PROGRESS_STEP_SEC = float(os.getenv("PHOTOSESSION_PROGRESS_STEP_SEC", "3"))
 PROGRESS_SEQUENCE = os.getenv("PHOTOSESSION_PROGRESS_SEQ", "10,25,45,65,85,95").strip()
+
+SEEDANCE_KIE_AUDIO_MAX_DURATION_SEC = float(os.getenv("SEEDANCE_KIE_AUDIO_MAX_DURATION_SEC", "15.0") or "15.0")
+
+
+def _guess_seedance_kie_audio_ext(raw: bytes) -> str:
+    head = bytes((raw or b"")[:64])
+    if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
+        return "wav"
+    if head.startswith(b"ID3"):
+        return "mp3"
+    if len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0:
+        return "mp3"
+    return ""
+
+
+def _probe_seedance_kie_audio_duration(raw: bytes, ext: str) -> float:
+    if not raw or not shutil.which("ffprobe"):
+        return 0.0
+    suffix = f".{(ext or 'bin').strip('.').lower() or 'bin'}"
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(raw)
+            tmp.flush()
+            tmp_path = tmp.name
+        proc = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "json",
+                tmp_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if proc.returncode != 0:
+            return 0.0
+        payload = json.loads(proc.stdout or "{}")
+        return float(((payload.get("format") or {}).get("duration")) or 0.0)
+    except Exception:
+        return 0.0
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+
+def _normalize_seedance_kie_audio_ref(raw: bytes) -> bytes:
+    """Normalize Telegram Seedance KIE Omni audio refs to stable WAV PCM.
+
+    Telegram can deliver MP3/WAV with odd headers/bitrates. KIE accepts URLs, so we
+    upload normalized bytes to Supabase to avoid provider-side audio parser errors.
+    """
+    raw = bytes(raw or b"")
+    if not raw:
+        return raw
+    ext = _guess_seedance_kie_audio_ext(raw)
+    if ext not in {"mp3", "wav"}:
+        raise RuntimeError("Seedance 2.0 audio refs поддерживают только MP3 или WAV.")
+
+    initial_duration = _probe_seedance_kie_audio_duration(raw, ext)
+    if initial_duration > SEEDANCE_KIE_AUDIO_MAX_DURATION_SEC:
+        raise RuntimeError("Seedance 2.0 audio reference должен быть не длиннее 15 секунд.")
+
+    if not shutil.which("ffmpeg"):
+        return raw
+
+    src_path = None
+    dst_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as src:
+            src.write(raw)
+            src.flush()
+            src_path = src.name
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as dst:
+            dst_path = dst.name
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", src_path,
+                "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2",
+                dst_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        if proc.returncode != 0:
+            if ext == "wav":
+                return raw
+            err = (proc.stderr or proc.stdout or "").strip()[:300]
+            raise RuntimeError(f"Не удалось нормализовать audio reference для Seedance 2.0: {err or 'ffmpeg error'}")
+        with open(dst_path, "rb") as fh:
+            normalized = fh.read() or raw
+        normalized_duration = _probe_seedance_kie_audio_duration(normalized, "wav")
+        if normalized_duration > SEEDANCE_KIE_AUDIO_MAX_DURATION_SEC:
+            raise RuntimeError("Seedance 2.0 audio reference должен быть не длиннее 15 секунд.")
+        return normalized
+    finally:
+        for path in (src_path, dst_path):
+            if path:
+                try:
+                    os.unlink(path)
+                except Exception:
+                    pass
 
 
 async def tg_send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None) -> Optional[int]:
@@ -1273,7 +1383,14 @@ async def handle_job(job: Dict[str, Any]) -> None:
 
         try:
             if provider_kind == "seedance_kie":
+                job_mode = str(job.get("mode") or "").strip().lower()
+                video_file_ids = job.get("video_file_ids") or []
+                audio_file_ids = job.get("audio_file_ids") or []
+
                 reference_images: list[bytes] = []
+                reference_videos: list[bytes] = []
+                reference_audios: list[bytes] = []
+
                 if isinstance(image_file_ids, list):
                     for fid in image_file_ids[:7]:
                         if not isinstance(fid, str) or not fid.strip():
@@ -1281,19 +1398,46 @@ async def handle_job(job: Dict[str, Any]) -> None:
                         b, _ext = await tg_download_file_bytes(fid.strip())
                         if b:
                             reference_images.append(b)
-                if not seedance_model:
-                    seedance_model = "seedance-kie-fast" if task_type == "seedance-2-fast" else "seedance-kie"
+                if isinstance(video_file_ids, list):
+                    for fid in video_file_ids[:3]:
+                        if not isinstance(fid, str) or not fid.strip():
+                            continue
+                        b, _ext = await tg_download_file_bytes(fid.strip())
+                        if b:
+                            reference_videos.append(b)
+                if isinstance(audio_file_ids, list):
+                    for fid in audio_file_ids[:3]:
+                        if not isinstance(fid, str) or not fid.strip():
+                            continue
+                        b, _ext = await tg_download_file_bytes(fid.strip())
+                        if b:
+                            reference_audios.append(_normalize_seedance_kie_audio_ref(b))
 
-                if reference_images:
-                    url = await run_seedance_kie_image_to_video(
+                if not seedance_model:
+                    seedance_model = "seedance-kie-480p" if task_type == "seedance-2-fast" else "seedance-kie-720p"
+
+                if job_mode == "omni_reference" or reference_videos or reference_audios:
+                    url = await run_seedance_kie_omni_reference(
                         user_id=int(user_id),
                         model=seedance_model,
                         prompt=prompt,
                         duration=duration,
                         aspect_ratio=aspect_ratio,
                         reference_images=reference_images,
-                        start_frame=None,
-                        last_frame=None,
+                        reference_videos=reference_videos,
+                        reference_audios=reference_audios,
+                    )
+                elif reference_images:
+                    # Image→Video: first image = first_frame_url, second image = last_frame_url.
+                    url = await run_seedance_kie_image_to_video(
+                        user_id=int(user_id),
+                        model=seedance_model,
+                        prompt=prompt,
+                        duration=duration,
+                        aspect_ratio=aspect_ratio,
+                        start_frame=reference_images[0],
+                        last_frame=reference_images[1] if len(reference_images) > 1 else None,
+                        reference_images=None,
                         reference_audios=None,
                     )
                 else:
