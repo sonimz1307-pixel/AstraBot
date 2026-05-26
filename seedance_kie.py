@@ -1,58 +1,114 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from typing import Any, Dict, List, Optional, Sequence
 
 import httpx
 
-from kling_flow import upload_bytes_to_supabase
+from kling_flow import KlingFlowError, upload_bytes_to_supabase
 
-PIAPI_BASE_URL = (os.getenv("PIAPI_BASE_URL", "https://api.piapi.ai") or "https://api.piapi.ai").strip().rstrip("/")
-PIAPI_API_KEY = (os.getenv("PIAPI_API_KEY") or os.getenv("PIAPI_KEY") or "").strip()
-PIAPI_SEEDANCE_SERVICE_MODE = (os.getenv("PIAPI_SEEDANCE_SERVICE_MODE") or "public").strip() or "public"
-PIAPI_SEEDANCE_TIMEOUT_SECONDS = float(os.getenv("PIAPI_SEEDANCE_TIMEOUT_SECONDS", "7200") or "7200")
-PIAPI_SEEDANCE_POLL_SECONDS = float(os.getenv("PIAPI_SEEDANCE_POLL_SECONDS", "6") or "6")
+KIE_API_BASE = (os.getenv("KIE_API_BASE") or "https://api.kie.ai").strip().rstrip("/")
+KIE_API_TOKEN = (
+    os.getenv("KIE_API_TOKEN")
+    or os.getenv("KIE_API_KEY")
+    or os.getenv("KIE_AI_API_KEY")
+    or ""
+).strip()
+KIE_SEEDANCE_CALLBACK_URL = (os.getenv("KIE_SEEDANCE_CALLBACK_URL") or "").strip()
+KIE_SEEDANCE_TIMEOUT_SECONDS = float(os.getenv("KIE_SEEDANCE_TIMEOUT_SECONDS", "7200") or "7200")
+KIE_SEEDANCE_POLL_SECONDS = float(os.getenv("KIE_SEEDANCE_POLL_SECONDS", "6") or "6")
 
-SEEDANCE_KIE_ALLOWED_MODELS = {"seedance-kie", "seedance-kie-fast"}
+# User-facing ordinary Seedance 2.0 presets.
+# Preview/Fast Preview are still handled by the separate PiAPI provider and must not be routed here.
+SEEDANCE_KIE_ALLOWED_MODELS = {
+    "seedance-kie-480p",
+    "seedance-kie-720p",
+    "seedance-kie-1080p",
+}
 SEEDANCE_KIE_ALLOWED_DURATIONS = (5, 10, 15)
 SEEDANCE_KIE_ALLOWED_ASPECT_RATIOS = ("16:9", "9:16", "1:1")
-SEEDANCE_KIE_VIDEO_REFERENCE_SURCHARGE = {
-    "seedance-kie": 20,
-    "seedance-kie-fast": 13,
-}
+SEEDANCE_KIE_PROMPT_MAX_CHARS = int(os.getenv("KIE_SEEDANCE_PROMPT_MAX_CHARS", "20000") or "20000")
+SEEDANCE_KIE_MAX_IMAGE_REFS = int(os.getenv("KIE_SEEDANCE_MAX_IMAGE_REFS", "7") or "7")
+SEEDANCE_KIE_MAX_AUDIO_REFS = int(os.getenv("KIE_SEEDANCE_MAX_AUDIO_REFS", "3") or "3")
+SEEDANCE_KIE_MAX_VIDEO_REFS = int(os.getenv("KIE_SEEDANCE_MAX_VIDEO_REFS", "3") or "3")
+SEEDANCE_KIE_MAX_TOTAL_OMNI_REFS = int(os.getenv("KIE_SEEDANCE_MAX_TOTAL_OMNI_REFS", "12") or "12")
+
+# Final retail prices approved for 5 / 10 / 15 seconds.
 SEEDANCE_KIE_TOKEN_MAP = {
-    "seedance-kie": {5: 10, 10: 20, 15: 30},
-    "seedance-kie-fast": {5: 5, 10: 10, 15: 15},
+    "seedance-kie-480p": {5: 5, 10: 10, 15: 15},
+    "seedance-kie-720p": {5: 10, 10: 20, 15: 30},
+    "seedance-kie-1080p": {5: 25, 10: 50, 15: 75},
 }
-SEEDANCE_KIE_TASK_TYPES = {
-    "seedance-kie": "seedance-2",
-    "seedance-kie-fast": "seedance-2-fast",
+
+# No extra video-reference surcharge in the new KIE Seedance 2.0 pricing grid.
+SEEDANCE_KIE_VIDEO_REFERENCE_SURCHARGE = {
+    "seedance-kie-480p": 0,
+    "seedance-kie-720p": 0,
+    "seedance-kie-1080p": 0,
+}
+
+SEEDANCE_KIE_MODEL_IDS = {
+    "seedance-kie-480p": "bytedance/seedance-2-fast",
+    "seedance-kie-720p": "bytedance/seedance-2",
+    "seedance-kie-1080p": "bytedance/seedance-2",
 }
 SEEDANCE_KIE_RESOLUTIONS = {
-    "seedance-kie": "720p",
-    "seedance-kie-fast": "480p",
+    "seedance-kie-480p": "480p",
+    "seedance-kie-720p": "720p",
+    "seedance-kie-1080p": "1080p",
 }
+SEEDANCE_KIE_DISPLAY_NAMES = {
+    "seedance-kie-480p": "Seedance 2.0 480p",
+    "seedance-kie-720p": "Seedance 2.0 720p",
+    "seedance-kie-1080p": "Seedance 2.0 1080p",
+}
+
 
 class SeedanceKieError(RuntimeError):
     pass
 
 
-def normalize_seedance_kie_model(value: Any, default: str = "seedance-kie") -> str:
-    raw = str(value or default).strip().lower()
-    if raw in {"seedance-2-fast", "seedance-fast", "fast", "seedance-kie-fast"}:
-        return "seedance-kie-fast"
-    if raw in {"seedance-2", "seedance", "seedance-kie"}:
-        return "seedance-kie"
-    return default
+def normalize_seedance_kie_model(value: Any, default: str = "seedance-kie-720p") -> str:
+    raw = str(value or default).strip().lower().replace("_", "-")
+    aliases = {
+        "480": "seedance-kie-480p",
+        "480p": "seedance-kie-480p",
+        "seedance-480p": "seedance-kie-480p",
+        "seedance-2-480p": "seedance-kie-480p",
+        "seedance-kie-480": "seedance-kie-480p",
+        "seedance-kie-480p": "seedance-kie-480p",
+        "seedance-kie-fast": "seedance-kie-480p",
+        "seedance-2-fast": "seedance-kie-480p",
+        "seedance-fast": "seedance-kie-480p",
+        "fast": "seedance-kie-480p",
+        "720": "seedance-kie-720p",
+        "720p": "seedance-kie-720p",
+        "seedance-720p": "seedance-kie-720p",
+        "seedance-2-720p": "seedance-kie-720p",
+        "seedance-kie-720": "seedance-kie-720p",
+        "seedance-kie-720p": "seedance-kie-720p",
+        "seedance-kie": "seedance-kie-720p",
+        "seedance-2": "seedance-kie-720p",
+        "seedance": "seedance-kie-720p",
+        "standard": "seedance-kie-720p",
+        "1080": "seedance-kie-1080p",
+        "1080p": "seedance-kie-1080p",
+        "seedance-1080p": "seedance-kie-1080p",
+        "seedance-2-1080p": "seedance-kie-1080p",
+        "seedance-kie-1080": "seedance-kie-1080p",
+        "seedance-kie-1080p": "seedance-kie-1080p",
+    }
+    return aliases.get(raw, default if default in SEEDANCE_KIE_ALLOWED_MODELS else "seedance-kie-720p")
 
 
 def normalize_seedance_kie_mode(value: Any, default: str = "text_to_video") -> str:
     raw = str(value or default).strip().lower()
-    if raw in {"omni", "omni_reference", "omni-reference", "reference", "refs"}:
+    if raw in {"omni", "omni_reference", "omni-reference", "reference", "refs", "multimodal", "reference_to_video"}:
         return "omni_reference"
-    if raw in {"image", "image_to_video", "i2v", "image2video"}:
+    if raw in {"image", "image_to_video", "i2v", "image2video", "image->video"}:
         return "image_to_video"
     return "text_to_video"
 
@@ -69,6 +125,11 @@ def normalize_seedance_kie_duration(value: Any, default: int = 5) -> int:
     return min(SEEDANCE_KIE_ALLOWED_DURATIONS, key=lambda item: (abs(item - out), item))
 
 
+def normalize_seedance_kie_aspect_ratio(value: Any, default: str = "16:9") -> str:
+    raw = str(value or default).strip()
+    return raw if raw in SEEDANCE_KIE_ALLOWED_ASPECT_RATIOS else default
+
+
 def seedance_kie_tokens_for_duration(model: Any, duration: Any) -> int:
     normalized_model = normalize_seedance_kie_model(model)
     normalized_duration = normalize_seedance_kie_duration(duration)
@@ -77,7 +138,7 @@ def seedance_kie_tokens_for_duration(model: Any, duration: Any) -> int:
 
 def seedance_kie_video_reference_surcharge(model: Any) -> int:
     normalized_model = normalize_seedance_kie_model(model)
-    return int(SEEDANCE_KIE_VIDEO_REFERENCE_SURCHARGE[normalized_model])
+    return int(SEEDANCE_KIE_VIDEO_REFERENCE_SURCHARGE.get(normalized_model, 0))
 
 
 def seedance_kie_resolution(model: Any) -> str:
@@ -85,16 +146,11 @@ def seedance_kie_resolution(model: Any) -> str:
 
 
 def seedance_kie_model_id(model: Any) -> str:
-    return SEEDANCE_KIE_TASK_TYPES[normalize_seedance_kie_model(model)]
+    return SEEDANCE_KIE_MODEL_IDS[normalize_seedance_kie_model(model)]
 
 
-def normalize_seedance_kie_aspect_ratio(value: Any, default: str = "16:9") -> str:
-    raw = str(value or default).strip()
-    if raw in SEEDANCE_KIE_ALLOWED_ASPECT_RATIOS:
-        return raw
-    return default
-
-
+def seedance_kie_display_name(model: Any) -> str:
+    return SEEDANCE_KIE_DISPLAY_NAMES[normalize_seedance_kie_model(model)]
 
 
 def _looks_like_mp3(data: bytes) -> bool:
@@ -104,266 +160,6 @@ def _looks_like_mp3(data: bytes) -> bool:
     if len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0:
         return True
     return False
-
-def _auth_headers() -> Dict[str, str]:
-    if not PIAPI_API_KEY:
-        raise SeedanceKieError("PIAPI API key is not configured. Set PIAPI_API_KEY or PIAPI_KEY.")
-    return {"X-API-Key": PIAPI_API_KEY, "Content-Type": "application/json"}
-
-
-def _upload_public_file(user_id: int, kind: str, idx: int, raw: bytes) -> str:
-    if not raw:
-        raise SeedanceKieError("Empty upload payload")
-    ext = _guess_ext(raw, default="bin")
-    mime = _guess_mime(ext, raw)
-    path = f"workspace_refs/{int(user_id)}/seedance/{kind}/{int(time.time())}_{idx}.{ext}"
-    return upload_bytes_to_supabase(path, raw, mime)
-
-
-async def _upload_files(user_id: int, files: Sequence[bytes], kind: str) -> List[str]:
-    urls: List[str] = []
-    for idx, raw in enumerate(files or [], start=1):
-        if not raw:
-            continue
-        urls.append(_upload_public_file(int(user_id), kind, idx, raw))
-    return urls
-
-
-def _extract_task_id(payload: Dict[str, Any]) -> str:
-    data = payload.get("data") if isinstance(payload, dict) else None
-    if isinstance(data, dict):
-        for key in ("task_id", "taskId", "id"):
-            value = str(data.get(key) or "").strip()
-            if value:
-                return value
-    for key in ("task_id", "taskId", "id"):
-        value = str(payload.get(key) or "").strip() if isinstance(payload, dict) else ""
-        if value:
-            return value
-    return ""
-
-
-def _extract_status(payload: Dict[str, Any]) -> str:
-    if not isinstance(payload, dict):
-        return ""
-    if payload.get("status"):
-        return str(payload.get("status") or "").strip().lower()
-    data = payload.get("data")
-    if isinstance(data, dict):
-        return str(data.get("status") or "").strip().lower()
-    return ""
-
-
-def _extract_error(payload: Dict[str, Any]) -> str:
-    if not isinstance(payload, dict):
-        return ""
-    message = str(payload.get("message") or "").strip()
-    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
-    error = data.get("error") if isinstance(data, dict) else None
-    if isinstance(error, dict):
-        detail = str(error.get("message") or error.get("raw_message") or error.get("detail") or "").strip()
-        if detail:
-            return detail
-    return message
-
-
-def _extract_video_url(payload: Dict[str, Any]) -> Optional[str]:
-    if not isinstance(payload, dict):
-        return None
-    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
-    output = data.get("output") if isinstance(data, dict) else None
-    if isinstance(output, dict):
-        for key in ("video", "video_url", "videoUrl", "url"):
-            value = output.get(key)
-            if isinstance(value, str) and value.startswith("http"):
-                return value
-    return None
-
-
-async def _request_json(method: str, path: str, *, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    url = f"{PIAPI_BASE_URL}{path}"
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.request(method.upper(), url, headers=_auth_headers(), json=payload)
-    parsed: Optional[Dict[str, Any]] = None
-    try:
-        candidate = resp.json()
-        if isinstance(candidate, dict):
-            parsed = candidate
-    except Exception:
-        parsed = None
-    if resp.status_code >= 300:
-        if parsed:
-            task_id = _extract_task_id(parsed)
-            status = _extract_status(parsed) or "unknown"
-            detail = _extract_error(parsed) or str(resp.text[:800] or "PiAPI request failed").strip()
-            suffix = f" [task_id={task_id}; status={status}]" if task_id else ""
-            raise SeedanceKieError(f"PiAPI request failed ({resp.status_code}){suffix}: {detail}")
-        raise SeedanceKieError(f"PiAPI request failed ({resp.status_code}): {resp.text[:800]}")
-    if parsed is None:
-        try:
-            data = resp.json()
-        except Exception as exc:
-            raise SeedanceKieError("PiAPI returned invalid JSON") from exc
-    else:
-        data = parsed
-    code = data.get("code") if isinstance(data, dict) else None
-    if code not in (None, 0, 200, "0", "200"):
-        raise SeedanceKieError(_extract_error(data) or f"PiAPI returned error code {code}")
-    return data if isinstance(data, dict) else {"data": data}
-
-
-async def _create_task(*, model: str, input_payload: Dict[str, Any]) -> Dict[str, Any]:
-    body: Dict[str, Any] = {
-        "model": "seedance",
-        "task_type": seedance_kie_model_id(model),
-        "input": input_payload,
-        "config": {"service_mode": PIAPI_SEEDANCE_SERVICE_MODE},
-    }
-    return await _request_json("POST", "/api/v1/task", payload=body)
-
-
-async def _wait_task(task_id: str) -> Dict[str, Any]:
-    started = time.monotonic()
-    last: Dict[str, Any] = {}
-    while True:
-        last = await _request_json("GET", f"/api/v1/task/{task_id}")
-        status = _extract_status(last)
-        if status in {"completed", "failed"}:
-            return last
-        if (time.monotonic() - started) >= PIAPI_SEEDANCE_TIMEOUT_SECONDS:
-            raise SeedanceKieError(f"Seedance timeout. Last status: {status or 'unknown'}")
-        await asyncio.sleep(PIAPI_SEEDANCE_POLL_SECONDS)
-
-
-async def _run_seedance_task(*, model: str, input_payload: Dict[str, Any]) -> str:
-    created = await _create_task(model=model, input_payload=input_payload)
-    task_id = _extract_task_id(created)
-    if not task_id:
-        raise SeedanceKieError(f"PiAPI did not return task_id: {created}")
-    done = await _wait_task(task_id)
-    status = _extract_status(done)
-    if status != "completed":
-        raise SeedanceKieError(_extract_error(done) or f"Seedance task finished with status: {status or 'unknown'}")
-    video_url = _extract_video_url(done)
-    if not video_url:
-        raise SeedanceKieError(f"Seedance task completed but no video url was returned: {done}")
-    return video_url
-
-
-async def run_seedance_kie_text_to_video(*, model: Any, prompt: str, duration: Any, aspect_ratio: Any = "16:9") -> str:
-    normalized_model = normalize_seedance_kie_model(model)
-    clean_prompt = str(prompt or "").strip()
-    if not clean_prompt:
-        raise SeedanceKieError("Seedance prompt is required")
-    input_payload: Dict[str, Any] = {
-        "prompt": clean_prompt,
-        "mode": "text_to_video",
-        "duration": normalize_seedance_kie_duration(duration),
-        "aspect_ratio": normalize_seedance_kie_aspect_ratio(aspect_ratio),
-    }
-    return await _run_seedance_task(model=normalized_model, input_payload=input_payload)
-
-
-async def run_seedance_kie_image_to_video(
-    *,
-    user_id: int,
-    model: Any,
-    prompt: str,
-    duration: Any,
-    aspect_ratio: Any = "16:9",
-    start_frame: bytes | None = None,
-    last_frame: bytes | None = None,
-    reference_images: Sequence[bytes] | None = None,
-    reference_audios: Sequence[bytes] | None = None,
-) -> str:
-    normalized_model = normalize_seedance_kie_model(model)
-    clean_prompt = str(prompt or "").strip()
-    if not clean_prompt:
-        raise SeedanceKieError("Seedance prompt is required")
-
-    extra_images = list(reference_images or [])[:7]
-    audio_refs = list(reference_audios or [])[:3]
-    start_raw = start_frame if start_frame else None
-    last_raw = last_frame if last_frame else None
-
-    only_frame_refs = bool(start_raw or last_raw) and not extra_images and not audio_refs
-    if only_frame_refs:
-        image_payload = [raw for raw in [start_raw, last_raw] if raw]
-        image_urls = await _upload_files(int(user_id), image_payload[:2], "image")
-        if not image_urls:
-            raise SeedanceKieError("Seedance Image→Video requires at least one image reference")
-        input_payload: Dict[str, Any] = {
-            "prompt": clean_prompt,
-            "mode": "first_last_frames",
-            "duration": normalize_seedance_kie_duration(duration),
-            "image_urls": image_urls,
-        }
-        return await _run_seedance_task(model=normalized_model, input_payload=input_payload)
-
-    image_payload: List[bytes] = []
-    if start_raw:
-        image_payload.append(start_raw)
-    image_payload.extend(extra_images)
-    if last_raw:
-        image_payload.append(last_raw)
-
-    image_urls = await _upload_files(int(user_id), image_payload[:7], "image")
-    if not image_urls:
-        raise SeedanceKieError("Seedance Image→Video requires at least one image reference")
-    audio_urls = await _upload_files(int(user_id), audio_refs, "audio")
-    input_payload = {
-        "prompt": clean_prompt,
-        "mode": "omni_reference",
-        "duration": normalize_seedance_kie_duration(duration),
-        "aspect_ratio": normalize_seedance_kie_aspect_ratio(aspect_ratio),
-        "image_urls": image_urls,
-    }
-    if audio_urls:
-        input_payload["audio_urls"] = audio_urls
-    return await _run_seedance_task(model=normalized_model, input_payload=input_payload)
-
-
-async def run_seedance_kie_omni_reference(
-    *,
-    user_id: int,
-    model: Any,
-    prompt: str,
-    duration: Any,
-    aspect_ratio: Any = "16:9",
-    reference_images: Sequence[bytes] | None = None,
-    reference_videos: Sequence[bytes] | None = None,
-    reference_audios: Sequence[bytes] | None = None,
-) -> str:
-    normalized_model = normalize_seedance_kie_model(model)
-    clean_prompt = str(prompt or "").strip()
-    if not clean_prompt:
-        raise SeedanceKieError("Seedance prompt is required")
-
-    image_refs = list(reference_images or [])[:12]
-    video_refs = list(reference_videos or [])[:12]
-    audio_refs = list(reference_audios or [])[:3]
-    if not image_refs and not video_refs and not audio_refs:
-        raise SeedanceKieError("Seedance Omni Reference requires at least one reference")
-    if audio_refs and not (image_refs or video_refs):
-        raise SeedanceKieError("Seedance Omni Reference does not support audio-only input")
-
-    image_urls = await _upload_files(int(user_id), image_refs, "image")
-    video_urls = await _upload_files(int(user_id), video_refs, "video")
-    audio_urls = await _upload_files(int(user_id), audio_refs, "audio")
-
-    input_payload: Dict[str, Any] = {
-        "prompt": clean_prompt,
-        "mode": "omni_reference",
-        "duration": normalize_seedance_kie_duration(duration),
-        "aspect_ratio": normalize_seedance_kie_aspect_ratio(aspect_ratio),
-    }
-    if image_urls:
-        input_payload["image_urls"] = image_urls
-    if video_urls:
-        input_payload["video_urls"] = video_urls
-    if audio_urls:
-        input_payload["audio_urls"] = audio_urls
-    return await _run_seedance_task(model=normalized_model, input_payload=input_payload)
 
 
 def _guess_ext(data: bytes, default: str = "bin") -> str:
@@ -416,3 +212,287 @@ def _guess_mime(ext_or_name: str, data: bytes) -> str:
     if name.endswith(".mp3") or name == "mp3" or _looks_like_mp3(data):
         return "audio/mpeg"
     return "application/octet-stream"
+
+
+def _auth_headers() -> Dict[str, str]:
+    if not KIE_API_TOKEN:
+        raise SeedanceKieError("KIE API token is not configured. Set KIE_API_TOKEN or KIE_API_KEY.")
+    return {"Authorization": f"Bearer {KIE_API_TOKEN}", "Content-Type": "application/json"}
+
+
+def _clean_prompt(prompt: Any) -> str:
+    text = str(prompt or "").strip()
+    if not text:
+        raise SeedanceKieError("Seedance prompt is required")
+    if len(text) > SEEDANCE_KIE_PROMPT_MAX_CHARS:
+        raise SeedanceKieError(f"Seedance prompt is too long. Maximum: {SEEDANCE_KIE_PROMPT_MAX_CHARS} characters")
+    return text
+
+
+def _upload_public_file(user_id: int, kind: str, idx: int, raw: bytes) -> str:
+    if not raw:
+        raise SeedanceKieError("Empty upload payload")
+    ext = _guess_ext(raw, default="bin")
+    mime = _guess_mime(ext, raw)
+    path = f"workspace_refs/{int(user_id)}/seedance_kie/{kind}/{int(time.time())}_{os.urandom(4).hex()}_{idx}.{ext}"
+    try:
+        return upload_bytes_to_supabase(path, raw, mime)
+    except KlingFlowError as exc:
+        raise SeedanceKieError(str(exc)) from exc
+    except Exception as exc:
+        raise SeedanceKieError(f"Failed to upload Seedance {kind} reference: {exc}") from exc
+
+
+async def _upload_files(user_id: int, files: Sequence[bytes] | None, kind: str, *, limit: int) -> List[str]:
+    urls: List[str] = []
+    for idx, raw in enumerate(list(files or [])[:limit], start=1):
+        if raw:
+            urls.append(_upload_public_file(int(user_id), kind, idx, raw))
+    return urls
+
+
+def _extract_task_id(payload: Dict[str, Any]) -> str:
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if isinstance(data, dict):
+        for key in ("taskId", "task_id", "id"):
+            value = str(data.get(key) or "").strip()
+            if value:
+                return value
+    for key in ("taskId", "task_id", "id"):
+        value = str(payload.get(key) or "").strip() if isinstance(payload, dict) else ""
+        if value:
+            return value
+    return ""
+
+
+def _extract_video_url_from_result(result: Any) -> Optional[str]:
+    if isinstance(result, str):
+        raw = result.strip()
+        if raw.startswith("{") or raw.startswith("["):
+            try:
+                return _extract_video_url_from_result(json.loads(raw))
+            except Exception:
+                pass
+        if raw.startswith("http://") or raw.startswith("https://"):
+            return raw
+        return None
+    if isinstance(result, list):
+        for item in result:
+            found = _extract_video_url_from_result(item)
+            if found:
+                return found
+        return None
+    if isinstance(result, dict):
+        for key in (
+            "videoUrl",
+            "video_url",
+            "resultUrl",
+            "result_url",
+            "url",
+            "downloadUrl",
+            "download_url",
+        ):
+            found = _extract_video_url_from_result(result.get(key))
+            if found:
+                return found
+        for key in ("resultUrls", "result_urls", "videos", "urls", "output", "data"):
+            found = _extract_video_url_from_result(result.get(key))
+            if found:
+                return found
+        for value in result.values():
+            found = _extract_video_url_from_result(value)
+            if found:
+                return found
+    return None
+
+
+async def _request_json(
+    client: httpx.AsyncClient,
+    method: str,
+    path: str,
+    *,
+    payload: Optional[Dict[str, Any]] = None,
+    params: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    url = f"{KIE_API_BASE}{path}"
+    resp = await client.request(method.upper(), url, headers=_auth_headers(), json=payload, params=params)
+    try:
+        data = resp.json()
+    except Exception:
+        data = {"raw": resp.text}
+    if resp.status_code >= 400:
+        detail = data.get("msg") or data.get("message") or data.get("error") or resp.text[:800] or f"HTTP {resp.status_code}"
+        raise SeedanceKieError(f"KIE Seedance request failed ({resp.status_code}): {detail}")
+    if isinstance(data, dict):
+        code = str(data.get("code") or "200")
+        msg = str(data.get("msg") or data.get("message") or "").strip().lower()
+        if code not in {"0", "200"} and msg != "success":
+            detail = data.get("msg") or data.get("message") or data.get("error") or data
+            raise SeedanceKieError(f"KIE Seedance API error: {detail}")
+    return data if isinstance(data, dict) else {"data": data}
+
+
+async def _create_task(client: httpx.AsyncClient, *, model: str, input_payload: Dict[str, Any]) -> Dict[str, Any]:
+    body: Dict[str, Any] = {
+        "model": seedance_kie_model_id(model),
+        "input": input_payload,
+    }
+    if KIE_SEEDANCE_CALLBACK_URL:
+        body["callBackUrl"] = KIE_SEEDANCE_CALLBACK_URL
+    return await _request_json(client, "POST", "/api/v1/jobs/createTask", payload=body)
+
+
+async def _wait_task(client: httpx.AsyncClient, task_id: str) -> Dict[str, Any]:
+    started = time.monotonic()
+    last_state = ""
+    while True:
+        payload = await _request_json(client, "GET", "/api/v1/jobs/recordInfo", params={"taskId": task_id})
+        data = payload.get("data") if isinstance(payload, dict) else None
+        data = data if isinstance(data, dict) else {}
+        state = str(data.get("state") or data.get("status") or "").strip().lower()
+        if state:
+            last_state = state
+        if state == "success":
+            return payload
+        if state in {"fail", "failed", "error"}:
+            detail = data.get("failMsg") or data.get("errorMessage") or data.get("msg") or data.get("message") or data
+            raise SeedanceKieError(f"KIE Seedance task failed: {detail}")
+        if (time.monotonic() - started) >= KIE_SEEDANCE_TIMEOUT_SECONDS:
+            raise SeedanceKieError(f"Seedance timeout. Last state: {last_state or 'unknown'}")
+        await asyncio.sleep(max(1.0, KIE_SEEDANCE_POLL_SECONDS))
+
+
+async def _run_seedance_task(*, model: str, input_payload: Dict[str, Any]) -> str:
+    timeout = httpx.Timeout(max(60.0, KIE_SEEDANCE_TIMEOUT_SECONDS + 120.0), connect=60.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        created = await _create_task(client, model=model, input_payload=input_payload)
+        task_id = _extract_task_id(created)
+        if not task_id:
+            raise SeedanceKieError(f"KIE Seedance createTask did not return taskId: {created}")
+        done = await _wait_task(client, task_id)
+    data = done.get("data") if isinstance(done, dict) else None
+    data = data if isinstance(data, dict) else {}
+    result = data.get("resultJson") or data.get("result") or data.get("output")
+    video_url = _extract_video_url_from_result(result)
+    if not video_url:
+        raise SeedanceKieError(f"KIE Seedance task succeeded but no video URL was returned: {data}")
+    return video_url
+
+
+def _base_input_payload(*, prompt: str, model: str, duration: Any, aspect_ratio: Any) -> Dict[str, Any]:
+    return {
+        "prompt": _clean_prompt(prompt),
+        "return_last_frame": False,
+        "generate_audio": True,
+        "resolution": seedance_kie_resolution(model),
+        "aspect_ratio": normalize_seedance_kie_aspect_ratio(aspect_ratio),
+        "duration": normalize_seedance_kie_duration(duration),
+        "web_search": False,
+    }
+
+
+async def run_seedance_kie_text_to_video(*, model: Any, prompt: str, duration: Any, aspect_ratio: Any = "16:9") -> str:
+    normalized_model = normalize_seedance_kie_model(model)
+    input_payload = _base_input_payload(prompt=prompt, model=normalized_model, duration=duration, aspect_ratio=aspect_ratio)
+    return await _run_seedance_task(model=normalized_model, input_payload=input_payload)
+
+
+async def run_seedance_kie_image_to_video(
+    *,
+    user_id: int,
+    model: Any,
+    prompt: str,
+    duration: Any,
+    aspect_ratio: Any = "16:9",
+    start_frame: bytes | None = None,
+    last_frame: bytes | None = None,
+    reference_images: Sequence[bytes] | None = None,
+    reference_audios: Sequence[bytes] | None = None,
+) -> str:
+    normalized_model = normalize_seedance_kie_model(model)
+    start_raw = bytes(start_frame) if start_frame else None
+    last_raw = bytes(last_frame) if last_frame else None
+    extra_images = [bytes(item) for item in list(reference_images or []) if item]
+    audio_refs = [bytes(item) for item in list(reference_audios or []) if item]
+
+    # KIE docs: strict Image→Video and Multimodal Reference-to-Video are mutually exclusive.
+    # Audio refs belong to Omni Reference; do not mix them into first/last-frame I2V payloads.
+    if audio_refs:
+        refs: List[bytes] = []
+        if start_raw:
+            refs.append(start_raw)
+        refs.extend(extra_images)
+        if last_raw:
+            refs.append(last_raw)
+        return await run_seedance_kie_omni_reference(
+            user_id=user_id,
+            model=normalized_model,
+            prompt=prompt,
+            duration=duration,
+            aspect_ratio=aspect_ratio,
+            reference_images=refs,
+            reference_audios=audio_refs,
+        )
+
+    frames: List[bytes] = []
+    if start_raw:
+        frames.append(start_raw)
+    frames.extend(extra_images)
+    if last_raw:
+        frames.append(last_raw)
+    frames = [raw for raw in frames if raw]
+
+    if not frames:
+        raise SeedanceKieError("Seedance Image→Video requires at least one first/last frame")
+    if len(frames) > 2:
+        raise SeedanceKieError("Seedance Image→Video supports maximum 2 images: first frame and optional last frame")
+
+    image_urls = await _upload_files(int(user_id), frames, "image", limit=2)
+    input_payload = _base_input_payload(prompt=prompt, model=normalized_model, duration=duration, aspect_ratio=aspect_ratio)
+    input_payload["first_frame_url"] = image_urls[0]
+    if len(image_urls) > 1:
+        input_payload["last_frame_url"] = image_urls[1]
+    return await _run_seedance_task(model=normalized_model, input_payload=input_payload)
+
+
+async def run_seedance_kie_omni_reference(
+    *,
+    user_id: int,
+    model: Any,
+    prompt: str,
+    duration: Any,
+    aspect_ratio: Any = "16:9",
+    reference_images: Sequence[bytes] | None = None,
+    reference_videos: Sequence[bytes] | None = None,
+    reference_audios: Sequence[bytes] | None = None,
+) -> str:
+    normalized_model = normalize_seedance_kie_model(model)
+    image_refs = [bytes(item) for item in list(reference_images or []) if item]
+    video_refs = [bytes(item) for item in list(reference_videos or []) if item]
+    audio_refs = [bytes(item) for item in list(reference_audios or []) if item]
+
+    if not image_refs and not video_refs and not audio_refs:
+        raise SeedanceKieError("Seedance Omni Reference requires at least one reference")
+    if audio_refs and not (image_refs or video_refs):
+        raise SeedanceKieError("Seedance Omni Reference does not support audio-only input")
+    if len(audio_refs) > SEEDANCE_KIE_MAX_AUDIO_REFS:
+        raise SeedanceKieError(f"Seedance supports maximum {SEEDANCE_KIE_MAX_AUDIO_REFS} audio references")
+    if len(video_refs) > SEEDANCE_KIE_MAX_VIDEO_REFS:
+        raise SeedanceKieError(f"Seedance supports maximum {SEEDANCE_KIE_MAX_VIDEO_REFS} video references")
+    if len(image_refs) > SEEDANCE_KIE_MAX_IMAGE_REFS:
+        raise SeedanceKieError(f"Seedance supports maximum {SEEDANCE_KIE_MAX_IMAGE_REFS} image references")
+    if len(image_refs) + len(video_refs) + len(audio_refs) > SEEDANCE_KIE_MAX_TOTAL_OMNI_REFS:
+        raise SeedanceKieError(f"Seedance supports maximum {SEEDANCE_KIE_MAX_TOTAL_OMNI_REFS} total references")
+
+    image_urls = await _upload_files(int(user_id), image_refs, "image", limit=SEEDANCE_KIE_MAX_IMAGE_REFS)
+    video_urls = await _upload_files(int(user_id), video_refs, "video", limit=SEEDANCE_KIE_MAX_VIDEO_REFS)
+    audio_urls = await _upload_files(int(user_id), audio_refs, "audio", limit=SEEDANCE_KIE_MAX_AUDIO_REFS)
+
+    input_payload = _base_input_payload(prompt=prompt, model=normalized_model, duration=duration, aspect_ratio=aspect_ratio)
+    if image_urls:
+        input_payload["reference_image_urls"] = image_urls
+    if video_urls:
+        input_payload["reference_video_urls"] = video_urls
+    if audio_urls:
+        input_payload["reference_audio_urls"] = audio_urls
+    return await _run_seedance_task(model=normalized_model, input_payload=input_payload)
