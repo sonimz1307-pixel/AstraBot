@@ -122,6 +122,7 @@ from seedance_kie import (
     run_seedance_kie_text_to_video,
     seedance_kie_tokens_for_duration,
     seedance_kie_video_reference_surcharge,
+    seedance_kie_resolution,
 )
 from pixverse_c1 import (
     PixVerseC1Error,
@@ -1439,7 +1440,7 @@ def _normalize_workspace_video_resolution(provider: str, model: str, resolution:
         return normalize_gemini_omni_resolution(value or "1080p")
     if provider == "seedance_kie":
         normalized_model = normalize_seedance_kie_model(model)
-        return "480p" if normalized_model == "seedance-kie-fast" else "720p"
+        return seedance_kie_resolution(normalized_model)
     if provider == "pixverse_c1":
         return normalize_pixverse_c1_quality(value or "720p")
     if value in {"720", "720p"}:
@@ -4030,8 +4031,8 @@ def _workspace_video_charge_spec(
                 "model": normalized_model,
                 "mode": normalized_mode,
                 "duration": normalized_duration,
-                "resolution": ("480p" if normalized_model == "seedance-kie-fast" else "720p"),
-                "generate_audio": True,
+                "resolution": seedance_kie_resolution(normalized_model),
+                "generate_audio": False,
                 "base_tokens": base_tokens,
                 "video_reference_surcharge_tokens": video_ref_surcharge,
                 "has_video_reference": bool(has_seedance_video_reference),
@@ -4285,15 +4286,16 @@ async def workspace_video_run(
         duration = normalize_seedance_kie_duration(duration)
         resolution = _normalize_workspace_video_resolution(provider, model, resolution)
         aspect_ratio = normalize_seedance_kie_aspect_ratio(aspect_ratio)
-        enable_audio = True
+        enable_audio = False
         if mode == "image_to_video":
             total_image_refs = len(reference_images) + (1 if start_frame else 0) + (1 if last_frame else 0)
             if total_image_refs < 1:
                 raise HTTPException(status_code=400, detail="Для Seedance 2.0 Image→Video нужен хотя бы один image reference.")
-            if total_image_refs > 7:
-                raise HTTPException(status_code=400, detail="Для Seedance 2.0 доступно максимум 7 image references суммарно.")
-            if len(reference_audios) > 3:
-                raise HTTPException(status_code=400, detail="Для Seedance 2.0 доступно максимум 3 audio references.")
+            if total_image_refs > 2:
+                raise HTTPException(status_code=400, detail="Seedance 2.0 Image→Video поддерживает максимум 2 изображения: first frame и optional last frame. Для большего числа refs используй Omni Reference.")
+            if len(reference_audios) > 0 or len(reference_videos) > 0:
+                raise HTTPException(status_code=400, detail="Audio/video refs нельзя смешивать с Image→Video. Для них используй Omni Reference.")
+            reference_audios = []
             reference_videos = []
         elif mode == "omni_reference":
             total_refs = len(reference_images) + len(reference_videos) + len(reference_audios)
@@ -4303,6 +4305,8 @@ async def workspace_video_run(
                 raise HTTPException(status_code=400, detail="Для Seedance 2.0 Omni Reference доступно максимум 12 refs суммарно.")
             if len(reference_audios) > 3:
                 raise HTTPException(status_code=400, detail="Для Seedance 2.0 доступно максимум 3 audio references.")
+            if len(reference_videos) > 3:
+                raise HTTPException(status_code=400, detail="Для Seedance 2.0 доступно максимум 3 video references.")
             if reference_audios and not (reference_images or reference_videos):
                 raise HTTPException(status_code=400, detail="Для Seedance 2.0 Omni Reference audio-only не поддерживается: нужен хотя бы один image или video reference.")
             if reference_video_total_duration_sec > SEEDANCE_VIDEO_TOTAL_MAX_DURATION_SEC:
