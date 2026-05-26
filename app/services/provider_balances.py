@@ -79,6 +79,20 @@ def _piapi_api_key() -> str:
     ).strip()
 
 
+def _kie_base_url() -> str:
+    return (os.getenv("KIE_API_BASE") or os.getenv("KIE_BASE_URL") or "https://api.kie.ai").strip().rstrip("/")
+
+
+def _kie_api_key() -> str:
+    return (
+        os.getenv("KIE_API_TOKEN")
+        or os.getenv("KIE_API_KEY")
+        or os.getenv("KIE_TOKEN")
+        or os.getenv("KIE_AI_API_KEY")
+        or ""
+    ).strip()
+
+
 def _cache_seconds() -> int:
     raw = (os.getenv("ADMIN_PROVIDER_BALANCE_CACHE_SECONDS") or "60").strip()
     try:
@@ -113,6 +127,25 @@ def _safe_piapi_raw_fields(account_data: Dict[str, Any]) -> Dict[str, Any]:
         leaf = key.split(".")[-1].lower()
         if leaf in allowed:
             safe[key] = value
+    return safe
+
+
+def _safe_kie_raw_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
+    safe: Dict[str, Any] = {}
+    for key in ("code", "msg", "message"):
+        value = payload.get(key)
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            safe[key] = value
+
+    data = payload.get("data")
+    if isinstance(data, (str, int, float, bool)) or data is None:
+        safe["data"] = data
+    elif isinstance(data, dict):
+        allowed = {"credit", "credits", "balance", "remaining_credit", "remaining_credits", "available_credit"}
+        for key, value in _flatten_dict(data).items():
+            leaf = key.split(".")[-1].lower()
+            if leaf in allowed:
+                safe[f"data.{key}"] = value
     return safe
 
 
@@ -190,8 +223,71 @@ async def fetch_piapi_balance() -> ProviderBalance:
     )
 
 
+async def fetch_kie_balance() -> ProviderBalance:
+    checked_at = _now_iso()
+    api_key = _kie_api_key()
+    if not api_key:
+        return ProviderBalance(
+            provider="kie",
+            title="KIE.ai",
+            configured=False,
+            status="not_configured",
+            checked_at=checked_at,
+            currency="credits",
+            message="KIE_API_TOKEN или KIE_API_KEY не настроен в env.",
+        )
+
+    url = f"{_kie_base_url()}/api/v1/chat/credit"
+    headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
+    timeout = float(os.getenv("ADMIN_PROVIDER_BALANCE_TIMEOUT_SECONDS", "20") or "20")
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(url, headers=headers)
+            text = response.text[:1000]
+            if response.status_code >= 400:
+                raise ProviderBalanceError(f"KIE HTTP {response.status_code}: {text}")
+            payload = response.json()
+    except ProviderBalanceError:
+        raise
+    except Exception as exc:
+        raise ProviderBalanceError(f"KIE balance request failed: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise ProviderBalanceError("KIE returned unsupported balance response")
+
+    code = payload.get("code")
+    if code is not None and str(code) not in {"0", "200"}:
+        raise ProviderBalanceError(f"KIE API error: {payload.get('msg') or payload.get('message') or payload}")
+
+    data = payload.get("data")
+    credits = _float_or_none(data)
+    if credits is None and isinstance(data, dict):
+        flat = {k.lower(): v for k, v in _flatten_dict(data).items()}
+        for key, value in flat.items():
+            if key.split(".")[-1] in {"credit", "credits", "balance", "remaining_credit", "remaining_credits", "available_credit"}:
+                credits = _float_or_none(value)
+                if credits is not None:
+                    break
+
+    if credits is None:
+        raise ProviderBalanceError(f"KIE returned balance response without credits: {payload}")
+
+    return ProviderBalance(
+        provider="kie",
+        title="KIE.ai",
+        configured=True,
+        status="ok",
+        checked_at=checked_at,
+        credits=credits,
+        currency="credits",
+        raw_fields=_safe_kie_raw_fields(payload),
+    )
+
+
 _PROVIDER_FETCHERS: Dict[str, Fetcher] = {
     "piapi": fetch_piapi_balance,
+    "kie": fetch_kie_balance,
 }
 
 
