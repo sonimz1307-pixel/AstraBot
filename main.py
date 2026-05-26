@@ -8,6 +8,7 @@ import urllib.parse
 import hashlib
 import hmac
 import logging
+import tempfile
 from uuid import uuid4, uuid5, NAMESPACE_URL
 from io import BytesIO
 from typing import Optional, Literal, Dict, Any, Tuple, List, Union
@@ -63,13 +64,16 @@ from grok_video_replicate import (
     normalize_grok_resolution,
 )
 from gemini_omni_video import (
+    KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC,
     gemini_omni_tokens_for_duration,
+    gemini_omni_tokens_for_run,
     normalize_gemini_omni_aspect_ratio,
     normalize_gemini_omni_duration,
     normalize_gemini_omni_mode,
     normalize_gemini_omni_resolution,
 )
 from app.routers.tts import router as tts_router
+from app.services.video_editor_service import create_workspace_upload_record, probe_media
 
 app = FastAPI()
 
@@ -1979,18 +1983,29 @@ async def _enqueue_tg_grok_job(*, chat_id: int, user_id: int, mode: str, prompt:
     return job
 
 
-async def _enqueue_tg_omni_flash_job(*, chat_id: int, user_id: int, mode: str, prompt: str, settings: dict, reference_images: list[tuple[bytes, str]] | None = None, reference_image_urls: list[str] | None = None, charge_tokens: int = 0, charge_ref_id: str = "") -> dict:
+async def _enqueue_tg_omni_flash_job(*, chat_id: int, user_id: int, mode: str, prompt: str, settings: dict, reference_images: list[tuple[bytes, str]] | None = None, reference_image_urls: list[str] | None = None, source_video_upload_id: str = "", source_video_end: int | None = None, charge_tokens: int = 0, charge_ref_id: str = "") -> dict:
     settings = dict(settings or {})
     duration = normalize_gemini_omni_duration(settings.get("duration") or 8)
     resolution = normalize_gemini_omni_resolution(settings.get("resolution") or "1080p")
     aspect_ratio = normalize_gemini_omni_aspect_ratio(settings.get("aspect_ratio") or "16:9")
-    reference_image_urls = [str(url or "").strip() for url in (reference_image_urls or []) if str(url or "").strip()][:7]
-    if mode == "image_to_video":
+    normalized_mode = normalize_gemini_omni_mode(mode)
+    max_refs = 5 if normalized_mode == "video_edit" else 7
+    reference_image_urls = [str(url or "").strip() for url in (reference_image_urls or []) if str(url or "").strip()][:max_refs]
+    source_video_upload_id = str(source_video_upload_id or "").strip()
+    if normalized_mode == "video_edit" and not source_video_upload_id:
+        raise RuntimeError("Для Google Omni Flash Video Edit нужно исходное видео")
+    normalized_source_video_end = None
+    if normalized_mode == "video_edit":
+        try:
+            normalized_source_video_end = int(max(1, min(float(KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC), float(source_video_end or KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC))))
+        except Exception:
+            normalized_source_video_end = int(KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC)
+    if normalized_mode == "image_to_video":
         # В нормальном Telegram flow фото уже загружены в Supabase сразу при получении,
         # чтобы не хранить bytes в user state/Redis. Этот fallback оставлен для старых вызовов.
         if not reference_image_urls:
             pairs = list(reference_images or [])
-            for idx, pair in enumerate(pairs[:7], start=1):
+            for idx, pair in enumerate(pairs[:max_refs], start=1):
                 image_bytes, image_name = pair
                 ext = "jpg"
                 mime = "image/jpeg"
@@ -2026,12 +2041,14 @@ async def _enqueue_tg_omni_flash_job(*, chat_id: int, user_id: int, mode: str, p
         "user_id": int(user_id),
         "provider": "google",
         "model": "gemini-omni-video",
-        "mode": "image_to_video" if mode == "image_to_video" else "text_to_video",
+        "mode": normalized_mode if normalized_mode in {"image_to_video", "video_edit"} else "text_to_video",
         "prompt": str(prompt or "").strip(),
         "duration": duration,
         "resolution": resolution,
         "aspect_ratio": aspect_ratio,
         "reference_image_urls": reference_image_urls,
+        "source_video_upload_id": source_video_upload_id if normalized_mode == "video_edit" else "",
+        "source_video_end": normalized_source_video_end if normalized_mode == "video_edit" else None,
         "charge_tokens": int(charge_tokens or 0),
         "charge_ref_id": str(charge_ref_id or ""),
         "refund_reason": "gemini_omni_video_refund",
@@ -2039,6 +2056,68 @@ async def _enqueue_tg_omni_flash_job(*, chat_id: int, user_id: int, mode: str, p
     }
     await enqueue_job(job, queue_name=WORKSPACE_MEDIA_QUEUE_NAME)
     return job
+
+
+def _detect_video_type(raw: bytes, filename: str = "", content_type: str = "") -> tuple[str, str]:
+    ctype = str(content_type or "").split(";", 1)[0].strip().lower()
+    suffix = str(filename or "").rsplit(".", 1)[-1].lower().strip() if "." in str(filename or "") else ""
+    head = bytes((raw or b"")[:16])
+    if suffix == "mov" or ctype in {"video/quicktime", "video/mov"}:
+        return "mov", "video/quicktime"
+    if suffix == "webm" or ctype == "video/webm":
+        return "webm", "video/webm"
+    if suffix == "mp4" or ctype == "video/mp4" or head[4:8] == b"ftyp":
+        return "mp4", "video/mp4"
+    return "mp4", "video/mp4"
+
+
+def _probe_video_duration_from_bytes(raw: bytes, ext: str = "mp4") -> float:
+    tmp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{(ext or 'mp4').strip('.').lower() or 'mp4'}") as tmp:
+            tmp.write(raw or b"")
+            tmp.flush()
+            tmp_path = tmp.name
+        meta = probe_media(tmp_path)
+        return float(meta.get("duration") or meta.get("duration_sec") or 0.0)
+    except Exception:
+        return 0.0
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+
+def _upload_omni_flash_source_video(*, user_id: int, video_bytes: bytes, filename: str = "omni_flash_source.mp4", content_type: str = "video/mp4", duration_hint: float = 0.0) -> tuple[str, float]:
+    if not video_bytes:
+        raise RuntimeError("Пустое видео")
+    ext, mime = _detect_video_type(video_bytes, filename, content_type)
+    duration_sec = float(duration_hint or 0)
+    if duration_sec <= 0:
+        duration_sec = _probe_video_duration_from_bytes(video_bytes, ext)
+    if duration_sec <= 0:
+        raise RuntimeError("Не удалось определить длительность видео")
+    if duration_sec > float(KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC):
+        raise RuntimeError(f"Видео слишком длинное. Максимум {KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC} секунд.")
+
+    # Telegram Video Edit source videos use the same workspace upload pipeline as the site:
+    # ffprobe metadata, workspace-videos bucket, workspace_video_uploads row, signed/public access URL, TTL cleanup.
+    # Important: store/pass upload_id, not a short-lived signed URL. The worker will build a fresh URL right before KIE request.
+    upload_row = create_workspace_upload_record(
+        user_id=int(user_id),
+        filename=filename or f"omni_flash_source.{ext}",
+        content_type=mime,
+        raw_bytes=video_bytes,
+    )
+    upload_id = str(upload_row.get("id") or "").strip()
+    if not upload_id:
+        raise RuntimeError("Не удалось сохранить исходное видео")
+    row_duration = float(upload_row.get("duration_sec") or 0)
+    if row_duration > 0:
+        duration_sec = row_duration
+    return upload_id, duration_sec
 
 
 def _clear_music_ctx(st: dict, chat_id: int, user_id: int) -> None:
@@ -6063,6 +6142,8 @@ async def webhook(secret: str, request: Request):
             flow = str(payload.get("flow") or payload.get("mode") or "text").lower().strip()
             if flow in ("image", "i2v", "image_to_video", "image2video", "image->video"):
                 flow = "image"
+            elif flow in ("video", "video_edit", "video_to_video", "v2v", "video2video", "video->video", "edit_video"):
+                flow = "video_edit"
             else:
                 flow = "text"
 
@@ -6077,7 +6158,7 @@ async def webhook(secret: str, request: Request):
                 "duration": duration,
                 "resolution": resolution,
                 "aspect_ratio": aspect_ratio,
-                "max_images": 7,
+                "max_images": 5 if flow == "video_edit" else 7,
             }
             st["ts"] = _now()
 
@@ -6087,6 +6168,14 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(
                     chat_id,
                     f"✅ Настройки Google Omni Flash сохранены: Text → Video • {duration} сек • {resolution} • {aspect_ratio}\n\nТеперь пришли промпт одним сообщением.",
+                    reply_markup=_help_menu_for(user_id),
+                )
+            elif flow == "video_edit":
+                _set_mode(chat_id, user_id, "omni_flash_video_edit")
+                st["omni_flash_video_edit"] = {"step": "need_video", "image_urls": []}
+                await tg_send_message(
+                    chat_id,
+                    f"✅ Настройки Google Omni Flash сохранены: Video Edit • до {KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC} сек • {resolution} • {aspect_ratio}\n\nТеперь пришли исходное видео MP4/MOV. После видео можно добавить до 5 фото-референсов или сразу прислать промпт.",
                     reply_markup=_help_menu_for(user_id),
                 )
             else:
@@ -7472,12 +7561,13 @@ async def webhook(secret: str, request: Request):
         st["ts"] = _now()
         return {"ok": True}
 
-    # ---- GOOGLE OMNI FLASH Text→Video / Image→Video ----
-    if st.get("mode") in ("omni_flash_t2v", "omni_flash_i2v") and incoming_text:
+    # ---- GOOGLE OMNI FLASH Text→Video / Image→Video / Video Edit ----
+    if st.get("mode") in ("omni_flash_t2v", "omni_flash_i2v", "omni_flash_video_edit") and incoming_text:
         if _is_nav_or_menu_text(incoming_text):
             _set_mode(chat_id, user_id, "chat")
             st.pop("omni_flash_t2v", None)
             st.pop("omni_flash_i2v", None)
+            st.pop("omni_flash_video_edit", None)
             st.pop("omni_flash_settings", None)
             st["ts"] = _now()
             await tg_send_message(chat_id, "Ок. Вышел из Google Omni Flash. Главное меню.", reply_markup=_main_menu_for(user_id))
@@ -7499,11 +7589,25 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(chat_id, "Фото собраны ✅ Теперь пришли промпт текстом.", reply_markup=_help_menu_for(user_id))
                 return {"ok": True}
 
+        if st.get("mode") == "omni_flash_video_edit":
+            ov = st.get("omni_flash_video_edit") or {}
+            step = (ov.get("step") or "need_video")
+            if step == "need_video":
+                await tg_send_message(chat_id, f"Сначала пришли исходное видео до {KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC} секунд.", reply_markup=_help_menu_for(user_id))
+                return {"ok": True}
+            if step == "need_images" and incoming_text.strip().lower() in {"готово", "готов", "старт"}:
+                ov["step"] = "need_prompt"
+                st["omni_flash_video_edit"] = ov
+                st["ts"] = _now()
+                await tg_send_message(chat_id, "Ок ✅ Теперь пришли промпт: что изменить в видео.", reply_markup=_help_menu_for(user_id))
+                return {"ok": True}
+
         settings = st.get("omni_flash_settings") or {}
         duration = normalize_gemini_omni_duration(settings.get("duration") or 8)
         resolution = normalize_gemini_omni_resolution(settings.get("resolution") or "1080p")
         aspect_ratio = normalize_gemini_omni_aspect_ratio(settings.get("aspect_ratio") or "16:9")
-        cost_tokens = int(gemini_omni_tokens_for_duration(duration, resolution))
+        current_mode = "video_edit" if st.get("mode") == "omni_flash_video_edit" else ("image_to_video" if st.get("mode") == "omni_flash_i2v" else "text_to_video")
+        cost_tokens = int(gemini_omni_tokens_for_run(current_mode, duration, resolution))
 
         try:
             ensure_user_row(user_id)
@@ -7528,7 +7632,8 @@ async def webhook(secret: str, request: Request):
                     "duration": duration,
                     "resolution": resolution,
                     "aspect_ratio": aspect_ratio,
-                    "flow": ("i2v" if st.get("mode") == "omni_flash_i2v" else "t2v"),
+                    "flow": ("video_edit" if st.get("mode") == "omni_flash_video_edit" else ("i2v" if st.get("mode") == "omni_flash_i2v" else "t2v")),
+                    "pricing": "fixed_per_video" if st.get("mode") == "omni_flash_video_edit" else "duration_based",
                 },
             )
         except TypeError:
@@ -7557,6 +7662,27 @@ async def webhook(secret: str, request: Request):
                     charge_ref_id=charge_ref_id,
                 )
                 await tg_send_message(chat_id, f"⏳ Google Omni Flash — генерация началась: Image → Video • {duration} сек • {resolution} • {aspect_ratio}", reply_markup=_help_menu_for(user_id))
+            elif st.get("mode") == "omni_flash_video_edit":
+                ov = st.get("omni_flash_video_edit") or {}
+                source_video_upload_id = str(ov.get("source_video_upload_id") or "").strip()
+                if not source_video_upload_id:
+                    await tg_send_message(chat_id, f"Сначала пришли исходное видео до {KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC} секунд.", reply_markup=_help_menu_for(user_id))
+                    add_tokens(user_id, int(cost_tokens), reason="gemini_omni_video_refund", ref_id=uuid4().hex, meta={"stage": "missing_video"})
+                    return {"ok": True}
+                image_urls = [str(url or "").strip() for url in (ov.get("image_urls") or []) if str(url or "").strip()][:5]
+                await _enqueue_tg_omni_flash_job(
+                    chat_id=int(chat_id),
+                    user_id=int(user_id),
+                    mode="video_edit",
+                    prompt=incoming_text.strip(),
+                    settings=settings,
+                    reference_image_urls=image_urls,
+                    source_video_upload_id=source_video_upload_id,
+                    source_video_end=int(max(1, min(float(KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC), float(ov.get("source_video_duration") or KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC)))),
+                    charge_tokens=cost_tokens,
+                    charge_ref_id=charge_ref_id,
+                )
+                await tg_send_message(chat_id, f"⏳ Google Omni Flash — Video Edit запущен • {resolution} • {aspect_ratio} • фикс {cost_tokens} ток.", reply_markup=_help_menu_for(user_id))
             else:
                 await _enqueue_tg_omni_flash_job(
                     chat_id=int(chat_id),
@@ -7579,6 +7705,7 @@ async def webhook(secret: str, request: Request):
         _set_mode(chat_id, user_id, "chat")
         st.pop("omni_flash_t2v", None)
         st.pop("omni_flash_i2v", None)
+        st.pop("omni_flash_video_edit", None)
         st.pop("omni_flash_settings", None)
         st["ts"] = _now()
         return {"ok": True}
@@ -8569,6 +8696,44 @@ async def webhook(secret: str, request: Request):
             )
             return {"ok": True}
 
+        # ---- GOOGLE OMNI FLASH Video Edit: optional photo references ----
+        if st.get("mode") == "omni_flash_video_edit":
+            ov = st.get("omni_flash_video_edit") or {}
+            step = (ov.get("step") or "need_video")
+            if step == "need_video":
+                await tg_send_message(chat_id, f"Сначала пришли исходное видео до {KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC} секунд.", reply_markup=_help_menu_for(user_id))
+                return {"ok": True}
+            if step in {"need_images", "need_prompt"}:
+                images = [str(url or "").strip() for url in (ov.get("image_urls") or []) if str(url or "").strip()]
+                if len(images) >= 5:
+                    ov["image_urls"] = images[:5]
+                    ov["step"] = "need_prompt"
+                    st["omni_flash_video_edit"] = ov
+                    st["ts"] = _now()
+                    await tg_send_message(chat_id, "Уже получено 5/5 фото ✅ Теперь пришли промпт, что изменить в видео.", reply_markup=_help_menu_for(user_id))
+                    return {"ok": True}
+                if img_bytes:
+                    try:
+                        ext, mime = _detect_image_type(img_bytes)
+                        input_path = f"omni_flash_inputs/{int(user_id)}/{int(time.time())}_{uuid4().hex[:10]}_video_edit_ref_{len(images) + 1}.{ext}"
+                        uploaded_url = upload_bytes_to_supabase(input_path, img_bytes, mime)
+                    except Exception:
+                        logging.exception("Google Omni Flash Video Edit Telegram ref upload failed")
+                        await tg_send_message(chat_id, "❌ Не удалось загрузить фото-референс. Попробуй отправить фото ещё раз.", reply_markup=_help_menu_for(user_id))
+                        return {"ok": True}
+                    if uploaded_url:
+                        images.append(str(uploaded_url).strip())
+                images = images[:5]
+                ov["image_urls"] = images
+                ov["step"] = "need_images" if len(images) < 5 else "need_prompt"
+                st["omni_flash_video_edit"] = ov
+                st["ts"] = _now()
+                if len(images) >= 5:
+                    await tg_send_message(chat_id, "Получил 5/5 фото ✅ Теперь пришли промпт, что изменить в видео.", reply_markup=_help_menu_for(user_id))
+                else:
+                    await tg_send_message(chat_id, f"Фото #{len(images)} получил ✅\nПришли ещё фото (до 5) или сразу напиши промпт.", reply_markup=_help_menu_for(user_id))
+                return {"ok": True}
+
         # ---- GOOGLE OMNI FLASH Image → Video: сбор фото-референсов ----
         if st.get("mode") == "omni_flash_i2v":
             oi = st.get("omni_flash_i2v") or {}
@@ -9008,6 +9173,42 @@ async def webhook(secret: str, request: Request):
     # ---------------- Video (message.video) ----------------
     vid = message.get("video") or {}
     if vid:
+        if st.get("mode") == "omni_flash_video_edit":
+            ov = st.get("omni_flash_video_edit") or {}
+            if (ov.get("step") or "need_video") != "need_video":
+                await tg_send_message(chat_id, "Исходное видео уже получено ✅ Пришли до 5 фото-референсов или сразу промпт.", reply_markup=_help_menu_for(user_id))
+                return {"ok": True}
+            file_id = str(vid.get("file_id") or "").strip()
+            if not file_id:
+                await tg_send_message(chat_id, "Не смог прочитать video file_id. Пришли видео ещё раз.", reply_markup=_help_menu_for(user_id))
+                return {"ok": True}
+            duration_hint = float(vid.get("duration") or 0)
+            if duration_hint > float(KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC):
+                await tg_send_message(chat_id, f"Видео слишком длинное. Максимум {KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC} секунд.", reply_markup=_help_menu_for(user_id))
+                return {"ok": True}
+            try:
+                file_path = await tg_get_file_path(file_id)
+                video_bytes = await tg_download_file_bytes(file_path)
+                source_upload_id, duration_sec = _upload_omni_flash_source_video(
+                    user_id=user_id,
+                    video_bytes=video_bytes,
+                    filename="omni_flash_source.mp4",
+                    content_type="video/mp4",
+                    duration_hint=duration_hint,
+                )
+            except Exception as e:
+                await tg_send_message(chat_id, f"❌ Не удалось загрузить видео для Google Omni Flash: {e}", reply_markup=_help_menu_for(user_id))
+                return {"ok": True}
+            ov["source_video_upload_id"] = source_upload_id
+            ov.pop("source_video_url", None)
+            ov["source_video_duration"] = round(float(duration_sec or 0), 2)
+            ov["step"] = "need_images"
+            ov.setdefault("image_urls", [])
+            st["omni_flash_video_edit"] = ov
+            st["ts"] = _now()
+            await tg_send_message(chat_id, f"Видео получил ✅ ({int(round(duration_sec))} сек). Теперь пришли до 5 фото-референсов или сразу напиши промпт, что изменить.", reply_markup=_help_menu_for(user_id))
+            return {"ok": True}
+
         if st.get("mode") == "topaz_video":
             tv = st.get("topaz_video") or {}
             preset_slug = str(tv.get("preset_slug") or "").strip().lower()
@@ -9139,6 +9340,34 @@ async def webhook(secret: str, request: Request):
     if doc:
         mime = (doc.get("mime_type") or "").lower()
         file_id = doc.get("file_id")
+
+        if file_id and mime.startswith("video/") and st.get("mode") == "omni_flash_video_edit":
+            ov = st.get("omni_flash_video_edit") or {}
+            if (ov.get("step") or "need_video") != "need_video":
+                await tg_send_message(chat_id, "Исходное видео уже получено ✅ Пришли до 5 фото-референсов или сразу промпт.", reply_markup=_help_menu_for(user_id))
+                return {"ok": True}
+            try:
+                file_path = await tg_get_file_path(file_id)
+                video_bytes = await tg_download_file_bytes(file_path)
+                source_upload_id, duration_sec = _upload_omni_flash_source_video(
+                    user_id=user_id,
+                    video_bytes=video_bytes,
+                    filename=str(doc.get("file_name") or "omni_flash_source.mp4"),
+                    content_type=mime or "video/mp4",
+                    duration_hint=0,
+                )
+            except Exception as e:
+                await tg_send_message(chat_id, f"❌ Не удалось загрузить видео для Google Omni Flash: {e}", reply_markup=_help_menu_for(user_id))
+                return {"ok": True}
+            ov["source_video_upload_id"] = source_upload_id
+            ov.pop("source_video_url", None)
+            ov["source_video_duration"] = round(float(duration_sec or 0), 2)
+            ov["step"] = "need_images"
+            ov.setdefault("image_urls", [])
+            st["omni_flash_video_edit"] = ov
+            st["ts"] = _now()
+            await tg_send_message(chat_id, f"Видео получил ✅ ({int(round(duration_sec))} сек). Теперь пришли до 5 фото-референсов или сразу напиши промпт, что изменить.", reply_markup=_help_menu_for(user_id))
+            return {"ok": True}
 
         if file_id and mime.startswith("video/") and st.get("mode") == "topaz_video":
             await tg_send_message(
