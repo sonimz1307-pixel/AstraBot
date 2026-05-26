@@ -18,11 +18,18 @@ KIE_OMNI_POLL_SECONDS = float(os.getenv("KIE_OMNI_POLL_SECONDS", "6") or "6")
 KIE_OMNI_ALLOWED_DURATIONS = (6, 8, 10)
 KIE_OMNI_ALLOWED_ASPECT_RATIOS = ("16:9", "9:16")
 KIE_OMNI_ALLOWED_RESOLUTIONS = ("720p", "1080p", "4k")
+KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC = int(os.getenv("KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC", "60") or "60")
 # Business pricing map. Can be overridden via env later.
 KIE_OMNI_TOKEN_MAP = {
     "720p": {6: 8, 8: 10, 10: 12},
     "1080p": {6: 8, 8: 10, 10: 12},
     "4k": {6: 16, 8: 18, 10: 20},
+}
+# Fixed retail price for Gemini Omni video input / Video Edit. KIE bills video input per task.
+KIE_OMNI_VIDEO_EDIT_TOKEN_MAP = {
+    "720p": int(os.getenv("KIE_OMNI_VIDEO_EDIT_720P_TOKENS", "20") or "20"),
+    "1080p": int(os.getenv("KIE_OMNI_VIDEO_EDIT_1080P_TOKENS", "20") or "20"),
+    "4k": int(os.getenv("KIE_OMNI_VIDEO_EDIT_4K_TOKENS", "30") or "30"),
 }
 
 
@@ -34,6 +41,8 @@ def normalize_gemini_omni_mode(value: Any, default: str = "text_to_video") -> st
     raw = str(value or default).strip().lower()
     if raw in {"image", "image_to_video", "i2v", "image2video", "image->video", "reference"}:
         return "image_to_video"
+    if raw in {"video", "video_edit", "video_to_video", "v2v", "video2video", "video->video", "edit", "edit_video"}:
+        return "video_edit"
     return "text_to_video"
 
 
@@ -69,6 +78,18 @@ def gemini_omni_tokens_for_duration(duration: Any, resolution: Any = "1080p") ->
     d = normalize_gemini_omni_duration(duration)
     r = normalize_gemini_omni_resolution(resolution)
     return int(KIE_OMNI_TOKEN_MAP[r][d])
+
+
+def gemini_omni_video_edit_tokens(resolution: Any = "1080p") -> int:
+    r = normalize_gemini_omni_resolution(resolution)
+    return int(KIE_OMNI_VIDEO_EDIT_TOKEN_MAP[r])
+
+
+def gemini_omni_tokens_for_run(mode: Any = "text_to_video", duration: Any = 8, resolution: Any = "1080p") -> int:
+    normalized_mode = normalize_gemini_omni_mode(mode)
+    if normalized_mode == "video_edit":
+        return gemini_omni_video_edit_tokens(resolution)
+    return gemini_omni_tokens_for_duration(duration, resolution)
 
 
 def upload_gemini_omni_input_image(*, user_id: int, image_bytes: bytes, filename_hint: Optional[str] = None, slot: str = "ref") -> str:
@@ -210,6 +231,9 @@ async def run_gemini_omni_video(
     resolution: Any,
     reference_images: Optional[Sequence[bytes]] = None,
     reference_image_urls: Optional[Sequence[str]] = None,
+    source_video_url: Optional[str] = None,
+    source_video_start: Any = 0,
+    source_video_end: Optional[Any] = None,
 ) -> str:
     prompt_text = str(prompt or "").strip()
     if not prompt_text:
@@ -219,10 +243,12 @@ async def run_gemini_omni_video(
     normalized_resolution = normalize_gemini_omni_resolution(resolution)
     direct_urls = [str(item or "").strip() for item in (reference_image_urls or []) if str(item or "").strip()]
     refs = [bytes(item) for item in (reference_images or []) if item]
+    video_url = str(source_video_url or "").strip()
     if direct_urls and refs:
         raise GeminiOmniVideoError("Use either reference_image_urls or reference_images, not both")
-    if len(direct_urls) > 7 or len(refs) > 7:
-        raise GeminiOmniVideoError("Gemini Omni supports maximum 7 image references")
+    max_image_refs = 5 if video_url else 7
+    if len(direct_urls) > max_image_refs or len(refs) > max_image_refs:
+        raise GeminiOmniVideoError(f"Gemini Omni supports maximum {max_image_refs} image references for this mode")
 
     image_urls = direct_urls or [
         upload_gemini_omni_input_image(user_id=user_id, image_bytes=raw, slot=f"ref_{idx}")
@@ -240,6 +266,17 @@ async def run_gemini_omni_video(
     }
     if image_urls:
         body["input"]["image_urls"] = image_urls
+    if video_url:
+        try:
+            start_sec = max(0, int(float(source_video_start or 0)))
+        except Exception:
+            start_sec = 0
+        try:
+            end_sec = int(float(source_video_end)) if source_video_end is not None else KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC
+        except Exception:
+            end_sec = KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC
+        end_sec = max(start_sec + 1, min(int(KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC), end_sec))
+        body["input"]["video_list"] = [{"url": video_url, "start": start_sec, "ends": end_sec}]
     if KIE_OMNI_CALLBACK_URL:
         body["callBackUrl"] = KIE_OMNI_CALLBACK_URL
 
