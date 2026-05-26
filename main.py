@@ -2296,6 +2296,56 @@ def _help_menu_for(user_id: int) -> dict:
     return base2
 
 
+def _seedance_refs_collect_kb() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "✅ Готово", "callback_data": "seedance_refs:done"}],
+            [{"text": "❌ Отмена", "callback_data": "seedance_refs:cancel"}],
+        ]
+    }
+
+
+def _seedance_prompt_back_kb() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "⬅️ Вернуться к refs", "callback_data": "seedance_refs:back"}],
+            [{"text": "❌ Отмена", "callback_data": "seedance_refs:cancel"}],
+        ]
+    }
+
+
+def _seedance_collect_summary_text(mode: str, settings: Optional[Dict[str, Any]] = None) -> str:
+    settings = settings or {}
+    try:
+        max_images = int(settings.get("max_images") or (7 if str(settings.get("provider_kind") or "") == "seedance_kie" else 9))
+    except Exception:
+        max_images = 7
+    try:
+        max_videos = int(settings.get("max_videos") or 0)
+    except Exception:
+        max_videos = 0
+    try:
+        max_audios = int(settings.get("max_audios") or 0)
+    except Exception:
+        max_audios = 0
+    try:
+        max_total_refs = int(settings.get("max_total_refs") or max_images)
+    except Exception:
+        max_total_refs = max_images
+
+    if mode == "seedance_omni":
+        return (
+            f"Можешь прислать refs: фото до {max_images}, видео до {max_videos}, аудио до {max_audios}, "
+            f"всего до {max_total_refs}.\n"
+            "Видео и аудио необязательны. Audio-only нельзя. Когда закончишь — нажми «✅ Готово»."
+        )
+
+    return (
+        f"Пришли фото (1–{max_images}). "
+        "Когда закончишь — нажми «✅ Готово»."
+    )
+
+
 def _photo_future_menu_keyboard() -> dict:
     return {
         "keyboard": [
@@ -4819,6 +4869,101 @@ async def webhook(secret: str, request: Request):
             except Exception:
                 pass
 
+        if chat_id and user_id and data.startswith("seedance_refs:"):
+            st = _ensure_state(chat_id, user_id)
+            action = data.split(":", 1)[1].strip()
+            mode_now = str(st.get("mode") or "").strip()
+
+            if action == "cancel":
+                _set_mode(chat_id, user_id, "chat")
+                st.pop("seedance_t2v", None)
+                st.pop("seedance_i2v", None)
+                st.pop("seedance_omni", None)
+                st.pop("seedance_settings", None)
+                st["ts"] = _now()
+                try:
+                    sb_clear_user_state(user_id)
+                except Exception:
+                    pass
+                await tg_send_message(chat_id, "Ок, Seedance отменил. Главное меню.", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            if mode_now not in ("seedance_i2v", "seedance_omni"):
+                await tg_send_message(chat_id, "Сейчас я не собираю refs для Seedance. Открой настройки Seedance заново.", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            settings = st.get("seedance_settings") or {}
+
+            if action == "back":
+                if mode_now == "seedance_i2v":
+                    si = st.get("seedance_i2v") or {}
+                    si["step"] = "need_images"
+                    st["seedance_i2v"] = si
+                else:
+                    so = st.get("seedance_omni") or {}
+                    so["step"] = "collect_refs"
+                    st["seedance_omni"] = so
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    "Ок, вернулся к загрузке refs. " + _seedance_collect_summary_text(mode_now, settings),
+                    reply_markup=_seedance_refs_collect_kb(),
+                )
+                return {"ok": True}
+
+            if action == "done":
+                if mode_now == "seedance_i2v":
+                    si = st.get("seedance_i2v") or {}
+                    imgs = [x for x in (si.get("image_file_ids") or []) if str(x or "").strip()]
+                    if not imgs:
+                        await tg_send_message(
+                            chat_id,
+                            "Сначала пришли хотя бы 1 фото.",
+                            reply_markup=_seedance_refs_collect_kb(),
+                        )
+                        return {"ok": True}
+                    si["step"] = "need_prompt"
+                    st["seedance_i2v"] = si
+                    st["ts"] = _now()
+                    await tg_send_message(
+                        chat_id,
+                        f"Фото принял ✅ Всего фото: {len(imgs)}.\nТеперь пришли ТЕКСТ (промпт), что должно происходить в видео.",
+                        reply_markup=_seedance_prompt_back_kb(),
+                    )
+                    return {"ok": True}
+
+                so = st.get("seedance_omni") or {}
+                image_ids = [x for x in (so.get("image_file_ids") or []) if str(x or "").strip()]
+                video_ids = [x for x in (so.get("video_file_ids") or []) if str(x or "").strip()]
+                audio_ids = [x for x in (so.get("audio_file_ids") or []) if str(x or "").strip()]
+                total_refs = len(image_ids) + len(video_ids) + len(audio_ids)
+                if total_refs <= 0:
+                    await tg_send_message(
+                        chat_id,
+                        "Сначала пришли хотя бы один image/video/audio reference.",
+                        reply_markup=_seedance_refs_collect_kb(),
+                    )
+                    return {"ok": True}
+                if audio_ids and not (image_ids or video_ids):
+                    await tg_send_message(
+                        chat_id,
+                        "Для Omni Reference аудио нельзя отправлять отдельно. Добавь хотя бы фото или видео reference.",
+                        reply_markup=_seedance_refs_collect_kb(),
+                    )
+                    return {"ok": True}
+
+                so["step"] = "need_prompt"
+                st["seedance_omni"] = so
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    f"Референсы принял ✅ Фото: {len(image_ids)}, видео: {len(video_ids)}, аудио: {len(audio_ids)}.\nТеперь пришли ТЕКСТ (промпт), что должно происходить в видео.",
+                    reply_markup=_seedance_prompt_back_kb(),
+                )
+                return {"ok": True}
+
+            return {"ok": True}
+
         if chat_id and user_id and data.startswith("nbp:aspect:"):
             aspect_ratio = data.split(":", 2)[2].strip()
             if aspect_ratio not in ("1:1", "4:5", "9:16", "16:9"):
@@ -5680,6 +5825,47 @@ async def webhook(secret: str, request: Request):
         await tg_send_message(chat_id, "❌ Не удалось поставить чат в очередь. Проверь REDIS_URL и worker_chat.py.", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
 
+    # ---------------- Audio (message.audio) для Seedance Omni ----------------
+    audio_msg = message.get("audio") or {}
+    if audio_msg and st.get("mode") == "seedance_omni":
+        so = st.get("seedance_omni") or {}
+        step = (so.get("step") or "collect_refs")
+        if step != "collect_refs":
+            await tg_send_message(chat_id, "Аудио refs уже собраны ✅ Теперь жду промпт текстом. Если хочешь добавить refs — нажми «⬅️ Вернуться к refs».", reply_markup=_seedance_prompt_back_kb())
+            return {"ok": True}
+        file_id = str(audio_msg.get("file_id") or "").strip()
+        mime_type = str(audio_msg.get("mime_type") or "").lower()
+        if not file_id:
+            await tg_send_message(chat_id, "Не смог прочитать audio file_id. Отправь аудио ещё раз.", reply_markup=_seedance_refs_collect_kb())
+            return {"ok": True}
+        if mime_type and not ("mpeg" in mime_type or "mp3" in mime_type or "wav" in mime_type):
+            await tg_send_message(chat_id, "Для Seedance Omni отправь аудио в MP3 или WAV. Голосовые/OGG лучше не использовать — KIE может отклонить.", reply_markup=_seedance_refs_collect_kb())
+            return {"ok": True}
+        settings = st.get("seedance_settings") or {}
+        audio_limit = int(settings.get("max_audios") or 3)
+        total_limit = int(settings.get("max_total_refs") or 12)
+        image_ids = list(so.get("image_file_ids") or [])
+        video_ids = list(so.get("video_file_ids") or [])
+        audio_ids = list(so.get("audio_file_ids") or [])
+        if len(audio_ids) >= audio_limit:
+            await tg_send_message(chat_id, f"Аудио refs уже {audio_limit}/{audio_limit}. Пришли другие refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
+            return {"ok": True}
+        if len(image_ids) + len(video_ids) + len(audio_ids) >= total_limit:
+            await tg_send_message(chat_id, f"Всего refs уже {total_limit}/{total_limit}. Нажми «✅ Готово», чтобы перейти к промпту.", reply_markup=_seedance_refs_collect_kb())
+            return {"ok": True}
+        if file_id not in audio_ids:
+            audio_ids.append(file_id)
+        so["audio_file_ids"] = audio_ids[:audio_limit]
+        st["seedance_omni"] = so
+        st["ts"] = _now()
+        await tg_send_message(chat_id, f"Аудио reference #{len(so['audio_file_ids'])} получил ✅\nПришли ещё refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
+        return {"ok": True}
+
+    # ---------------- Voice для Seedance Omni: не принимаем OGG как audio ref ----------------
+    if voice and st.get("mode") == "seedance_omni":
+        await tg_send_message(chat_id, "Для Seedance Omni отправь аудио файлом MP3/WAV, не голосовым сообщением. Так меньше риск ошибки KIE.", reply_markup=_seedance_refs_collect_kb())
+        return {"ok": True}
+
     # ---------------- Документы в режиме ИИ-чата ----------------
     document = message.get("document") or {}
     if document and st.get("mode") == "chat":
@@ -5977,17 +6163,21 @@ async def webhook(secret: str, request: Request):
 
                 # ----- WebApp data (Seedance 2.0 / Preview settings) -----
         # Expected preview: {type:"seedance_settings", provider:"seedance", seedance_model:"preview|fast", flow:"text|image", ...}
-        # Expected regular: {type:"seedance_settings", provider:"seedance_kie", seedance_model:"seedance-kie|seedance-kie-fast", flow:"text|image", ...}
+        # Expected regular KIE: {type:"seedance_settings", provider:"seedance_kie", seedance_model:"seedance-kie-480p|seedance-kie-720p|seedance-kie-1080p", flow:"text|image|omni", ...}
         seedance_provider_raw = str(payload.get("provider") or provider_raw or "").lower().strip()
         seedance_type_raw = str(payload.get("type") or "").lower().strip()
         seedance_model_raw = str(payload.get("seedance_model") or payload.get("model") or payload.get("preset") or "").lower().strip()
         seedance_variant_raw = str(payload.get("seedance_variant") or payload.get("variant") or "").lower().strip()
         seedance_task_type_raw = str(payload.get("task_type") or payload.get("taskType") or "").lower().strip()
 
+        kie_seedance_models = (
+            "seedance-kie-480p", "seedance-kie-720p", "seedance-kie-1080p",
+            "seedance-kie", "seedance-kie-fast", "seedance-2", "seedance-2-fast",
+        )
         is_seedance = (
             seedance_type_raw in ("seedance_settings", "seedance2_settings", "seedance_2_settings")
             or seedance_provider_raw in ("seedance", "seedance2", "seedance_2", "seedance_kie", "seedance-kie")
-            or seedance_model_raw in ("preview", "fast", "seedance-2-preview", "seedance-2-fast-preview", "seedance-kie", "seedance-kie-fast")
+            or seedance_model_raw in ("preview", "fast", "seedance-2-preview", "seedance-2-fast-preview", *kie_seedance_models)
             or seedance_task_type_raw in ("seedance-2-preview", "seedance-2-fast-preview", "seedance-2", "seedance-2-fast")
         )
 
@@ -5996,14 +6186,16 @@ async def webhook(secret: str, request: Request):
             if (
                 seedance_provider_raw in ("seedance_kie", "seedance-kie")
                 or seedance_variant_raw == "kie"
-                or seedance_model_raw in ("seedance-kie", "seedance-kie-fast")
+                or seedance_model_raw in kie_seedance_models
                 or seedance_task_type_raw in ("seedance-2", "seedance-2-fast")
             ):
                 provider_kind = "seedance_kie"
 
-            flow = str(payload.get("flow") or payload.get("gen_mode") or payload.get("mode") or ("text" if provider_kind == "seedance_kie" else "text")).lower().strip()
-            if flow not in ("text", "image"):
+            flow = str(payload.get("flow") or payload.get("gen_mode") or payload.get("mode") or "text").lower().strip()
+            if flow not in ("text", "image", "omni"):
                 flow = "text"
+            if provider_kind != "seedance_kie" and flow == "omni":
+                flow = "image"
 
             try:
                 duration = int(payload.get("duration") or 5)
@@ -6016,15 +6208,20 @@ async def webhook(secret: str, request: Request):
             if provider_kind == "seedance_kie":
                 if aspect_ratio not in ("16:9", "9:16", "1:1"):
                     aspect_ratio = "16:9"
-                seedance_model = seedance_model_raw or "seedance-kie"
-                if seedance_model not in ("seedance-kie", "seedance-kie-fast", "seedance-2", "seedance-2-fast"):
-                    seedance_model = "seedance-kie"
-                if seedance_model == "seedance-2-fast":
-                    seedance_model = "seedance-kie-fast"
-                elif seedance_model == "seedance-2":
-                    seedance_model = "seedance-kie"
-                task_type = "seedance-2-fast" if seedance_model == "seedance-kie-fast" else "seedance-2"
-                max_images = 7
+                model_map = {
+                    "seedance-kie-fast": "seedance-kie-480p",
+                    "seedance-2-fast": "seedance-kie-480p",
+                    "seedance-kie": "seedance-kie-720p",
+                    "seedance-2": "seedance-kie-720p",
+                }
+                seedance_model = model_map.get(seedance_model_raw, seedance_model_raw or "seedance-kie-480p")
+                if seedance_model not in ("seedance-kie-480p", "seedance-kie-720p", "seedance-kie-1080p"):
+                    seedance_model = "seedance-kie-480p"
+                task_type = "seedance-2-fast" if seedance_model == "seedance-kie-480p" else "seedance-2"
+                max_images = 2 if flow == "image" else 7
+                max_videos = 3
+                max_audios = 3
+                max_total_refs = 12
             else:
                 if aspect_ratio not in ("16:9", "9:16", "1:1", "4:3", "3:4"):
                     aspect_ratio = "16:9"
@@ -6040,6 +6237,9 @@ async def webhook(secret: str, request: Request):
                 else:
                     task_type = "seedance-2-fast-preview" if seedance_model == "fast" else "seedance-2-preview"
                 max_images = 9
+                max_videos = 0
+                max_audios = 0
+                max_total_refs = 9
 
             st["seedance_settings"] = {
                 "provider_kind": provider_kind,
@@ -6049,6 +6249,9 @@ async def webhook(secret: str, request: Request):
                 "duration": duration,
                 "aspect_ratio": aspect_ratio,
                 "max_images": max_images,
+                "max_videos": max_videos,
+                "max_audios": max_audios,
+                "max_total_refs": max_total_refs,
             }
             st["ts"] = _now()
 
@@ -6064,31 +6267,45 @@ async def webhook(secret: str, request: Request):
                     reply_markup=_help_menu_for(user_id),
                 )
                 return {"ok": True}
-            else:
-                _set_mode(chat_id, user_id, "seedance_i2v")
-                st["seedance_i2v"] = {
-                    "step": "need_images",
+
+            if flow == "omni" and provider_kind == "seedance_kie":
+                _set_mode(chat_id, user_id, "seedance_omni")
+                st["seedance_omni"] = {
+                    "step": "collect_refs",
                     "image_file_ids": [],
+                    "video_file_ids": [],
+                    "audio_file_ids": [],
                     "prompt": None,
                 }
                 st["ts"] = _now()
-                if provider_kind == "seedance_kie":
-                    msg = (
-                        "✅ Настройки Seedance 2.0 сохранены.\n\nТеперь пришли 1–7 ФОТО (референсы).\n"
-                        "Когда все фото отправишь — напиши «Готово», и я попрошу промпт.\n"
-                        "В этом режиме в боте доступны только photo references — без audio, first frame и last frame."
-                    )
-                else:
-                    msg = (
-                        "✅ Настройки Seedance 2.0 Preview сохранены.\n\nТеперь пришли 1–9 ФОТО (референсы).\n"
-                        "Когда все фото отправишь — напиши «Готово», и я попрошу промпт."
-                    )
                 await tg_send_message(
                     chat_id,
-                    msg,
-                    reply_markup=_help_menu_for(user_id),
+                    "✅ Настройки Seedance 2.0 Omni сохранены.\n\n"
+                    "Теперь пришли референсы: можно только фото, либо фото/видео/аудио вместе.\n"
+                    "Видео и аудио необязательны. Audio-only нельзя. Когда закончишь — нажми «✅ Готово».",
+                    reply_markup=_seedance_refs_collect_kb(),
                 )
                 return {"ok": True}
+
+            _set_mode(chat_id, user_id, "seedance_i2v")
+            st["seedance_i2v"] = {
+                "step": "need_images",
+                "image_file_ids": [],
+                "prompt": None,
+            }
+            st["ts"] = _now()
+            if provider_kind == "seedance_kie":
+                msg = (
+                    "✅ Настройки Seedance 2.0 Image → Video сохранены.\n\nТеперь пришли 1–2 ФОТО. "
+                    "Если пришлёшь 2 фото — второе будет last frame. После фото нажми «✅ Готово», затем пришли промпт."
+                )
+            else:
+                msg = (
+                    "✅ Настройки Seedance 2.0 Preview сохранены.\n\nТеперь пришли 1–9 ФОТО (референсы).\n"
+                    "Когда все фото отправишь — нажми «✅ Готово», и я попрошу промпт."
+                )
+            await tg_send_message(chat_id, msg, reply_markup=_seedance_refs_collect_kb())
+            return {"ok": True}
 
 # ----- WebApp data (Sora 2 settings) -----
         # Expected: {type:"sora_settings", provider:"sora", duration:4|8|12, aspect_ratio:"16:9|9:16"}
@@ -7346,13 +7563,14 @@ async def webhook(secret: str, request: Request):
         finally:
             _busy_end(int(user_id))
 
-    # ---- SEEDANCE 2 (PiAPI) Text/Image → Video: ждём промпт ----
-    if st.get("mode") in ("seedance_t2v", "seedance_i2v") and incoming_text:
+    # ---- SEEDANCE 2 Text/Image/Omni → Video: ждём промпт ----
+    if st.get("mode") in ("seedance_t2v", "seedance_i2v", "seedance_omni") and incoming_text:
         # Навигация/кнопки меню не считаем промптом
         if _is_nav_or_menu_text(incoming_text):
             _set_mode(chat_id, user_id, "chat")
             st.pop("seedance_t2v", None)
             st.pop("seedance_i2v", None)
+            st.pop("seedance_omni", None)
             st.pop("seedance_settings", None)
             st["ts"] = _now()
             sb_clear_user_state(user_id)
@@ -7371,11 +7589,14 @@ async def webhook(secret: str, request: Request):
 
         settings = st.get("seedance_settings") or {}
         provider_kind = str(settings.get("provider_kind") or "seedance").strip() or "seedance"
-        seedance_model = str(settings.get("seedance_model") or ("seedance-kie" if provider_kind == "seedance_kie" else "preview")).strip()
-        task_type = str(settings.get("task_type") or ("seedance-2" if provider_kind == "seedance_kie" else "seedance-2-preview")).strip()
+        seedance_model = str(settings.get("seedance_model") or ("seedance-kie-480p" if provider_kind == "seedance_kie" else "preview")).strip()
+        task_type = str(settings.get("task_type") or ("seedance-2-fast" if seedance_model == "seedance-kie-480p" else ("seedance-2" if provider_kind == "seedance_kie" else "seedance-2-preview"))).strip()
         duration = int(settings.get("duration") or 5)
         aspect_ratio = str(settings.get("aspect_ratio") or "16:9").strip()
         max_images = int(settings.get("max_images") or (7 if provider_kind == "seedance_kie" else 9))
+        max_videos = int(settings.get("max_videos") or 0)
+        max_audios = int(settings.get("max_audios") or 0)
+        max_total_refs = int(settings.get("max_total_refs") or max_images)
 
         # Если это i2v, но мы ещё собираем фото — обрабатываем «Готово»
         if st.get("mode") == "seedance_i2v":
@@ -7385,7 +7606,7 @@ async def webhook(secret: str, request: Request):
                 if incoming_text.lower() in ("готово", "готов", "done", "ok", "ок"):
                     imgs = si.get("image_file_ids") or []
                     if not imgs:
-                        await tg_send_message(chat_id, "Сначала пришли хотя бы 1 фото (референс).", reply_markup=_help_menu_for(user_id))
+                        await tg_send_message(chat_id, "Сначала пришли хотя бы 1 фото.", reply_markup=_seedance_refs_collect_kb())
                         return {"ok": True}
                     si["step"] = "need_prompt"
                     st["seedance_i2v"] = si
@@ -7393,32 +7614,79 @@ async def webhook(secret: str, request: Request):
                     await tg_send_message(
                         chat_id,
                         "Фото принял ✅ Теперь пришли ТЕКСТ (промпт), что должно происходить в видео.",
-                        reply_markup=_help_menu_for(user_id),
+                        reply_markup=_seedance_prompt_back_kb(),
                     )
                     return {"ok": True}
 
-                # если пользователь написал что-то другое, пока мы ждём фото — подсказка
                 await tg_send_message(
                     chat_id,
-                    f"Я сейчас жду фото-референсы (1–{max_images}).\nОтправь фото или напиши «Готово», когда закончил.",
-                    reply_markup=_help_menu_for(user_id),
+                    f"Я сейчас жду фото (1–{max_images}).\nОтправь фото или нажми «✅ Готово», когда закончил.",
+                    reply_markup=_seedance_refs_collect_kb(),
+                )
+                return {"ok": True}
+
+        # Если это omni, но мы ещё собираем refs — обрабатываем «Готово»
+        if st.get("mode") == "seedance_omni":
+            so = st.get("seedance_omni") or {}
+            step = (so.get("step") or "collect_refs")
+            if step == "collect_refs":
+                if incoming_text.lower() in ("готово", "готов", "done", "ok", "ок"):
+                    image_ids = list(so.get("image_file_ids") or [])
+                    video_ids = list(so.get("video_file_ids") or [])
+                    audio_ids = list(so.get("audio_file_ids") or [])
+                    total_refs = len(image_ids) + len(video_ids) + len(audio_ids)
+                    if total_refs <= 0:
+                        await tg_send_message(chat_id, "Сначала пришли хотя бы один image/video/audio reference.", reply_markup=_seedance_refs_collect_kb())
+                        return {"ok": True}
+                    if audio_ids and not (image_ids or video_ids):
+                        await tg_send_message(chat_id, "Для Omni Reference аудио нельзя отправлять отдельно. Добавь хотя бы фото или видео reference.", reply_markup=_seedance_refs_collect_kb())
+                        return {"ok": True}
+                    so["step"] = "need_prompt"
+                    st["seedance_omni"] = so
+                    st["ts"] = _now()
+                    await tg_send_message(
+                        chat_id,
+                        "Референсы принял ✅ Теперь пришли ТЕКСТ (промпт), что должно происходить в видео.",
+                        reply_markup=_seedance_prompt_back_kb(),
+                    )
+                    return {"ok": True}
+
+                await tg_send_message(
+                    chat_id,
+                    f"Я сейчас жду refs: фото до {max_images}, видео до {max_videos}, аудио до {max_audios}, всего до {max_total_refs}.\n"
+                    "Отправь файлы или нажми «✅ Готово», когда закончил.",
+                    reply_markup=_seedance_refs_collect_kb(),
                 )
                 return {"ok": True}
 
         prompt = incoming_text.strip()
         if not prompt:
-            await tg_send_message(chat_id, "Промпт пустой. Пришли текстом, что должно быть в видео.", reply_markup=_help_menu_for(user_id))
+            await tg_send_message(chat_id, "Промпт пустой. Пришли текстом, что должно быть в видео.", reply_markup=_seedance_prompt_back_kb() if st.get("mode") in ("seedance_i2v", "seedance_omni") else _help_menu_for(user_id))
+            return {"ok": True}
+
+        prompt_limit = 20000 if provider_kind == "seedance_kie" else 4000
+        if len(prompt) > prompt_limit:
+            await tg_send_message(
+                chat_id,
+                f"Промпт слишком длинный: {len(prompt)} символов. Лимит для этого режима: {prompt_limit}.",
+                reply_markup=_seedance_prompt_back_kb() if st.get("mode") in ("seedance_i2v", "seedance_omni") else _help_menu_for(user_id),
+            )
             return {"ok": True}
 
         # ---- SEEDANCE BILLING ----
         if provider_kind == "seedance_kie":
-            if seedance_model == "seedance-kie-fast":
-                price_map = {5: 5, 10: 10, 15: 15}
-            else:
-                price_map = {5: 10, 10: 20, 15: 30}
-            cost_tokens = int(price_map.get(int(duration), 5 if seedance_model == "seedance-kie-fast" else 10))
+            price_maps = {
+                "seedance-kie-480p": {5: 5, 10: 10, 15: 15},
+                "seedance-kie-720p": {5: 10, 10: 20, 15: 30},
+                "seedance-kie-1080p": {5: 25, 10: 50, 15: 75},
+                # legacy aliases
+                "seedance-kie-fast": {5: 5, 10: 10, 15: 15},
+                "seedance-kie": {5: 10, 10: 20, 15: 30},
+            }
+            price_map = price_maps.get(seedance_model, price_maps["seedance-kie-480p"])
+            cost_tokens = int(price_map.get(int(duration), price_map[5]))
         else:
-            # По умолчанию: preview=2 ток/сек, fast=1 ток/сек (можно переопределить env)
+            # Preview остаётся через PiAPI без изменений: preview=2 ток/сек, fast=1 ток/сек.
             rate_preview = int(os.getenv("SEEDANCE_TOKENS_PER_SEC_PREVIEW", "2") or 2)
             rate_fast = int(os.getenv("SEEDANCE_TOKENS_PER_SEC_FAST", "1") or 1)
             is_fast = ("fast" in task_type)
@@ -7442,30 +7710,18 @@ async def webhook(secret: str, request: Request):
                 )
                 return {"ok": True}
 
+            charge_meta = {
+                "provider_kind": provider_kind,
+                "seedance_model": seedance_model,
+                "task_type": task_type,
+                "duration": int(duration),
+                "aspect_ratio": aspect_ratio,
+                "cost_tokens": int(cost_tokens),
+            }
             try:
-                add_tokens(
-                    user_id,
-                    -cost_tokens,
-                    reason="seedance_video",
-                    meta={
-                        "task_type": task_type,
-                        "duration": int(duration),
-                        "aspect_ratio": aspect_ratio,
-                        "cost_tokens": int(cost_tokens),
-                    },
-                )
+                add_tokens(user_id, -cost_tokens, reason="seedance_video", meta=charge_meta)
             except TypeError:
-                add_tokens(
-                    user_id,
-                    -int(cost_tokens),
-                    reason="seedance_video",
-                    meta={
-                        "task_type": task_type,
-                        "duration": int(duration),
-                        "aspect_ratio": aspect_ratio,
-                        "cost_tokens": int(cost_tokens),
-                    },
-                )
+                add_tokens(user_id, -int(cost_tokens), reason="seedance_video", meta=charge_meta)
             seedance_charged = True
 
             # build job for worker
@@ -7486,16 +7742,26 @@ async def webhook(secret: str, request: Request):
 
             if st.get("mode") == "seedance_i2v":
                 si = st.get("seedance_i2v") or {}
+                job["mode"] = "image_to_video"
                 job["image_file_ids"] = list(si.get("image_file_ids") or [])[:max_images]
+            elif st.get("mode") == "seedance_omni":
+                so = st.get("seedance_omni") or {}
+                job["mode"] = "omni_reference"
+                job["image_file_ids"] = list(so.get("image_file_ids") or [])[:max_images]
+                job["video_file_ids"] = list(so.get("video_file_ids") or [])[:max_videos]
+                job["audio_file_ids"] = list(so.get("audio_file_ids") or [])[:max_audios]
+            else:
+                job["mode"] = "text_to_video"
 
             if provider_kind != "seedance_kie":
                 se = st.get("seedance_extend") or {}
                 se["task_type"] = task_type
                 st["seedance_extend"] = se
-            
+
             # очистим контекст, чтобы любой следующий текст не перезапускал генерацию
             st.pop("seedance_t2v", None)
             st.pop("seedance_i2v", None)
+            st.pop("seedance_omni", None)
             st.pop("seedance_settings", None)
             st["ts"] = _now()
             sb_clear_user_state(user_id)
@@ -7543,7 +7809,7 @@ async def webhook(secret: str, request: Request):
 
         prompt = incoming_text.strip()
         if not prompt:
-            await tg_send_message(chat_id, "Промпт пустой. Пришли текстом, что должно быть в видео.", reply_markup=_help_menu_for(user_id))
+            await tg_send_message(chat_id, "Промпт пустой. Пришли текстом, что должно быть в видео.", reply_markup=_seedance_prompt_back_kb() if st.get("mode") in ("seedance_i2v", "seedance_omni") else _help_menu_for(user_id))
             return {"ok": True}
 
         settings = st.get("sora_settings") or {}
@@ -9063,16 +9329,47 @@ async def webhook(secret: str, request: Request):
             return {"ok": True}
 
 
-        # ---- SEEDANCE 2 Image → Video: сбор референс-фото ----
-        if st.get("mode") == "seedance_i2v":
+        # ---- SEEDANCE 2 Image/Omni: сбор фото-референсов ----
+        if st.get("mode") in ("seedance_i2v", "seedance_omni"):
+            settings = st.get("seedance_settings") or {}
+            limit = int(settings.get("max_images") or (7 if (settings.get("provider_kind") == "seedance_kie") else 9))
+            total_limit = int(settings.get("max_total_refs") or 12)
+
+            if st.get("mode") == "seedance_omni":
+                so = st.get("seedance_omni") or {}
+                step = (so.get("step") or "collect_refs")
+                if step == "collect_refs":
+                    image_ids = list(so.get("image_file_ids") or [])
+                    video_ids = list(so.get("video_file_ids") or [])
+                    audio_ids = list(so.get("audio_file_ids") or [])
+                    total_refs = len(image_ids) + len(video_ids) + len(audio_ids)
+                    if len(image_ids) >= limit:
+                        await tg_send_message(chat_id, f"Фото refs уже {limit}/{limit}. Пришли видео/аудио refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
+                        return {"ok": True}
+                    if total_refs >= total_limit:
+                        await tg_send_message(chat_id, f"Всего refs уже {total_limit}/{total_limit}. Нажми «✅ Готово», чтобы перейти к промпту.", reply_markup=_seedance_refs_collect_kb())
+                        return {"ok": True}
+                    if file_id and (file_id not in image_ids):
+                        image_ids.append(str(file_id))
+                    so["image_file_ids"] = image_ids[:limit]
+                    st["seedance_omni"] = so
+                    st["ts"] = _now()
+                    await tg_send_message(
+                        chat_id,
+                        f"Фото reference #{len(so['image_file_ids'])} получил ✅\n"
+                        "Пришли ещё refs или нажми «✅ Готово», чтобы перейти к промпту.",
+                        reply_markup=_seedance_refs_collect_kb(),
+                    )
+                    return {"ok": True}
+                await tg_send_message(chat_id, "Референсы уже собраны ✅ Теперь жду промпт текстом. Если хочешь добавить refs — нажми «⬅️ Вернуться к refs».", reply_markup=_seedance_prompt_back_kb())
+                return {"ok": True}
+
             si = st.get("seedance_i2v") or {}
             step = (si.get("step") or "need_images")
             if step == "need_images":
-                # собираем до 9 фото (file_id), байты не храним
                 imgs = list(si.get("image_file_ids") or [])
-                limit = int((st.get("seedance_settings") or {}).get("max_images") or 9)
                 if file_id and (file_id not in imgs):
-                    imgs.append(file_id)
+                    imgs.append(str(file_id))
                 imgs = imgs[:limit]
                 si["image_file_ids"] = imgs
                 st["seedance_i2v"] = si
@@ -9085,23 +9382,22 @@ async def webhook(secret: str, request: Request):
                     await tg_send_message(
                         chat_id,
                         f"Получил {limit}/{limit} фото ✅ Теперь пришли ТЕКСТ (промпт), что должно происходить в видео.",
-                        reply_markup=_help_menu_for(user_id),
+                        reply_markup=_seedance_prompt_back_kb(),
                     )
                     return {"ok": True}
 
                 await tg_send_message(
                     chat_id,
                     f"Фото #{len(imgs)} получил ✅\n"
-                    f"Пришли ещё фото (до {limit}) или напиши «Готово», чтобы перейти к промпту.",
-                    reply_markup=_help_menu_for(user_id),
+                    f"Пришли ещё фото (до {limit}) или нажми «✅ Готово», чтобы перейти к промпту.",
+                    reply_markup=_seedance_refs_collect_kb(),
                 )
                 return {"ok": True}
 
-            # если мы уже на шаге need_prompt — фото больше не нужно
             await tg_send_message(
                 chat_id,
-                "Фото уже собраны ✅ Теперь жду промпт текстом (или /reset).",
-                reply_markup=_help_menu_for(user_id),
+                "Фото уже собраны ✅ Теперь жду промпт текстом. Если хочешь добавить refs — нажми «⬅️ Вернуться к refs».",
+                reply_markup=_seedance_prompt_back_kb(),
             )
             return {"ok": True}
 
@@ -9371,6 +9667,40 @@ async def webhook(secret: str, request: Request):
     # ---------------- Video (message.video) ----------------
     vid = message.get("video") or {}
     if vid:
+        if st.get("mode") == "seedance_omni":
+            so = st.get("seedance_omni") or {}
+            step = (so.get("step") or "collect_refs")
+            if step != "collect_refs":
+                await tg_send_message(chat_id, "Видео refs уже собраны ✅ Теперь жду промпт текстом. Если хочешь добавить refs — нажми «⬅️ Вернуться к refs».", reply_markup=_seedance_prompt_back_kb())
+                return {"ok": True}
+            file_id = str(vid.get("file_id") or "").strip()
+            if not file_id:
+                await tg_send_message(chat_id, "Не смог прочитать video file_id. Пришли видео ещё раз.", reply_markup=_seedance_refs_collect_kb())
+                return {"ok": True}
+            duration_hint = float(vid.get("duration") or 0)
+            if duration_hint and duration_hint > 15.4:
+                await tg_send_message(chat_id, "Видео reference слишком длинное. Для Seedance Omni сейчас максимум около 15 секунд.", reply_markup=_seedance_refs_collect_kb())
+                return {"ok": True}
+            settings = st.get("seedance_settings") or {}
+            video_limit = int(settings.get("max_videos") or 3)
+            total_limit = int(settings.get("max_total_refs") or 12)
+            image_ids = list(so.get("image_file_ids") or [])
+            video_ids = list(so.get("video_file_ids") or [])
+            audio_ids = list(so.get("audio_file_ids") or [])
+            if len(video_ids) >= video_limit:
+                await tg_send_message(chat_id, f"Видео refs уже {video_limit}/{video_limit}. Пришли другие refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
+                return {"ok": True}
+            if len(image_ids) + len(video_ids) + len(audio_ids) >= total_limit:
+                await tg_send_message(chat_id, f"Всего refs уже {total_limit}/{total_limit}. Нажми «✅ Готово», чтобы перейти к промпту.", reply_markup=_seedance_refs_collect_kb())
+                return {"ok": True}
+            if file_id not in video_ids:
+                video_ids.append(file_id)
+            so["video_file_ids"] = video_ids[:video_limit]
+            st["seedance_omni"] = so
+            st["ts"] = _now()
+            await tg_send_message(chat_id, f"Видео reference #{len(so['video_file_ids'])} получил ✅\nПришли ещё refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
+            return {"ok": True}
+
         if st.get("mode") == "omni_flash_video_edit":
             ov = st.get("omni_flash_video_edit") or {}
             if (ov.get("step") or "need_video") != "need_video":
@@ -9544,6 +9874,73 @@ async def webhook(secret: str, request: Request):
             mime.startswith("image/")
             or filename_l.endswith((".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"))
         )
+
+        if file_id and st.get("mode") == "seedance_omni":
+            so = st.get("seedance_omni") or {}
+            step = (so.get("step") or "collect_refs")
+            if step != "collect_refs":
+                await tg_send_message(chat_id, "Refs уже собраны ✅ Теперь жду промпт текстом. Если хочешь добавить refs — нажми «⬅️ Вернуться к refs».", reply_markup=_seedance_prompt_back_kb())
+                return {"ok": True}
+
+            is_video_document = mime.startswith("video/") or filename_l.endswith((".mp4", ".mov"))
+            is_audio_document = mime.startswith("audio/") or filename_l.endswith((".mp3", ".wav"))
+            if not (is_image_document or is_video_document or is_audio_document):
+                await tg_send_message(chat_id, "Для Seedance Omni отправь фото, видео MP4/MOV или аудио MP3/WAV.", reply_markup=_seedance_refs_collect_kb())
+                return {"ok": True}
+            if is_audio_document and not ("mpeg" in mime or "mp3" in mime or "wav" in mime or filename_l.endswith((".mp3", ".wav"))):
+                await tg_send_message(chat_id, "Аудио reference лучше отправлять MP3 или WAV — другие форматы KIE может отклонить.", reply_markup=_seedance_refs_collect_kb())
+                return {"ok": True}
+            if is_video_document and not (mime in ("video/mp4", "video/quicktime") or filename_l.endswith((".mp4", ".mov"))):
+                await tg_send_message(chat_id, "Видео reference отправь в MP4 или MOV.", reply_markup=_seedance_refs_collect_kb())
+                return {"ok": True}
+            try:
+                if int(doc.get("file_size") or 0) > 100 * 1024 * 1024:
+                    await tg_send_message(chat_id, "Файл слишком большой для reference. Лимит: до 100 МБ.", reply_markup=_seedance_refs_collect_kb())
+                    return {"ok": True}
+            except Exception:
+                pass
+
+            settings = st.get("seedance_settings") or {}
+            image_limit = int(settings.get("max_images") or 7)
+            video_limit = int(settings.get("max_videos") or 3)
+            audio_limit = int(settings.get("max_audios") or 3)
+            total_limit = int(settings.get("max_total_refs") or 12)
+            image_ids = list(so.get("image_file_ids") or [])
+            video_ids = list(so.get("video_file_ids") or [])
+            audio_ids = list(so.get("audio_file_ids") or [])
+            if len(image_ids) + len(video_ids) + len(audio_ids) >= total_limit:
+                await tg_send_message(chat_id, f"Всего refs уже {total_limit}/{total_limit}. Нажми «✅ Готово», чтобы перейти к промпту.", reply_markup=_seedance_refs_collect_kb())
+                return {"ok": True}
+
+            if is_image_document:
+                if len(image_ids) >= image_limit:
+                    await tg_send_message(chat_id, f"Фото refs уже {image_limit}/{image_limit}. Нажми «✅ Готово» или отправь другой тип refs.", reply_markup=_seedance_refs_collect_kb())
+                    return {"ok": True}
+                if file_id not in image_ids:
+                    image_ids.append(str(file_id))
+                so["image_file_ids"] = image_ids[:image_limit]
+                label = f"Фото reference #{len(so['image_file_ids'])}"
+            elif is_video_document:
+                if len(video_ids) >= video_limit:
+                    await tg_send_message(chat_id, f"Видео refs уже {video_limit}/{video_limit}. Нажми «✅ Готово» или отправь другой тип refs.", reply_markup=_seedance_refs_collect_kb())
+                    return {"ok": True}
+                if file_id not in video_ids:
+                    video_ids.append(str(file_id))
+                so["video_file_ids"] = video_ids[:video_limit]
+                label = f"Видео reference #{len(so['video_file_ids'])}"
+            else:
+                if len(audio_ids) >= audio_limit:
+                    await tg_send_message(chat_id, f"Аудио refs уже {audio_limit}/{audio_limit}. Нажми «✅ Готово» или отправь другой тип refs.", reply_markup=_seedance_refs_collect_kb())
+                    return {"ok": True}
+                if file_id not in audio_ids:
+                    audio_ids.append(str(file_id))
+                so["audio_file_ids"] = audio_ids[:audio_limit]
+                label = f"Аудио reference #{len(so['audio_file_ids'])}"
+
+            st["seedance_omni"] = so
+            st["ts"] = _now()
+            await tg_send_message(chat_id, f"{label} получил ✅\nПришли ещё refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
+            return {"ok": True}
 
         if file_id and mime.startswith("video/") and st.get("mode") == "omni_flash_video_edit":
             ov = st.get("omni_flash_video_edit") or {}
