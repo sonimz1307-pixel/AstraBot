@@ -3,6 +3,7 @@ uvicorn==0.30.6
 httpx==0.27.2
 python-dotenv==1.0.1
 Pillow==10.4.0
+pillow-heif>=0.18.0
 supabase==2.6.0
 aiohttp
 requests>=2.31.0
