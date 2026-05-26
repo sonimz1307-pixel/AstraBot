@@ -3467,7 +3467,10 @@ def _normalize_openai_image_input(image_bytes: bytes, *, source_label: str = "im
         raise RuntimeError(f"{source_label}: empty image bytes")
 
     try:
-        from pillow_heif import register_heif_opener  # type: ignore
+        try:
+            from pi_heif import register_heif_opener  # type: ignore
+        except ImportError:
+            from pillow_heif import register_heif_opener  # type: ignore
         register_heif_opener()
     except Exception:
         # JPEG/PNG/WebP still work without pillow-heif. If the file is HEIC, PIL will fail below
