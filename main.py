@@ -2301,7 +2301,7 @@ def _photo_future_menu_keyboard() -> dict:
         "keyboard": [
             [{"text": "GPT Image 2.0"}, {"text": "Нейро фотосессии"}],
             [{"text": "🍌 Nano Banana"}, {"text": "🍌 Nano Banana 2"}],
-            [{"text": "🍌 Nano Banana Pro"}, {"text": "🍌 Nano Banana Pro - NEW"}],
+            [{"text": "🍌 Nano Banana Pro - NEW"}],
             [{"text": "Seedream"}, {"text": "Апскейл"}],
             [{"text": "⬅️ Назад"}],
         ],
