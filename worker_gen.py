@@ -42,11 +42,20 @@ def _guess_seedance_kie_audio_ext(raw: bytes) -> str:
     head = bytes((raw or b"")[:64])
     if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
         return "wav"
+    if head[:4] == b"OggS":
+        return "ogg"
+    if len(head) >= 12 and head[4:8] == b"ftyp":
+        brand = head[8:12]
+        if brand == b"qt  ":
+            return "mov"
+        if brand in {b"M4A ", b"M4B ", b"M4P "}:
+            return "m4a"
+        return "mp4"
     if head.startswith(b"ID3"):
         return "mp3"
     if len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0:
         return "mp3"
-    return ""
+    return "bin"
 
 
 def _probe_seedance_kie_audio_duration(raw: bytes, ext: str) -> float:
@@ -85,38 +94,40 @@ def _probe_seedance_kie_audio_duration(raw: bytes, ext: str) -> float:
 
 
 def _normalize_seedance_kie_audio_ref(raw: bytes) -> bytes:
-    """Normalize Telegram Seedance KIE Omni audio refs to stable WAV PCM.
+    """Convert Telegram Seedance KIE Omni audio refs to stable MP3.
 
-    Telegram can deliver MP3/WAV with odd headers/bitrates. KIE accepts URLs, so we
-    upload normalized bytes to Supabase to avoid provider-side audio parser errors.
+    Handles MP3/WAV/M4A/AAC/OGG/OPUS and Telegram voice messages (OGG/Opus),
+    plus MP4/MOV containers that have an audio stream. KIE then receives a clean
+    MP3 URL instead of device/provider-specific audio containers.
     """
     raw = bytes(raw or b"")
     if not raw:
         return raw
-    ext = _guess_seedance_kie_audio_ext(raw)
-    if ext not in {"mp3", "wav"}:
-        raise RuntimeError("Seedance 2.0 audio refs поддерживают только MP3 или WAV.")
 
+    ext = _guess_seedance_kie_audio_ext(raw)
     initial_duration = _probe_seedance_kie_audio_duration(raw, ext)
     if initial_duration > SEEDANCE_KIE_AUDIO_MAX_DURATION_SEC:
         raise RuntimeError("Seedance 2.0 audio reference должен быть не длиннее 15 секунд.")
 
     if not shutil.which("ffmpeg"):
-        return raw
+        if ext == "mp3":
+            return raw
+        raise RuntimeError("Для конвертации audio reference в MP3 на worker нужен ffmpeg.")
 
     src_path = None
     dst_path = None
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as src:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext or 'bin'}") as src:
             src.write(raw)
             src.flush()
             src_path = src.name
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as dst:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as dst:
             dst_path = dst.name
         proc = subprocess.run(
             [
                 "ffmpeg", "-y", "-i", src_path,
-                "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2",
+                "-vn", "-map", "0:a:0",
+                "-acodec", "libmp3lame", "-ar", "44100", "-ac", "2", "-b:a", "128k",
                 dst_path,
             ],
             capture_output=True,
@@ -124,13 +135,13 @@ def _normalize_seedance_kie_audio_ref(raw: bytes) -> bytes:
             timeout=90,
         )
         if proc.returncode != 0:
-            if ext == "wav":
-                return raw
-            err = (proc.stderr or proc.stdout or "").strip()[:300]
-            raise RuntimeError(f"Не удалось нормализовать audio reference для Seedance 2.0: {err or 'ffmpeg error'}")
+            err = (proc.stderr or proc.stdout or "").strip()[:500]
+            raise RuntimeError(f"Не удалось преобразовать audio reference в MP3: {err or 'ffmpeg error'}")
         with open(dst_path, "rb") as fh:
-            normalized = fh.read() or raw
-        normalized_duration = _probe_seedance_kie_audio_duration(normalized, "wav")
+            normalized = fh.read()
+        if not normalized:
+            raise RuntimeError("Не удалось преобразовать audio reference в MP3: пустой файл.")
+        normalized_duration = _probe_seedance_kie_audio_duration(normalized, "mp3")
         if normalized_duration > SEEDANCE_KIE_AUDIO_MAX_DURATION_SEC:
             raise RuntimeError("Seedance 2.0 audio reference должен быть не длиннее 15 секунд.")
         return normalized
