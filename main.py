@@ -810,6 +810,11 @@ async def webapp_prompts_admin():
 async def webapp_account():
     with open(os.path.join(BASE_DIR, "webapp_account.html"), "r", encoding="utf-8") as f:
         return f.read()
+
+@app.get("/webapp/topup", response_class=HTMLResponse)
+async def webapp_topup():
+    with open(os.path.join(BASE_DIR, "webapp_topup.html"), "r", encoding="utf-8") as f:
+        return f.read()
         
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 WEBAPP_KLING_URL = os.getenv("WEBAPP_KLING_URL", "https://astrabot-tchj.onrender.com/webapp/kling")
@@ -818,6 +823,7 @@ WEBAPP_TOP_ANALIZATOR_URL = os.getenv("WEBAPP_TOP_ANALIZATOR_URL", "https://astr
 WEBAPP_PROMPTS_URL = os.getenv("WEBAPP_PROMPTS_URL", "https://astrabot-tchj.onrender.com/webapp/prompts")
 WEBAPP_PROMPTS_ADMIN_URL = os.getenv("WEBAPP_PROMPTS_ADMIN_URL", "https://astrabot-tchj.onrender.com/webapp/prompts_admin")
 WEBAPP_ACCOUNT_URL = os.getenv("WEBAPP_ACCOUNT_URL", "https://astrabot-tchj.onrender.com/webapp/account")
+WEBAPP_TOPUP_URL = os.getenv("WEBAPP_TOPUP_URL", "https://astrabot-tchj.onrender.com/webapp/topup")
 NABEX_PUBLIC_SITE_URL = (os.getenv("NABEX_PUBLIC_SITE_URL") or os.getenv("PARTNER_SITE_URL") or os.getenv("PUBLIC_SITE_URL") or "https://nabex.ru").strip().rstrip("/")
 NABEX_SUPPORT_URL = (os.getenv("NABEX_SUPPORT_URL") or os.getenv("SUPPORT_URL") or "https://t.me/HelpNeiroAstra").strip()
 NABEX_PARTNER_BOT_USERNAME = (os.getenv("PARTNER_BOT_USERNAME") or os.getenv("TELEGRAM_BOT_USERNAME") or os.getenv("BOT_USERNAME") or "NeiroAstraBot").strip().lstrip("@")
@@ -901,9 +907,12 @@ async def tg_account_info(request: Request):
             "site_url": NABEX_PUBLIC_SITE_URL,
             "ref_cabinet_url": f"{NABEX_PUBLIC_SITE_URL}/#workspace",
             "topup_url": f"{NABEX_PUBLIC_SITE_URL}/tariffs.html",
+            "account_webapp_url": WEBAPP_ACCOUNT_URL,
+            "topup_webapp_url": WEBAPP_TOPUP_URL,
             "support_url": NABEX_SUPPORT_URL,
             "offer_url": f"{NABEX_PUBLIC_SITE_URL}/terms.html",
             "policy_url": f"{NABEX_PUBLIC_SITE_URL}/privacy.html",
+            "contact_email": "",
         }
 
     balance = 0
@@ -917,6 +926,12 @@ async def tg_account_info(request: Request):
             pass
 
     ref_code, site_ref, bot_ref = _tg_account_ref_links_for(user_id)
+    contact_email = ""
+    try:
+        contact_email = sb_get_user_email(user_id)
+    except Exception:
+        contact_email = ""
+
     return {
         "ok": True,
         "user_id": user_id,
@@ -927,9 +942,161 @@ async def tg_account_info(request: Request):
         "site_url": NABEX_PUBLIC_SITE_URL,
         "ref_cabinet_url": f"{NABEX_PUBLIC_SITE_URL}/#workspace",
         "topup_url": f"{NABEX_PUBLIC_SITE_URL}/tariffs.html",
+        "account_webapp_url": _with_uid(WEBAPP_ACCOUNT_URL, user_id),
+        "topup_webapp_url": _with_uid(WEBAPP_TOPUP_URL, user_id),
         "support_url": NABEX_SUPPORT_URL,
         "offer_url": f"{NABEX_PUBLIC_SITE_URL}/terms.html",
         "policy_url": f"{NABEX_PUBLIC_SITE_URL}/privacy.html",
+        "contact_email": contact_email,
+    }
+
+
+@app.post("/api/tg/topup/create")
+async def tg_topup_create(request: Request):
+    """Create a top-up payment directly from the Telegram account WebApp."""
+    init_data = request.headers.get("X-Telegram-Init-Data", "")
+    tg_user = _verify_telegram_webapp_init_data(init_data)
+
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            payload = {}
+    except Exception:
+        payload = {}
+
+    user_id = 0
+    if tg_user and tg_user.get("id"):
+        try:
+            user_id = int(tg_user.get("id") or 0)
+        except Exception:
+            user_id = 0
+
+    # Fallback for local browser testing only. In Telegram initData is used.
+    if user_id <= 0:
+        for value in (
+            payload.get("uid"),
+            payload.get("tg_user_id"),
+            payload.get("user_id"),
+            request.query_params.get("uid"),
+            request.query_params.get("tg_user_id"),
+            request.query_params.get("user_id"),
+        ):
+            try:
+                user_id = int(value or 0)
+            except Exception:
+                user_id = 0
+            if user_id > 0:
+                break
+
+    if user_id <= 0:
+        return {
+            "ok": False,
+            "error": "user_id_required",
+            "message": "Откройте личный кабинет из Telegram-бота.",
+        }
+
+    try:
+        tokens = int(payload.get("tokens") or 0)
+    except Exception:
+        tokens = 0
+
+    pack = _find_pack_by_tokens(tokens)
+    if not pack:
+        return {
+            "ok": False,
+            "error": "pack_not_found",
+            "message": "Пакет пополнения не найден.",
+        }
+
+    amount_rub = int(pack.get("rub") or 0)
+    stars = int(pack.get("stars") or 0)
+    title = f"Пополнение баланса: {tokens} токенов"
+
+    # Main path: YooKassa card/SBP payment. It requires receipt email.
+    if _yookassa_enabled():
+        email = str(payload.get("email") or "").strip().lower()
+        stored_email = ""
+        try:
+            stored_email = sb_get_user_email(user_id)
+        except Exception:
+            stored_email = ""
+
+        if email:
+            if not _EMAIL_RE.match(email):
+                return {
+                    "ok": False,
+                    "need_email": True,
+                    "message": "Введите корректный email для чека.",
+                }
+            # Payment can still be created if Supabase temporarily fails; storing email is a convenience.
+            try:
+                sb_set_user_email(user_id, email)
+            except Exception:
+                pass
+            stored_email = email
+
+        if not stored_email:
+            return {
+                "ok": False,
+                "need_email": True,
+                "message": "Для оплаты картой или СБП нужен email для чека.",
+            }
+
+        return_url = str(payload.get("return_url") or WEBAPP_ACCOUNT_URL or "https://t.me").strip()
+        if not (return_url.startswith("https://") or return_url.startswith("http://")):
+            return_url = WEBAPP_ACCOUNT_URL or "https://t.me"
+
+        try:
+            payment_id, url = await create_yookassa_payment(
+                amount_rub=amount_rub,
+                description=title,
+                user_id=user_id,
+                tokens=tokens,
+                customer_email=stored_email,
+                return_url=return_url,
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": "payment_create_failed",
+                "message": f"Не удалось создать платёж: {exc}",
+            }
+
+        return {
+            "ok": True,
+            "method": "yookassa",
+            "payment_id": payment_id,
+            "confirmation_url": url,
+            "tokens": tokens,
+            "amount_rub": amount_rub,
+            "customer_email": stored_email,
+        }
+
+    # Fallback: Telegram Stars invoice is sent into the bot chat.
+    try:
+        payload_str = f"stars_topup:{tokens}:{user_id}"
+        await tg_send_stars_invoice(
+            user_id,
+            title,
+            f"{tokens} токенов • {stars}⭐ (≈{amount_rub}₽)",
+            payload_str,
+            stars,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": "stars_invoice_failed",
+            "message": f"Не удалось отправить инвойс Stars: {exc}",
+        }
+
+    return {
+        "ok": True,
+        "method": "telegram_stars",
+        "sent_to_bot": True,
+        "tokens": tokens,
+        "amount_rub": amount_rub,
+        "stars": stars,
+        "message": "Инвойс Telegram Stars отправлен в чат с ботом.",
     }
 
 
