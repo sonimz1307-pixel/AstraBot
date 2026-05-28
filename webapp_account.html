@@ -1604,6 +1604,27 @@
       }
     }
 
+
+
+    /* === Visual cleanup for Telegram WebApp header/referral block === */
+    .topbar {
+      display: none !important;
+    }
+
+    .stat-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .stat-grid .stat-box:first-child {
+      display: none !important;
+    }
+
+    @media (max-width: 760px) {
+      .stat-grid {
+        grid-template-columns: 1fr !important;
+      }
+    }
+
   </style>
 </head>
 <body>
