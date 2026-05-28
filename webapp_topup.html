@@ -1,0 +1,663 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Тарифные планы — NABEX AI</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      --bg: #050505;
+      --card: rgba(12, 12, 12, 0.96);
+      --card-soft: rgba(15, 15, 15, 0.94);
+      --stroke: rgba(255,255,255,0.08);
+      --stroke-strong: rgba(255,168,0,0.38);
+      --text: #fff;
+      --muted: rgba(255,255,255,0.72);
+      --muted-2: rgba(255,255,255,0.48);
+      --orange: #ff9800;
+      --orange-2: #ffb400;
+      --green: #78db45;
+      --blue: #2992ff;
+      --purple: #954fff;
+      --radius-xl: 28px;
+      --radius-lg: 22px;
+      --radius-md: 16px;
+      --shadow: 0 20px 48px rgba(0,0,0,0.46);
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      color: var(--text);
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+      background:
+        radial-gradient(circle at 8% 0%, rgba(255, 136, 0, 0.18), transparent 30%),
+        radial-gradient(circle at 100% 18%, rgba(255, 175, 0, 0.08), transparent 26%),
+        #020202;
+    }
+    body { padding: max(18px, env(safe-area-inset-top)) 18px max(28px, env(safe-area-inset-bottom)); }
+    button, a, input { font: inherit; }
+    button { border: 0; cursor: pointer; }
+    a { color: inherit; text-decoration: none; }
+    .app { width: min(100%, 620px); margin: 0 auto; }
+    .topbar {
+      display: grid;
+      grid-template-columns: 44px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 20px;
+    }
+    .back-btn, .icon-btn {
+      width: 44px; height: 44px; border-radius: 14px; display: grid; place-items: center;
+      color: rgba(255,255,255,0.82); background: transparent;
+    }
+    .back-btn svg, .icon-btn svg { width: 28px; height: 28px; display: block; }
+    .brand { display: flex; align-items: center; gap: 14px; min-width: 0; }
+    .logo {
+      width: 58px; height: 58px; border-radius: 50%; flex: 0 0 auto; display: grid; place-items: center;
+      font-size: 32px; font-weight: 950; color: #1f1405;
+      background: radial-gradient(circle at 32% 24%, #ffd56c, #ff9a00 46%, #e46d00 100%);
+      box-shadow: 0 12px 32px rgba(255, 152, 0, 0.28), inset 0 0 0 1px rgba(255,255,255,0.12);
+    }
+    .brand-title { font-size: 28px; font-weight: 900; letter-spacing: -0.6px; line-height: 1.05; }
+    .brand-subtitle { margin-top: 4px; color: var(--muted); font-size: 16px; }
+    .top-actions { display: flex; align-items: center; gap: 8px; }
+    .dot-alert { position: absolute; right: 6px; top: 4px; width: 12px; height: 12px; border-radius: 50%; background: var(--orange); box-shadow: 0 0 0 3px #050505; }
+    .icon-btn { position: relative; }
+
+    .info-card {
+      border: 1px solid var(--stroke); border-radius: 24px; padding: 18px 22px; margin-bottom: 22px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0.01)), var(--card);
+      box-shadow: var(--shadow);
+      display: grid; grid-template-columns: 54px minmax(0,1fr); gap: 16px; align-items: center;
+    }
+    .info-icon {
+      width: 46px; height: 46px; border-radius: 16px; display: grid; place-items: center;
+      color: var(--orange); font-size: 28px;
+      background: rgba(255,152,0,0.08);
+      box-shadow: inset 0 0 0 1px rgba(255, 152, 0, 0.16);
+    }
+    .info-title { font-size: 16px; line-height: 1.45; color: rgba(255,255,255,0.92); }
+
+    .packs { display: grid; gap: 18px; }
+    .pack-card {
+      position: relative; overflow: hidden; border: 1px solid var(--stroke); border-radius: 30px;
+      background:
+        radial-gradient(circle at 100% 0%, rgba(255, 152, 0, 0.08), transparent 28%),
+        linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.008)),
+        var(--card-soft);
+      box-shadow: var(--shadow);
+      padding: 22px 24px;
+    }
+    .pack-card.popular {
+      border-color: rgba(255, 152, 0, 0.72);
+      box-shadow: 0 0 0 1px rgba(255, 152, 0, 0.22) inset, var(--shadow);
+    }
+    .popular-ribbon {
+      position: absolute; left: 0; top: 0; min-height: 38px; padding: 0 18px 0 16px; border-bottom-right-radius: 18px;
+      display: inline-flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 900;
+      color: #fff3da; background: linear-gradient(135deg, #ff8d00, #ffb400);
+      box-shadow: 0 8px 26px rgba(255, 152, 0, 0.24);
+    }
+    .popular-ribbon svg { width: 14px; height: 14px; }
+    .pack-grid {
+      display: grid;
+      grid-template-columns: 118px minmax(200px, 1fr) 190px 160px 190px;
+      gap: 18px;
+      align-items: center;
+      min-height: 160px;
+    }
+    .pack-col + .pack-col { border-left: 1px solid rgba(255,255,255,0.08); padding-left: 18px; }
+    .pack-icon-wrap { display: flex; justify-content: center; }
+    .pack-icon {
+      width: 86px; height: 86px; border-radius: 50%; display: grid; place-items: center; font-size: 52px;
+      background: radial-gradient(circle at 30% 24%, rgba(255,255,255,0.12), rgba(255,255,255,0.02));
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08), 0 0 0 1px rgba(255, 152, 0, 0.18);
+    }
+    .pack-name { font-size: 28px; font-weight: 950; letter-spacing: -0.6px; margin-bottom: 10px; }
+    .tag-row { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+    .tag {
+      min-height: 34px; padding: 0 12px; border-radius: 999px; display: inline-flex; align-items: center;
+      font-size: 14px; font-weight: 900;
+    }
+    .tag-green { color: #dfffca; background: rgba(120, 219, 69, 0.14); box-shadow: inset 0 0 0 1px rgba(120,219,69,0.22); }
+    .tag-purple { color: #dfc9ff; background: rgba(149, 79, 255, 0.16); box-shadow: inset 0 0 0 1px rgba(149,79,255,0.22); }
+    .tag-blue { color: #cfe6ff; background: rgba(41, 146, 255, 0.16); box-shadow: inset 0 0 0 1px rgba(41,146,255,0.22); }
+    .tag-orange { color: #ffe3b0; background: rgba(255, 152, 0, 0.16); box-shadow: inset 0 0 0 1px rgba(255,152,0,0.24); }
+    .desc { color: var(--muted); font-size: 16px; line-height: 1.45; max-width: 240px; }
+
+    .metric-main { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
+    .metric-main strong { font-size: 58px; line-height: 0.9; font-weight: 950; letter-spacing: -2px; }
+    .metric-main span { color: rgba(255,255,255,0.9); font-size: 17px; font-weight: 700; }
+    .metric-sub { display: inline-flex; min-height: 42px; align-items: center; padding: 0 14px; border-radius: 14px; color: rgba(255,255,255,0.82); font-size: 15px; background: rgba(255,255,255,0.03); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08); }
+    .metric-sub.economy { color: #cfff73; background: rgba(115, 168, 0, 0.16); box-shadow: inset 0 0 0 1px rgba(140,205,20,0.22); margin-top: 10px; }
+
+    .price-main { font-size: 34px; font-weight: 950; letter-spacing: -1px; white-space: nowrap; }
+    .buy-col { display: flex; justify-content: flex-end; }
+    .buy-btn {
+      width: 170px; min-height: 68px; border-radius: 18px; color: #120b01; font-size: 22px; font-weight: 950;
+      background: linear-gradient(135deg, #ff9800, #ffb400);
+      box-shadow: 0 14px 28px rgba(255, 152, 0, 0.22), inset 0 0 0 1px rgba(255,255,255,0.14);
+      transition: transform .16s ease, filter .16s ease, opacity .16s ease;
+    }
+    .buy-btn:active { transform: scale(.985); }
+    .buy-btn[disabled] { opacity: .65; cursor: default; }
+
+    .footer-note {
+      display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap;
+      color: var(--muted-2); text-align: center; font-size: 14px; line-height: 1.5; margin: 26px 0 8px;
+    }
+    .footer-note a { color: var(--orange); }
+    .footer-lock { width: 16px; height: 16px; opacity: .74; }
+
+    .toast {
+      position: fixed; z-index: 80; left: 50%; bottom: calc(22px + env(safe-area-inset-bottom));
+      transform: translateX(-50%) translateY(12px); opacity: 0; pointer-events: none;
+      background: linear-gradient(135deg, #fff0c0, #ffb400); color: #120b01; font-weight: 900;
+      padding: 14px 18px; border-radius: 999px; transition: opacity .18s ease, transform .18s ease;
+      box-shadow: 0 16px 34px rgba(0,0,0,0.38);
+      white-space: nowrap;
+    }
+    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+    .modal-overlay {
+      position: fixed; inset: 0; z-index: 70; display: none; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.66); padding: 18px;
+    }
+    .modal-overlay.show { display: flex; }
+    .modal {
+      width: min(100%, 440px); border: 1px solid rgba(255,255,255,0.1); border-radius: 24px; padding: 22px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.012)), #0d0d0d;
+      box-shadow: var(--shadow);
+    }
+    .modal-title { font-size: 24px; font-weight: 950; margin-bottom: 8px; }
+    .modal-text { color: var(--muted); font-size: 15px; line-height: 1.45; margin-bottom: 16px; }
+    .input {
+      width: 100%; min-height: 54px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.1); outline: none;
+      background: rgba(255,255,255,0.04); color: #fff; padding: 0 16px; font-size: 16px; margin-bottom: 12px;
+    }
+    .modal-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .btn-secondary, .btn-primary {
+      min-height: 50px; border-radius: 14px; font-weight: 900; font-size: 16px;
+    }
+    .btn-secondary { color: #fff; background: rgba(255,255,255,0.08); }
+    .btn-primary { color: #120b01; background: linear-gradient(135deg, #ff9800, #ffb400); }
+
+    @media (max-width: 980px) {
+      .pack-grid {
+        grid-template-columns: 100px minmax(160px, 1fr) 160px 130px 160px;
+        gap: 14px;
+      }
+      .metric-main strong { font-size: 48px; }
+      .price-main { font-size: 30px; }
+      .buy-btn { width: 150px; min-height: 60px; font-size: 20px; }
+    }
+
+
+    @media (min-width: 761px) {
+      .app { width: min(100%, 620px); }
+      .topbar { margin-bottom: 18px; }
+      .info-card {
+        padding: 16px 18px;
+        margin-bottom: 16px;
+        border-radius: 22px;
+        grid-template-columns: 44px minmax(0, 1fr);
+        gap: 12px;
+      }
+      .info-icon { width: 40px; height: 40px; border-radius: 14px; font-size: 25px; }
+      .info-title { font-size: 14px; line-height: 1.45; }
+      .packs { gap: 14px; }
+      .pack-card { padding: 18px; border-radius: 24px; }
+      .popular-ribbon { min-height: 34px; padding: 0 15px; font-size: 12px; border-bottom-right-radius: 16px; }
+      .pack-grid {
+        grid-template-columns: 68px 145px 112px 76px 120px;
+        gap: 10px;
+        min-height: 132px;
+        align-items: center;
+      }
+      .pack-col + .pack-col { padding-left: 10px; }
+      .pack-icon { width: 62px; height: 62px; font-size: 37px; }
+      .pack-name { font-size: 22px; margin-bottom: 8px; }
+      .tag-row { margin-bottom: 10px; }
+      .tag { min-height: 28px; padding: 0 9px; font-size: 11px; }
+      .desc { font-size: 13px; line-height: 1.42; max-width: none; }
+      .metric-main { gap: 7px; margin-bottom: 8px; }
+      .metric-main strong { font-size: 40px; letter-spacing: -1.5px; }
+      .metric-main span { font-size: 12px; }
+      .metric-sub { min-height: 32px; padding: 0 10px; border-radius: 12px; font-size: 12px; }
+      .metric-sub.economy { margin-top: 7px; }
+      .price-main { font-size: 24px; letter-spacing: -0.6px; }
+      .buy-btn { width: 118px; min-height: 52px; border-radius: 15px; font-size: 18px; }
+      .footer-note { font-size: 13px; margin-top: 22px; }
+    }
+
+    @media (max-width: 760px) {
+      body { padding-left: 12px; padding-right: 12px; }
+      .topbar { grid-template-columns: 38px minmax(0,1fr) auto; gap: 10px; }
+      .back-btn, .icon-btn { width: 38px; height: 38px; border-radius: 12px; }
+      .back-btn svg, .icon-btn svg { width: 24px; height: 24px; }
+      .brand { gap: 10px; }
+      .logo { width: 48px; height: 48px; font-size: 26px; }
+      .brand-title { font-size: 22px; }
+      .brand-subtitle { font-size: 14px; }
+      .info-card { padding: 16px; grid-template-columns: 40px minmax(0,1fr); gap: 12px; border-radius: 20px; }
+      .info-icon { width: 38px; height: 38px; border-radius: 14px; font-size: 24px; }
+      .info-title { font-size: 15px; }
+
+      .pack-card { padding: 18px; border-radius: 24px; }
+      .popular-ribbon { min-height: 34px; font-size: 12px; }
+      .pack-grid {
+        grid-template-columns: 84px minmax(0, 1fr);
+        gap: 14px;
+        align-items: start;
+      }
+      .pack-col + .pack-col { border-left: 0; padding-left: 0; }
+      .pack-icon { width: 72px; height: 72px; font-size: 42px; }
+      .pack-name { font-size: 22px; margin-bottom: 8px; }
+      .tag { min-height: 30px; font-size: 12px; padding: 0 10px; }
+      .desc { font-size: 14px; max-width: none; }
+      .tokens-col, .price-col, .buy-col {
+        grid-column: 1 / -1;
+      }
+      .tokens-col, .price-col {
+        margin-top: 4px;
+        padding-top: 14px;
+        border-top: 1px solid rgba(255,255,255,0.08);
+      }
+      .price-col { padding-top: 0; border-top: 0; }
+      .metric-main { margin-bottom: 10px; }
+      .metric-main strong { font-size: 44px; }
+      .metric-main span { font-size: 16px; }
+      .metric-sub { min-height: 38px; font-size: 14px; }
+      .price-main { font-size: 30px; }
+      .buy-col { justify-content: stretch; margin-top: 4px; }
+      .buy-btn { width: 100%; min-height: 58px; font-size: 19px; border-radius: 16px; }
+      .footer-note { font-size: 13px; margin-top: 22px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <button class="back-btn" type="button" data-back aria-label="Назад">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+      </button>
+      <div class="brand">
+        <div class="logo">N</div>
+        <div>
+          <div class="brand-title">Nabex AI</div>
+          <div class="brand-subtitle">Тарифные планы</div>
+        </div>
+      </div>
+      <div class="top-actions" aria-label="Действия">
+        <button class="icon-btn" type="button" aria-label="Уведомления">
+          <span class="dot-alert"></span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+        </button>
+        <button class="icon-btn" type="button" aria-label="Меню">
+          <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <section class="info-card">
+      <div class="info-icon">⚡</div>
+      <div class="info-title">Токены — универсальная валюта для всех AI‑инструментов Nabex AI. Используйте их для генерации изображений, видео, музыки и других задач.</div>
+    </section>
+
+    <section class="packs">
+      <article class="pack-card">
+        <div class="pack-grid">
+          <div class="pack-icon-wrap"><div class="pack-icon">💰</div></div>
+          <div class="pack-col info-col">
+            <div class="pack-name">MINI</div>
+            <div class="tag-row"><span class="tag tag-green">Быстрый тест</span></div>
+            <div class="desc">Для знакомства<br />с сервисом</div>
+          </div>
+          <div class="pack-col tokens-col">
+            <div class="metric-main"><strong>5</strong><span>токенов</span></div>
+            <div class="metric-sub">12 ₽ за токен</div>
+          </div>
+          <div class="pack-col price-col">
+            <div class="price-main">60 ₽</div>
+          </div>
+          <div class="pack-col buy-col">
+            <button class="buy-btn" type="button" data-buy="5">Купить</button>
+          </div>
+        </div>
+      </article>
+
+      <article class="pack-card popular">
+        <div class="popular-ribbon">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="m12 2.5 2.8 6 6.5.7-4.8 4.5 1.3 6.4L12 16.8l-5.8 3.3 1.3-6.4-4.8-4.5 6.5-.7L12 2.5z"/></svg>
+          <span>ПОПУЛЯРНЫЙ СТАРТ</span>
+        </div>
+        <div class="pack-grid" style="padding-top: 10px;">
+          <div class="pack-icon-wrap"><div class="pack-icon">⭐</div></div>
+          <div class="pack-col info-col">
+            <div class="pack-name">START</div>
+            <div class="tag-row"><span class="tag tag-purple">Популярный старт</span></div>
+            <div class="desc">Базовое пополнение<br />для повседневной работы</div>
+          </div>
+          <div class="pack-col tokens-col">
+            <div class="metric-main"><strong>20</strong><span>токенов</span></div>
+            <div class="metric-sub">9 ₽ за токен</div>
+          </div>
+          <div class="pack-col price-col">
+            <div class="price-main">180 ₽</div>
+          </div>
+          <div class="pack-col buy-col">
+            <button class="buy-btn" type="button" data-buy="20">Купить</button>
+          </div>
+        </div>
+      </article>
+
+      <article class="pack-card">
+        <div class="pack-grid">
+          <div class="pack-icon-wrap"><div class="pack-icon">🚀</div></div>
+          <div class="pack-col info-col">
+            <div class="pack-name">PRO</div>
+            <div class="tag-row"><span class="tag tag-blue">Для активных</span></div>
+            <div class="desc">Оптимальный баланс<br />для активной работы</div>
+          </div>
+          <div class="pack-col tokens-col">
+            <div class="metric-main"><strong>50</strong><span>токенов</span></div>
+            <div class="metric-sub">9 ₽ за токен</div>
+          </div>
+          <div class="pack-col price-col">
+            <div class="price-main">450 ₽</div>
+          </div>
+          <div class="pack-col buy-col">
+            <button class="buy-btn" type="button" data-buy="50">Купить</button>
+          </div>
+        </div>
+      </article>
+
+      <article class="pack-card">
+        <div class="pack-grid">
+          <div class="pack-icon-wrap"><div class="pack-icon">👑</div></div>
+          <div class="pack-col info-col">
+            <div class="pack-name">PLUS</div>
+            <div class="tag-row"><span class="tag tag-purple">Выгоднее</span></div>
+            <div class="desc">Больше токенов —<br />больше возможностей</div>
+          </div>
+          <div class="pack-col tokens-col">
+            <div class="metric-main"><strong>100</strong><span>токенов</span></div>
+            <div class="metric-sub">8.5 ₽ за токен</div>
+            <div class="metric-sub economy">Вы экономите 350 ₽</div>
+          </div>
+          <div class="pack-col price-col">
+            <div class="price-main">850 ₽</div>
+          </div>
+          <div class="pack-col buy-col">
+            <button class="buy-btn" type="button" data-buy="100">Купить</button>
+          </div>
+        </div>
+      </article>
+
+      <article class="pack-card">
+        <div class="pack-grid">
+          <div class="pack-icon-wrap"><div class="pack-icon">💎</div></div>
+          <div class="pack-col info-col">
+            <div class="pack-name">MAX</div>
+            <div class="tag-row"><span class="tag tag-blue">Лучшая цена</span></div>
+            <div class="desc">Максимальный пакет<br />по лучшей цене</div>
+          </div>
+          <div class="pack-col tokens-col">
+            <div class="metric-main"><strong>200</strong><span>токенов</span></div>
+            <div class="metric-sub">8 ₽ за токен</div>
+            <div class="metric-sub economy">Вы экономите 800 ₽</div>
+          </div>
+          <div class="pack-col price-col">
+            <div class="price-main">1 600 ₽</div>
+          </div>
+          <div class="pack-col buy-col">
+            <button class="buy-btn" type="button" data-buy="200">Купить</button>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <div class="footer-note">
+      <svg class="footer-lock" viewBox="0 0 24 24" fill="currentColor"><path d="M17 9h-1V7a4 4 0 1 0-8 0v2H7a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2Zm-7-2a2 2 0 1 1 4 0v2h-4V7Z"/></svg>
+      <span>Покупая токены, вы соглашаетесь с условиями</span>
+      <a href="#" data-open="offer">оферты</a>
+      <span>и</span>
+      <a href="#" data-open="policy">политикой сервиса</a>.
+    </div>
+  </main>
+
+  <div class="modal-overlay" id="emailOverlay" aria-hidden="true">
+    <section class="modal" role="dialog" aria-modal="true" aria-label="Email для чека">
+      <div class="modal-title">Email для чека</div>
+      <div class="modal-text">Перед оплатой, нужен email для отправки чека. Введи его один раз — дальше будем использовать автоматически.</div>
+      <input class="input" id="emailInput" type="email" inputmode="email" autocomplete="email" placeholder="Введите email" />
+      <div class="modal-actions">
+        <button class="btn-secondary" type="button" data-email-cancel>Отмена</button>
+        <button class="btn-primary" type="button" data-email-submit>Продолжить</button>
+      </div>
+    </section>
+  </div>
+
+  <div class="toast" id="toast">Готово</div>
+
+  <script>
+    const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+    const query = new URLSearchParams(window.location.search || "");
+    const toast = document.getElementById("toast");
+    const emailOverlay = document.getElementById("emailOverlay");
+    const emailInput = document.getElementById("emailInput");
+
+    const state = {
+      offerUrl: "https://nabex.ru/terms.html",
+      policyUrl: "https://nabex.ru/privacy.html",
+      accountUrl: "",
+      customerEmail: "",
+      pendingTokens: 0,
+      loadingTokens: 0
+    };
+
+    if (tg) {
+      tg.ready();
+      tg.expand();
+      tg.setHeaderColor("#050505");
+      tg.setBackgroundColor("#050505");
+      if (tg.BackButton) {
+        tg.BackButton.show();
+        tg.BackButton.onClick(() => goBack());
+      }
+    }
+
+    function showToast(text) {
+      toast.textContent = text || "Готово";
+      toast.classList.add("show");
+      clearTimeout(showToast.timer);
+      showToast.timer = setTimeout(() => toast.classList.remove("show"), 1800);
+    }
+
+    function openUrl(url) {
+      if (!url) return;
+      if (tg && typeof tg.openLink === "function") {
+        tg.openLink(url);
+        return;
+      }
+      window.location.href = url;
+    }
+
+    function accountUrl() {
+      if (state.accountUrl) return state.accountUrl;
+      let url;
+      if (window.location.protocol === "file:") {
+        url = new URL("webapp_account.html", window.location.href);
+      } else {
+        url = new URL("/webapp/account", window.location.origin);
+      }
+      const uid = query.get("uid") || query.get("tg_user_id") || query.get("user_id") || "";
+      if (uid) url.searchParams.set("uid", uid);
+      return url.toString();
+    }
+
+    function goBack() {
+      if (history.length > 1) {
+        history.back();
+        return;
+      }
+      window.location.href = accountUrl();
+    }
+
+    function setLoading(tokens) {
+      state.loadingTokens = tokens || 0;
+      document.querySelectorAll("[data-buy]").forEach((btn) => {
+        const btnTokens = Number(btn.dataset.buy || 0);
+        const loading = state.loadingTokens === btnTokens;
+        btn.disabled = !!state.loadingTokens;
+        btn.textContent = loading ? "Загрузка..." : "Купить";
+      });
+    }
+
+    function openEmailModal(tokens) {
+      state.pendingTokens = Number(tokens || 0);
+      emailInput.value = state.customerEmail || "";
+      emailOverlay.classList.add("show");
+      emailOverlay.setAttribute("aria-hidden", "false");
+      setTimeout(() => emailInput.focus(), 40);
+    }
+
+    function closeEmailModal() {
+      emailOverlay.classList.remove("show");
+      emailOverlay.setAttribute("aria-hidden", "true");
+    }
+
+    async function loadAccountMeta() {
+      const params = new URLSearchParams();
+      const uid = query.get("uid") || query.get("tg_user_id") || query.get("user_id") || "";
+      if (uid) params.set("uid", uid);
+      try {
+        const response = await fetch("/api/tg/account" + (params.toString() ? "?" + params.toString() : ""), {
+          headers: { "X-Telegram-Init-Data": tg && tg.initData ? tg.initData : "" }
+        });
+        const data = await response.json();
+        state.offerUrl = data.offer_url || state.offerUrl;
+        state.policyUrl = data.policy_url || state.policyUrl;
+        state.accountUrl = data.account_webapp_url || state.accountUrl;
+        state.customerEmail = data.contact_email || data.email || state.customerEmail || "";
+      } catch (e) {}
+    }
+
+    async function createTopup(tokens, emailOverride) {
+      const uid = query.get("uid") || query.get("tg_user_id") || query.get("user_id") || "";
+      const payload = {
+        tokens: Number(tokens || 0),
+        uid,
+        user_id: uid,
+        tg_user_id: uid,
+        return_url: accountUrl()
+      };
+      const email = String(emailOverride || state.customerEmail || "").trim();
+      if (email) payload.email = email;
+
+      const response = await fetch("/api/tg/topup/create", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Telegram-Init-Data": tg && tg.initData ? tg.initData : ""
+        },
+        body: JSON.stringify(payload)
+      });
+      return await response.json();
+    }
+
+    async function handleBuy(tokens, emailOverride) {
+      try {
+        setLoading(Number(tokens));
+        const data = await createTopup(tokens, emailOverride);
+        if (!data || !data.ok) {
+          if (data && data.need_email) {
+            closeEmailModal();
+            openEmailModal(tokens);
+            showToast("Нужен email для чека");
+            return;
+          }
+          const message = data && data.message ? data.message : "Не удалось создать оплату";
+          if (tg && typeof tg.showAlert === "function") {
+            tg.showAlert(message);
+          } else {
+            alert(message);
+          }
+          return;
+        }
+
+        closeEmailModal();
+        if (emailOverride) state.customerEmail = String(emailOverride).trim();
+
+        if (data.method === "yookassa" && data.confirmation_url) {
+          openUrl(data.confirmation_url);
+          return;
+        }
+
+        if (data.method === "telegram_stars") {
+          const message = data.message || "Инвойс отправлен в чат с ботом.";
+          showToast("Инвойс отправлен");
+          if (tg && typeof tg.showAlert === "function") {
+            tg.showAlert(message);
+          } else {
+            alert(message);
+          }
+          return;
+        }
+
+        showToast("Оплата создана");
+      } catch (error) {
+        const message = window.location.protocol === "file:"
+          ? "Локальный HTML не может создать оплату без backend. В проекте после подключения маршрута /webapp/topup всё будет работать."
+          : "Не удалось создать оплату";
+        if (tg && typeof tg.showAlert === "function") {
+          tg.showAlert(message);
+        } else {
+          alert(message);
+        }
+      } finally {
+        setLoading(0);
+      }
+    }
+
+    document.addEventListener("click", async (event) => {
+      if (event.target.closest("[data-back]")) {
+        goBack();
+        return;
+      }
+
+      const openTarget = event.target.closest("[data-open]");
+      if (openTarget) {
+        event.preventDefault();
+        openUrl(openTarget.dataset.open === "offer" ? state.offerUrl : state.policyUrl);
+        return;
+      }
+
+      const buy = event.target.closest("[data-buy]");
+      if (buy) {
+        await handleBuy(Number(buy.dataset.buy || 0));
+        return;
+      }
+
+      if (event.target.closest("[data-email-cancel]")) {
+        closeEmailModal();
+        return;
+      }
+
+      if (event.target.closest("[data-email-submit]")) {
+        const email = emailInput.value.trim();
+        await handleBuy(state.pendingTokens, email);
+        return;
+      }
+
+      if (event.target === emailOverlay) {
+        closeEmailModal();
+      }
+    });
+
+    loadAccountMeta();
+  </script>
+</body>
+</html>
