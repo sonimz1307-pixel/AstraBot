@@ -1,12 +1,26 @@
-import os
+import asyncio
 import json
+import os
 import time
 from typing import Any, Dict, Optional, Sequence
 
 import redis.asyncio as redis
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 _QUEUE_PREFIX = os.getenv("REDIS_QUEUE_PREFIX", "astrabot:queue").strip().rstrip(":")
 _DEFAULT_QUEUE_NAME = os.getenv("REDIS_QUEUE_NAME", "gen").strip() or "gen"
+
+# BLPOP waits up to timeout_sec, so the socket read timeout must be higher
+# than the blocking-pop timeout. Otherwise workers can die while simply
+# waiting for a job.
+_REDIS_SOCKET_TIMEOUT_SEC = int(os.getenv("REDIS_SOCKET_TIMEOUT_SEC", "30") or "30")
+_REDIS_CONNECT_TIMEOUT_SEC = int(os.getenv("REDIS_CONNECT_TIMEOUT_SEC", "10") or "10")
+_REDIS_HEALTH_CHECK_INTERVAL_SEC = int(os.getenv("REDIS_HEALTH_CHECK_INTERVAL_SEC", "30") or "30")
+_REDIS_RECONNECT_SLEEP_SEC = float(os.getenv("REDIS_RECONNECT_SLEEP_SEC", "2") or "2")
+_REDIS_ENQUEUE_ATTEMPTS = max(1, int(os.getenv("REDIS_ENQUEUE_ATTEMPTS", "3") or "3"))
+
+_REDIS_CLIENT: Optional[redis.Redis] = None
 
 
 def _redis_url() -> str:
@@ -22,8 +36,30 @@ def _queue_key(queue_name: Optional[str] = None) -> str:
 
 
 async def get_redis() -> "redis.Redis":
-    # decode_responses=True -> str keys/values (we store JSON strings)
-    return redis.from_url(_redis_url(), decode_responses=True)
+    """Return a shared async Redis client for this process."""
+    global _REDIS_CLIENT
+    if _REDIS_CLIENT is None:
+        # decode_responses=True -> str keys/values (we store JSON strings)
+        _REDIS_CLIENT = redis.from_url(
+            _redis_url(),
+            decode_responses=True,
+            socket_timeout=_REDIS_SOCKET_TIMEOUT_SEC,
+            socket_connect_timeout=_REDIS_CONNECT_TIMEOUT_SEC,
+            health_check_interval=_REDIS_HEALTH_CHECK_INTERVAL_SEC,
+            retry_on_timeout=True,
+        )
+    return _REDIS_CLIENT
+
+
+async def _reset_redis_client() -> None:
+    global _REDIS_CLIENT
+    client = _REDIS_CLIENT
+    _REDIS_CLIENT = None
+    if client is not None:
+        try:
+            await client.aclose()
+        except Exception:
+            pass
 
 
 async def enqueue_job(job: Dict[str, Any], queue_name: Optional[str] = None) -> str:
@@ -31,13 +67,32 @@ async def enqueue_job(job: Dict[str, Any], queue_name: Optional[str] = None) -> 
     Push job (dict) into Redis list.
     Returns job_id (string). If missing, generates one.
     """
-    r = await get_redis()
     job_id = str(job.get("job_id") or job.get("id") or "")
     if not job_id:
         job_id = f"job_{int(time.time() * 1000)}"
         job["job_id"] = job_id
-    await r.rpush(_queue_key(queue_name), json.dumps(job, ensure_ascii=False))
-    return job_id
+
+    payload = json.dumps(job, ensure_ascii=False)
+    key = _queue_key(queue_name)
+    last_exc: Optional[BaseException] = None
+
+    for attempt in range(1, _REDIS_ENQUEUE_ATTEMPTS + 1):
+        try:
+            r = await get_redis()
+            await r.rpush(key, payload)
+            return job_id
+        except (RedisTimeoutError, RedisConnectionError) as exc:
+            last_exc = exc
+            print(
+                f"[queue_redis] Redis enqueue error attempt={attempt}/{_REDIS_ENQUEUE_ATTEMPTS} "
+                f"queue={key}: {exc}",
+                flush=True,
+            )
+            await _reset_redis_client()
+            if attempt < _REDIS_ENQUEUE_ATTEMPTS:
+                await asyncio.sleep(_REDIS_RECONNECT_SLEEP_SEC)
+
+    raise RuntimeError(f"Redis enqueue failed after {_REDIS_ENQUEUE_ATTEMPTS} attempts: {last_exc}")
 
 
 async def dequeue_job(
@@ -48,14 +103,23 @@ async def dequeue_job(
     """
     Blocking pop with timeout. Returns dict job or None.
     Supports one queue_name or multiple queue_names.
+    Transient Redis timeout/connection errors do not crash workers.
     """
-    r = await get_redis()
     keys: list[str]
     if queue_names:
         keys = [_queue_key(q) for q in queue_names if str(q or "").strip()]
     else:
         keys = [_queue_key(queue_name)]
-    res = await r.blpop(keys, timeout=timeout_sec)
+
+    try:
+        r = await get_redis()
+        res = await r.blpop(keys, timeout=timeout_sec)
+    except (RedisTimeoutError, RedisConnectionError) as exc:
+        print(f"[queue_redis] Redis dequeue error queues={keys}: {exc}", flush=True)
+        await _reset_redis_client()
+        await asyncio.sleep(_REDIS_RECONNECT_SLEEP_SEC)
+        return None
+
     if not res:
         return None
     _key, payload = res
