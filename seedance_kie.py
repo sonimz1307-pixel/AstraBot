@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
 import os
 import time
 from typing import Any, Dict, List, Optional, Sequence
@@ -38,62 +37,13 @@ SEEDANCE_KIE_MAX_VIDEO_REFS = int(os.getenv("KIE_SEEDANCE_MAX_VIDEO_REFS", "3") 
 SEEDANCE_KIE_MAX_TOTAL_OMNI_REFS = int(os.getenv("KIE_SEEDANCE_MAX_TOTAL_OMNI_REFS", "12") or "12")
 
 # Final retail prices approved for 5 / 10 / 15 seconds.
-# Do not derive these base prices from provider rates: product pricing is fixed by business rules.
 SEEDANCE_KIE_TOKEN_MAP = {
     "seedance-kie-480p": {5: 5, 10: 10, 15: 15},
     "seedance-kie-720p": {5: 10, 10: 20, 15: 30},
     "seedance-kie-1080p": {5: 25, 10: 50, 15: 75},
 }
 
-# KIE provider pricing for Seedance 2.0 video-input billing only.
-# Important: without video input the platform keeps the approved retail grid above.
-# With video input the provider bills Price × (Input seconds + Output seconds), so we only add
-# a dynamic surcharge when that real provider cost is higher than the approved base price.
-SEEDANCE_KIE_USD_RUB = float(os.getenv("SEEDANCE_KIE_USD_RUB", "100") or "100")
-SEEDANCE_KIE_TOKEN_RUB = float(os.getenv("SEEDANCE_KIE_TOKEN_RUB", "8") or "8")
-SEEDANCE_KIE_VIDEO_REF_METADATA_TOLERANCE_SEC = float(os.getenv("SEEDANCE_KIE_VIDEO_REF_METADATA_TOLERANCE_SEC", "0.25") or "0.25")
-
-SEEDANCE_KIE_PROVIDER_USD_PER_SEC = {
-    "seedance-kie-480p": {"with_video": 0.0575, "no_video": 0.095},
-    "seedance-kie-720p": {"with_video": 0.125, "no_video": 0.205},
-    "seedance-kie-1080p": {"with_video": 0.31, "no_video": 0.51},
-}
-
-
-def _seedance_kie_tokens_from_usd(cost_usd: float) -> int:
-    if SEEDANCE_KIE_TOKEN_RUB <= 0:
-        return 1
-    return max(1, int(math.ceil(float(cost_usd or 0.0) * SEEDANCE_KIE_USD_RUB / SEEDANCE_KIE_TOKEN_RUB)))
-
-
-def seedance_kie_billable_input_video_seconds(value: Any) -> int:
-    try:
-        seconds = float(value or 0.0)
-    except Exception:
-        seconds = 0.0
-    if seconds <= 0:
-        return 0
-    # Avoid charging 16s for common metadata such as 15.03s, while never rounding down a real 15.6s clip.
-    return max(1, int(math.ceil(seconds - SEEDANCE_KIE_VIDEO_REF_METADATA_TOLERANCE_SEC)))
-
-
-def _seedance_kie_cost_usd(model: Any, duration: Any, *, input_video_duration_sec: Any = 0) -> float:
-    normalized_model = normalize_seedance_kie_model(model)
-    normalized_duration = normalize_seedance_kie_duration(duration)
-    input_seconds = seedance_kie_billable_input_video_seconds(input_video_duration_sec)
-    rates = SEEDANCE_KIE_PROVIDER_USD_PER_SEC[normalized_model]
-    if input_seconds > 0:
-        return float(rates["with_video"]) * float(normalized_duration + input_seconds)
-    return float(rates["no_video"]) * float(normalized_duration)
-
-
-def _seedance_kie_base_tokens(model: Any, duration: Any) -> int:
-    normalized_model = normalize_seedance_kie_model(model)
-    normalized_duration = normalize_seedance_kie_duration(duration)
-    return int(SEEDANCE_KIE_TOKEN_MAP[normalized_model][normalized_duration])
-
-
-# Kept for old callers/imports; dynamic video-reference billing is handled by seedance_kie_tokens_for_duration(..., input_video_duration_sec=...).
+# No extra video-reference surcharge in the new KIE Seedance 2.0 pricing grid.
 SEEDANCE_KIE_VIDEO_REFERENCE_SURCHARGE = {
     "seedance-kie-480p": 0,
     "seedance-kie-720p": 0,
@@ -180,53 +130,15 @@ def normalize_seedance_kie_aspect_ratio(value: Any, default: str = "16:9") -> st
     return raw if raw in SEEDANCE_KIE_ALLOWED_ASPECT_RATIOS else default
 
 
-def seedance_kie_tokens_for_duration(model: Any, duration: Any, *, input_video_duration_sec: Any = 0) -> int:
-    base_tokens = _seedance_kie_base_tokens(model, duration)
-    input_seconds = seedance_kie_billable_input_video_seconds(input_video_duration_sec)
-    if input_seconds <= 0:
-        return int(base_tokens)
-    provider_tokens = _seedance_kie_tokens_from_usd(
-        _seedance_kie_cost_usd(model, duration, input_video_duration_sec=input_seconds)
-    )
-    return max(int(base_tokens), int(provider_tokens))
-
-
-def seedance_kie_pricing_breakdown(model: Any, duration: Any, *, input_video_duration_sec: Any = 0) -> Dict[str, Any]:
+def seedance_kie_tokens_for_duration(model: Any, duration: Any) -> int:
     normalized_model = normalize_seedance_kie_model(model)
     normalized_duration = normalize_seedance_kie_duration(duration)
-    input_seconds = seedance_kie_billable_input_video_seconds(input_video_duration_sec)
-    has_video_input = input_seconds > 0
-    rates = SEEDANCE_KIE_PROVIDER_USD_PER_SEC[normalized_model]
-    rate_key = "with_video" if has_video_input else "no_video"
-    billable_seconds = normalized_duration + input_seconds if has_video_input else normalized_duration
-    cost_usd = float(rates[rate_key]) * float(billable_seconds)
-    base_tokens = _seedance_kie_base_tokens(normalized_model, normalized_duration)
-    provider_cost_tokens = _seedance_kie_tokens_from_usd(cost_usd)
-    tokens = max(base_tokens, provider_cost_tokens) if has_video_input else base_tokens
-    return {
-        "model": normalized_model,
-        "duration": normalized_duration,
-        "input_video_seconds": input_seconds,
-        "billable_seconds": billable_seconds,
-        "has_video_input": has_video_input,
-        "provider_rate_usd_per_sec": float(rates[rate_key]),
-        "provider_cost_usd": cost_usd,
-        "provider_cost_tokens": provider_cost_tokens,
-        "base_tokens": base_tokens,
-        "video_reference_surcharge_tokens": max(0, int(tokens) - int(base_tokens)),
-        "usd_rub": SEEDANCE_KIE_USD_RUB,
-        "token_rub": SEEDANCE_KIE_TOKEN_RUB,
-        "tokens": int(tokens),
-    }
+    return int(SEEDANCE_KIE_TOKEN_MAP[normalized_model][normalized_duration])
 
 
-def seedance_kie_video_reference_surcharge(model: Any, duration: Any = 5, input_video_duration_sec: Any = 0) -> int:
-    input_seconds = seedance_kie_billable_input_video_seconds(input_video_duration_sec)
-    if input_seconds <= 0:
-        return 0
-    base = seedance_kie_tokens_for_duration(model, duration, input_video_duration_sec=0)
-    with_video = seedance_kie_tokens_for_duration(model, duration, input_video_duration_sec=input_seconds)
-    return max(0, int(with_video) - int(base))
+def seedance_kie_video_reference_surcharge(model: Any) -> int:
+    normalized_model = normalize_seedance_kie_model(model)
+    return int(SEEDANCE_KIE_VIDEO_REFERENCE_SURCHARGE.get(normalized_model, 0))
 
 
 def seedance_kie_resolution(model: Any) -> str:
