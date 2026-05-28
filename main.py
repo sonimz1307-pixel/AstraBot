@@ -72,7 +72,6 @@ from gemini_omni_video import (
     normalize_gemini_omni_mode,
     normalize_gemini_omni_resolution,
 )
-from seedance_kie import seedance_kie_tokens_for_duration
 from app.routers.tts import router as tts_router
 from app.services.video_editor_service import create_workspace_upload_record, probe_media
 
@@ -6493,7 +6492,6 @@ async def webhook(secret: str, request: Request):
                     "step": "collect_refs",
                     "image_file_ids": [],
                     "video_file_ids": [],
-                    "video_durations_sec": [],
                     "audio_file_ids": [],
                     "prompt": None,
                 }
@@ -7895,21 +7893,16 @@ async def webhook(secret: str, request: Request):
 
         # ---- SEEDANCE BILLING ----
         if provider_kind == "seedance_kie":
-            seedance_input_video_sec = 0.0
-            if st.get("mode") == "seedance_omni":
-                so_price = st.get("seedance_omni") or {}
-                video_ids_for_price = [x for x in (so_price.get("video_file_ids") or []) if str(x or "").strip()]
-                video_durations_for_price = list(so_price.get("video_durations_sec") or [])
-                if video_ids_for_price:
-                    # If Telegram did not provide/probe duration for a video-document, use the max allowed input duration to avoid undercharging.
-                    while len(video_durations_for_price) < len(video_ids_for_price):
-                        video_durations_for_price.append(15.4)
-                    seedance_input_video_sec = float(sum(float(x or 0.0) for x in video_durations_for_price[:len(video_ids_for_price)]))
-            cost_tokens = int(seedance_kie_tokens_for_duration(
-                seedance_model,
-                duration,
-                input_video_duration_sec=seedance_input_video_sec,
-            ))
+            price_maps = {
+                "seedance-kie-480p": {5: 5, 10: 10, 15: 15},
+                "seedance-kie-720p": {5: 10, 10: 20, 15: 30},
+                "seedance-kie-1080p": {5: 25, 10: 50, 15: 75},
+                # legacy aliases
+                "seedance-kie-fast": {5: 5, 10: 10, 15: 15},
+                "seedance-kie": {5: 10, 10: 20, 15: 30},
+            }
+            price_map = price_maps.get(seedance_model, price_maps["seedance-kie-480p"])
+            cost_tokens = int(price_map.get(int(duration), price_map[5]))
         else:
             # Preview остаётся через PiAPI без изменений: preview=2 ток/сек, fast=1 ток/сек.
             rate_preview = int(os.getenv("SEEDANCE_TOKENS_PER_SEC_PREVIEW", "2") or 2)
@@ -7974,7 +7967,6 @@ async def webhook(secret: str, request: Request):
                 job["mode"] = "omni_reference"
                 job["image_file_ids"] = list(so.get("image_file_ids") or [])[:max_images]
                 job["video_file_ids"] = list(so.get("video_file_ids") or [])[:max_videos]
-                job["video_durations_sec"] = list(so.get("video_durations_sec") or [])[:max_videos]
                 job["audio_file_ids"] = list(so.get("audio_file_ids") or [])[:max_audios]
             else:
                 job["mode"] = "text_to_video"
@@ -9912,7 +9904,6 @@ async def webhook(secret: str, request: Request):
             total_limit = int(settings.get("max_total_refs") or 12)
             image_ids = list(so.get("image_file_ids") or [])
             video_ids = list(so.get("video_file_ids") or [])
-            video_durations = list(so.get("video_durations_sec") or [])
             audio_ids = list(so.get("audio_file_ids") or [])
             if len(video_ids) >= video_limit:
                 await tg_send_message(chat_id, f"Видео refs уже {video_limit}/{video_limit}. Пришли другие refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
@@ -9922,9 +9913,7 @@ async def webhook(secret: str, request: Request):
                 return {"ok": True}
             if file_id not in video_ids:
                 video_ids.append(file_id)
-                video_durations.append(float(duration_hint or 15.4))
             so["video_file_ids"] = video_ids[:video_limit]
-            so["video_durations_sec"] = video_durations[:video_limit]
             st["seedance_omni"] = so
             st["ts"] = _now()
             await tg_send_message(chat_id, f"Видео reference #{len(so['video_file_ids'])} получил ✅\nПришли ещё refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
@@ -10137,7 +10126,6 @@ async def webhook(secret: str, request: Request):
             total_limit = int(settings.get("max_total_refs") or 12)
             image_ids = list(so.get("image_file_ids") or [])
             video_ids = list(so.get("video_file_ids") or [])
-            video_durations = list(so.get("video_durations_sec") or [])
             audio_ids = list(so.get("audio_file_ids") or [])
             if len(image_ids) + len(video_ids) + len(audio_ids) >= total_limit:
                 await tg_send_message(chat_id, f"Всего refs уже {total_limit}/{total_limit}. Нажми «✅ Готово», чтобы перейти к промпту.", reply_markup=_seedance_refs_collect_kb())
@@ -10155,22 +10143,9 @@ async def webhook(secret: str, request: Request):
                 if len(video_ids) >= video_limit:
                     await tg_send_message(chat_id, f"Видео refs уже {video_limit}/{video_limit}. Нажми «✅ Готово» или отправь другой тип refs.", reply_markup=_seedance_refs_collect_kb())
                     return {"ok": True}
-                duration_sec = 0.0
-                try:
-                    file_path = await tg_get_file_path(str(file_id))
-                    raw_video = await tg_download_file_bytes(file_path)
-                    ext = "mov" if filename_l.endswith(".mov") or mime == "video/quicktime" else "mp4"
-                    duration_sec = float(_probe_video_duration_from_bytes(raw_video, ext) or 0.0)
-                except Exception:
-                    duration_sec = 0.0
-                if duration_sec and duration_sec > 15.4:
-                    await tg_send_message(chat_id, "Видео reference слишком длинное. Для Seedance Omni сейчас максимум около 15 секунд.", reply_markup=_seedance_refs_collect_kb())
-                    return {"ok": True}
                 if file_id not in video_ids:
                     video_ids.append(str(file_id))
-                    video_durations.append(float(duration_sec or 15.4))
                 so["video_file_ids"] = video_ids[:video_limit]
-                so["video_durations_sec"] = video_durations[:video_limit]
                 label = f"Видео reference #{len(so['video_file_ids'])}"
             else:
                 if len(audio_ids) >= audio_limit:
