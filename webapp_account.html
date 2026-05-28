@@ -3,20 +3,29 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>Личный кабинет — NABEX</title>
+  <title>Личный кабинет — NABEX AI</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     :root {
-      --bg: #090909;
-      --card: #141414;
-      --line: rgba(255, 255, 255, 0.08);
-      --text: #f5f5f5;
-      --muted: rgba(245, 245, 245, 0.62);
-      --muted-2: rgba(245, 245, 245, 0.42);
-      --accent: #ff8a00;
-      --accent-2: #ffb000;
-      --radius: 22px;
-      --shadow: 0 20px 50px rgba(0, 0, 0, 0.32);
+      --bg: #040404;
+      --bg-soft: #080808;
+      --card: rgba(18, 18, 18, 0.92);
+      --card-2: rgba(23, 23, 23, 0.92);
+      --stroke: rgba(255, 255, 255, 0.10);
+      --stroke-strong: rgba(255, 255, 255, 0.16);
+      --text: #ffffff;
+      --muted: rgba(255, 255, 255, 0.68);
+      --muted-2: rgba(255, 255, 255, 0.46);
+      --orange: #ff8a00;
+      --orange-2: #ffb000;
+      --purple: #9a4dff;
+      --purple-2: #6f2cff;
+      --green: #78db45;
+      --green-2: #45a925;
+      --radius-xl: 30px;
+      --radius-lg: 24px;
+      --radius-md: 18px;
+      --shadow: 0 28px 70px rgba(0, 0, 0, 0.55);
     }
 
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -26,399 +35,1832 @@
       margin: 0;
       min-height: 100%;
       background:
-        radial-gradient(circle at top left, rgba(255, 138, 0, 0.16), transparent 32%),
-        radial-gradient(circle at top right, rgba(255, 176, 0, 0.09), transparent 28%),
+        radial-gradient(circle at 12% 0%, rgba(255, 138, 0, 0.16), transparent 34%),
+        radial-gradient(circle at 94% 12%, rgba(255, 176, 0, 0.10), transparent 28%),
+        radial-gradient(circle at 50% 100%, rgba(93, 255, 68, 0.045), transparent 38%),
         var(--bg);
       color: var(--text);
       font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
     }
 
-    body { padding: max(14px, env(safe-area-inset-top)) 14px max(22px, env(safe-area-inset-bottom)); }
+    body {
+      padding: max(26px, env(safe-area-inset-top)) 30px max(34px, env(safe-area-inset-bottom));
+    }
 
-    .app { width: min(100%, 520px); margin: 0 auto; padding-bottom: 76px; }
+    button, a { font: inherit; }
+    button { cursor: pointer; border: 0; }
+    a { color: inherit; text-decoration: none; }
 
-    .top {
+    .app {
+      width: min(100%, 1024px);
+      margin: 0 auto;
+      display: grid;
+      gap: 18px;
+      padding-bottom: 24px;
+    }
+
+    .topbar {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 12px;
-      margin-bottom: 14px;
+      gap: 18px;
+      min-height: 78px;
     }
 
-    .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 22px;
+      min-width: 0;
+    }
 
     .logo {
-      width: 38px;
-      height: 38px;
-      border-radius: 14px;
+      width: 76px;
+      height: 76px;
+      border-radius: 50%;
       display: grid;
       place-items: center;
-      background: linear-gradient(135deg, var(--accent), var(--accent-2));
-      color: #111;
-      font-weight: 900;
-      box-shadow: 0 12px 24px rgba(255, 138, 0, 0.22);
       flex: 0 0 auto;
+      color: #171006;
+      font-size: 36px;
+      font-weight: 950;
+      letter-spacing: -1px;
+      background:
+        radial-gradient(circle at 32% 24%, #ffd56c, #ff9a00 45%, #e66b00 100%);
+      box-shadow:
+        0 0 0 1px rgba(255, 255, 255, 0.12) inset,
+        0 14px 34px rgba(255, 138, 0, 0.34);
     }
 
     .brand-title {
-      font-size: 18px;
-      line-height: 1.1;
-      font-weight: 800;
+      font-size: 32px;
+      line-height: 1.05;
+      font-weight: 900;
+      letter-spacing: -0.8px;
       white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
     }
 
-    .brand-subtitle { margin-top: 2px; font-size: 12px; color: var(--muted); }
-
-    .pill {
-      padding: 8px 11px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      background: rgba(255, 255, 255, 0.04);
+    .brand-subtitle {
+      margin-top: 7px;
       color: var(--muted);
-      font-size: 12px;
-      white-space: nowrap;
+      font-size: 22px;
+      font-weight: 500;
     }
 
-    .hero {
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      color: rgba(255, 255, 255, 0.74);
+    }
+
+    .icon-button {
+      position: relative;
+      width: 42px;
+      height: 42px;
+      border-radius: 14px;
+      display: grid;
+      place-items: center;
+      background: transparent;
+      color: currentColor;
+    }
+
+    .icon-button svg { width: 34px; height: 34px; display: block; }
+    .dot-alert {
+      position: absolute;
+      right: 4px;
+      top: 1px;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: var(--orange);
+      box-shadow: 0 0 0 3px var(--bg);
+    }
+
+    .card {
       position: relative;
       overflow: hidden;
-      border: 1px solid rgba(255, 138, 0, 0.18);
-      border-radius: 28px;
-      padding: 20px;
+      border: 1px solid var(--stroke);
+      border-radius: var(--radius-xl);
       background:
-        linear-gradient(135deg, rgba(255, 138, 0, 0.18), transparent 56%),
-        linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.03)),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.018)),
         var(--card);
       box-shadow: var(--shadow);
-      margin-bottom: 12px;
     }
 
-    .hero::after {
-      content: "";
-      position: absolute;
-      right: -60px;
-      top: -60px;
-      width: 170px;
-      height: 170px;
-      border-radius: 50%;
-      background: rgba(255, 138, 0, 0.13);
-      filter: blur(4px);
+    .balance-card {
+      min-height: 328px;
+      padding: 36px 40px;
+      border-color: rgba(255, 138, 0, 0.21);
+      background:
+        radial-gradient(circle at 82% 42%, rgba(255, 138, 0, 0.23), transparent 30%),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.018)),
+        #0b0b0b;
     }
 
-    .label { position: relative; z-index: 1; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
-
-    .balance {
+    .balance-content {
       position: relative;
-      z-index: 1;
+      z-index: 2;
+      width: 54%;
+      min-width: 430px;
+    }
+
+    .section-kicker {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      color: rgba(255, 255, 255, 0.88);
+      font-size: 20px;
+      line-height: 1.1;
+      font-weight: 800;
+      margin-bottom: 24px;
+    }
+
+    .section-kicker svg { width: 25px; height: 25px; color: var(--orange); }
+
+    .balance-row {
       display: flex;
       align-items: baseline;
-      gap: 8px;
-      margin-bottom: 16px;
+      gap: 16px;
+      margin-bottom: 20px;
     }
 
     .balance-value {
-      font-size: clamp(34px, 10vw, 48px);
-      line-height: 0.95;
-      font-weight: 900;
-      letter-spacing: -1.5px;
+      font-size: clamp(72px, 10vw, 96px);
+      line-height: 0.9;
+      font-weight: 950;
+      letter-spacing: -4px;
+      text-shadow: 0 10px 28px rgba(255, 255, 255, 0.08);
     }
 
-    .balance-unit { font-size: 16px; color: var(--muted); font-weight: 650; }
+    .balance-unit {
+      color: var(--orange);
+      font-size: 24px;
+      font-weight: 950;
+      letter-spacing: -0.3px;
+    }
 
-    .hint {
-      position: relative;
-      z-index: 1;
-      font-size: 12px;
+    .balance-note {
+      margin: 0 0 26px;
+      color: var(--muted);
+      font-size: 20px;
       line-height: 1.45;
-      color: var(--muted);
-      margin: 0 0 16px;
     }
 
-    .grid { display: grid; gap: 12px; }
-
-    .card {
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      padding: 16px;
-      background:
-        linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.025)),
-        var(--card);
-      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.18);
-    }
-
-    .card-title {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      margin-bottom: 9px;
-      font-size: 16px;
-      font-weight: 800;
-    }
-
-    .badge {
-      padding: 5px 8px;
-      border-radius: 999px;
-      background: rgba(255, 138, 0, 0.12);
-      color: #ffb24a;
-      font-size: 11px;
-      font-weight: 700;
-      white-space: nowrap;
-    }
-
-    .text { margin: 0 0 12px; color: var(--muted); font-size: 13px; line-height: 1.45; }
-
-    .link-box {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 10px 11px;
-      border-radius: 14px;
-      background: rgba(255, 255, 255, 0.045);
-      border: 1px solid var(--line);
-      margin-bottom: 8px;
-      min-width: 0;
-    }
-
-    .ref-item { display: grid; gap: 6px; margin-bottom: 10px; }
-
-    .ref-label {
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 750;
-      padding-left: 2px;
-    }
-
-    .link-text {
-      min-width: 0;
-      flex: 1;
-      overflow: hidden;
-      white-space: nowrap;
-      text-overflow: ellipsis;
-      color: rgba(255, 255, 255, 0.82);
-      font-size: 12px;
-    }
-
-    .mini-copy {
-      width: auto;
-      min-height: 36px;
-      border: 0;
-      border-radius: 11px;
-      padding: 8px 10px;
-      background: rgba(255, 138, 0, 0.16);
-      color: #ffc06a;
-      font-size: 12px;
-      font-weight: 750;
-      cursor: pointer;
-      flex: 0 0 auto;
-    }
-
-    .actions { display: grid; grid-template-columns: 1fr; gap: 9px; }
-
-    button,
-    .btn {
-      width: 100%;
-      min-height: 46px;
-      border: 0;
+    .primary-btn {
+      min-height: 70px;
       border-radius: 16px;
-      padding: 12px 14px;
-      font: inherit;
-      font-size: 14px;
-      font-weight: 800;
-      cursor: pointer;
+      padding: 0 28px;
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      gap: 8px;
-      text-decoration: none;
-      transition: transform 0.15s ease, opacity 0.15s ease, background 0.15s ease;
+      gap: 18px;
+      min-width: 430px;
+      color: #100b02;
+      font-size: 23px;
+      font-weight: 950;
+      background: linear-gradient(135deg, #ff7600, #ffb000);
+      box-shadow:
+        0 17px 34px rgba(255, 138, 0, 0.28),
+        0 0 0 1px rgba(255, 255, 255, 0.14) inset;
+      transition: transform 0.16s ease, filter 0.16s ease;
     }
 
-    button:active,
-    .btn:active { transform: scale(0.985); }
+    .primary-btn:active,
+    .outline-btn:active,
+    .green-btn:active,
+    .plan-buy:active { transform: scale(0.985); }
 
-    .btn-primary {
-      background: linear-gradient(135deg, var(--accent), var(--accent-2));
-      color: #111;
-      box-shadow: 0 14px 28px rgba(255, 138, 0, 0.22);
+    .plus-circle {
+      width: 25px;
+      height: 25px;
+      border-radius: 50%;
+      border: 2px solid rgba(0, 0, 0, 0.72);
+      display: grid;
+      place-items: center;
+      font-size: 20px;
+      line-height: 1;
     }
 
-    .btn-secondary { background: rgba(255, 255, 255, 0.075); color: var(--text); border: 1px solid var(--line); }
+    .coin-art {
+      position: absolute;
+      z-index: 1;
+      right: 64px;
+      top: 44px;
+      width: 330px;
+      height: 242px;
+      pointer-events: none;
+    }
 
-    .btn-soft { background: rgba(255, 138, 0, 0.11); color: #ffb24a; border: 1px solid rgba(255, 138, 0, 0.18); }
+    .coin-orbit {
+      position: absolute;
+      left: 10px;
+      top: 108px;
+      width: 316px;
+      height: 88px;
+      border: 1.5px dashed rgba(255, 138, 0, 0.62);
+      border-radius: 50%;
+      transform: rotate(-18deg);
+      opacity: 0.85;
+    }
 
-    .nav-panel {
-      display: none;
-      margin-top: 12px;
-      padding: 13px;
-      border-radius: 16px;
-      background: rgba(255, 255, 255, 0.045);
-      border: 1px solid var(--line);
+    .coin {
+      position: absolute;
+      right: 45px;
+      top: 0;
+      width: 150px;
+      height: 150px;
+      border-radius: 50%;
+      background:
+        radial-gradient(circle at 32% 24%, #ffe08b, #ffab18 46%, #d66b00 76%, #8e3d00 100%);
+      transform: rotate(-14deg) skewY(-4deg);
+      box-shadow:
+        16px 12px 0 #b85300,
+        0 24px 60px rgba(255, 138, 0, 0.42),
+        0 0 0 9px rgba(104, 47, 0, 0.26) inset,
+        0 0 0 1px rgba(255, 255, 255, 0.22) inset;
+    }
+
+    .coin::before {
+      content: "";
+      position: absolute;
+      inset: 17px;
+      border-radius: 50%;
+      border: 3px solid rgba(86, 42, 0, 0.22);
+      box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.16) inset;
+    }
+
+    .coin::after {
+      content: "N";
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      color: #683000;
+      font-size: 74px;
+      font-weight: 950;
+      letter-spacing: -5px;
+      transform: rotate(12deg);
+      text-shadow: 0 4px 1px rgba(255, 213, 90, 0.44);
+    }
+
+    .spark {
+      position: absolute;
+      color: var(--orange);
+      font-size: 26px;
+      line-height: 1;
+      text-shadow: 0 0 18px rgba(255, 138, 0, 0.7);
+    }
+
+    .spark.s1 { left: 26px; top: 56px; }
+    .spark.s2 { right: 6px; top: 130px; font-size: 32px; }
+    .spark.s3 { left: 0; bottom: 55px; font-size: 16px; opacity: 0.8; }
+
+    .tariff-card {
+      min-height: 250px;
+      padding: 28px 32px;
+      border-color: rgba(154, 77, 255, 0.26);
+      background:
+        radial-gradient(circle at 83% 53%, rgba(154, 77, 255, 0.20), transparent 32%),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.048), rgba(255, 255, 255, 0.018)),
+        #0d0d10;
+    }
+
+    .tariff-layout {
+      position: relative;
+      z-index: 2;
+      display: grid;
+      grid-template-columns: 84px minmax(0, 1fr) 230px;
+      gap: 24px;
+      align-items: center;
+    }
+
+    .icon-tile {
+      width: 78px;
+      height: 78px;
+      border-radius: 22px;
+      display: grid;
+      place-items: center;
+      flex: 0 0 auto;
+      box-shadow: 0 14px 34px rgba(0, 0, 0, 0.2);
+    }
+
+    .icon-tile svg { width: 43px; height: 43px; }
+    .icon-purple { background: rgba(126, 61, 255, 0.22); color: var(--purple); }
+    .icon-green { background: rgba(120, 219, 69, 0.16); color: var(--green); }
+    .icon-orange { background: rgba(255, 138, 0, 0.12); color: var(--orange); }
+    .icon-gray { background: rgba(255, 255, 255, 0.06); color: rgba(255, 255, 255, 0.68); }
+
+    .tariff-title {
+      font-size: 30px;
+      line-height: 1;
+      font-weight: 950;
+      letter-spacing: -0.7px;
+      margin-bottom: 11px;
+    }
+
+    .tariff-name {
+      color: var(--purple);
+      font-size: 38px;
+      line-height: 1;
+      font-weight: 950;
+      letter-spacing: -1px;
+      margin-bottom: 17px;
+    }
+
+    .tariff-note {
       color: var(--muted);
-      font-size: 13px;
-      line-height: 1.5;
-      white-space: pre-line;
+      font-size: 19px;
+      margin-bottom: 20px;
     }
 
-    .nav-panel.show { display: block; }
-    .nav-panel b { color: var(--text); }
+    .current-badge {
+      position: absolute;
+      top: 24px;
+      right: 28px;
+      z-index: 3;
+      min-height: 46px;
+      padding: 0 20px;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: rgba(255, 255, 255, 0.76);
+      font-size: 16px;
+      font-weight: 750;
+      background: rgba(255, 255, 255, 0.07);
+    }
 
-    .doc-list { display: grid; gap: 9px; }
+    .outline-btn {
+      width: min(100%, 500px);
+      min-height: 64px;
+      border: 1.5px solid rgba(154, 77, 255, 0.78);
+      border-radius: 15px;
+      background: rgba(0, 0, 0, 0.18);
+      color: #a55eff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 28px;
+      font-size: 21px;
+      font-weight: 950;
+      transition: transform 0.16s ease, background 0.16s ease;
+    }
 
-    .doc-row {
+    .outline-btn svg { width: 24px; height: 24px; }
+
+    .tariff-art {
+      position: relative;
+      height: 160px;
+      opacity: 0.72;
+    }
+
+    .glass-stack,
+    .glass-stack::before,
+    .glass-stack::after {
+      position: absolute;
+      content: "";
+      width: 170px;
+      height: 120px;
+      right: 6px;
+      bottom: 4px;
+      border-radius: 22px;
+      border: 1px solid rgba(154, 77, 255, 0.38);
+      background: linear-gradient(135deg, rgba(154, 77, 255, 0.18), rgba(154, 77, 255, 0.03));
+      transform: skewY(13deg);
+    }
+
+    .glass-stack::before { right: 28px; bottom: 18px; opacity: 0.85; }
+    .glass-stack::after { right: 56px; bottom: 36px; opacity: 0.68; }
+
+    .star-shape {
+      position: absolute;
+      right: 74px;
+      bottom: 28px;
+      width: 56px;
+      height: 56px;
+      color: var(--purple);
+      filter: drop-shadow(0 0 28px rgba(154, 77, 255, 0.55));
+    }
+
+    .ref-card {
+      padding: 28px 30px 30px;
+      border-color: rgba(120, 219, 69, 0.22);
+      background:
+        radial-gradient(circle at 4% 18%, rgba(120, 219, 69, 0.12), transparent 23%),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.014)),
+        #0b100b;
+    }
+
+    .ref-head {
+      display: grid;
+      grid-template-columns: 76px minmax(0, 1fr) auto;
+      gap: 20px;
+      align-items: center;
+      margin-bottom: 22px;
+    }
+
+    .ref-title {
+      font-size: 28px;
+      line-height: 1;
+      font-weight: 950;
+      letter-spacing: -0.5px;
+      margin-bottom: 9px;
+    }
+
+    .ref-subtitle {
+      color: var(--muted);
+      font-size: 20px;
+      line-height: 1.32;
+    }
+
+    .green-word { color: var(--green); }
+
+    .ref-badge {
+      min-height: 54px;
+      padding: 0 22px;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      color: var(--green);
+      font-size: 20px;
+      font-weight: 950;
+      background: rgba(120, 219, 69, 0.13);
+    }
+
+    .stat-grid {
+      display: grid;
+      grid-template-columns: 1.5fr 1fr 1.25fr;
+      gap: 14px;
+      margin-bottom: 14px;
+    }
+
+    .stat-box {
+      min-height: 98px;
+      border: 1px solid var(--stroke);
+      border-radius: 16px;
+      padding: 18px;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.018));
+    }
+
+    .stat-label {
+      color: var(--muted);
+      font-size: 16px;
+      margin-bottom: 12px;
+    }
+
+    .stat-value {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 10px;
-      padding: 13px;
-      border-radius: 16px;
-      background: rgba(255, 255, 255, 0.045);
-      border: 1px solid var(--line);
-      color: var(--text);
-      text-decoration: none;
-      font-size: 14px;
-      font-weight: 750;
+      color: var(--green);
+      font-size: 28px;
+      line-height: 1;
+      font-weight: 950;
+      letter-spacing: -0.5px;
     }
 
-    .doc-row small { display: block; margin-top: 2px; color: var(--muted-2); font-size: 11px; font-weight: 600; }
-    .arrow { color: var(--muted-2); font-size: 18px; flex: 0 0 auto; }
+    .copy-mini {
+      width: 44px;
+      height: 44px;
+      border-radius: 14px;
+      display: grid;
+      place-items: center;
+      flex: 0 0 auto;
+      color: rgba(255, 255, 255, 0.72);
+      background: rgba(255, 255, 255, 0.10);
+    }
+
+    .copy-mini svg { width: 24px; height: 24px; }
+
+    .green-btn {
+      width: 100%;
+      min-height: 58px;
+      border: 1px solid rgba(120, 219, 69, 0.62);
+      border-radius: 14px;
+      background: rgba(120, 219, 69, 0.07);
+      color: var(--green);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      font-size: 21px;
+      font-weight: 950;
+      transition: transform 0.16s ease, background 0.16s ease;
+    }
+
+    .green-btn svg { width: 25px; height: 25px; }
+
+
+    .ref-links-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      margin-top: 14px;
+    }
+
+    .ref-link-card {
+      min-height: 92px;
+      border: 1px solid rgba(120, 219, 69, 0.28);
+      border-radius: 16px;
+      padding: 16px;
+      background: rgba(120, 219, 69, 0.055);
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 46px;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .ref-link-label {
+      color: rgba(255, 255, 255, 0.66);
+      font-size: 15px;
+      margin-bottom: 9px;
+    }
+
+    .ref-link-text {
+      color: var(--green);
+      font-size: 17px;
+      line-height: 1.15;
+      font-weight: 850;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    .copy-link-btn {
+      width: 46px;
+      height: 46px;
+      border-radius: 14px;
+      display: grid;
+      place-items: center;
+      color: var(--green);
+      background: rgba(120, 219, 69, 0.13);
+      border: 1px solid rgba(120, 219, 69, 0.24);
+    }
+
+    .copy-link-btn svg { width: 24px; height: 24px; }
+
+    .list-card {
+      padding: 0;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.018)),
+        #111111;
+    }
+
+    .nav-row {
+      min-height: 86px;
+      display: grid;
+      grid-template-columns: 58px minmax(0, 1fr) 32px;
+      gap: 18px;
+      align-items: center;
+      padding: 18px 30px;
+      color: inherit;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.065);
+      background: transparent;
+    }
+
+    .nav-row:last-child { border-bottom: 0; }
+
+    .small-icon {
+      width: 46px;
+      height: 46px;
+      display: grid;
+      place-items: center;
+      color: var(--orange);
+    }
+
+    .small-icon svg { width: 42px; height: 42px; }
+    .row-title { font-size: 25px; font-weight: 950; line-height: 1.08; letter-spacing: -0.4px; }
+    .row-text { color: var(--muted); font-size: 18px; margin-top: 4px; line-height: 1.25; }
+    .chev { color: rgba(255, 255, 255, 0.57); display: grid; place-items: center; }
+    .chev svg { width: 30px; height: 30px; }
+
+    .settings-card {
+      padding: 28px 30px 28px;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.018)),
+        #111111;
+    }
+
+    .settings-head {
+      display: grid;
+      grid-template-columns: 58px minmax(0, 1fr);
+      gap: 18px;
+      align-items: center;
+      margin-bottom: 20px;
+    }
+
+    .settings-links {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+    }
+
+    .doc-link {
+      min-height: 82px;
+      border-radius: 15px;
+      border: 1px solid var(--stroke);
+      background: rgba(255, 255, 255, 0.035);
+      display: grid;
+      grid-template-columns: 50px minmax(0, 1fr) 28px;
+      align-items: center;
+      gap: 14px;
+      padding: 14px 18px;
+    }
+
+    .doc-link svg { width: 32px; height: 32px; color: rgba(255, 255, 255, 0.62); }
+    .doc-title { font-size: 18px; line-height: 1.05; font-weight: 900; }
+    .doc-text { color: var(--muted); font-size: 14px; line-height: 1.22; margin-top: 4px; }
 
     .toast {
       position: fixed;
+      z-index: 80;
       left: 50%;
-      bottom: calc(18px + env(safe-area-inset-bottom));
-      transform: translateX(-50%) translateY(20px);
+      bottom: calc(24px + env(safe-area-inset-bottom));
+      transform: translateX(-50%) translateY(18px);
       opacity: 0;
       pointer-events: none;
-      padding: 11px 14px;
+      padding: 14px 18px;
       border-radius: 999px;
-      background: rgba(255, 255, 255, 0.92);
-      color: #111;
-      font-size: 13px;
-      font-weight: 800;
+      color: #130d03;
+      background: linear-gradient(135deg, #fff1c4, #ffb000);
+      font-size: 15px;
+      font-weight: 950;
+      box-shadow: 0 20px 48px rgba(0, 0, 0, 0.45);
       transition: opacity 0.18s ease, transform 0.18s ease;
-      z-index: 20;
-      box-shadow: 0 14px 32px rgba(0, 0, 0, 0.32);
       white-space: nowrap;
     }
 
     .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
-    @media (max-width: 360px) {
-      body { padding-left: 10px; padding-right: 10px; }
-      .hero, .card { padding: 15px; }
-      .brand-title { font-size: 16px; }
-      .pill { display: none; }
+    .plans-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 60;
+      display: none;
+      background: rgba(0, 0, 0, 0.68);
+      padding: 22px;
+      align-items: flex-end;
     }
+
+    .plans-overlay.show { display: flex; }
+
+    .plans-sheet {
+      width: min(100%, 1024px);
+      max-height: min(88vh, 780px);
+      margin: 0 auto;
+      overflow: auto;
+      border: 1px solid var(--stroke-strong);
+      border-radius: 30px;
+      background:
+        radial-gradient(circle at 30% 0%, rgba(255, 138, 0, 0.12), transparent 34%),
+        #101010;
+      box-shadow: 0 -30px 80px rgba(0, 0, 0, 0.6);
+      padding: 26px;
+    }
+
+    .sheet-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 18px;
+    }
+
+    .sheet-title { font-size: 26px; font-weight: 950; letter-spacing: -0.5px; }
+    .sheet-note { color: var(--muted); margin-top: 5px; font-size: 15px; }
+
+    .close-sheet {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.08);
+      color: #fff;
+      display: grid;
+      place-items: center;
+    }
+
+    .close-sheet svg { width: 25px; height: 25px; }
+
+    .plans-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .plan-card {
+      min-height: 258px;
+      border: 1px solid rgba(255, 138, 0, 0.17);
+      border-radius: 22px;
+      padding: 22px;
+      background:
+        radial-gradient(circle at 100% 0%, rgba(255, 138, 0, 0.14), transparent 42%),
+        rgba(255, 255, 255, 0.035);
+    }
+
+    .plan-name { color: var(--orange); font-size: 24px; font-weight: 950; margin-bottom: 6px; }
+    .plan-tokens { font-size: 34px; font-weight: 950; letter-spacing: -1px; margin-bottom: 10px; }
+    .plan-desc { color: var(--muted); font-size: 15px; line-height: 1.36; min-height: 64px; }
+    .plan-price { margin-top: 16px; font-size: 22px; font-weight: 950; }
+
+    .plan-buy {
+      width: 100%;
+      min-height: 50px;
+      margin-top: 16px;
+      border-radius: 14px;
+      color: #130d03;
+      background: linear-gradient(135deg, #ff7600, #ffb000);
+      font-weight: 950;
+      transition: transform 0.16s ease;
+    }
+
+    @media (max-width: 760px) {
+      body { padding: max(18px, env(safe-area-inset-top)) 14px max(24px, env(safe-area-inset-bottom)); }
+      .app { width: 100%; gap: 14px; }
+      .topbar { min-height: 58px; }
+      .brand { gap: 12px; }
+      .logo { width: 54px; height: 54px; font-size: 27px; }
+      .brand-title { font-size: 22px; }
+      .brand-subtitle { font-size: 15px; margin-top: 3px; }
+      .top-actions { gap: 8px; }
+      .icon-button { width: 36px; height: 36px; }
+      .icon-button svg { width: 28px; height: 28px; }
+      .dot-alert { width: 12px; height: 12px; right: 3px; top: 2px; }
+
+      .card { border-radius: 23px; }
+      .balance-card { min-height: 260px; padding: 26px 22px; }
+      .balance-content { width: 100%; min-width: 0; padding-right: 118px; }
+      .section-kicker { font-size: 15px; gap: 9px; margin-bottom: 18px; }
+      .section-kicker svg { width: 19px; height: 19px; }
+      .balance-row { gap: 10px; margin-bottom: 14px; }
+      .balance-value { font-size: clamp(62px, 19vw, 82px); letter-spacing: -3px; }
+      .balance-unit { font-size: 17px; }
+      .balance-note { font-size: 15px; margin-bottom: 22px; }
+      .primary-btn { min-width: 0; width: 100%; min-height: 58px; border-radius: 14px; font-size: 18px; gap: 14px; padding: 0 18px; }
+      .plus-circle { width: 22px; height: 22px; font-size: 17px; }
+      .coin-art { right: 2px; top: 56px; width: 166px; height: 150px; opacity: 0.92; }
+      .coin-orbit { left: -4px; top: 76px; width: 160px; height: 48px; }
+      .coin { width: 86px; height: 86px; right: 36px; top: 0; box-shadow: 9px 7px 0 #b85300, 0 18px 38px rgba(255, 138, 0, 0.42), 0 0 0 6px rgba(104, 47, 0, 0.25) inset; }
+      .coin::before { inset: 10px; border-width: 2px; }
+      .coin::after { font-size: 42px; letter-spacing: -3px; }
+      .spark.s1 { left: 14px; top: 36px; font-size: 18px; }
+      .spark.s2 { right: 3px; top: 88px; font-size: 22px; }
+
+      .tariff-card { min-height: 222px; padding: 24px 22px; }
+      .tariff-layout { grid-template-columns: 68px minmax(0, 1fr); gap: 14px; align-items: start; }
+      .icon-tile { width: 62px; height: 62px; border-radius: 18px; }
+      .icon-tile svg { width: 35px; height: 35px; }
+      .current-badge { top: 18px; right: 18px; min-height: 38px; padding: 0 15px; font-size: 13px; }
+      .tariff-title { font-size: 23px; margin-right: 120px; margin-bottom: 10px; }
+      .tariff-name { font-size: 34px; margin-bottom: 13px; }
+      .tariff-note { font-size: 16px; margin-bottom: 15px; }
+      .outline-btn { width: 100%; min-height: 56px; font-size: 18px; gap: 18px; }
+      .tariff-art { position: absolute; right: 7px; bottom: 4px; width: 136px; height: 90px; z-index: -1; opacity: 0.62; }
+      .glass-stack,
+      .glass-stack::before,
+      .glass-stack::after { width: 112px; height: 78px; border-radius: 16px; }
+      .star-shape { right: 34px; bottom: 15px; width: 42px; height: 42px; }
+
+      .ref-card { padding: 22px; }
+      .ref-head { grid-template-columns: 58px minmax(0, 1fr); gap: 14px; margin-bottom: 18px; }
+      .ref-title { font-size: 22px; }
+      .ref-subtitle { font-size: 16px; }
+      .ref-badge { position: absolute; top: 22px; right: 22px; min-height: 44px; padding: 0 16px; font-size: 16px; }
+      .stat-grid { grid-template-columns: 1fr; gap: 10px; }
+      .stat-box { min-height: 78px; padding: 15px; }
+      .stat-label { font-size: 13px; margin-bottom: 9px; }
+      .stat-value { font-size: 24px; }
+      .green-btn { min-height: 54px; font-size: 17px; gap: 10px; }
+      .green-btn svg { width: 21px; height: 21px; }
+
+      .ref-links-grid { grid-template-columns: 1fr; gap: 10px; }
+      .ref-link-card { min-height: 78px; padding: 14px; grid-template-columns: minmax(0, 1fr) 42px; }
+      .ref-link-label { font-size: 13px; margin-bottom: 7px; }
+      .ref-link-text { font-size: 15px; }
+      .copy-link-btn { width: 42px; height: 42px; border-radius: 13px; }
+
+      .nav-row { min-height: 76px; grid-template-columns: 44px minmax(0, 1fr) 24px; gap: 12px; padding: 14px 22px; }
+      .small-icon { width: 38px; height: 38px; }
+      .small-icon svg { width: 34px; height: 34px; }
+      .row-title { font-size: 20px; }
+      .row-text { font-size: 15px; }
+      .chev svg { width: 24px; height: 24px; }
+
+      .settings-card { padding: 22px; }
+      .settings-head { grid-template-columns: 44px minmax(0, 1fr); gap: 12px; }
+      .settings-links { grid-template-columns: 1fr; gap: 10px; }
+      .doc-link { min-height: 72px; grid-template-columns: 40px minmax(0, 1fr) 24px; gap: 12px; padding: 13px 14px; }
+      .doc-title { font-size: 17px; }
+      .doc-text { font-size: 13px; }
+
+      .plans-overlay { padding: 10px; }
+      .plans-sheet { border-radius: 24px; padding: 18px; max-height: 88vh; }
+      .plans-grid { display: flex; overflow-x: auto; scroll-snap-type: x mandatory; padding-bottom: 5px; }
+      .plan-card { flex: 0 0 82%; scroll-snap-align: start; }
+    }
+
+    @media (max-width: 380px) {
+      body { padding-left: 10px; padding-right: 10px; }
+      .balance-content { padding-right: 92px; }
+      .coin-art { transform: scale(0.88); transform-origin: right top; right: -12px; }
+      .primary-btn { font-size: 16px; }
+      .tariff-title { margin-right: 100px; font-size: 21px; }
+      .current-badge { font-size: 12px; padding: 0 12px; }
+      .ref-badge { font-size: 14px; }
+    }
+
+    /* Balanced desktop preview: не лендинг 1024px и не зажатая колонка 430px */
+    @media (min-width: 761px) {
+      body {
+        overflow-x: hidden;
+        padding: max(20px, env(safe-area-inset-top)) 22px max(28px, env(safe-area-inset-bottom));
+      }
+
+      .app {
+        width: min(100%, 620px);
+        gap: 14px;
+        padding-bottom: 22px;
+      }
+
+      .topbar {
+        min-height: 62px;
+        gap: 12px;
+      }
+
+      .brand { gap: 14px; }
+      .logo { width: 58px; height: 58px; font-size: 28px; }
+      .brand-title { font-size: 25px; letter-spacing: -0.5px; }
+      .brand-subtitle { font-size: 16px; margin-top: 4px; }
+      .top-actions { gap: 10px; }
+      .icon-button { width: 38px; height: 38px; border-radius: 12px; }
+      .icon-button svg { width: 28px; height: 28px; }
+      .dot-alert { width: 12px; height: 12px; right: 2px; top: 1px; }
+
+      .card {
+        border-radius: 24px;
+        box-shadow: 0 20px 52px rgba(0, 0, 0, 0.48);
+      }
+
+      .balance-card {
+        min-height: 258px;
+        padding: 26px 28px;
+      }
+
+      .balance-content {
+        width: 58%;
+        min-width: 0;
+      }
+
+      .section-kicker { font-size: 16px; gap: 9px; margin-bottom: 18px; }
+      .section-kicker svg { width: 20px; height: 20px; }
+      .balance-row { gap: 10px; margin-bottom: 14px; }
+      .balance-value { font-size: 70px; letter-spacing: -3px; }
+      .balance-unit { font-size: 18px; }
+      .balance-note { font-size: 16px; margin-bottom: 22px; }
+
+      .primary-btn {
+        min-width: 305px;
+        min-height: 56px;
+        border-radius: 14px;
+        padding: 0 20px;
+        gap: 12px;
+        font-size: 18px;
+      }
+
+      .plus-circle { width: 22px; height: 22px; font-size: 17px; }
+
+      .coin-art {
+        right: 32px;
+        top: 42px;
+        width: 218px;
+        height: 170px;
+      }
+
+      .coin-orbit { left: 0; top: 92px; width: 210px; height: 58px; }
+      .coin {
+        width: 104px;
+        height: 104px;
+        right: 42px;
+        box-shadow:
+          11px 8px 0 #b85300,
+          0 18px 42px rgba(255, 138, 0, 0.42),
+          0 0 0 7px rgba(104, 47, 0, 0.26) inset,
+          0 0 0 1px rgba(255, 255, 255, 0.22) inset;
+      }
+      .coin::before { inset: 12px; border-width: 2px; }
+      .coin::after { font-size: 50px; letter-spacing: -3px; }
+      .spark.s1 { left: 18px; top: 48px; font-size: 20px; }
+      .spark.s2 { right: 5px; top: 108px; font-size: 24px; }
+      .spark.s3 { left: 0; bottom: 42px; font-size: 14px; }
+
+      .tariff-card {
+        min-height: 210px;
+        padding: 24px 26px;
+      }
+
+      .tariff-layout {
+        grid-template-columns: 62px minmax(0, 1fr) 145px;
+        gap: 18px;
+      }
+
+      .icon-tile { width: 58px; height: 58px; border-radius: 17px; }
+      .icon-tile svg { width: 32px; height: 32px; }
+      .current-badge { top: 18px; right: 22px; min-height: 36px; padding: 0 14px; font-size: 13px; }
+      .tariff-title { font-size: 24px; margin-bottom: 8px; }
+      .tariff-name { font-size: 34px; margin-bottom: 12px; }
+      .tariff-note { font-size: 16px; margin-bottom: 15px; }
+
+      .outline-btn {
+        width: min(100%, 330px);
+        min-height: 54px;
+        border-radius: 14px;
+        gap: 18px;
+        font-size: 18px;
+      }
+      .outline-btn svg { width: 22px; height: 22px; }
+
+      .tariff-art { height: 126px; opacity: 0.65; }
+      .glass-stack,
+      .glass-stack::before,
+      .glass-stack::after { width: 126px; height: 88px; border-radius: 17px; }
+      .star-shape { right: 50px; bottom: 22px; width: 42px; height: 42px; }
+
+      .ref-card { padding: 24px 26px 26px; }
+      .ref-head {
+        grid-template-columns: 58px minmax(0, 1fr) auto;
+        gap: 14px;
+        margin-bottom: 18px;
+      }
+      .ref-title { font-size: 23px; margin-bottom: 6px; }
+      .ref-subtitle { font-size: 16px; line-height: 1.28; }
+      .ref-badge { min-height: 42px; padding: 0 15px; font-size: 16px; }
+
+      .stat-grid {
+        grid-template-columns: 1.35fr 1fr 1.1fr;
+        gap: 10px;
+        margin-bottom: 12px;
+      }
+      .stat-box { min-height: 78px; padding: 14px; border-radius: 14px; }
+      .stat-label { font-size: 12px; margin-bottom: 9px; }
+      .stat-value { font-size: 22px; }
+      .copy-mini { width: 38px; height: 38px; border-radius: 12px; }
+      .copy-mini svg { width: 21px; height: 21px; }
+
+      .ref-links-grid {
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        margin-top: 12px;
+      }
+      .ref-link-card { min-height: 76px; padding: 13px; border-radius: 14px; grid-template-columns: minmax(0, 1fr) 40px; }
+      .ref-link-label { font-size: 12px; margin-bottom: 7px; }
+      .ref-link-text { font-size: 14px; }
+      .copy-link-btn { width: 40px; height: 40px; border-radius: 12px; }
+      .copy-link-btn svg { width: 21px; height: 21px; }
+
+      .nav-row {
+        min-height: 72px;
+        grid-template-columns: 44px minmax(0, 1fr) 24px;
+        gap: 12px;
+        padding: 14px 24px;
+      }
+      .small-icon { width: 38px; height: 38px; }
+      .small-icon svg { width: 34px; height: 34px; }
+      .row-title { font-size: 20px; }
+      .row-text { font-size: 14px; margin-top: 3px; }
+      .chev svg { width: 24px; height: 24px; }
+
+      .settings-card { padding: 22px 24px; }
+      .settings-head { grid-template-columns: 44px minmax(0, 1fr); gap: 12px; margin-bottom: 16px; }
+      .settings-links { grid-template-columns: 1fr 1fr; gap: 10px; }
+      .doc-link { min-height: 72px; grid-template-columns: 38px minmax(0, 1fr) 22px; gap: 10px; padding: 12px 13px; }
+      .doc-link svg { width: 28px; height: 28px; }
+      .doc-title { font-size: 15px; }
+      .doc-text { font-size: 12px; }
+
+      .plans-sheet { width: min(100%, 620px); padding: 22px; border-radius: 26px; }
+      .plans-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+      .plan-card { min-height: 230px; padding: 18px; border-radius: 18px; }
+      .plan-name { font-size: 20px; }
+      .plan-tokens { font-size: 26px; }
+      .plan-desc { font-size: 13px; min-height: 70px; }
+      .plan-price { font-size: 19px; }
+      .plan-buy { min-height: 46px; }
+    }
+
+
+    /* Final Telegram Account polish: centered top-up header, modern cards, stable buttons */
+    .plans-sheet {
+      position: relative;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255, 138, 0, 0.55) rgba(255, 255, 255, 0.06);
+    }
+
+    #topupOverlay .plans-sheet {
+      background:
+        radial-gradient(circle at 18% 0%, rgba(255, 176, 0, 0.18), transparent 34%),
+        radial-gradient(circle at 92% 8%, rgba(255, 138, 0, 0.12), transparent 30%),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.025)),
+        #0d0d0d;
+    }
+
+    #topupOverlay .sheet-head {
+      position: sticky;
+      top: -26px;
+      z-index: 5;
+      display: grid;
+      grid-template-columns: 1fr;
+      justify-items: center;
+      text-align: center;
+      padding: 8px 62px 18px;
+      margin: -8px -4px 16px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      background: linear-gradient(180deg, rgba(13, 13, 13, 0.98), rgba(13, 13, 13, 0.88));
+      backdrop-filter: blur(18px);
+    }
+
+    #topupOverlay .sheet-title {
+      font-size: clamp(25px, 4.5vw, 34px);
+      line-height: 1.05;
+      letter-spacing: -0.8px;
+    }
+
+    #topupOverlay .sheet-note {
+      max-width: 560px;
+      margin: 9px auto 0;
+      color: rgba(255, 255, 255, 0.68);
+      font-size: 15px;
+      line-height: 1.42;
+    }
+
+    #topupOverlay .close-sheet {
+      position: absolute;
+      right: 18px;
+      top: 14px;
+      width: 48px;
+      height: 48px;
+      background: rgba(255, 255, 255, 0.10);
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+    }
+
+    .email-box {
+      display: none;
+      gap: 10px;
+      align-items: center;
+      margin: 0 0 16px;
+      padding: 14px;
+      border: 1px solid rgba(255, 138, 0, 0.24);
+      border-radius: 18px;
+      background: rgba(255, 138, 0, 0.07);
+    }
+
+    .email-box.show { display: grid; grid-template-columns: minmax(0, 1fr); }
+
+    .email-label {
+      color: rgba(255, 255, 255, 0.72);
+      font-size: 13px;
+      line-height: 1.3;
+      font-weight: 750;
+    }
+
+    .email-input {
+      width: 100%;
+      min-height: 50px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 14px;
+      padding: 0 15px;
+      color: #fff;
+      background: rgba(0, 0, 0, 0.28);
+      outline: none;
+      font: inherit;
+      font-size: 16px;
+      font-weight: 700;
+    }
+
+    .email-input:focus {
+      border-color: rgba(255, 138, 0, 0.70);
+      box-shadow: 0 0 0 4px rgba(255, 138, 0, 0.12);
+    }
+
+    #topupOverlay .plans-grid {
+      align-items: stretch;
+    }
+
+    #topupOverlay .plan-card {
+      position: relative;
+      isolation: isolate;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      min-height: 246px;
+      padding: 18px;
+      border-radius: 24px;
+      border: 1px solid rgba(255, 176, 0, 0.22);
+      background:
+        radial-gradient(circle at 105% -12%, rgba(255, 176, 0, 0.30), transparent 38%),
+        radial-gradient(circle at 0% 100%, rgba(255, 138, 0, 0.12), transparent 46%),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.030)),
+        #151515;
+      box-shadow: 0 18px 44px rgba(0, 0, 0, 0.36);
+    }
+
+    #topupOverlay .plan-card::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      z-index: -1;
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.10), transparent 32%, rgba(255, 138, 0, 0.08));
+      opacity: 0.88;
+    }
+
+    #topupOverlay .plan-card.featured {
+      border-color: rgba(255, 176, 0, 0.48);
+      box-shadow: 0 22px 58px rgba(255, 138, 0, 0.14), 0 18px 44px rgba(0, 0, 0, 0.38);
+    }
+
+    .plan-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+
+    .plan-icon {
+      width: 48px;
+      height: 48px;
+      display: grid;
+      place-items: center;
+      border-radius: 16px;
+      font-size: 25px;
+      background: rgba(255, 138, 0, 0.13);
+      border: 1px solid rgba(255, 176, 0, 0.18);
+    }
+
+    .plan-chip {
+      min-height: 31px;
+      padding: 0 11px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+      color: #ffc766;
+      background: rgba(255, 176, 0, 0.10);
+      border: 1px solid rgba(255, 176, 0, 0.18);
+      font-size: 12px;
+      font-weight: 950;
+      white-space: nowrap;
+    }
+
+    #topupOverlay .plan-name {
+      margin: 0 0 8px;
+      color: rgba(255, 255, 255, 0.86);
+      font-size: 15px;
+      line-height: 1;
+      font-weight: 950;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+    }
+
+    #topupOverlay .plan-tokens {
+      margin: 0 0 12px;
+      font-size: 20px;
+      line-height: 1;
+      font-weight: 950;
+      letter-spacing: -0.3px;
+    }
+
+    #topupOverlay .plan-tokens strong {
+      font-size: 46px;
+      line-height: 0.88;
+      letter-spacing: -2px;
+      color: #fff;
+    }
+
+    #topupOverlay .plan-desc {
+      flex: 1 1 auto;
+      min-height: 0;
+      margin: 0 0 18px;
+      color: rgba(255, 255, 255, 0.62);
+      font-size: 14px;
+      line-height: 1.35;
+    }
+
+    .plan-foot {
+      margin-top: auto;
+      display: grid;
+      grid-template-columns: auto minmax(112px, 1fr);
+      align-items: center;
+      gap: 12px;
+    }
+
+    #topupOverlay .plan-price {
+      margin: 0;
+      font-size: 23px;
+      line-height: 1;
+      letter-spacing: -0.4px;
+    }
+
+    #topupOverlay .plan-buy {
+      margin: 0;
+      min-height: 48px;
+      border-radius: 15px;
+      font-size: 15px;
+      box-shadow: 0 14px 28px rgba(255, 138, 0, 0.20), 0 0 0 1px rgba(255, 255, 255, 0.13) inset;
+    }
+
+    #topupOverlay .plan-buy[disabled] {
+      cursor: default;
+      opacity: 0.62;
+      filter: grayscale(0.2);
+    }
+
+    @media (min-width: 761px) {
+      #topupOverlay .plans-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+      #topupOverlay .plan-card.featured {
+        grid-column: span 2;
+        min-height: 214px;
+      }
+      #topupOverlay .plan-card.featured .plan-foot {
+        grid-template-columns: auto 180px;
+      }
+    }
+
+    @media (max-width: 760px) {
+      #topupOverlay .sheet-head {
+        top: -18px;
+        padding: 8px 54px 15px;
+        margin: -8px -2px 14px;
+      }
+      #topupOverlay .close-sheet {
+        right: 8px;
+        top: 10px;
+        width: 44px;
+        height: 44px;
+      }
+      #topupOverlay .plan-card {
+        flex: 0 0 84%;
+        min-height: 248px;
+      }
+      .plan-foot {
+        grid-template-columns: 1fr;
+      }
+      #topupOverlay .plan-buy {
+        width: 100%;
+      }
+    }
+
+
+    /* Hotfix: ровное пополнение баланса + аккуратное окно пакетов */
+    .balance-content {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+    }
+
+    .balance-note {
+      width: 100%;
+      text-align: center;
+    }
+
+    .primary-btn {
+      position: relative;
+      text-align: center;
+    }
+
+    .primary-btn > span:first-child {
+      display: block;
+      width: 100%;
+      text-align: center;
+      padding: 0 26px;
+    }
+
+    .primary-btn .plus-circle {
+      position: absolute;
+      right: 22px;
+      top: 50%;
+      transform: translateY(-50%);
+    }
+
+    #topupOverlay {
+      align-items: center;
+      background: rgba(0, 0, 0, 0.74);
+      backdrop-filter: blur(12px);
+    }
+
+    #topupOverlay .plans-sheet {
+      width: min(100%, 640px);
+      max-height: min(86vh, 760px);
+      padding: 22px;
+      border-radius: 28px;
+      overflow: auto;
+      border: 1px solid rgba(255, 138, 0, 0.24);
+      background:
+        radial-gradient(circle at 16% 0%, rgba(255, 176, 0, 0.16), transparent 34%),
+        radial-gradient(circle at 100% 8%, rgba(255, 138, 0, 0.10), transparent 30%),
+        linear-gradient(180deg, rgba(30, 30, 30, 0.98), rgba(11, 11, 11, 0.98));
+      box-shadow: 0 28px 92px rgba(0, 0, 0, 0.72);
+    }
+
+    #topupOverlay .sheet-head {
+      position: relative;
+      top: auto;
+      z-index: 2;
+      display: grid;
+      grid-template-columns: 1fr;
+      justify-items: center;
+      text-align: center;
+      padding: 4px 58px 18px;
+      margin: 0 0 16px;
+      border-bottom: 0;
+      background: transparent;
+      backdrop-filter: none;
+    }
+
+    #topupOverlay .sheet-title {
+      font-size: 34px;
+      line-height: 1.05;
+      letter-spacing: -1px;
+    }
+
+    #topupOverlay .sheet-note {
+      max-width: 460px;
+      margin: 9px auto 0;
+      color: rgba(255, 255, 255, 0.66);
+      font-size: 15px;
+      line-height: 1.38;
+    }
+
+    #topupOverlay .close-sheet {
+      position: absolute;
+      right: 0;
+      top: 0;
+      width: 48px;
+      height: 48px;
+      background: rgba(255, 255, 255, 0.10);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    #topupOverlay .plans-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      align-items: stretch;
+    }
+
+    #topupOverlay .plan-card,
+    #topupOverlay .plan-card.featured {
+      grid-column: auto;
+      min-height: 218px;
+      padding: 18px;
+      border-radius: 22px;
+      display: flex;
+      flex-direction: column;
+      border: 1px solid rgba(255, 176, 0, 0.22);
+      background:
+        radial-gradient(circle at 100% 0%, rgba(255, 176, 0, 0.18), transparent 38%),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.028)),
+        #161616;
+      box-shadow: 0 16px 42px rgba(0, 0, 0, 0.38);
+    }
+
+    #topupOverlay .plan-card.featured {
+      border-color: rgba(255, 176, 0, 0.34);
+    }
+
+    #topupOverlay .plan-top {
+      margin-bottom: 14px;
+    }
+
+    #topupOverlay .plan-icon {
+      width: 44px;
+      height: 44px;
+      border-radius: 15px;
+      font-size: 23px;
+    }
+
+    #topupOverlay .plan-chip {
+      min-height: 28px;
+      padding: 0 10px;
+      font-size: 11px;
+    }
+
+    #topupOverlay .plan-name {
+      margin-bottom: 7px;
+      font-size: 14px;
+      color: rgba(255, 255, 255, 0.76);
+    }
+
+    #topupOverlay .plan-tokens {
+      margin-bottom: 10px;
+      font-size: 18px;
+      white-space: nowrap;
+    }
+
+    #topupOverlay .plan-tokens strong {
+      font-size: 42px;
+      letter-spacing: -1.8px;
+    }
+
+    #topupOverlay .plan-desc {
+      flex: 1 1 auto;
+      margin-bottom: 16px;
+      color: rgba(255, 255, 255, 0.60);
+      font-size: 13.5px;
+      line-height: 1.34;
+    }
+
+    #topupOverlay .plan-foot,
+    #topupOverlay .plan-card.featured .plan-foot {
+      margin-top: auto;
+      display: grid;
+      grid-template-columns: auto minmax(118px, 1fr);
+      align-items: center;
+      gap: 12px;
+    }
+
+    #topupOverlay .plan-price {
+      margin: 0;
+      font-size: 22px;
+      line-height: 1;
+      white-space: nowrap;
+    }
+
+    #topupOverlay .plan-buy {
+      margin: 0;
+      min-height: 48px;
+      width: 100%;
+      border-radius: 15px;
+      font-size: 15px;
+    }
+
+    @media (max-width: 760px) {
+      #topupOverlay {
+        align-items: flex-end;
+        padding: 10px;
+      }
+
+      #topupOverlay .plans-sheet {
+        width: 100%;
+        max-height: 88vh;
+        padding: 18px;
+        border-radius: 24px;
+      }
+
+      #topupOverlay .sheet-head {
+        padding: 2px 52px 15px;
+        margin-bottom: 12px;
+      }
+
+      #topupOverlay .sheet-title {
+        font-size: 28px;
+      }
+
+      #topupOverlay .sheet-note {
+        font-size: 14px;
+      }
+
+      #topupOverlay .close-sheet {
+        width: 44px;
+        height: 44px;
+      }
+
+      #topupOverlay .plans-grid {
+        display: flex;
+        overflow-x: auto;
+        scroll-snap-type: x mandatory;
+        gap: 12px;
+        padding-bottom: 4px;
+      }
+
+      #topupOverlay .plan-card,
+      #topupOverlay .plan-card.featured {
+        flex: 0 0 84%;
+        min-height: 236px;
+        scroll-snap-align: start;
+      }
+
+      #topupOverlay .plan-foot,
+      #topupOverlay .plan-card.featured .plan-foot {
+        grid-template-columns: 1fr;
+      }
+    }
+
+
+    /* Hotfix v3: одинаковый левый отступ у блока баланса и тарифного плана */
+    @media (min-width: 761px) {
+      .balance-card,
+      .tariff-card {
+        padding-left: 28px;
+        padding-right: 28px;
+      }
+
+      .primary-btn,
+      .outline-btn {
+        width: 330px;
+        max-width: 100%;
+      }
+
+      .tariff-layout {
+        grid-template-columns: minmax(0, 1fr) 145px !important;
+        gap: 18px;
+        align-items: center;
+      }
+
+      .tariff-layout > .icon-tile {
+        display: none;
+      }
+
+      .tariff-layout > div:nth-child(2) {
+        grid-column: 1;
+      }
+
+      .tariff-layout > .tariff-art {
+        grid-column: 2;
+      }
+
+      .tariff-title,
+      .tariff-name,
+      .tariff-note {
+        margin-left: 0;
+        text-align: left;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .tariff-layout {
+        grid-template-columns: minmax(0, 1fr) !important;
+      }
+
+      .tariff-layout > .icon-tile {
+        display: none;
+      }
+
+      .tariff-layout > div:nth-child(2) {
+        grid-column: 1;
+      }
+    }
+
   </style>
 </head>
 <body>
   <main class="app">
-    <header class="top">
+    <header class="topbar">
       <div class="brand">
         <div class="logo">N</div>
         <div>
-          <div class="brand-title">Личный кабинет</div>
-          <div class="brand-subtitle">NABEX.RU</div>
+          <div class="brand-title">Nabex AI</div>
+          <div class="brand-subtitle">Личный кабинет</div>
         </div>
       </div>
-      <div class="pill">Telegram WebApp</div>
+      <div class="top-actions" aria-label="Действия">
+        <button class="icon-button" type="button" aria-label="Уведомления">
+          <span class="dot-alert"></span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+        </button>
+        <button class="icon-button" type="button" aria-label="Меню">
+          <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
+        </button>
+      </div>
     </header>
 
-    <section class="hero">
-      <div class="label">Ваш баланс</div>
-      <div class="balance">
-        <div class="balance-value" id="balanceValue">—</div>
-        <div class="balance-unit">токенов</div>
+    <section class="card balance-card">
+      <div class="balance-content">
+        <div class="section-kicker">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h18v12H3z"/><path d="M7 7V5h10v2"/><path d="M3 11h18"/></svg>
+          <span>Ваш баланс</span>
+        </div>
+        <div class="balance-row">
+          <div class="balance-value" id="balanceValue">0</div>
+          <div class="balance-unit">токенов</div>
+        </div>
+        <p class="balance-note">Баланс действует на сайте и в Telegram</p>
+        <button class="primary-btn" type="button" data-open-topup>
+          <span>Пополнить баланс</span>
+          <span class="plus-circle">+</span>
+        </button>
       </div>
-      <p class="hint" id="balanceHint">Загружаю данные аккаунта…</p>
-      <button class="btn-primary" type="button" data-open="topup">Пополнить баланс</button>
+      <div class="coin-art" aria-hidden="true">
+        <div class="coin-orbit"></div>
+        <div class="coin"></div>
+        <div class="spark s1">✦</div>
+        <div class="spark s2">✦</div>
+        <div class="spark s3">✧</div>
+      </div>
     </section>
 
-    <section class="grid">
-      <article class="card">
-        <div class="card-title">
-          <span>Реферальная программа</span>
-          <span class="badge">до 30%</span>
+    <section class="card tariff-card">
+      <div class="current-badge">Текущий тариф</div>
+      <div class="tariff-layout">
+        <div class="icon-tile icon-purple">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 8 4.5 4L12 4l4.5 8L21 8l-2 11H5L3 8z"/></svg>
         </div>
-        <p class="text">Основные ссылки для приглашений. Расширенная информация по реферальной системе доступна на сайте.</p>
+        <div>
+          <div class="tariff-title">Тарифный план</div>
+          <div class="tariff-name" id="tariffName">FREE</div>
+          <div class="tariff-note">Тариф не подключен</div>
+          <button class="outline-btn" type="button" data-open-tariffs>
+            <span>Выбрать тариф</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+          </button>
+        </div>
+        <div class="tariff-art" aria-hidden="true">
+          <div class="glass-stack"></div>
+          <svg class="star-shape" viewBox="0 0 24 24" fill="currentColor"><path d="m12 2.5 2.8 6 6.5.7-4.8 4.5 1.3 6.4L12 16.8l-5.8 3.3 1.3-6.4-4.8-4.5 6.5-.7L12 2.5z"/></svg>
+        </div>
+      </div>
+    </section>
 
-        <div class="ref-item">
-          <div class="ref-label">Ссылка на сайт</div>
-          <div class="link-box">
-            <div class="link-text" id="siteRefText">Загрузка ссылки…</div>
-            <button class="mini-copy" type="button" data-copy="site_ref">Скопировать</button>
+    <section class="card ref-card">
+      <div class="ref-head">
+        <div class="icon-tile icon-green">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        </div>
+        <div>
+          <div class="ref-title">Реферальная программа</div>
+          <div class="ref-subtitle">Приглашайте друзей и получайте <span class="green-word">до 30%</span><br />с их пополнений</div>
+        </div>
+        <div class="ref-badge">до 30%</div>
+      </div>
+
+      <div class="stat-grid">
+        <div class="stat-box">
+          <div class="stat-label">Ваш реферальный код</div>
+          <div class="stat-value">
+            <span id="refCode">—</span>
+            <button class="copy-mini" type="button" data-copy-code aria-label="Скопировать код">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            </button>
           </div>
         </div>
+        <div class="stat-box">
+          <div class="stat-label">Доход за май</div>
+          <div class="stat-value"><span id="refMonthIncome">0 ₽</span></div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">Всего заработано</div>
+          <div class="stat-value"><span id="refTotalIncome">0 ₽</span></div>
+        </div>
+      </div>
 
-        <div class="ref-item">
-          <div class="ref-label">Ссылка на Telegram-бота</div>
-          <div class="link-box">
-            <div class="link-text" id="botRefText">Загрузка ссылки…</div>
-            <button class="mini-copy" type="button" data-copy="bot_ref">Скопировать</button>
+      <div class="ref-links-grid">
+        <div class="ref-link-card">
+          <div>
+            <div class="ref-link-label">Ссылка на сайт</div>
+            <div class="ref-link-text" id="siteRefText">Загрузка ссылки…</div>
           </div>
+          <button class="copy-link-btn" type="button" data-copy-ref="site_ref" aria-label="Скопировать ссылку на сайт">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          </button>
         </div>
-
-        <div class="actions">
-          <button class="btn-soft" type="button" data-open="ref_site">Открыть реферальный кабинет на сайте</button>
+        <div class="ref-link-card">
+          <div>
+            <div class="ref-link-label">Ссылка на Telegram-бота</div>
+            <div class="ref-link-text" id="botRefText">Загрузка ссылки…</div>
+          </div>
+          <button class="copy-link-btn" type="button" data-copy-ref="bot_ref" aria-label="Скопировать ссылку на Telegram-бота">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          </button>
         </div>
-      </article>
+      </div>
+    </section>
 
-      <article class="card">
-        <div class="card-title">
-          <span>Навигация</span>
-          <span class="badge">подсказка</span>
-        </div>
-        <p class="text">Краткая навигация по основным разделам бота и сайта.</p>
-        <button class="btn-secondary" type="button" data-toggle="navigation">Открыть навигацию</button>
-        <div class="nav-panel" id="navigationPanel"><b>🤖 NABEX.RU - Наш Сайт.</b>
-• 🖼 Фото будущего: редактирование, афиши, нейро-фотосессии.
-  — фото → потом текст
-  — нужен текст/цена/надпись → сделаю афишу GPT Image2
-  — 'без текста' / описание сцены → фото-редактирование
-• 🎬 Видео будущего: текст → видео или фото → видео.
-• 🎵 Музыка будущего: генерация треков (Suno / Udio).
-• 🔊 Озвучить текст: профессиональная AI-озвучка.
-• 🍌 Nano Banana 2: генерация или редактирование изображений через PiAPI.
-• 🍌 Nano Banana Pro: продвинутый AI-редактор изображений.
-• 🍌 Nano Banana Pro - NEW: новая ветка с выбором 2K / 4K.
-• 💰 Баланс: токены, пополнение, история операций.
-• 🔄 Сбросить генерацию — если зациклилась/зависла
-• /reset — сбросить текущий режим</div>
-      </article>
+    <section class="card list-card">
+      <a class="nav-row" href="#" data-open="navigation">
+        <span class="small-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m16 8-3 8-5 2 3-8 5-2z"/></svg></span>
+        <span><span class="row-title">Навигация </span><span class="row-text">    Краткая навигация по разделам бота и сайта</span></span>
+        <span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></span>
+      </a>
+      <a class="nav-row" href="#" data-open="support">
+        <span class="small-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3v5z"/><path d="M3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3v5z"/></svg></span>
+        <span><span class="row-title">Поддержка </span><span class="row-text"> Мы всегда готовы помочь вам</span></span>
+        <span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></span>
+      </a>
+      <a class="nav-row" href="#" data-open="site">
+        <span class="small-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></span>
+        <span><span class="row-title">Сайт Nabex.ru </span><span class="row-text"> Полная версия кабинета и информация</span></span>
+        <span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></span>
+      </a>
+    </section>
 
-      <article class="card">
-        <div class="card-title"><span>Сайт</span></div>
-        <p class="text">Полная версия кабинета, история генераций, тарифы и подробная информация доступны на сайте.</p>
-        <button class="btn-secondary" type="button" data-open="site">Открыть Nabex.ru</button>
-      </article>
-
-      <article class="card">
-        <div class="card-title"><span>Поддержка</span></div>
-        <p class="text">Если генерация зависла, токены списались или возникла ошибка — напишите в поддержку.</p>
-        <button class="btn-secondary" type="button" data-open="support">Написать в поддержку</button>
-      </article>
-
-      <article class="card">
-        <div class="card-title"><span>Настройки</span></div>
-        <p class="text">Документы сервиса и условия использования.</p>
-        <div class="doc-list">
-          <a class="doc-row" href="#" data-open-link="offer">
-            <span>Согласие с офертой<small>Условия использования сервиса</small></span>
-            <span class="arrow">›</span>
-          </a>
-          <a class="doc-row" href="#" data-open-link="policy">
-            <span>Политика сервиса<small>Правила и обработка данных</small></span>
-            <span class="arrow">›</span>
-          </a>
-        </div>
-      </article>
+    <section class="card settings-card">
+      <div class="settings-head">
+        <span class="small-icon icon-gray"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.52a2 2 0 0 1-1 1.72l-.15.1a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.1a2 2 0 0 1-1-1.72v-.52a2 2 0 0 1 1-1.72l.15-.1a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></span>
+        <span><span class="row-title">Настройки </span><span class="row-text"> Документы сервиса и условия использования</span></span>
+      </div>
+      <div class="settings-links">
+        <a class="doc-link" href="#" data-open="offer">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
+          <span><span class="doc-title">Согласие с офертой </span><span class="doc-text"> Условия использования сервиса</span></span>
+          <span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></span>
+        </a>
+        <a class="doc-link" href="#" data-open="policy">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          <span><span class="doc-title">Политика сервиса </span><span class="doc-text"> Правила и обработка данных</span></span>
+          <span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></span>
+        </a>
+      </div>
     </section>
   </main>
 
-  <div class="toast" id="toast">Скопировано</div>
+  <div class="plans-overlay" id="topupOverlay" aria-hidden="true">
+    <section class="plans-sheet" role="dialog" aria-modal="true" aria-label="Пополнение баланса">
+      <div class="sheet-head">
+        <div>
+          <div class="sheet-title">Пополнить баланс</div>
+          <div class="sheet-note">Выберите пакет токенов. После нажатия «Купить» сразу откроется оплата.</div>
+        </div>
+        <button class="close-sheet" type="button" data-close-topup aria-label="Закрыть">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+        </button>
+      </div>
+
+      <div class="email-box" id="topupEmailBox">
+        <div class="email-label">Для оплаты картой/СБП нужен email для чека. Введите один раз — дальше он сохранится.</div>
+        <input class="email-input" id="topupEmailInput" type="email" inputmode="email" autocomplete="email" placeholder="Ваш email для чека" />
+      </div>
+
+      <div class="plans-grid">
+        <article class="plan-card topup-plan">
+          <div class="plan-top"><div class="plan-icon">💰</div><div class="plan-chip">Быстрый тест</div></div>
+          <div class="plan-name">MINI</div>
+          <div class="plan-tokens"><strong>5</strong> токенов</div>
+          <div class="plan-desc">Мини-пакет, чтобы проверить генерации и быстро попробовать сервис.</div>
+          <div class="plan-foot"><div class="plan-price">60 ₽</div><button class="plan-buy" type="button" data-topup-tokens="5">Купить</button></div>
+        </article>
+        <article class="plan-card topup-plan featured">
+          <div class="plan-top"><div class="plan-icon">⭐</div><div class="plan-chip">Популярный старт</div></div>
+          <div class="plan-name">START</div>
+          <div class="plan-tokens"><strong>20</strong> токенов</div>
+          <div class="plan-desc">Базовое пополнение для обычной работы с фото, видео, музыкой и другими AI-инструментами.</div>
+          <div class="plan-foot"><div class="plan-price">180 ₽</div><button class="plan-buy" type="button" data-topup-tokens="20">Купить</button></div>
+        </article>
+        <article class="plan-card topup-plan">
+          <div class="plan-top"><div class="plan-icon">🚀</div><div class="plan-chip">Для активных</div></div>
+          <div class="plan-name">PRO</div>
+          <div class="plan-tokens"><strong>50</strong> токенов</div>
+          <div class="plan-desc">Оптимальный запас токенов для регулярных генераций без частых пополнений.</div>
+          <div class="plan-foot"><div class="plan-price">450 ₽</div><button class="plan-buy" type="button" data-topup-tokens="50">Купить</button></div>
+        </article>
+        <article class="plan-card topup-plan">
+          <div class="plan-top"><div class="plan-icon">👑</div><div class="plan-chip">Выгоднее</div></div>
+          <div class="plan-name">PLUS</div>
+          <div class="plan-tokens"><strong>100</strong> токенов</div>
+          <div class="plan-desc">Большой пакет для видео, изображений, музыки и частого использования.</div>
+          <div class="plan-foot"><div class="plan-price">850 ₽</div><button class="plan-buy" type="button" data-topup-tokens="100">Купить</button></div>
+        </article>
+        <article class="plan-card topup-plan featured">
+          <div class="plan-top"><div class="plan-icon">💎</div><div class="plan-chip">Максимум</div></div>
+          <div class="plan-name">MAX</div>
+          <div class="plan-tokens"><strong>200</strong> токенов</div>
+          <div class="plan-desc">Максимальный пакет для регулярной работы и большого запаса токенов.</div>
+          <div class="plan-foot"><div class="plan-price">1 600 ₽</div><button class="plan-buy" type="button" data-topup-tokens="200">Купить</button></div>
+        </article>
+      </div>
+    </section>
+  </div>
+
+  <div class="plans-overlay" id="tariffOverlay" aria-hidden="true">
+    <section class="plans-sheet" role="dialog" aria-modal="true" aria-label="Выбор тарифа">
+      <div class="sheet-head">
+        <div>
+          <div class="sheet-title">Выбрать тариф</div>
+          <div class="sheet-note">Тарифные планы пока не реализованы. Сейчас это отдельная визуальная заглушка без оплаты.</div>
+        </div>
+        <button class="close-sheet" type="button" data-close-tariffs aria-label="Закрыть">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+        </button>
+      </div>
+      <div class="plans-grid">
+        <article class="plan-card">
+          <div class="plan-name">FREE</div>
+          <div class="plan-tokens">Текущий</div>
+          <div class="plan-desc">Базовый доступ. Токены расходуются по обычным правилам сервиса.</div>
+          <div class="plan-price">0 ₽</div>
+          <button class="plan-buy" type="button" data-demo-tariff="free">Активен</button>
+        </article>
+        <article class="plan-card">
+          <div class="plan-name">PRO</div>
+          <div class="plan-tokens">Скоро</div>
+          <div class="plan-desc">Будущий тариф для активных пользователей. Условия добавим позже.</div>
+          <div class="plan-price">—</div>
+          <button class="plan-buy" type="button" data-demo-tariff="pro">Скоро</button>
+        </article>
+        <article class="plan-card">
+          <div class="plan-name">VIP</div>
+          <div class="plan-tokens">Скоро</div>
+          <div class="plan-desc">Будущий расширенный тариф. Пока без подключения и списаний.</div>
+          <div class="plan-price">—</div>
+          <button class="plan-buy" type="button" data-demo-tariff="vip">Скоро</button>
+        </article>
+      </div>
+    </section>
+  </div>
+
+  <div class="toast" id="toast">Готово</div>
 
   <script>
     const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
@@ -426,11 +1868,13 @@
 
     const state = {
       balance: 0,
+      refCode: "",
       siteRef: "",
       botRef: "",
+      contactEmail: "",
       topupUrl: "https://nabex.ru/tariffs.html",
+      topupWebAppUrl: "",
       siteUrl: "https://nabex.ru",
-      refCabinetUrl: "https://nabex.ru/#workspace",
       supportUrl: "https://t.me/HelpNeiroAstra",
       offerUrl: "https://nabex.ru/terms.html",
       policyUrl: "https://nabex.ru/privacy.html"
@@ -439,21 +1883,49 @@
     if (tg) {
       tg.ready();
       tg.expand();
-      tg.setHeaderColor("#090909");
-      tg.setBackgroundColor("#090909");
+      tg.setHeaderColor("#040404");
+      tg.setBackgroundColor("#040404");
     }
 
+    const topupOverlay = document.getElementById("topupOverlay");
+    const tariffOverlay = document.getElementById("tariffOverlay");
+    const topupEmailBox = document.getElementById("topupEmailBox");
+    const topupEmailInput = document.getElementById("topupEmailInput");
+    const toast = document.getElementById("toast");
     const balanceValue = document.getElementById("balanceValue");
-    const balanceHint = document.getElementById("balanceHint");
+    const refCode = document.getElementById("refCode");
     const siteRefText = document.getElementById("siteRefText");
     const botRefText = document.getElementById("botRefText");
-    const toast = document.getElementById("toast");
+
+    function showToast(text) {
+      toast.textContent = text || "Готово";
+      toast.classList.add("show");
+      clearTimeout(showToast.timer);
+      showToast.timer = setTimeout(() => toast.classList.remove("show"), 1600);
+    }
 
     function renderAccount() {
-      balanceValue.textContent = Number.isFinite(Number(state.balance)) ? String(Math.trunc(Number(state.balance))) : "0";
-      balanceHint.textContent = "Баланс общий для сайта и Telegram. После пополнения токены доступны во всех разделах сервиса.";
+      const balance = Number(state.balance);
+      balanceValue.textContent = Number.isFinite(balance) ? String(Math.trunc(balance)) : "0";
+      refCode.textContent = state.refCode || "—";
       siteRefText.textContent = state.siteRef || "Ссылка недоступна";
       botRefText.textContent = state.botRef || "Ссылка недоступна";
+    }
+
+    function openSheet(sheet) {
+      if (!sheet) return;
+      sheet.classList.add("show");
+      sheet.setAttribute("aria-hidden", "false");
+      document.body.style.overflow = "hidden";
+    }
+
+    function closeSheet(sheet) {
+      if (!sheet) return;
+      sheet.classList.remove("show");
+      sheet.setAttribute("aria-hidden", "true");
+      if (!topupOverlay.classList.contains("show") && !tariffOverlay.classList.contains("show")) {
+        document.body.style.overflow = "";
+      }
     }
 
     function openUrl(url) {
@@ -465,21 +1937,35 @@
       window.location.href = url;
     }
 
-    function showToast(text) {
-      toast.textContent = text || "Готово";
-      toast.classList.add("show");
-      clearTimeout(showToast.timer);
-      showToast.timer = setTimeout(() => toast.classList.remove("show"), 1600);
+    function buildTopupUrl() {
+      const explicit = String(state.topupWebAppUrl || "").trim();
+      let url;
+      if (explicit) {
+        try {
+          url = new URL(explicit, window.location.origin);
+        } catch (e) {}
+      }
+      if (!url) {
+        if (window.location.protocol === "file:") {
+          url = new URL("webapp_topup.html", window.location.href);
+        } else {
+          url = new URL("/webapp/topup", window.location.origin);
+        }
+      }
+      const uid = query.get("uid") || query.get("tg_user_id") || query.get("user_id") || "";
+      if (uid) {
+        url.searchParams.set("uid", uid);
+      }
+      return url.toString();
     }
 
-    async function copyText(text) {
+    async function copyText(text, successText) {
       if (!text) {
         showToast("Ссылка недоступна");
         return;
       }
       try {
         await navigator.clipboard.writeText(text);
-        showToast("Ссылка скопирована");
       } catch (error) {
         const temp = document.createElement("textarea");
         temp.value = text;
@@ -488,9 +1974,95 @@
         document.body.appendChild(temp);
         temp.focus();
         temp.select();
-        document.execCommand("copy");
+        try { document.execCommand("copy"); } catch (copyError) {}
         temp.remove();
-        showToast("Ссылка скопирована");
+      }
+      showToast(successText || "Скопировано");
+    }
+
+
+    function setTopupLoading(button, loading) {
+      if (!button) return;
+      if (loading) {
+        button.dataset.oldText = button.textContent || "Купить";
+        button.textContent = "Создаю…";
+        button.disabled = true;
+      } else {
+        button.textContent = button.dataset.oldText || "Купить";
+        button.disabled = false;
+      }
+    }
+
+    function looksLikeEmail(value) {
+      return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/i.test(String(value || "").trim());
+    }
+
+    async function createTopupPayment(tokens, button) {
+      const emailValue = topupEmailInput ? String(topupEmailInput.value || "").trim().toLowerCase() : "";
+      const uid = query.get("uid") || query.get("tg_user_id") || query.get("user_id") || "";
+      const payload = {
+        tokens: Number(tokens),
+        email: emailValue,
+        return_url: window.location.href
+      };
+      if (uid) payload.uid = uid;
+
+      setTopupLoading(button, true);
+      try {
+        const response = await fetch("/api/tg/topup/create", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Telegram-Init-Data": tg && tg.initData ? tg.initData : ""
+          },
+          body: JSON.stringify(payload)
+        });
+        const data = await response.json().catch(() => ({}));
+
+        if (data.need_email) {
+          if (topupEmailBox) topupEmailBox.classList.add("show");
+          if (topupEmailInput) {
+            topupEmailInput.focus();
+            if (emailValue && !looksLikeEmail(emailValue)) topupEmailInput.select();
+          }
+          showToast(data.message || "Введите email для чека");
+          return;
+        }
+
+        if (!data.ok) {
+          showToast(data.message || "Не удалось создать оплату");
+          if (tg && typeof tg.showAlert === "function") {
+            tg.showAlert(data.message || "Не удалось создать оплату. Попробуйте ещё раз.");
+          }
+          return;
+        }
+
+        if (data.confirmation_url) {
+          showToast("Открываю оплату…");
+          if (tg && tg.HapticFeedback) {
+            try { tg.HapticFeedback.impactOccurred("light"); } catch (e) {}
+          }
+          openUrl(data.confirmation_url);
+          return;
+        }
+
+        if (data.sent_to_bot) {
+          closeSheet(topupOverlay);
+          showToast("Инвойс отправлен в бот");
+          if (tg && typeof tg.showAlert === "function") {
+            tg.showAlert(data.message || "Инвойс Telegram Stars отправлен в чат с ботом.");
+          }
+          return;
+        }
+
+        showToast("Оплата создана");
+      } catch (error) {
+        showToast("Ошибка создания оплаты");
+        if (tg && typeof tg.showAlert === "function") {
+          tg.showAlert("Ошибка создания оплаты. Проверьте интернет и попробуйте ещё раз.");
+        }
+      } finally {
+        setTopupLoading(button, false);
       }
     }
 
@@ -506,61 +2078,94 @@
         });
         const data = await response.json();
         state.balance = data.balance ?? 0;
+        state.refCode = data.ref_code || "";
         state.siteRef = data.site_ref || "";
         state.botRef = data.bot_ref || "";
         state.topupUrl = data.topup_url || state.topupUrl;
+        state.topupWebAppUrl = data.topup_webapp_url || state.topupWebAppUrl;
+        state.contactEmail = data.contact_email || state.contactEmail || "";
+        if (topupEmailInput && state.contactEmail) topupEmailInput.value = state.contactEmail;
         state.siteUrl = data.site_url || state.siteUrl;
-        state.refCabinetUrl = data.ref_cabinet_url || state.refCabinetUrl;
         state.supportUrl = data.support_url || state.supportUrl;
         state.offerUrl = data.offer_url || state.offerUrl;
         state.policyUrl = data.policy_url || state.policyUrl;
-
         if (!data.ok && data.error) {
-          balanceHint.textContent = "Не удалось определить аккаунт. Откройте кабинет из Telegram-бота.";
+          showToast("Откройте кабинет из Telegram-бота");
         }
       } catch (error) {
-        balanceHint.textContent = "Не удалось загрузить данные. Попробуйте открыть кабинет заново.";
+        showToast("Не удалось загрузить аккаунт");
       } finally {
         renderAccount();
       }
     }
 
-    document.addEventListener("click", (event) => {
-      const copyBtn = event.target.closest("[data-copy]");
-      if (copyBtn) {
-        const key = copyBtn.dataset.copy;
-        copyText(key === "site_ref" ? state.siteRef : state.botRef);
+    document.addEventListener("click", async (event) => {
+      if (event.target.closest("[data-open-topup]")) {
+        window.location.href = buildTopupUrl();
         return;
       }
 
-      const toggleBtn = event.target.closest("[data-toggle]");
-      if (toggleBtn && toggleBtn.dataset.toggle === "navigation") {
-        const panel = document.getElementById("navigationPanel");
-        const isOpen = panel.classList.toggle("show");
-        toggleBtn.textContent = isOpen ? "Скрыть навигацию" : "Открыть навигацию";
+      if (event.target.closest("[data-open-tariffs]")) {
+        openSheet(tariffOverlay);
         return;
       }
 
-      const openBtn = event.target.closest("[data-open]");
-      if (openBtn) {
-        const map = {
-          topup: state.topupUrl,
-          site: state.siteUrl,
-          ref_site: state.refCabinetUrl,
-          support: state.supportUrl
-        };
-        openUrl(map[openBtn.dataset.open]);
+      if (event.target.closest("[data-close-topup]") || event.target === topupOverlay) {
+        closeSheet(topupOverlay);
         return;
       }
 
-      const openLink = event.target.closest("[data-open-link]");
-      if (openLink) {
+      if (event.target.closest("[data-close-tariffs]") || event.target === tariffOverlay) {
+        closeSheet(tariffOverlay);
+        return;
+      }
+
+      const copyRef = event.target.closest("[data-copy-ref]");
+      if (copyRef) {
+        const key = copyRef.dataset.copyRef;
+        await copyText(key === "site_ref" ? state.siteRef : state.botRef, "Ссылка скопирована");
+        return;
+      }
+
+      if (event.target.closest("[data-copy-code]")) {
+        await copyText(state.refCode || refCode.textContent.trim(), "Код скопирован");
+        return;
+      }
+
+      const openTarget = event.target.closest("[data-open]");
+      if (openTarget) {
         event.preventDefault();
-        const map = { offer: state.offerUrl, policy: state.policyUrl };
-        openUrl(map[openLink.dataset.openLink]);
+        const map = {
+          site: state.siteUrl,
+          support: state.supportUrl,
+          offer: state.offerUrl,
+          policy: state.policyUrl
+        };
+        if (openTarget.dataset.open === "navigation") {
+          showToast("Навигация доступна в меню бота");
+          return;
+        }
+        openUrl(map[openTarget.dataset.open]);
+        return;
+      }
+
+      const topupButton = event.target.closest("[data-topup-tokens]");
+      if (topupButton) {
+        const tokens = topupButton.dataset.topupTokens || "";
+        await createTopupPayment(tokens, topupButton);
+        return;
+      }
+
+      if (event.target.closest("[data-demo-tariff]")) {
+        showToast("Тарифы пока в разработке");
+        if (tg && typeof tg.showAlert === "function") {
+          tg.showAlert("Тарифные планы скоро появятся. Сейчас это отдельная заглушка, оплата не создаётся.");
+        }
+        return;
       }
     });
 
+    renderAccount();
     loadAccount();
   </script>
 </body>
