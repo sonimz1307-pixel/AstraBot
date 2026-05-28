@@ -1131,6 +1131,11 @@ try:
     AI_CHAT_VOICE_MAX_BYTES = int(os.getenv("AI_CHAT_VOICE_MAX_BYTES", str(20 * 1024 * 1024)) or (20 * 1024 * 1024))
 except Exception:
     AI_CHAT_VOICE_MAX_BYTES = 20 * 1024 * 1024
+try:
+    SEEDANCE_AUDIO_MAX_UPLOAD_MB = max(1, int(os.getenv("SEEDANCE_AUDIO_MAX_UPLOAD_MB", "30") or "30"))
+except Exception:
+    SEEDANCE_AUDIO_MAX_UPLOAD_MB = 30
+SEEDANCE_AUDIO_MAX_UPLOAD_BYTES = SEEDANCE_AUDIO_MAX_UPLOAD_MB * 1024 * 1024
 AI_CHAT_VOICE_LANGUAGE = os.getenv("AI_CHAT_VOICE_LANGUAGE", "ru").strip()
 PROMPT_BUILDER_MODEL = os.getenv("PROMPT_BUILDER_MODEL", "gpt-5.4").strip() or "gpt-5.4"
 PROMPT_BUILDER_MAX_IMAGES = int(os.getenv("PROMPT_BUILDER_MAX_IMAGES", "9") or 9)
@@ -6002,11 +6007,19 @@ async def webhook(secret: str, request: Request):
             return {"ok": True}
         file_id = str(audio_msg.get("file_id") or "").strip()
         mime_type = str(audio_msg.get("mime_type") or "").lower()
+        duration_sec = int(audio_msg.get("duration") or 0)
         if not file_id:
             await tg_send_message(chat_id, "Не смог прочитать audio file_id. Отправь аудио ещё раз.", reply_markup=_seedance_refs_collect_kb())
             return {"ok": True}
-        if mime_type and not ("mpeg" in mime_type or "mp3" in mime_type or "wav" in mime_type):
-            await tg_send_message(chat_id, "Для Seedance Omni отправь аудио в MP3 или WAV. Голосовые/OGG лучше не использовать — KIE может отклонить.", reply_markup=_seedance_refs_collect_kb())
+        if duration_sec and duration_sec > 15:
+            await tg_send_message(chat_id, "Audio reference слишком длинный. Для Seedance Omni максимум 15 секунд.", reply_markup=_seedance_refs_collect_kb())
+            return {"ok": True}
+        try:
+            size_bytes = int(audio_msg.get("file_size") or 0)
+        except Exception:
+            size_bytes = 0
+        if size_bytes and size_bytes > SEEDANCE_AUDIO_MAX_UPLOAD_BYTES:
+            await tg_send_message(chat_id, f"Audio reference слишком большой. Лимит: до {SEEDANCE_AUDIO_MAX_UPLOAD_MB} МБ.", reply_markup=_seedance_refs_collect_kb())
             return {"ok": True}
         settings = st.get("seedance_settings") or {}
         audio_limit = int(settings.get("max_audios") or 3)
@@ -6028,10 +6041,48 @@ async def webhook(secret: str, request: Request):
         await tg_send_message(chat_id, f"Аудио reference #{len(so['audio_file_ids'])} получил ✅\nПришли ещё refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
         return {"ok": True}
 
-    # ---------------- Voice для Seedance Omni: не принимаем OGG как audio ref ----------------
+    # ---------------- Voice для Seedance Omni: принимаем как audio ref и конвертируем в MP3 в worker ----------------
     if voice and st.get("mode") == "seedance_omni":
-        await tg_send_message(chat_id, "Для Seedance Omni отправь аудио файлом MP3/WAV, не голосовым сообщением. Так меньше риск ошибки KIE.", reply_markup=_seedance_refs_collect_kb())
+        so = st.get("seedance_omni") or {}
+        step = (so.get("step") or "collect_refs")
+        if step != "collect_refs":
+            await tg_send_message(chat_id, "Аудио refs уже собраны ✅ Теперь жду промпт текстом. Если хочешь добавить refs — нажми «⬅️ Вернуться к refs».", reply_markup=_seedance_prompt_back_kb())
+            return {"ok": True}
+        file_id = str(voice.get("file_id") or "").strip()
+        duration_sec = int(voice.get("duration") or 0)
+        if not file_id:
+            await tg_send_message(chat_id, "Не смог прочитать file_id голосового. Запиши голосовое ещё раз.", reply_markup=_seedance_refs_collect_kb())
+            return {"ok": True}
+        if duration_sec and duration_sec > 15:
+            await tg_send_message(chat_id, "Голосовой audio reference слишком длинный. Для Seedance Omni максимум 15 секунд.", reply_markup=_seedance_refs_collect_kb())
+            return {"ok": True}
+        try:
+            size_bytes = int(voice.get("file_size") or 0)
+        except Exception:
+            size_bytes = 0
+        if size_bytes and size_bytes > SEEDANCE_AUDIO_MAX_UPLOAD_BYTES:
+            await tg_send_message(chat_id, f"Голосовой audio reference слишком большой. Лимит: до {SEEDANCE_AUDIO_MAX_UPLOAD_MB} МБ.", reply_markup=_seedance_refs_collect_kb())
+            return {"ok": True}
+        settings = st.get("seedance_settings") or {}
+        audio_limit = int(settings.get("max_audios") or 3)
+        total_limit = int(settings.get("max_total_refs") or 12)
+        image_ids = list(so.get("image_file_ids") or [])
+        video_ids = list(so.get("video_file_ids") or [])
+        audio_ids = list(so.get("audio_file_ids") or [])
+        if len(audio_ids) >= audio_limit:
+            await tg_send_message(chat_id, f"Аудио refs уже {audio_limit}/{audio_limit}. Пришли другие refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
+            return {"ok": True}
+        if len(image_ids) + len(video_ids) + len(audio_ids) >= total_limit:
+            await tg_send_message(chat_id, f"Всего refs уже {total_limit}/{total_limit}. Нажми «✅ Готово», чтобы перейти к промпту.", reply_markup=_seedance_refs_collect_kb())
+            return {"ok": True}
+        if file_id not in audio_ids:
+            audio_ids.append(file_id)
+        so["audio_file_ids"] = audio_ids[:audio_limit]
+        st["seedance_omni"] = so
+        st["ts"] = _now()
+        await tg_send_message(chat_id, f"Голосовой audio reference #{len(so['audio_file_ids'])} получил ✅\nКонвертирую в MP3 при запуске. Пришли ещё refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
         return {"ok": True}
+
 
     # ---------------- Документы в режиме ИИ-чата ----------------
     document = message.get("document") or {}
@@ -6449,7 +6500,7 @@ async def webhook(secret: str, request: Request):
                     chat_id,
                     "✅ Настройки Seedance 2.0 Omni сохранены.\n\n"
                     "Теперь пришли референсы: можно только фото, либо фото/видео/аудио вместе.\n"
-                    "Видео и аудио необязательны. Audio-only нельзя. Когда закончишь — нажми «✅ Готово».",
+                    "Аудио можно файлом или голосовым сообщением — я конвертирую в MP3. Audio-only нельзя. Когда закончишь — нажми «✅ Готово».",
                     reply_markup=_seedance_refs_collect_kb(),
                 )
                 return {"ok": True}
@@ -10049,23 +10100,24 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(chat_id, "Refs уже собраны ✅ Теперь жду промпт текстом. Если хочешь добавить refs — нажми «⬅️ Вернуться к refs».", reply_markup=_seedance_prompt_back_kb())
                 return {"ok": True}
 
-            is_video_document = mime.startswith("video/") or filename_l.endswith((".mp4", ".mov"))
-            is_audio_document = mime.startswith("audio/") or filename_l.endswith((".mp3", ".wav"))
+            is_audio_document = mime.startswith("audio/") or mime in ("application/ogg",) or filename_l.endswith((".mp3", ".wav", ".m4a", ".aac", ".ogg", ".opus"))
+            is_video_document = (mime.startswith("video/") or filename_l.endswith((".mp4", ".mov"))) and not is_audio_document
             if not (is_image_document or is_video_document or is_audio_document):
-                await tg_send_message(chat_id, "Для Seedance Omni отправь фото, видео MP4/MOV или аудио MP3/WAV.", reply_markup=_seedance_refs_collect_kb())
-                return {"ok": True}
-            if is_audio_document and not ("mpeg" in mime or "mp3" in mime or "wav" in mime or filename_l.endswith((".mp3", ".wav"))):
-                await tg_send_message(chat_id, "Аудио reference лучше отправлять MP3 или WAV — другие форматы KIE может отклонить.", reply_markup=_seedance_refs_collect_kb())
+                await tg_send_message(chat_id, "Для Seedance Omni отправь фото, видео MP4/MOV или аудио MP3/WAV/M4A/OGG/OPUS.", reply_markup=_seedance_refs_collect_kb())
                 return {"ok": True}
             if is_video_document and not (mime in ("video/mp4", "video/quicktime") or filename_l.endswith((".mp4", ".mov"))):
                 await tg_send_message(chat_id, "Видео reference отправь в MP4 или MOV.", reply_markup=_seedance_refs_collect_kb())
                 return {"ok": True}
             try:
-                if int(doc.get("file_size") or 0) > 100 * 1024 * 1024:
-                    await tg_send_message(chat_id, "Файл слишком большой для reference. Лимит: до 100 МБ.", reply_markup=_seedance_refs_collect_kb())
-                    return {"ok": True}
+                doc_size = int(doc.get("file_size") or 0)
             except Exception:
-                pass
+                doc_size = 0
+            if is_audio_document and doc_size and doc_size > SEEDANCE_AUDIO_MAX_UPLOAD_BYTES:
+                await tg_send_message(chat_id, f"Audio reference слишком большой. Лимит: до {SEEDANCE_AUDIO_MAX_UPLOAD_MB} МБ.", reply_markup=_seedance_refs_collect_kb())
+                return {"ok": True}
+            if not is_audio_document and doc_size and doc_size > 100 * 1024 * 1024:
+                await tg_send_message(chat_id, "Файл слишком большой для reference. Лимит: до 100 МБ.", reply_markup=_seedance_refs_collect_kb())
+                return {"ok": True}
 
             settings = st.get("seedance_settings") or {}
             image_limit = int(settings.get("max_images") or 7)
