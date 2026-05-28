@@ -201,8 +201,14 @@ WORKSPACE_IMAGE_QUEUE_NAME = (os.getenv("WORKSPACE_IMAGE_QUEUE_NAME", "workspace
 WORKSPACE_CHAT_OPENAI_QUEUE_NAME = (os.getenv("WORKSPACE_CHAT_OPENAI_QUEUE_NAME", "workspace_chat_openai") or "workspace_chat_openai").strip() or "workspace_chat_openai"
 WORKSPACE_CHAT_CLAUDE_QUEUE_NAME = (os.getenv("WORKSPACE_CHAT_CLAUDE_QUEUE_NAME", "workspace_chat_claude") or "workspace_chat_claude").strip() or "workspace_chat_claude"
 SEEDANCE_AUDIO_MAX_DURATION_SEC = 15.0
-SEEDANCE_AUDIO_ALLOWED_EXTS = {"mp3", "wav"}
-SEEDANCE_AUDIO_ALLOWED_MIME_TYPES = {"audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/wave"}
+SEEDANCE_AUDIO_MAX_UPLOAD_MB = max(1, int(os.getenv("SEEDANCE_AUDIO_MAX_UPLOAD_MB", "30") or "30"))
+SEEDANCE_AUDIO_MAX_UPLOAD_BYTES = SEEDANCE_AUDIO_MAX_UPLOAD_MB * 1024 * 1024
+SEEDANCE_AUDIO_ALLOWED_EXTS = {"mp3", "wav", "m4a", "aac", "ogg", "opus", "mp4", "mov"}
+SEEDANCE_AUDIO_ALLOWED_MIME_TYPES = {
+    "audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/wave",
+    "audio/mp4", "audio/x-m4a", "audio/aac", "audio/ogg", "audio/opus",
+    "application/ogg", "video/mp4", "video/quicktime",
+}
 SEEDANCE_VIDEO_ALLOWED_EXTS = {"mp4", "mov"}
 SEEDANCE_VIDEO_ALLOWED_MIME_TYPES = {"video/mp4", "video/quicktime"}
 SEEDANCE_VIDEO_TOTAL_MAX_DURATION_SEC = 15.4
@@ -212,18 +218,39 @@ SWITCHX_TOKENS_PER_SEC_1080 = max(1, int(os.getenv("SWITCHX_TOKENS_PER_SEC_1080"
 
 def _guess_seedance_audio_ext(*, filename: Any = None, content_type: Any = None, raw: bytes = b"") -> str:
     name = str(filename or "").strip().lower()
-    if name.endswith(".mp3"):
-        return "mp3"
-    if name.endswith(".wav"):
-        return "wav"
+    suffix = Path(name).suffix.lower().lstrip(".")
+    if suffix in SEEDANCE_AUDIO_ALLOWED_EXTS:
+        return suffix
     ctype = str(content_type or "").strip().lower()
-    if ctype in {"audio/mpeg", "audio/mp3"}:
-        return "mp3"
-    if ctype in {"audio/wav", "audio/x-wav", "audio/wave"}:
-        return "wav"
-    head = bytes((raw or b"")[:32])
+    ctype_map = {
+        "audio/mpeg": "mp3",
+        "audio/mp3": "mp3",
+        "audio/wav": "wav",
+        "audio/x-wav": "wav",
+        "audio/wave": "wav",
+        "audio/mp4": "m4a",
+        "audio/x-m4a": "m4a",
+        "audio/aac": "aac",
+        "audio/ogg": "ogg",
+        "audio/opus": "opus",
+        "application/ogg": "ogg",
+        "video/mp4": "mp4",
+        "video/quicktime": "mov",
+    }
+    if ctype in ctype_map:
+        return ctype_map[ctype]
+    head = bytes((raw or b"")[:64])
     if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
         return "wav"
+    if head[:4] == b"OggS":
+        return "ogg"
+    if len(head) >= 12 and head[4:8] == b"ftyp":
+        brand = head[8:12]
+        if brand == b"qt  ":
+            return "mov"
+        if brand in {b"M4A ", b"M4B ", b"M4P "}:
+            return "m4a"
+        return "mp4"
     if head.startswith(b"ID3"):
         return "mp3"
     if len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0:
@@ -247,10 +274,13 @@ def _probe_seedance_audio_duration_seconds(raw: bytes, ext: str) -> float:
         except Exception:
             pass
         if ext == "wav":
-            with wave.open(tmp_path, "rb") as wav_file:
-                frames = float(wav_file.getnframes() or 0)
-                rate = float(wav_file.getframerate() or 0)
-                return (frames / rate) if rate > 0 else 0.0
+            try:
+                with wave.open(tmp_path, "rb") as wav_file:
+                    frames = float(wav_file.getnframes() or 0)
+                    rate = float(wav_file.getframerate() or 0)
+                    return (frames / rate) if rate > 0 else 0.0
+            except Exception:
+                pass
     finally:
         if tmp_path:
             try:
@@ -261,35 +291,50 @@ def _probe_seedance_audio_duration_seconds(raw: bytes, ext: str) -> float:
 
 
 def _normalize_seedance_audio_bytes(raw: bytes, ext: str) -> bytes:
-    normalized_ext = str(ext or "").strip().lower()
-    if normalized_ext != "wav":
+    """Convert Seedance Omni audio references to stable MP3.
+
+    Supports direct MP3/WAV plus common mobile/Telegram containers such as
+    M4A/AAC/OGG/OPUS and MP4/MOV with an audio stream. MP4 uploaded into the
+    audio-reference slot is treated as an audio source: ffmpeg extracts the first
+    audio stream and stores it as MP3 before KIE receives it.
+    """
+    raw = bytes(raw or b"")
+    if not raw:
         return raw
+    normalized_ext = str(ext or "").strip().lower() or "bin"
     if not shutil.which("ffmpeg"):
-        return raw
+        if normalized_ext == "mp3":
+            return raw
+        raise HTTPException(status_code=400, detail="Для конвертации audio reference в MP3 на сервере нужен ffmpeg.")
+
     src_path: Optional[str] = None
     dst_path: Optional[str] = None
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as src:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{normalized_ext}") as src:
             src.write(raw)
             src.flush()
             src_path = src.name
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as dst:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as dst:
             dst_path = dst.name
         proc = subprocess.run(
             [
                 "ffmpeg", "-y", "-i", src_path,
-                "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2",
+                "-vn", "-map", "0:a:0",
+                "-acodec", "libmp3lame", "-ar", "44100", "-ac", "2", "-b:a", "128k",
                 dst_path,
             ],
             capture_output=True,
             text=True,
+            timeout=90,
         )
         if proc.returncode != 0:
-            return raw
+            err = (proc.stderr or proc.stdout or "").strip()[:500]
+            raise HTTPException(status_code=400, detail=f"Не удалось преобразовать audio reference в MP3: {err or 'ffmpeg error'}")
         with open(dst_path, "rb") as fh:
-            return fh.read() or raw
-    except Exception:
-        return raw
+            converted = fh.read()
+        if not converted:
+            raise HTTPException(status_code=400, detail="Не удалось преобразовать audio reference в MP3: пустой файл.")
+        return converted
     finally:
         for path in (src_path, dst_path):
             if path:
@@ -300,20 +345,26 @@ def _normalize_seedance_audio_bytes(raw: bytes, ext: str) -> bytes:
 
 
 def _prepare_seedance_audio_file(upload: Any, raw: bytes) -> tuple[bytes, str, float]:
+    raw_size = len(raw or b"")
+    if raw_size > SEEDANCE_AUDIO_MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Audio reference для Seedance 2.0 слишком большой. Максимум {SEEDANCE_AUDIO_MAX_UPLOAD_MB} МБ.",
+        )
     ext = _guess_seedance_audio_ext(
         filename=getattr(upload, "filename", None),
         content_type=getattr(upload, "content_type", None),
         raw=raw,
     )
     if ext not in SEEDANCE_AUDIO_ALLOWED_EXTS:
-        raise HTTPException(status_code=400, detail="Для Seedance 2.0 audio refs доступны только MP3 или WAV.")
+        raise HTTPException(status_code=400, detail="Для Seedance 2.0 audio refs доступны MP3/WAV/M4A/OGG/OPUS или MP4/MOV с аудиодорожкой.")
     normalized_raw = _normalize_seedance_audio_bytes(raw, ext)
-    duration_sec = _probe_seedance_audio_duration_seconds(normalized_raw, ext)
+    duration_sec = _probe_seedance_audio_duration_seconds(normalized_raw, "mp3")
     if duration_sec <= 0:
         raise HTTPException(status_code=400, detail="Не удалось определить длительность audio reference для Seedance 2.0.")
     if duration_sec > SEEDANCE_AUDIO_MAX_DURATION_SEC:
         raise HTTPException(status_code=400, detail="Для Seedance 2.0 audio reference должен быть не длиннее 15 секунд.")
-    return normalized_raw, ext, duration_sec
+    return normalized_raw, "mp3", duration_sec
 
 
 def _guess_seedance_video_ext(*, filename: Any = None, content_type: Any = None, raw: bytes = b"") -> str:
