@@ -120,7 +120,8 @@ from seedance_kie import (
     run_seedance_kie_image_to_video,
     run_seedance_kie_omni_reference,
     run_seedance_kie_text_to_video,
-    seedance_kie_pricing_breakdown,
+    seedance_kie_tokens_for_duration,
+    seedance_kie_video_reference_surcharge,
     seedance_kie_resolution,
 )
 from pixverse_c1 import (
@@ -3891,7 +3892,6 @@ def _workspace_video_charge_spec(
     enable_audio: bool,
     quality: str,
     has_seedance_video_reference: bool = False,
-    seedance_video_reference_duration_sec: float = 0.0,
     kling3_kie_multi_shots: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     duration = max(1, int(duration or 0))
@@ -4069,9 +4069,9 @@ def _workspace_video_charge_spec(
         normalized_model = normalize_seedance_kie_model(model)
         normalized_mode = normalize_seedance_kie_mode(mode)
         normalized_duration = normalize_seedance_kie_duration(duration)
-        input_video_sec = float(seedance_video_reference_duration_sec or 0.0) if normalized_mode == "omni_reference" and has_seedance_video_reference else 0.0
-        breakdown = seedance_kie_pricing_breakdown(normalized_model, normalized_duration, input_video_duration_sec=input_video_sec)
-        tokens = int(breakdown.get("tokens") or 0)
+        base_tokens = int(seedance_kie_tokens_for_duration(normalized_model, normalized_duration))
+        video_ref_surcharge = int(seedance_kie_video_reference_surcharge(normalized_model)) if normalized_mode == "omni_reference" and has_seedance_video_reference else 0
+        tokens = base_tokens + video_ref_surcharge
         return {
             "tokens": tokens,
             "charge_reason": "seedance_kie_video",
@@ -4084,13 +4084,9 @@ def _workspace_video_charge_spec(
                 "duration": normalized_duration,
                 "resolution": seedance_kie_resolution(normalized_model),
                 "generate_audio": False,
+                "base_tokens": base_tokens,
+                "video_reference_surcharge_tokens": video_ref_surcharge,
                 "has_video_reference": bool(has_seedance_video_reference),
-                "input_video_seconds": int(breakdown.get("input_video_seconds") or 0),
-                "billable_seconds": int(breakdown.get("billable_seconds") or normalized_duration),
-                "provider_rate_usd_per_sec": breakdown.get("provider_rate_usd_per_sec"),
-                "provider_cost_usd": breakdown.get("provider_cost_usd"),
-                "usd_rub": breakdown.get("usd_rub"),
-                "token_rub": breakdown.get("token_rub"),
             },
         }
 
@@ -4465,7 +4461,6 @@ async def workspace_video_run(
         enable_audio=enable_audio,
         quality=quality,
         has_seedance_video_reference=bool(reference_videos),
-        seedance_video_reference_duration_sec=reference_video_total_duration_sec,
         kling3_kie_multi_shots=kling3_kie_multi_shots,
     )
     cost_tokens = int(charge.get("tokens") or 0)
