@@ -4,6 +4,7 @@ import asyncio
 import json
 import math
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -317,6 +318,16 @@ def _clean_prompt(prompt: Any) -> str:
     return text
 
 
+def _max_prompt_audio_ref_index(prompt: Any) -> int:
+    max_idx = 0
+    for match in re.finditer(r"@audio(\d+)", str(prompt or ""), flags=re.IGNORECASE):
+        try:
+            max_idx = max(max_idx, int(match.group(1) or 0))
+        except Exception:
+            continue
+    return max_idx
+
+
 def _upload_public_file(user_id: int, kind: str, idx: int, raw: bytes) -> str:
     if not raw:
         raise SeedanceKieError("Empty upload payload")
@@ -467,11 +478,11 @@ async def _run_seedance_task(*, model: str, input_payload: Dict[str, Any]) -> st
     return video_url
 
 
-def _base_input_payload(*, prompt: str, model: str, duration: Any, aspect_ratio: Any) -> Dict[str, Any]:
+def _base_input_payload(*, prompt: str, model: str, duration: Any, aspect_ratio: Any, generate_audio: bool = True) -> Dict[str, Any]:
     return {
         "prompt": _clean_prompt(prompt),
         "return_last_frame": False,
-        "generate_audio": True,
+        "generate_audio": bool(generate_audio),
         "resolution": seedance_kie_resolution(model),
         "aspect_ratio": normalize_seedance_kie_aspect_ratio(aspect_ratio),
         "duration": normalize_seedance_kie_duration(duration),
@@ -576,7 +587,21 @@ async def run_seedance_kie_omni_reference(
     video_urls = await _upload_files(int(user_id), video_refs, "video", limit=SEEDANCE_KIE_MAX_VIDEO_REFS)
     audio_urls = await _upload_files(int(user_id), audio_refs, "audio", limit=SEEDANCE_KIE_MAX_AUDIO_REFS)
 
-    input_payload = _base_input_payload(prompt=prompt, model=normalized_model, duration=duration, aspect_ratio=aspect_ratio)
+    max_audio_ref = _max_prompt_audio_ref_index(prompt)
+    if max_audio_ref > len(audio_urls):
+        raise SeedanceKieError(
+            f"Prompt references @audio{max_audio_ref}, but only {len(audio_urls)} audio reference(s) were uploaded"
+        )
+
+    # When explicit audio references are provided, do not ask KIE to generate a competing
+    # audio track. Otherwise the provider can ignore/override the uploaded reference.
+    input_payload = _base_input_payload(
+        prompt=prompt,
+        model=normalized_model,
+        duration=duration,
+        aspect_ratio=aspect_ratio,
+        generate_audio=not bool(audio_urls),
+    )
     if image_urls:
         input_payload["reference_image_urls"] = image_urls
     if video_urls:
