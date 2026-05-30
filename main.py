@@ -5563,14 +5563,11 @@ async def webhook(secret: str, request: Request):
             se = st.get("seedance_extend") or {}
             task_type = str(se.get("task_type") or "seedance-2-preview")
 
-            rate_preview = int(os.getenv("SEEDANCE_TOKENS_PER_SEC_PREVIEW", "2") or 2)
-            rate_fast = int(os.getenv("SEEDANCE_TOKENS_PER_SEC_FAST", "1") or 1)
-            is_fast = ("fast" in task_type)
-            rate = rate_fast if is_fast else rate_preview
-
-            cost_5 = int(rate * 5)
-            cost_10 = int(rate * 10)
-            cost_15 = int(rate * 15)
+            # Preview = 720p grid; Fast Preview = 480p grid.
+            preview_price_map = {5: 6, 10: 12, 15: 18} if task_type == "seedance-2-fast-preview" else {5: 12, 10: 24, 15: 33}
+            cost_5 = int(preview_price_map[5])
+            cost_10 = int(preview_price_map[10])
+            cost_15 = int(preview_price_map[15])
 
             await tg_send_message(
                 chat_id,
@@ -5603,11 +5600,9 @@ async def webhook(secret: str, request: Request):
             seedance_settings = st.get("seedance_settings") or {}
             task_type = str(seedance_settings.get("task_type") or "seedance-2-preview")
 
-            rate_preview = int(os.getenv("SEEDANCE_TOKENS_PER_SEC_PREVIEW", "2") or 2)
-            rate_fast = int(os.getenv("SEEDANCE_TOKENS_PER_SEC_FAST", "1") or 1)
-            is_fast = ("fast" in task_type)
-            rate = rate_fast if is_fast else rate_preview
-            cost_tokens = int(rate * duration)
+            # Preview = 720p grid; Fast Preview = 480p grid.
+            preview_price_map = {5: 6, 10: 12, 15: 18} if task_type == "seedance-2-fast-preview" else {5: 12, 10: 24, 15: 33}
+            cost_tokens = int(preview_price_map.get(int(duration), preview_price_map[5]))
 
             se["cost_tokens"] = cost_tokens
             st["seedance_extend"] = se
@@ -7911,12 +7906,10 @@ async def webhook(secret: str, request: Request):
                 input_video_duration_sec=seedance_input_video_sec,
             ))
         else:
-            # Preview остаётся через PiAPI без изменений: preview=2 ток/сек, fast=1 ток/сек.
-            rate_preview = int(os.getenv("SEEDANCE_TOKENS_PER_SEC_PREVIEW", "2") or 2)
-            rate_fast = int(os.getenv("SEEDANCE_TOKENS_PER_SEC_FAST", "1") or 1)
-            is_fast = ("fast" in task_type)
-            rate = rate_fast if is_fast else rate_preview
-            cost_tokens = int(max(0, rate * int(duration)))
+            # Preview = 720p grid; Fast Preview = 480p grid.
+            is_fast_preview = seedance_model in ("fast", "seedance-2-fast-preview") or task_type == "seedance-2-fast-preview"
+            preview_price_map = {5: 6, 10: 12, 15: 18} if is_fast_preview else {5: 12, 10: 24, 15: 33}
+            cost_tokens = int(preview_price_map.get(int(duration), preview_price_map[5]))
 
         _busy_start(int(user_id), "Seedance видео")
         seedance_charged = False
