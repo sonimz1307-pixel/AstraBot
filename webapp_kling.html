@@ -2052,9 +2052,12 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
 
       if (provider === 'grok'){
         const seconds = parseInt((qs('#grok_duration')?.value || "6"), 10);
-        const resolution = (qs('#grok_resolution')?.value || '480p');
-        const secondsPerToken = resolution === '720p' ? 6 : 12;
-        const tokens = Math.max(1, Math.ceil(seconds / secondsPerToken));
+        const resolution = String(qs('#grok_resolution')?.value || '480p').trim().toLowerCase() === '720p' ? '720p' : '480p';
+        const priceMap = {
+          '480p': {6:1, 12:2, 18:2, 24:3, 30:3},
+          '720p': {6:2, 12:3, 18:4, 24:5, 30:6},
+        };
+        const tokens = (priceMap[resolution] && priceMap[resolution][seconds]) ? priceMap[resolution][seconds] : 1;
         return { known:true, tokens, note:'' };
       }
 
