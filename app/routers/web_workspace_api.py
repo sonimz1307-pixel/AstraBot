@@ -4095,13 +4095,15 @@ def _workspace_video_charge_spec(
         }
 
     if provider == "seedance":
-        rate = 1 if model == "seedance-fast" else 2
-        tokens = int(duration) * int(rate)
+        # Preview = 720p grid; Fast Preview = 480p grid.
+        is_fast_preview = model == "seedance-fast"
+        preview_price_map = {5: 6, 10: 12, 15: 18} if is_fast_preview else {5: 12, 10: 24, 15: 33}
+        tokens = int(preview_price_map.get(int(duration), preview_price_map[5]))
         return {
             "tokens": tokens,
             "charge_reason": "seedance_video",
             "refund_reason": "seedance_video_refund",
-            "meta": {"origin": "workspace_video", "provider": provider, "model": model, "mode": mode, "duration": duration, "rate": rate},
+            "meta": {"origin": "workspace_video", "provider": provider, "model": model, "mode": mode, "duration": duration, "price_grid": "480p" if is_fast_preview else "720p"},
         }
 
     if provider == "sora":
