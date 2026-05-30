@@ -19,10 +19,10 @@ PIXVERSE_C1_ALLOWED_DURATIONS = (5, 10, 15)
 PIXVERSE_C1_ALLOWED_QUALITIES = ("360p", "540p", "720p", "1080p")
 PIXVERSE_C1_ALLOWED_ASPECT_RATIOS = ("16:9", "4:3", "1:1", "3:4", "9:16", "2:3", "3:2", "21:9")
 PIXVERSE_C1_TOKEN_MAP = {
-    "360p": {5: 2, 10: 4, 15: 6},
-    "540p": {5: 2, 10: 5, 15: 7},
-    "720p": {5: 3, 10: 6, 15: 9},
-    "1080p": {5: 5, 10: 11, 15: 16},
+    "360p": {5: 3, 10: 5, 15: 7},
+    "540p": {5: 3, 10: 6, 15: 9},
+    "720p": {5: 4, 10: 8, 15: 12},
+    "1080p": {5: 7, 10: 14, 15: 21},
 }
 PIXVERSE_C1_STATUS_PROCESSING = {5}
 PIXVERSE_C1_STATUS_SUCCESS = {1}
