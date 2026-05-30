@@ -41,9 +41,9 @@ SEEDANCE_KIE_MAX_TOTAL_OMNI_REFS = int(os.getenv("KIE_SEEDANCE_MAX_TOTAL_OMNI_RE
 # Final retail prices approved for 5 / 10 / 15 seconds.
 # Do not derive these base prices from provider rates: product pricing is fixed by business rules.
 SEEDANCE_KIE_TOKEN_MAP = {
-    "seedance-kie-480p": {5: 5, 10: 10, 15: 15},
-    "seedance-kie-720p": {5: 10, 10: 20, 15: 30},
-    "seedance-kie-1080p": {5: 25, 10: 50, 15: 75},
+    "seedance-kie-480p": {5: 6, 10: 12, 15: 18},
+    "seedance-kie-720p": {5: 12, 10: 24, 15: 33},
+    "seedance-kie-1080p": {5: 28, 10: 55, 15: 80},
 }
 
 # KIE provider pricing for Seedance 2.0 video-input billing only.
@@ -593,14 +593,14 @@ async def run_seedance_kie_omni_reference(
             f"Prompt references @audio{max_audio_ref}, but only {len(audio_urls)} audio reference(s) were uploaded"
         )
 
-    # When explicit audio references are provided, do not ask KIE to generate a competing
-    # audio track. Otherwise the provider can ignore/override the uploaded reference.
+    # Audio references are conditioning inputs, not a final audio track replacement.
+    # Keep generated audio enabled; otherwise KIE returns a silent video when audio refs exist.
     input_payload = _base_input_payload(
         prompt=prompt,
         model=normalized_model,
         duration=duration,
         aspect_ratio=aspect_ratio,
-        generate_audio=not bool(audio_urls),
+        generate_audio=True,
     )
     if image_urls:
         input_payload["reference_image_urls"] = image_urls
