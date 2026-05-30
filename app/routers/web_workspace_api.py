@@ -4007,8 +4007,8 @@ def _workspace_video_charge_spec(
 
     if provider == "grok":
         normalized_resolution = normalize_grok_resolution(resolution)
-        seconds_per_token = 6 if normalized_resolution == "720p" else 12
-        tokens = int(grok_tokens_for_duration(duration, normalized_resolution))
+        normalized_duration = normalize_grok_duration(duration)
+        tokens = int(grok_tokens_for_duration(normalized_duration, normalized_resolution))
         return {
             "tokens": tokens,
             "charge_reason": "grok_video",
@@ -4018,10 +4018,10 @@ def _workspace_video_charge_spec(
                 "provider": provider,
                 "model": model,
                 "mode": mode,
-                "duration": duration,
+                "duration": normalized_duration,
                 "resolution": normalized_resolution,
-                "seconds_per_token": seconds_per_token,
-                "rate": tokens / max(1, int(duration or 1)),
+                "pricing": "fixed_duration_map",
+                "rate": tokens / max(1, int(normalized_duration or 1)),
             },
         }
 
