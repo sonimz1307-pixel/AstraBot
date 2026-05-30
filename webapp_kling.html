@@ -1116,17 +1116,17 @@
           <div class="seg" role="radiogroup" aria-label="Модель Seedance Preview">
             <input id="seed_preview" type="radio" name="seedance_model" value="preview" checked>
             <label for="seed_preview">
-              <span class="name">Preview</span>
-              <span class="desc">Максимальное качество</span>
+              <span class="name">Preview 720p</span>
+              <span class="desc">12 / 24 / 33 токенов</span>
             </label>
 
             <input id="seed_fast" type="radio" name="seedance_model" value="fast">
             <label for="seed_fast">
-              <span class="name">Fast</span>
-              <span class="desc">Быстрее / дешевле</span>
+              <span class="name">Fast 480p</span>
+              <span class="desc">6 / 12 / 18 токенов</span>
             </label>
           </div>
-          <div class="hint">Preview: текущая реализация бота.</div>
+          <div class="hint">Preview = 720p, Fast Preview = 480p.</div>
         </div>
 
         <div id="seedanceKieModelWrap" style="display:none;">
@@ -1134,19 +1134,19 @@
             <input id="seed_kie_480p" type="radio" name="seedance_kie_model" value="seedance-kie-480p" checked>
             <label for="seed_kie_480p">
               <span class="name">Seedance 2.0 480p</span>
-              <span class="desc">5 / 10 / 15 токенов</span>
+              <span class="desc">6 / 12 / 18 токенов</span>
             </label>
 
             <input id="seed_kie_720p" type="radio" name="seedance_kie_model" value="seedance-kie-720p">
             <label for="seed_kie_720p">
               <span class="name">Seedance 2.0 720p</span>
-              <span class="desc">10 / 20 / 30 токенов</span>
+              <span class="desc">12 / 24 / 33 токенов</span>
             </label>
 
             <input id="seed_kie_1080p" type="radio" name="seedance_kie_model" value="seedance-kie-1080p">
             <label for="seed_kie_1080p">
               <span class="name">Seedance 2.0 1080p</span>
-              <span class="desc">25 / 50 / 75 токенов</span>
+              <span class="desc">28 / 55 / 80 токенов</span>
             </label>
           </div>
           <div class="hint">Обычный Seedance 2.0.</div>
@@ -2029,17 +2029,17 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
         if (variant === 'kie'){
           const model = getSeedanceKieModel();
           const priceMap = model === 'seedance-kie-1080p'
-            ? {5: 25, 10: 50, 15: 75}
+            ? {5: 28, 10: 55, 15: 80}
             : (model === 'seedance-kie-720p' || model === 'seedance-kie')
-              ? {5: 10, 10: 20, 15: 30}
-              : {5: 5, 10: 10, 15: 15};
+              ? {5: 12, 10: 24, 15: 33}
+              : {5: 6, 10: 12, 15: 18};
           const tokens = priceMap[seconds] || priceMap[5];
           return { known:true, tokens, note:'' };
         }
 
-        const model = getSeedancePreviewModel();
-        let rate = (model === 'fast') ? 1 : 2;
-        const tokens = rate * seconds;
+        const previewModel = getSeedancePreviewModel();
+        const priceMap = previewModel === 'fast' ? {5: 6, 10: 12, 15: 18} : {5: 12, 10: 24, 15: 33};
+        const tokens = priceMap[seconds] || priceMap[5];
         return { known:true, tokens, note:'' };
       }
 
