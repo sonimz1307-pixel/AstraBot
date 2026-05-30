@@ -18,8 +18,15 @@ KIE_GROK_IMAGE_MODEL = (os.getenv("KIE_GROK_IMAGE_MODEL") or "grok-imagine/image
 KIE_GROK_CALLBACK_URL = (os.getenv("KIE_GROK_CALLBACK_URL") or "").strip()
 KIE_GROK_CREATE_TIMEOUT_SECONDS = float(os.getenv("KIE_GROK_CREATE_TIMEOUT_SECONDS", "60") or "60")
 KIE_GROK_MAX_WAIT_SECONDS = float(os.getenv("KIE_GROK_MAX_WAIT_SECONDS", "900") or "900")
-GROK_480P_SECONDS_PER_TOKEN = max(1, int(os.getenv("GROK_480P_SECONDS_PER_TOKEN", "12") or "12"))
-GROK_720P_SECONDS_PER_TOKEN = max(1, int(os.getenv("GROK_720P_SECONDS_PER_TOKEN", "6") or "6"))
+# Price grid in internal tokens.
+# KIE cost basis: 480p = 1.6 credits/sec, 720p = 3 credits/sec.
+# Target grid after margin review:
+#   480p: 6s=1, 12s=2, 18s=2, 24s=3, 30s=3
+#   720p: 6s=2, 12s=3, 18s=4, 24s=5, 30s=6
+GROK_TOKEN_PRICE_MAP = {
+    "480p": {6: 1, 12: 2, 18: 2, 24: 3, 30: 3},
+    "720p": {6: 2, 12: 3, 18: 4, 24: 5, 30: 6},
+}
 GROK_ALLOWED_DURATIONS = (6, 12, 18, 24, 30)
 
 GROK_ALLOWED_ASPECT_RATIOS = {
@@ -72,17 +79,11 @@ def normalize_grok_resolution(value: Any, default: str = "480p") -> str:
     return default
 
 
-def grok_seconds_per_token(resolution: Any = "480p") -> int:
-    normalized = normalize_grok_resolution(resolution)
-    if normalized == "720p":
-        return int(GROK_720P_SECONDS_PER_TOKEN)
-    return int(GROK_480P_SECONDS_PER_TOKEN)
-
-
 def grok_tokens_for_duration(duration: Any, resolution: Any = "480p") -> int:
     seconds = normalize_grok_duration(duration)
-    seconds_per_token = max(1, int(grok_seconds_per_token(resolution)))
-    return max(1, (seconds + seconds_per_token - 1) // seconds_per_token)
+    normalized = normalize_grok_resolution(resolution)
+    price_map = GROK_TOKEN_PRICE_MAP.get(normalized) or GROK_TOKEN_PRICE_MAP["480p"]
+    return int(price_map.get(seconds) or price_map[GROK_ALLOWED_DURATIONS[0]])
 
 
 def upload_grok_input_image(*, user_id: int, image_bytes: bytes, filename_hint: Optional[str] = None) -> str:
