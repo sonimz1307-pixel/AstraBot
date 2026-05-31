@@ -90,6 +90,14 @@ from kling3_motion_kie import (
 )
 from veo_flow import VeoFlowError, run_veo_image_to_video, run_veo_text_to_video
 from veo_billing import calc_veo_charge
+from veo31_fast_relax_kie import (
+    Veo31FastRelaxError,
+    normalize_veo31_fast_relax_aspect_ratio,
+    normalize_veo31_fast_relax_duration,
+    normalize_veo31_fast_relax_resolution,
+    run_veo31_fast_relax,
+    veo31_fast_relax_tokens_for_run,
+)
 from grok_video_replicate import (
     GrokVideoError,
     grok_tokens_for_duration,
@@ -196,6 +204,7 @@ TOPAZ_IMAGE_RETRY_DELAY_SEC = max(0.25, float(os.getenv("TOPAZ_IMAGE_RETRY_DELAY
 
 WORKSPACE_MEDIA_QUEUE_NAME = (os.getenv("WORKSPACE_MEDIA_QUEUE_NAME", "workspace_media") or "workspace_media").strip() or "workspace_media"
 KLING3_KIE_QUEUE_NAME = (os.getenv("KLING3_KIE_QUEUE_NAME", "kling3_kie") or "kling3_kie").strip() or "kling3_kie"
+WORKSPACE_VEO_RELAX_QUEUE_NAME = (os.getenv("WORKSPACE_VEO_RELAX_QUEUE_NAME", "workspace_veo_relax") or "workspace_veo_relax").strip() or "workspace_veo_relax"
 WORKSPACE_IMAGE_QUEUE_NAME = (os.getenv("WORKSPACE_IMAGE_QUEUE_NAME", "workspace_image") or "workspace_image").strip() or "workspace_image"
 WORKSPACE_CHAT_OPENAI_QUEUE_NAME = (os.getenv("WORKSPACE_CHAT_OPENAI_QUEUE_NAME", "workspace_chat_openai") or "workspace_chat_openai").strip() or "workspace_chat_openai"
 WORKSPACE_CHAT_CLAUDE_QUEUE_NAME = (os.getenv("WORKSPACE_CHAT_CLAUDE_QUEUE_NAME", "workspace_chat_claude") or "workspace_chat_claude").strip() or "workspace_chat_claude"
@@ -1483,6 +1492,8 @@ def _normalize_workspace_video_resolution(provider: str, model: str, resolution:
     if provider == "kling" and model == "kling-3.0-new":
         return normalize_kling3_kie_mode(resolution or "pro")
     if provider == "veo":
+        if model == "veo-3.1-fast-relax":
+            return normalize_veo31_fast_relax_resolution(value or "1080p")
         return "1080p" if model == "veo-3.1-pro" else "720p"
     if provider == "grok":
         return normalize_grok_resolution(value or "480p")
@@ -1959,7 +1970,18 @@ async def _run_workspace_video_job(
                 )
 
         elif provider == "veo":
-            if mode == "text_to_video":
+            if model == "veo-3.1-fast-relax":
+                provider_video_url = await run_veo31_fast_relax(
+                    user_id=user_id,
+                    prompt=prompt,
+                    mode=mode,
+                    duration=duration,
+                    resolution=resolution,
+                    aspect_ratio=aspect_ratio,
+                    image_bytes=start_frame if mode == "image_to_video" else None,
+                    last_frame_bytes=last_frame if mode == "image_to_video" else None,
+                )
+            elif mode == "text_to_video":
                 provider_video_url = await run_veo_text_to_video(
                     user_id=user_id,
                     model=model,
@@ -2307,7 +2329,7 @@ async def _run_workspace_video_job(
             user_id=user_id,
             provider_video_url=provider_video_url,
         )
-    except (Kling3Error, KlingFlowError, VeoFlowError, GrokVideoError, PixVerseC1Error, SwitchXError, ValueError, RuntimeError, TimeoutError) as e:
+    except (Kling3Error, KlingFlowError, VeoFlowError, Veo31FastRelaxError, GrokVideoError, PixVerseC1Error, SwitchXError, ValueError, RuntimeError, TimeoutError) as e:
         _mark_workspace_generation_failed(generation_id, str(e), error_code="provider_error")
         if int(charge_tokens or 0) > 0:
             try:
@@ -3966,6 +3988,24 @@ def _workspace_video_charge_spec(
             }
 
     if provider == "veo":
+        if model == "veo-3.1-fast-relax":
+            normalized_resolution = normalize_veo31_fast_relax_resolution(resolution or "1080p")
+            normalized_duration = normalize_veo31_fast_relax_duration(duration)
+            tokens = int(veo31_fast_relax_tokens_for_run())
+            return {
+                "tokens": tokens,
+                "charge_reason": "veo31_fast_relax_video",
+                "refund_reason": "veo31_fast_relax_video_refund",
+                "meta": {
+                    "origin": "workspace_video",
+                    "provider": provider,
+                    "model": "Veo 3.1 Fast Relax",
+                    "mode": mode,
+                    "duration": normalized_duration,
+                    "resolution": normalized_resolution,
+                    "fixed_price": True,
+                },
+            }
         ch = calc_veo_charge(
             veo_model=("pro" if model == "veo-3.1-pro" else "fast"),
             model_slug=model,
@@ -4267,6 +4307,26 @@ async def workspace_video_run(
                 raise HTTPException(status_code=400, detail="Суммарная длительность Multi-shot должна быть 3–15 сек.")
             duration = total_ms
             end_frame = None
+            last_frame = None
+    if provider == "veo" and model == "veo-3.1-fast-relax":
+        if mode not in {"text_to_video", "image_to_video"}:
+            raise HTTPException(status_code=400, detail="Veo 3.1 Fast Relax поддерживает только Text→Video и Image→Video.")
+        duration = normalize_veo31_fast_relax_duration(duration)
+        resolution = normalize_veo31_fast_relax_resolution(resolution or "1080p")
+        aspect_ratio = normalize_veo31_fast_relax_aspect_ratio(aspect_ratio or "16:9")
+        # Veo 3.1 Fast Relax has no reliable API-side audio toggle. Keep this
+        # internal billing/history flag false, but do not send an audio-off field
+        # to the provider and do not expose an audio switch for this model.
+        enable_audio = False
+        end_frame = None
+        reference_audios = []
+        reference_videos = []
+        if reference_images:
+            raise HTTPException(status_code=400, detail="Для Veo 3.1 Fast Relax доступны только первый кадр и опциональный последний кадр.")
+        if mode == "image_to_video" and not start_frame:
+            raise HTTPException(status_code=400, detail="Для Veo 3.1 Fast Relax Image→Video нужен первый кадр.")
+        if mode == "text_to_video":
+            start_frame = None
             last_frame = None
     if provider == "veo" and mode == "image_to_video" and not start_frame:
         raise HTTPException(status_code=400, detail="Для Veo Image→Video нужен start frame.")
@@ -4612,7 +4672,12 @@ async def workspace_video_run(
             job["multi_shots"] = kling3_kie_multi_shots
             job["kling_elements"] = kling3_kie_elements
             job["mode"] = mode
-        target_queue = KLING3_KIE_QUEUE_NAME if (provider == "kling" and model == "kling-3.0-new") else WORKSPACE_MEDIA_QUEUE_NAME
+        if provider == "veo" and model == "veo-3.1-fast-relax":
+            target_queue = WORKSPACE_VEO_RELAX_QUEUE_NAME
+        elif provider == "kling" and model == "kling-3.0-new":
+            target_queue = KLING3_KIE_QUEUE_NAME
+        else:
+            target_queue = WORKSPACE_MEDIA_QUEUE_NAME
         await enqueue_job(job, queue_name=target_queue)
 
         try:
