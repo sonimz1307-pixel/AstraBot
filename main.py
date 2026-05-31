@@ -1104,6 +1104,7 @@ async def tg_topup_create(request: Request):
 SORA_QUEUE_NAME = os.getenv("SORA_QUEUE_NAME", "sora").strip() or "sora"
 TOPAZ_PHOTO_QUEUE_NAME = os.getenv("TOPAZ_PHOTO_QUEUE_NAME", "topaz_photo").strip() or "topaz_photo"
 GPT_IMAGE2_QUEUE_NAME = os.getenv("GPT_IMAGE2_QUEUE_NAME", "gpt_image2").strip() or "gpt_image2"
+GPT_IMAGE2_GENERATION_COST = int(os.getenv("GPT_IMAGE2_GENERATION_COST", "1") or "1")
 SEEDREAM_T2I_QUEUE_NAME = os.getenv("SEEDREAM_T2I_QUEUE_NAME", "seedream_t2i").strip() or "seedream_t2i"
 NANO_BANANA_QUEUE_NAME = os.getenv("NANO_BANANA_QUEUE_NAME", "nano_banana").strip() or "nano_banana"
 TOPAZ_VIDEO_QUEUE_NAME = os.getenv("TOPAZ_VIDEO_QUEUE_NAME", "topaz_video").strip() or "topaz_video"
@@ -6947,93 +6948,16 @@ async def webhook(secret: str, request: Request):
             )
             return {"ok": True}
 
-        # ----- Kling PRO 3.0 -----
+        # ----- Legacy Kling PRO 3.0 / PiAPI disabled -----
         if str(payload.get("type") or "").lower().strip() == "kling3_settings":
-
-            resolution = str(payload.get("resolution") or "720")
-            enable_audio = bool(payload.get("enable_audio"))
-            duration = int(payload.get("duration") or 5)
-
-            # Только 16:9 или 9:16 (как ты просил)
-            aspect_ratio = str(payload.get("aspect_ratio") or "16:9")
-            aspect_ratio = "9:16" if aspect_ratio == "9:16" else "16:9"
-
-            # режим (принимаем разные ключи, чтобы не зависеть от WebApp)
-            gen_mode = (
-                str(payload.get("gen_mode") or payload.get("flow") or payload.get("kling3_gen_mode") or "t2v")
-                .lower()
-                .strip()
-            )
-            if gen_mode not in ("t2v", "i2v", "multishot"):
-                gen_mode = "t2v"
-
-            multi_shots = payload.get("multi_shots") or None
-            prefer_multi_shots = bool(payload.get("prefer_multi_shots"))
-            base_gen_mode = (
-                str(payload.get("base_gen_mode") or "")
-                .lower()
-                .strip()
-            )
-            effective_gen_mode = "multishot" if prefer_multi_shots else gen_mode
-
-            # 1-й/последний кадр: пока приходят фото в чат (см. Правка B)
-            # Здесь просто сохраняем текущие значения, если они уже есть в state
-            prev = st.get("kling3_settings") or {}
-
-            st["kling3_settings"] = {
-                "resolution": resolution,
-                "enable_audio": enable_audio,
-                "duration": duration,
-                "aspect_ratio": aspect_ratio,
-
-                "gen_mode": effective_gen_mode,
-                "base_gen_mode": base_gen_mode or (gen_mode if gen_mode != "multishot" else "t2v"),
-                "multi_shots": multi_shots,
-                "prefer_multi_shots": prefer_multi_shots,
-
-                # кадры (байты) будут заполняться при приёме фото
-                "start_image_bytes": prev.get("start_image_bytes"),
-                "end_image_bytes": prev.get("end_image_bytes"),
-            }
-            st["ts"] = _now()
-
-            _set_mode(chat_id, user_id, "kling3_wait_prompt")
-
-            mode = effective_gen_mode
-
-            if mode == "i2v":
-                next_block = (
-                    "Дальше:\n"
-                    "• Пришли фото (1-й кадр)\n"
-                    "• (опционально) ещё фото — последний кадр\n"
-                    "• Затем пришли промпт"
-                )
-            elif mode == "t2v":
-                next_block = (
-                    "Дальше:\n"
-                    "• Пришли текстовый промпт"
-                )
-            elif mode == "multishot":
-                next_block = (
-                    "Дальше:\n"
-                    "• Пришли multi-shot промпт\n"
-                    "• Затем запуск"
-                )
-            else:
-                next_block = ""
-
+            st.pop("kling3_settings", None)
+            if st.get("mode") == "kling3_wait_prompt":
+                _set_mode(chat_id, user_id, "chat")
             await tg_send_message(
                 chat_id,
-                "✅ Kling PRO 3.0 настройки сохранены.\n"
-                f"Режим: {effective_gen_mode}\n"
-                f"{resolution}p • {duration} сек • {'Audio ON' if enable_audio else 'Audio OFF'}\n"
-                f"Формат: {aspect_ratio}\n"
-                f"1-й кадр: {'да' if st['kling3_settings'].get('start_image_bytes') else 'нет'} • "
-                f"последний: {'да' if st['kling3_settings'].get('end_image_bytes') else 'нет'}\n\n"
-                f"{next_block}",
+                "⚠️ Старый Kling/PiAPI Kling 3.0 отключён. Используй Kling 3.0 - New.",
                 reply_markup=_help_menu_for(user_id),
             )
-
             return {"ok": True}
 
         # из WebApp может прилетать Kling 1.6 / 2.5 / 3.0
@@ -7541,7 +7465,7 @@ async def webhook(secret: str, request: Request):
         st["ts"] = _now()
         await tg_send_message(
             chat_id,
-            "✨ GPT Image 2.0 — выбери режим:\n• Текст→Картинка\n• Картинка→Картинка",
+            "✨ GPT Image 2.0 — Цена 1 токен\n• Текст→Картинка\n• Картинка→Картинка",
             reply_markup=_photo_gpt_image_2_menu_keyboard(),
         )
         return {"ok": True}
@@ -7644,6 +7568,16 @@ async def webhook(secret: str, request: Request):
             },
         )
         if handled:
+            return {"ok": True}
+
+        if st.get("mode") == "kling3_wait_prompt":
+            st.pop("kling3_settings", None)
+            _set_mode(chat_id, user_id, "chat")
+            await tg_send_message(
+                chat_id,
+                "⚠️ Старый Kling/PiAPI Kling 3.0 отключён. Используй Kling 3.0 - New.",
+                reply_markup=_main_menu_for(user_id),
+            )
             return {"ok": True}
 
         handled = await handle_kling3_wait_prompt(
@@ -9499,8 +9433,19 @@ async def webhook(secret: str, request: Request):
             )
             return {"ok": True}
 
-        # ---- KLING 3.0: приём 1-го/последнего кадра через фото ----
+        # ---- KLING 3.0 legacy/PiAPI disabled ----
         if st.get("mode") == "kling3_wait_prompt":
+            st.pop("kling3_settings", None)
+            _set_mode(chat_id, user_id, "chat")
+            await tg_send_message(
+                chat_id,
+                "⚠️ Старый Kling/PiAPI Kling 3.0 отключён. Используй Kling 3.0 - New.",
+                reply_markup=_main_menu_for(user_id),
+            )
+            return {"ok": True}
+
+        # ---- KLING 3.0: приём 1-го/последнего кадра через фото ----
+        if False and st.get("mode") == "kling3_wait_prompt":
             ks3 = st.get("kling3_settings") or {}
             gen_mode = (ks3.get("gen_mode") or "t2v")
 
@@ -11635,9 +11580,33 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(chat_id, "Напиши описание для генерации.", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
+            cost_tokens = int(GPT_IMAGE2_GENERATION_COST)
+            try:
+                ensure_user_row(user_id)
+                bal = int(get_balance(user_id) or 0)
+            except Exception:
+                bal = 0
+            if bal < cost_tokens:
+                await tg_send_message(
+                    chat_id,
+                    f"❌ Недостаточно токенов для GPT Image 2.0. Нужно: {cost_tokens}, баланс: {bal}",
+                    reply_markup=_topup_packs_kb(),
+                )
+                return {"ok": True}
+
+            charge_ref_id = uuid4().hex
+            charged = False
             try:
                 aspect_ratio = str(gi2.get("aspect_ratio") or _gpt_image_2_aspect_for_size(gi2.get("size")) or "1:1")
                 size = _gpt_image_2_size_for_aspect_ratio(aspect_ratio)
+                add_tokens(
+                    user_id,
+                    -cost_tokens,
+                    reason="gpt_image_2",
+                    ref_id=charge_ref_id,
+                    meta={"mode": "text_to_image", "cost_tokens": cost_tokens},
+                )
+                charged = True
                 await enqueue_job({
                     "job_id": uuid4().hex,
                     "type": "gpt_image_2_t2i",
@@ -11646,14 +11615,22 @@ async def webhook(secret: str, request: Request):
                     "prompt": user_prompt,
                     "aspect_ratio": aspect_ratio,
                     "size": size,
+                    "charge_tokens": cost_tokens,
+                    "charge_ref_id": charge_ref_id,
+                    "refund_reason": "gpt_image_2_refund",
                 }, queue_name=GPT_IMAGE2_QUEUE_NAME)
             except Exception as e:
+                if charged:
+                    try:
+                        add_tokens(user_id, cost_tokens, reason="gpt_image_2_refund", ref_id=charge_ref_id, meta={"stage": "enqueue_failed", "error": str(e)[:300]})
+                    except Exception:
+                        pass
                 await tg_send_message(chat_id, f"❌ Не удалось поставить GPT Image 2.0 в очередь: {e}", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
             await tg_send_message(
                 chat_id,
-                "✅ GPT Image 2.0: запрос принят. Пришлю результат, как будет готово.",
+                f"✅ GPT Image 2.0: запрос принят. Списано {cost_tokens} токен. Пришлю результат, как будет готово.",
                 reply_markup=_main_menu_for(user_id),
             )
             st["gpt_image_2_t2i"] = {"step": "need_prompt", "aspect_ratio": aspect_ratio, "size": size}
@@ -11677,9 +11654,33 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(chat_id, "Напиши, что нужно изменить на фото.", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
+            cost_tokens = int(GPT_IMAGE2_GENERATION_COST)
+            try:
+                ensure_user_row(user_id)
+                bal = int(get_balance(user_id) or 0)
+            except Exception:
+                bal = 0
+            if bal < cost_tokens:
+                await tg_send_message(
+                    chat_id,
+                    f"❌ Недостаточно токенов для GPT Image 2.0. Нужно: {cost_tokens}, баланс: {bal}",
+                    reply_markup=_topup_packs_kb(),
+                )
+                return {"ok": True}
+
+            charge_ref_id = uuid4().hex
+            charged = False
             try:
                 aspect_ratio = str(gi2.get("aspect_ratio") or _gpt_image_2_aspect_for_size(gi2.get("size")) or "1:1")
                 size = _gpt_image_2_size_for_aspect_ratio(aspect_ratio)
+                add_tokens(
+                    user_id,
+                    -cost_tokens,
+                    reason="gpt_image_2",
+                    ref_id=charge_ref_id,
+                    meta={"mode": "image_to_image", "cost_tokens": cost_tokens, "refs": len(photo_file_ids[:4] or photo_urls[:4])},
+                )
+                charged = True
                 await enqueue_job({
                     "job_id": uuid4().hex,
                     "type": "gpt_image_2_i2i",
@@ -11691,14 +11692,22 @@ async def webhook(secret: str, request: Request):
                     "photo_file_id": photo_file_ids[0],
                     "photo_file_ids": photo_file_ids[:4],
                     "photo_urls": photo_urls[:4],
+                    "charge_tokens": cost_tokens,
+                    "charge_ref_id": charge_ref_id,
+                    "refund_reason": "gpt_image_2_refund",
                 }, queue_name=GPT_IMAGE2_QUEUE_NAME)
             except Exception as e:
+                if charged:
+                    try:
+                        add_tokens(user_id, cost_tokens, reason="gpt_image_2_refund", ref_id=charge_ref_id, meta={"stage": "enqueue_failed", "error": str(e)[:300]})
+                    except Exception:
+                        pass
                 await tg_send_message(chat_id, f"❌ Не удалось поставить GPT Image 2.0 в очередь: {e}", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
             await tg_send_message(
                 chat_id,
-                "✅ GPT Image 2.0: запрос принят. Пришлю результат, как будет готово.",
+                f"✅ GPT Image 2.0: запрос принят. Списано {cost_tokens} токен. Пришлю результат, как будет готово.",
                 reply_markup=_main_menu_for(user_id),
             )
             st["gpt_image_2_i2i"] = {
