@@ -1257,6 +1257,428 @@ def _make_empty_buckets(*, since: datetime, until: datetime, period: str) -> Lis
 
 
 
+
+
+# ==========================================================
+# Nabex Admin Client Growth
+# - total clients site + Telegram bot without duplicate Telegram-login users
+# - new clients by period/day/7d/30d
+# - active Telegram/site users for the selected admin period
+# ==========================================================
+
+
+def _fetch_admin_table_rows(table: str, select: str = "*", *, max_rows: int = 50000, order_col: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Small paginated helper for admin statistics.
+
+    It intentionally does not use service-side count because different supabase-py
+    versions handle `count="exact"` differently. We only fetch narrow columns here.
+    """
+    rows: List[Dict[str, Any]] = []
+    page_size = 1000
+    offset = 0
+    limit_total = max(1, min(int(max_rows or 50000), 200000))
+    sb = _admin_sb()
+    while len(rows) < limit_total:
+        end = min(offset + page_size - 1, limit_total - 1)
+        try:
+            q = sb.table(table).select(select)
+            if order_col:
+                q = q.order(order_col, desc=False)
+            res = q.range(offset, end).execute()
+            batch = list(getattr(res, "data", None) or [])
+        except Exception as exc:
+            try:
+                print(f"[admin_client_growth] {table} skipped: {exc}", flush=True)
+            except Exception:
+                pass
+            break
+        if not batch:
+            break
+        rows.extend(batch)
+        if len(batch) < page_size:
+            break
+        offset += page_size
+    return rows[:limit_total]
+
+
+def _admin_client_key_from_tg(telegram_user_id: Any) -> str:
+    tg_id = _safe_int(telegram_user_id)
+    return f"tg:{tg_id}" if tg_id > 0 else ""
+
+
+def _admin_client_key_from_site(row: Dict[str, Any]) -> str:
+    tg_key = _admin_client_key_from_tg((row or {}).get("telegram_user_id"))
+    if tg_key:
+        return tg_key
+    account_id = _safe_int((row or {}).get("id"))
+    return f"site:{account_id}" if account_id > 0 else ""
+
+
+def _admin_site_account_key(row: Dict[str, Any]) -> str:
+    account_id = _safe_int((row or {}).get("id"))
+    return f"site_account:{account_id}" if account_id > 0 else _admin_client_key_from_site(row)
+
+
+def _first_admin_dt(row: Dict[str, Any], *keys: str) -> Optional[datetime]:
+    for key in keys:
+        dt = _parse_admin_dt((row or {}).get(key))
+        if dt is not None:
+            return dt
+    return None
+
+
+def _admin_day_event_dt(row: Dict[str, Any]) -> Optional[datetime]:
+    dt = _parse_admin_dt((row or {}).get("first_event_at"))
+    if dt is not None:
+        return dt
+    day_raw = str((row or {}).get("day") or "").strip()
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", day_raw):
+        return None
+    try:
+        local_dt = datetime.strptime(day_raw, "%Y-%m-%d").replace(tzinfo=_admin_stats_tz())
+        return local_dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _admin_dt_in_period(dt: Optional[datetime], since: datetime, until: datetime) -> bool:
+    return dt is not None and since <= dt < until
+
+
+def _admin_client_series_empty(since_local: datetime, until_local: datetime, *, period: str) -> tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+    buckets: List[Dict[str, Any]] = []
+    if period == "month":
+        cur = since_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        step = timedelta(days=1)
+        fmt_key = "%Y-%m-%d"
+        fmt_label = "%d.%m"
+    else:
+        cur = since_local.replace(minute=0, second=0, microsecond=0)
+        step = timedelta(hours=1)
+        fmt_key = "%Y-%m-%dT%H"
+        fmt_label = "%H:00"
+
+    while cur < until_local:
+        buckets.append({
+            "key": cur.strftime(fmt_key),
+            "label": cur.strftime(fmt_label),
+            "new_tg_keys": set(),
+            "new_site_account_keys": set(),
+            "new_unique_keys": set(),
+            "active_tg_keys": set(),
+            "active_site_account_keys": set(),
+            "active_unique_keys": set(),
+        })
+        cur += step
+    return buckets, {str(b["key"]): b for b in buckets}
+
+
+def _admin_client_bucket_key(dt: datetime, *, period: str) -> str:
+    local_dt = dt.astimezone(_admin_stats_tz())
+    if period == "month":
+        return local_dt.strftime("%Y-%m-%d")
+    return local_dt.strftime("%Y-%m-%dT%H")
+
+
+def _admin_add_key_to_bucket(
+    bucket_index: Dict[str, Dict[str, Any]],
+    dt: Optional[datetime],
+    *,
+    period: str,
+    key: str,
+    field: str,
+) -> None:
+    if not key or dt is None:
+        return
+    bucket = bucket_index.get(_admin_client_bucket_key(dt, period=period))
+    if bucket is not None:
+        bucket[field].add(key)
+
+
+def _admin_count_new_window(bot_rows: List[Dict[str, Any]], site_rows: List[Dict[str, Any]], *, since: datetime, until: datetime) -> Dict[str, int]:
+    unique_first: Dict[str, datetime] = {}
+    new_tg = 0
+    new_site = 0
+
+    for row in bot_rows:
+        key = _admin_client_key_from_tg((row or {}).get("telegram_user_id"))
+        dt = _first_admin_dt(row, "first_seen_at", "created_at")
+        if key and dt is not None:
+            old = unique_first.get(key)
+            if old is None or dt < old:
+                unique_first[key] = dt
+            if since <= dt < until:
+                new_tg += 1
+
+    for row in site_rows:
+        key = _admin_client_key_from_site(row)
+        dt = _first_admin_dt(row, "created_at")
+        if key and dt is not None:
+            old = unique_first.get(key)
+            if old is None or dt < old:
+                unique_first[key] = dt
+            if since <= dt < until:
+                new_site += 1
+
+    return {
+        "telegram": int(new_tg),
+        "site": int(new_site),
+        "unique": int(sum(1 for dt in unique_first.values() if since <= dt < until)),
+    }
+
+
+def _admin_site_row_by_any_id(site_rows: List[Dict[str, Any]]) -> tuple[Dict[int, Dict[str, Any]], Dict[int, Dict[str, Any]]]:
+    by_account: Dict[int, Dict[str, Any]] = {}
+    by_tg: Dict[int, Dict[str, Any]] = {}
+    for row in site_rows:
+        account_id = _safe_int((row or {}).get("id"))
+        tg_id = _safe_int((row or {}).get("telegram_user_id"))
+        if account_id > 0:
+            by_account[account_id] = row
+        if tg_id > 0:
+            by_tg[tg_id] = row
+    return by_account, by_tg
+
+
+@router.get("/admin/client-growth")
+async def partner_admin_client_growth(
+    period: str = Query("day", pattern="^(day|month)$"),
+    date_msk: Optional[str] = Query(None, max_length=10),
+    max_rows: int = Query(100000, ge=1000, le=200000),
+    x_admin_token: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    _require_admin(x_admin_token)
+
+    period_key = str(period or "day").strip().lower()
+    if period_key not in {"day", "month"}:
+        period_key = "day"
+
+    since, until, since_local, until_local, period_label = _admin_stats_period_bounds(period_key, date_msk=date_msk)
+    tz = _admin_stats_tz()
+    today_start_local = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_until_local = today_start_local + timedelta(days=1)
+    today_since = today_start_local.astimezone(timezone.utc)
+    today_until = today_until_local.astimezone(timezone.utc)
+    days_7_since = (today_start_local - timedelta(days=6)).astimezone(timezone.utc)
+    days_30_since = (today_start_local - timedelta(days=29)).astimezone(timezone.utc)
+
+    bot_rows = _fetch_admin_table_rows(
+        "bot_users",
+        "id,telegram_user_id,first_seen_at,created_at,last_seen_at,updated_at",
+        max_rows=max_rows,
+        order_col="first_seen_at",
+    )
+    site_rows = _fetch_admin_table_rows(
+        "workspace_accounts",
+        "id,telegram_user_id,email,created_at,last_login_at,updated_at,google_email",
+        max_rows=max_rows,
+        order_col="created_at",
+    )
+    daily_rows = _fetch_admin_table_rows(
+        "bot_daily_active",
+        "day,telegram_user_id,first_event_at",
+        max_rows=max_rows,
+        order_col="day",
+    )
+
+    bot_tg_keys = {_admin_client_key_from_tg((row or {}).get("telegram_user_id")) for row in bot_rows}
+    bot_tg_keys.discard("")
+    site_account_keys = {_admin_site_account_key(row) for row in site_rows}
+    site_account_keys.discard("")
+    site_client_keys = {_admin_client_key_from_site(row) for row in site_rows}
+    site_client_keys.discard("")
+    site_tg_keys = {_admin_client_key_from_tg((row or {}).get("telegram_user_id")) for row in site_rows if _safe_int((row or {}).get("telegram_user_id")) > 0}
+    site_tg_keys.discard("")
+
+    unique_client_keys = set(bot_tg_keys) | set(site_client_keys)
+    linked_tg_keys = set(site_tg_keys)
+    telegram_only_keys = set(bot_tg_keys) - set(site_tg_keys)
+    site_only_keys = {_admin_client_key_from_site(row) for row in site_rows if _safe_int((row or {}).get("telegram_user_id")) <= 0}
+    site_only_keys.discard("")
+
+    unique_first: Dict[str, datetime] = {}
+    for row in bot_rows:
+        key = _admin_client_key_from_tg((row or {}).get("telegram_user_id"))
+        dt = _first_admin_dt(row, "first_seen_at", "created_at")
+        if key and dt is not None:
+            old = unique_first.get(key)
+            if old is None or dt < old:
+                unique_first[key] = dt
+    for row in site_rows:
+        key = _admin_client_key_from_site(row)
+        dt = _first_admin_dt(row, "created_at")
+        if key and dt is not None:
+            old = unique_first.get(key)
+            if old is None or dt < old:
+                unique_first[key] = dt
+
+    buckets, bucket_index = _admin_client_series_empty(since_local, until_local, period=period_key)
+
+    for row in bot_rows:
+        tg_key = _admin_client_key_from_tg((row or {}).get("telegram_user_id"))
+        dt = _first_admin_dt(row, "first_seen_at", "created_at")
+        if _admin_dt_in_period(dt, since, until):
+            _admin_add_key_to_bucket(bucket_index, dt, period=period_key, key=tg_key, field="new_tg_keys")
+            # True new unique clients are counted by the earliest known entry point.
+            first_dt = unique_first.get(tg_key)
+            if _admin_dt_in_period(first_dt, since, until):
+                _admin_add_key_to_bucket(bucket_index, first_dt, period=period_key, key=tg_key, field="new_unique_keys")
+
+    for row in site_rows:
+        site_account_key = _admin_site_account_key(row)
+        client_key = _admin_client_key_from_site(row)
+        dt = _first_admin_dt(row, "created_at")
+        if _admin_dt_in_period(dt, since, until):
+            _admin_add_key_to_bucket(bucket_index, dt, period=period_key, key=site_account_key, field="new_site_account_keys")
+            # True new unique clients are counted by the earliest known entry point.
+            first_dt = unique_first.get(client_key)
+            if _admin_dt_in_period(first_dt, since, until):
+                _admin_add_key_to_bucket(bucket_index, first_dt, period=period_key, key=client_key, field="new_unique_keys")
+
+    active_tg_keys = set()
+    active_site_account_keys = set()
+    active_unique_keys = set()
+    site_by_account, site_by_tg = _admin_site_row_by_any_id(site_rows)
+
+    for row in daily_rows:
+        tg_key = _admin_client_key_from_tg((row or {}).get("telegram_user_id"))
+        dt = _admin_day_event_dt(row)
+        if tg_key and _admin_dt_in_period(dt, since, until):
+            active_tg_keys.add(tg_key)
+            active_unique_keys.add(tg_key)
+            _admin_add_key_to_bucket(bucket_index, dt, period=period_key, key=tg_key, field="active_tg_keys")
+            _admin_add_key_to_bucket(bucket_index, dt, period=period_key, key=tg_key, field="active_unique_keys")
+
+    for row in site_rows:
+        dt = _first_admin_dt(row, "last_login_at")
+        if _admin_dt_in_period(dt, since, until):
+            site_account_key = _admin_site_account_key(row)
+            client_key = _admin_client_key_from_site(row)
+            if site_account_key:
+                active_site_account_keys.add(site_account_key)
+                _admin_add_key_to_bucket(bucket_index, dt, period=period_key, key=site_account_key, field="active_site_account_keys")
+            if client_key:
+                active_unique_keys.add(client_key)
+                _admin_add_key_to_bucket(bucket_index, dt, period=period_key, key=client_key, field="active_unique_keys")
+
+    free_rows = _fetch_admin_free_usage_rows_for_stats(since=since, until=until, max_rows=max_rows)
+    paid_rows = _fetch_admin_ledger_rows_for_stats(since=since, until=until, max_rows=max_rows)
+
+    for row in free_rows:
+        source = str((row or {}).get("source") or "").strip().lower()
+        dt = _parse_admin_dt((row or {}).get("created_at"))
+        if not _admin_dt_in_period(dt, since, until):
+            continue
+        if source == "telegram":
+            tg_key = _admin_client_key_from_tg((row or {}).get("telegram_user_id") or (row or {}).get("user_id"))
+            if tg_key:
+                active_tg_keys.add(tg_key)
+                active_unique_keys.add(tg_key)
+                _admin_add_key_to_bucket(bucket_index, dt, period=period_key, key=tg_key, field="active_tg_keys")
+                _admin_add_key_to_bucket(bucket_index, dt, period=period_key, key=tg_key, field="active_unique_keys")
+        else:
+            account_id = _safe_int((row or {}).get("workspace_account_id")) or _safe_int((row or {}).get("user_id"))
+            site_row = site_by_account.get(account_id) or site_by_tg.get(account_id) or {"id": account_id}
+            site_account_key = _admin_site_account_key(site_row)
+            client_key = _admin_client_key_from_site(site_row)
+            if site_account_key:
+                active_site_account_keys.add(site_account_key)
+                _admin_add_key_to_bucket(bucket_index, dt, period=period_key, key=site_account_key, field="active_site_account_keys")
+            if client_key:
+                active_unique_keys.add(client_key)
+                _admin_add_key_to_bucket(bucket_index, dt, period=period_key, key=client_key, field="active_unique_keys")
+
+    for row in paid_rows:
+        meta = (row or {}).get("meta") if isinstance((row or {}).get("meta"), dict) else {}
+        source = _admin_source_from_meta(meta)
+        dt = _parse_admin_dt((row or {}).get("created_at"))
+        if not _admin_dt_in_period(dt, since, until):
+            continue
+        if source == "site":
+            account_id = _safe_int(meta.get("workspace_user_id")) or _safe_int(meta.get("account_id")) or _safe_int(meta.get("workspace_id"))
+            tg_id = _safe_int((row or {}).get("telegram_user_id"))
+            site_row = site_by_account.get(account_id) or site_by_tg.get(tg_id) or {"id": account_id or tg_id}
+            site_account_key = _admin_site_account_key(site_row)
+            client_key = _admin_client_key_from_site(site_row)
+            if site_account_key:
+                active_site_account_keys.add(site_account_key)
+                _admin_add_key_to_bucket(bucket_index, dt, period=period_key, key=site_account_key, field="active_site_account_keys")
+            if client_key:
+                active_unique_keys.add(client_key)
+                _admin_add_key_to_bucket(bucket_index, dt, period=period_key, key=client_key, field="active_unique_keys")
+        elif source == "telegram":
+            tg_key = _admin_client_key_from_tg((row or {}).get("telegram_user_id"))
+            if tg_key:
+                active_tg_keys.add(tg_key)
+                active_unique_keys.add(tg_key)
+                _admin_add_key_to_bucket(bucket_index, dt, period=period_key, key=tg_key, field="active_tg_keys")
+                _admin_add_key_to_bucket(bucket_index, dt, period=period_key, key=tg_key, field="active_unique_keys")
+        else:
+            tg_key = _admin_client_key_from_tg((row or {}).get("telegram_user_id"))
+            if tg_key:
+                active_unique_keys.add(tg_key)
+                _admin_add_key_to_bucket(bucket_index, dt, period=period_key, key=tg_key, field="active_unique_keys")
+
+    series: List[Dict[str, Any]] = []
+    for bucket in buckets:
+        series.append({
+            "key": bucket["key"],
+            "label": bucket["label"],
+            "new_tg": len(bucket["new_tg_keys"]),
+            "new_site": len(bucket["new_site_account_keys"]),
+            "new_unique": len(bucket["new_unique_keys"]),
+            "active_tg": len(bucket["active_tg_keys"]),
+            "active_site": len(bucket["active_site_account_keys"]),
+            "active_unique": len(bucket["active_unique_keys"]),
+        })
+
+    new_today = _admin_count_new_window(bot_rows, site_rows, since=today_since, until=today_until)
+    new_7 = _admin_count_new_window(bot_rows, site_rows, since=days_7_since, until=today_until)
+    new_30 = _admin_count_new_window(bot_rows, site_rows, since=days_30_since, until=today_until)
+    new_period = _admin_count_new_window(bot_rows, site_rows, since=since, until=until)
+
+    return {
+        "ok": True,
+        "period": period_key,
+        "timezone": _STAT_TZ_NAME,
+        "date_msk": since_local.strftime("%Y-%m-%d") if period_key == "day" else None,
+        "period_label": period_label,
+        "since": _admin_iso_z(since),
+        "until": _admin_iso_z(until),
+        "since_label_msk": _admin_stats_label(since),
+        "until_label_msk": _admin_stats_label(until - timedelta(seconds=1)),
+        "source": "bot_users + workspace_accounts + bot_daily_active + free_usage_events + bot_balance_ledger",
+        "note": "Уникальные клиенты склеиваются по workspace_accounts.telegram_user_id. Telegram-прирост считается по bot_users.first_seen_at, сайт — по workspace_accounts.created_at. Время — календарные сутки по МСК.",
+        "totals": {
+            "unique_clients": len(unique_client_keys),
+            "telegram_users": len(bot_tg_keys),
+            "site_accounts": len(site_account_keys),
+            "telegram_only": len(telegram_only_keys),
+            "site_only": len(site_only_keys),
+            "linked_tg_site": len(linked_tg_keys),
+        },
+        "new": {
+            "period": new_period,
+            "today": new_today,
+            "last_7_days": new_7,
+            "last_30_days": new_30,
+        },
+        "active": {
+            "period_telegram": len(active_tg_keys),
+            "period_site": len(active_site_account_keys),
+            "period_unique": len(active_unique_keys),
+        },
+        "series": series,
+        "rows_scanned": {
+            "bot_users": len(bot_rows),
+            "workspace_accounts": len(site_rows),
+            "bot_daily_active": len(daily_rows),
+            "free_usage_events_period": len(free_rows),
+            "paid_ledger_period": len(paid_rows),
+        },
+        "truncated": len(bot_rows) >= max_rows or len(site_rows) >= max_rows or len(daily_rows) >= max_rows,
+    }
+
 @router.get("/admin/payments/stats")
 async def partner_admin_payments_stats(
     period: str = Query("day", pattern="^(day|month)$"),
