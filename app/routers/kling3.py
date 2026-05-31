@@ -29,6 +29,7 @@ class Kling3CreateBody(BaseModel):
 
 @router.post("/create", summary="Create Kling 3.0 task (with token charge)")
 async def kling3_create(body: Kling3CreateBody) -> Dict[str, Any]:
+    raise HTTPException(status_code=410, detail="Старый Kling/PiAPI Kling 3.0 отключён. Используй Kling 3.0 - New.")
     request_id = str(uuid4())
     tokens_required = 0
 
