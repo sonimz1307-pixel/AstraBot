@@ -28,6 +28,13 @@ from gemini_omni_video import (
     normalize_gemini_omni_resolution,
     run_gemini_omni_video,
 )
+from veo31_fast_relax_kie import (
+    Veo31FastRelaxError,
+    normalize_veo31_fast_relax_aspect_ratio,
+    normalize_veo31_fast_relax_duration,
+    normalize_veo31_fast_relax_resolution,
+    run_veo31_fast_relax,
+)
 from app.routers import web_workspace_api as ww
 from app.services.legnext_midjourney import (
     LegnextMidjourneyError,
@@ -274,6 +281,65 @@ async def process_workspace_switchx_ref_job(job: Dict[str, Any]) -> None:
             except Exception:
                 pass
         ww._mark_workspace_image_generation_failed(generation_id, str(e), error_code="provider_error")
+
+
+
+async def process_tg_veo_relax_video_job(job: Dict[str, Any]) -> None:
+    chat_id = int(job.get("chat_id") or 0)
+    user_id = int(job.get("user_id") or 0)
+    mode_raw = str(job.get("mode") or "text_to_video").strip().lower()
+    mode = "image_to_video" if mode_raw in {"image", "image_to_video", "i2v", "image2video"} else "text_to_video"
+    prompt = str(job.get("prompt") or "")
+    duration = normalize_veo31_fast_relax_duration(job.get("duration") or 8)
+    resolution = normalize_veo31_fast_relax_resolution(job.get("resolution") or "1080p")
+    aspect_ratio = normalize_veo31_fast_relax_aspect_ratio(job.get("aspect_ratio") or "16:9")
+    charge_tokens = int(job.get("charge_tokens") or 0)
+    charge_ref_id = str(job.get("charge_ref_id") or "")
+    refund_reason = str(job.get("refund_reason") or "veo31_fast_relax_video_refund")
+
+    if not chat_id or not user_id:
+        raise RuntimeError("tg_veo_relax_video_run job missing chat_id/user_id")
+
+    try:
+        frame_urls = []
+        start_url = str(job.get("start_frame_url") or "").strip()
+        last_url = str(job.get("last_frame_url") or "").strip()
+        if mode == "image_to_video":
+            if not start_url:
+                raise Veo31FastRelaxError("Для Veo 3.1 Fast Relax Image → Video нужен первый кадр")
+            frame_urls.append(start_url)
+            if last_url:
+                frame_urls.append(last_url)
+        video_url = await run_veo31_fast_relax(
+            user_id=user_id,
+            prompt=prompt,
+            mode=mode,
+            duration=duration,
+            resolution=resolution,
+            aspect_ratio=aspect_ratio,
+            image_urls=frame_urls,
+        )
+        if not video_url:
+            raise Veo31FastRelaxError("Veo 3.1 Fast Relax did not return video url")
+        await _tg_send_video_url(chat_id, video_url, caption="✅ Veo 3.1 Fast Relax готов")
+    except Exception as e:
+        if charge_tokens > 0:
+            try:
+                add_tokens(
+                    int(user_id),
+                    int(charge_tokens),
+                    reason=refund_reason,
+                    ref_id=charge_ref_id or None,
+                    meta={"origin": "tg_veo31_fast_relax_video", "error": str(e)[:300]},
+                )
+            except TypeError:
+                add_tokens(int(user_id), int(charge_tokens), reason=refund_reason)
+            except Exception:
+                pass
+        try:
+            await _tg_send_message(chat_id, f"❌ Ошибка Veo 3.1 Fast Relax: {e}")
+        except Exception:
+            pass
 
 
 async def process_tg_grok_video_job(job: Dict[str, Any]) -> None:
