@@ -72,6 +72,14 @@ from gemini_omni_video import (
     normalize_gemini_omni_mode,
     normalize_gemini_omni_resolution,
 )
+from veo31_fast_relax_kie import (
+    VEO31_FAST_RELAX_DISPLAY_NAME,
+    normalize_veo31_fast_relax_aspect_ratio,
+    normalize_veo31_fast_relax_duration,
+    normalize_veo31_fast_relax_resolution,
+    upload_veo31_fast_relax_input_image,
+    veo31_fast_relax_tokens_for_run,
+)
 from seedance_kie import seedance_kie_tokens_for_duration
 from app.routers.tts import router as tts_router
 from app.services.video_editor_service import create_workspace_upload_record, probe_media
@@ -139,6 +147,7 @@ if UVICORN_LOGGER.level > logging.INFO:
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WORKSPACE_MEDIA_QUEUE_NAME = (os.getenv("WORKSPACE_MEDIA_QUEUE_NAME", "workspace_media") or "workspace_media").strip() or "workspace_media"
+WORKSPACE_VEO_RELAX_QUEUE_NAME = (os.getenv("WORKSPACE_VEO_RELAX_QUEUE_NAME", "workspace_veo_relax") or "workspace_veo_relax").strip() or "workspace_veo_relax"
 PARTNER_EVENTS_QUEUE_NAME = (os.getenv("PARTNER_EVENTS_QUEUE_NAME", "partner_events") or "partner_events").strip() or "partner_events"
 
 
@@ -2263,6 +2272,44 @@ async def _enqueue_tg_omni_flash_job(*, chat_id: int, user_id: int, mode: str, p
         "origin": "telegram",
     }
     await enqueue_job(job, queue_name=WORKSPACE_MEDIA_QUEUE_NAME)
+    return job
+
+
+async def _enqueue_tg_veo_relax_job(*, chat_id: int, user_id: int, mode: str, prompt: str, settings: dict, image_bytes: bytes | None = None, image_name: str = "start_frame.jpg", last_frame_bytes: bytes | None = None, last_frame_name: str = "last_frame.jpg", charge_tokens: int = 0, charge_ref_id: str = "") -> dict:
+    settings = dict(settings or {})
+    normalized_mode = "image_to_video" if str(mode or "").strip().lower() in {"image", "image_to_video", "i2v", "image2video"} else "text_to_video"
+    duration = normalize_veo31_fast_relax_duration(settings.get("duration") or 8)
+    resolution = normalize_veo31_fast_relax_resolution(settings.get("resolution") or "1080p")
+    aspect_ratio = normalize_veo31_fast_relax_aspect_ratio(settings.get("aspect_ratio") or "16:9")
+    start_frame_url = ""
+    last_frame_url = ""
+    if normalized_mode == "image_to_video":
+        if not image_bytes:
+            raise RuntimeError("Для Veo 3.1 Fast Relax Image → Video нужен первый кадр")
+        start_frame_url = upload_veo31_fast_relax_input_image(user_id=int(user_id), image_bytes=image_bytes, filename_hint=image_name, slot="start")
+        if last_frame_bytes:
+            last_frame_url = upload_veo31_fast_relax_input_image(user_id=int(user_id), image_bytes=last_frame_bytes, filename_hint=last_frame_name, slot="last")
+
+    job = {
+        "job_id": uuid4().hex,
+        "kind": "tg_veo_relax_video_run",
+        "chat_id": int(chat_id),
+        "user_id": int(user_id),
+        "provider": "veo",
+        "model": "veo-3.1-fast-relax",
+        "mode": normalized_mode,
+        "prompt": str(prompt or "").strip(),
+        "duration": duration,
+        "resolution": resolution,
+        "aspect_ratio": aspect_ratio,
+        "start_frame_url": start_frame_url,
+        "last_frame_url": last_frame_url,
+        "charge_tokens": int(charge_tokens or 0),
+        "charge_ref_id": str(charge_ref_id or ""),
+        "refund_reason": "veo31_fast_relax_video_refund",
+        "origin": "telegram",
+    }
+    await enqueue_job(job, queue_name=WORKSPACE_VEO_RELAX_QUEUE_NAME)
     return job
 
 
@@ -6561,8 +6608,8 @@ async def webhook(secret: str, request: Request):
             return {"ok": True}
 
 # ----- WebApp data (Veo settings) -----
-        # Expected (from our WebApp): {type:"veo_settings", provider:"veo", veo_model:"fast|pro", flow:"text|image",
-        # duration, aspect_ratio, generate_audio, resolution, use_last_frame, use_reference_images}
+        # Expected (from our WebApp): {type:"veo_settings", provider:"veo", veo_model:"fast|pro|fast_relax", flow:"text|image",
+        # duration, aspect_ratio, resolution, use_last_frame, use_reference_images, generate_audio only for fast/pro}
         is_veo = (
             (str(payload.get("type") or "").lower().strip() == "veo_settings")
             or (provider_raw == "veo")
@@ -6571,11 +6618,12 @@ async def webhook(secret: str, request: Request):
 
         if is_veo:
             veo_model = str(payload.get("veo_model") or payload.get("model") or "fast").lower().strip()
-            if veo_model not in ("fast", "pro", "veo-3.1", "3.1"):
-                veo_model = "fast"
-            # map aliases
             if veo_model in ("veo-3.1", "3.1"):
                 veo_model = "pro"
+            elif veo_model in ("fast_relax", "relax", "veo-3.1-fast-relax", "veo_fast_relax", "veo31_fast_relax"):
+                veo_model = "fast_relax"
+            elif veo_model not in ("fast", "pro"):
+                veo_model = "fast"
 
             flow = str(payload.get("flow") or "text").lower().strip()
             if flow not in ("text", "image"):
@@ -6585,23 +6633,28 @@ async def webhook(secret: str, request: Request):
                 duration = int(payload.get("duration") or 8)
             except Exception:
                 duration = 8
-            if duration not in (4, 6, 8):
+            if veo_model == "fast_relax":
+                duration = normalize_veo31_fast_relax_duration(duration)
+            elif duration not in (4, 6, 8):
                 duration = 8
 
             aspect_ratio = str(payload.get("aspect_ratio") or "16:9").strip()
-            if aspect_ratio not in ("16:9", "9:16"):
+            if veo_model == "fast_relax":
+                aspect_ratio = normalize_veo31_fast_relax_aspect_ratio(aspect_ratio)
+            elif aspect_ratio not in ("16:9", "9:16"):
                 aspect_ratio = "16:9"
 
-            generate_audio = bool(payload.get("generate_audio"))
+            generate_audio = None if veo_model == "fast_relax" else bool(payload.get("generate_audio"))
 
-            # FAST фикс 720p, PRO 1080p
-            resolution = str(payload.get("resolution") or ("1080p" if veo_model == "pro" else "720p")).lower().strip()
+            resolution = str(payload.get("resolution") or ("1080p" if veo_model in ("pro", "fast_relax") else "720p")).lower().strip()
             if veo_model == "pro":
                 resolution = "1080p"
+            elif veo_model == "fast_relax":
+                resolution = normalize_veo31_fast_relax_resolution(resolution)
             else:
                 resolution = "720p"
 
-            use_last_frame = bool(payload.get("use_last_frame")) if (veo_model == "pro" and flow == "image") else False
+            use_last_frame = bool(payload.get("use_last_frame")) if (flow == "image" and veo_model in ("pro", "fast_relax")) else False
             use_reference_images = bool(payload.get("use_reference_images")) if (
                 veo_model == "pro" and flow == "image" and aspect_ratio == "16:9" and duration == 8
             ) else False
@@ -6610,18 +6663,26 @@ async def webhook(secret: str, request: Request):
             # Если refs включены, tail/last frame игнорируется — делаем это явным и на нашей стороне.
             if use_reference_images:
                 use_last_frame = False
+            if veo_model == "fast_relax":
+                use_reference_images = False
 
-            st["veo_settings"] = {
-                "model": ("veo-3.1" if veo_model == "pro" else "veo-3-fast"),
+            model_slug = "veo-3.1-fast-relax" if veo_model == "fast_relax" else ("veo-3.1" if veo_model == "pro" else "veo-3-fast")
+            display_name = VEO31_FAST_RELAX_DISPLAY_NAME if veo_model == "fast_relax" else ("Veo 3.1" if veo_model == "pro" else "Veo Fast")
+
+            veo_settings = {
+                "model": model_slug,
                 "veo_model": veo_model,
                 "flow": flow,
                 "duration": duration,
                 "aspect_ratio": aspect_ratio,
                 "resolution": resolution,
-                "generate_audio": generate_audio,
                 "use_last_frame": use_last_frame,
                 "use_reference_images": use_reference_images,
+                "display_name": display_name,
             }
+            if veo_model != "fast_relax":
+                veo_settings["generate_audio"] = bool(generate_audio)
+            st["veo_settings"] = veo_settings
             st["ts"] = _now()
 
             if flow == "text":
@@ -6630,10 +6691,7 @@ async def webhook(secret: str, request: Request):
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
-                    """✅ Настройки Veo сохранены.
-
-Теперь пришли ТЕКСТ (промпт), что должно быть в видео.
-Пример: «Кот в скафандре идёт по Марсу, кинематографично». """,
+                    f"✅ Настройки {display_name} сохранены.\n\nДлительность: {duration} сек.\nКачество: {resolution}.\n\nТеперь пришли ТЕКСТ (промпт), что должно быть в видео.\nПример: «Кот в скафандре идёт по Марсу, кинематографично».",
                     reply_markup=_help_menu_for(user_id),
                 )
                 return {"ok": True}
@@ -6660,7 +6718,7 @@ async def webhook(secret: str, request: Request):
                     refs_note = "\n\nℹ️ Last frame работает как финальный кадр перехода."
                 await tg_send_message(
                     chat_id,
-                    "✅ Настройки Veo сохранены (Image → Video).\n\nШаг 1) Пришли СТАРТОВОЕ фото (кадр 1)." + extra_txt + refs_note,
+                    f"✅ Настройки {display_name} сохранены (Image → Video).\n\nДлительность: {duration} сек.\nКачество: {resolution}.\n\nШаг 1) Пришли СТАРТОВОЕ фото (кадр 1)." + extra_txt + refs_note,
                     reply_markup=_help_menu_for(user_id),
                 )
                 return {"ok": True}
@@ -8346,6 +8404,55 @@ async def webhook(secret: str, request: Request):
         aspect_ratio = str(settings.get("aspect_ratio") or "16:9")
         generate_audio = bool(settings.get("generate_audio"))
 
+        if veo_model == "fast_relax":
+            duration = normalize_veo31_fast_relax_duration(duration)
+            resolution = normalize_veo31_fast_relax_resolution(resolution)
+            aspect_ratio = normalize_veo31_fast_relax_aspect_ratio(aspect_ratio)
+            cost_tokens = int(veo31_fast_relax_tokens_for_run())
+            try:
+                ensure_user_row(user_id)
+                bal = int(get_balance(user_id) or 0)
+            except Exception:
+                bal = 0
+            if bal < cost_tokens:
+                await tg_send_message(chat_id, f"❌ Недостаточно токенов.\nНужно: {cost_tokens}\nБаланс: {bal}", reply_markup=_topup_balance_inline_kb())
+                return {"ok": True}
+            charge_ref_id = uuid4().hex
+            try:
+                add_tokens(
+                    user_id,
+                    -cost_tokens,
+                    reason="veo31_fast_relax_video",
+                    ref_id=charge_ref_id,
+                    meta={"provider": "veo", "model": VEO31_FAST_RELAX_DISPLAY_NAME, "duration": duration, "resolution": resolution, "aspect_ratio": aspect_ratio, "flow": "t2v", "pricing": "fixed_per_video"},
+                )
+            except TypeError:
+                add_tokens(user_id, -int(cost_tokens), reason="veo31_fast_relax_video")
+            try:
+                await _enqueue_tg_veo_relax_job(
+                    chat_id=int(chat_id),
+                    user_id=int(user_id),
+                    mode="text_to_video",
+                    prompt=incoming_text.strip(),
+                    settings={"duration": duration, "resolution": resolution, "aspect_ratio": aspect_ratio},
+                    charge_tokens=cost_tokens,
+                    charge_ref_id=charge_ref_id,
+                )
+                await tg_send_message(chat_id, f"⏳ {VEO31_FAST_RELAX_DISPLAY_NAME} поставлен в отдельную очередь: Text → Video • {duration} сек • {resolution} • {aspect_ratio} • {cost_tokens} ток.", reply_markup=_help_menu_for(user_id))
+            except Exception as e:
+                try:
+                    add_tokens(user_id, int(cost_tokens), reason="veo31_fast_relax_video_refund", ref_id=charge_ref_id, meta={"stage": "enqueue_failed", "error": str(e)[:300]})
+                except TypeError:
+                    add_tokens(user_id, int(cost_tokens), reason="veo31_fast_relax_video_refund")
+                await tg_send_message(chat_id, f"❌ Не удалось поставить {VEO31_FAST_RELAX_DISPLAY_NAME} в очередь: {e}", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+            _set_mode(chat_id, user_id, "chat")
+            st.pop("veo_t2v", None)
+            st.pop("veo_settings", None)
+            st["ts"] = _now()
+            sb_clear_user_state(user_id)
+            return {"ok": True}
+
         # ---- VEO BILLING (Text→Video) ----
         _busy_start(int(user_id), "Veo видео")
         veo_charged = False
@@ -8496,6 +8603,60 @@ async def webhook(secret: str, request: Request):
             ref_bytes = vi.get("reference_images_bytes") or []
             if not isinstance(ref_bytes, list):
                 ref_bytes = []
+
+            if veo_model == "fast_relax":
+                duration = normalize_veo31_fast_relax_duration(duration)
+                resolution = normalize_veo31_fast_relax_resolution(resolution)
+                aspect_ratio = normalize_veo31_fast_relax_aspect_ratio(aspect_ratio)
+                cost_tokens = int(veo31_fast_relax_tokens_for_run())
+                try:
+                    ensure_user_row(user_id)
+                    bal = int(get_balance(user_id) or 0)
+                except Exception:
+                    bal = 0
+                if bal < cost_tokens:
+                    await tg_send_message(chat_id, f"❌ Недостаточно токенов.\nНужно: {cost_tokens}\nБаланс: {bal}", reply_markup=_topup_balance_inline_kb())
+                    return {"ok": True}
+                charge_ref_id = uuid4().hex
+                try:
+                    add_tokens(
+                        user_id,
+                        -cost_tokens,
+                        reason="veo31_fast_relax_video",
+                        ref_id=charge_ref_id,
+                        meta={"provider": "veo", "model": VEO31_FAST_RELAX_DISPLAY_NAME, "duration": duration, "resolution": resolution, "aspect_ratio": aspect_ratio, "flow": "i2v", "pricing": "fixed_per_video", "last_frame": bool(last_frame_bytes)},
+                    )
+                except TypeError:
+                    add_tokens(user_id, -int(cost_tokens), reason="veo31_fast_relax_video")
+                try:
+                    await _enqueue_tg_veo_relax_job(
+                        chat_id=int(chat_id),
+                        user_id=int(user_id),
+                        mode="image_to_video",
+                        prompt=incoming_text.strip(),
+                        settings={"duration": duration, "resolution": resolution, "aspect_ratio": aspect_ratio},
+                        image_bytes=image_bytes,
+                        image_name="start_frame.jpg",
+                        last_frame_bytes=last_frame_bytes,
+                        last_frame_name="last_frame.jpg",
+                        charge_tokens=cost_tokens,
+                        charge_ref_id=charge_ref_id,
+                    )
+                    frame_note = "первый + последний кадр" if last_frame_bytes else "первый кадр"
+                    await tg_send_message(chat_id, f"⏳ {VEO31_FAST_RELAX_DISPLAY_NAME} поставлен в отдельную очередь: Image → Video • {frame_note} • {duration} сек • {resolution} • {aspect_ratio} • {cost_tokens} ток.", reply_markup=_help_menu_for(user_id))
+                except Exception as e:
+                    try:
+                        add_tokens(user_id, int(cost_tokens), reason="veo31_fast_relax_video_refund", ref_id=charge_ref_id, meta={"stage": "enqueue_failed", "error": str(e)[:300]})
+                    except TypeError:
+                        add_tokens(user_id, int(cost_tokens), reason="veo31_fast_relax_video_refund")
+                    await tg_send_message(chat_id, f"❌ Не удалось поставить {VEO31_FAST_RELAX_DISPLAY_NAME} в очередь: {e}", reply_markup=_main_menu_for(user_id))
+                    return {"ok": True}
+                _set_mode(chat_id, user_id, "chat")
+                st.pop("veo_i2v", None)
+                st.pop("veo_settings", None)
+                st["ts"] = _now()
+                sb_clear_user_state(user_id)
+                return {"ok": True}
 
             # ---- VEO BILLING (Image→Video) ----
             _busy_start(int(user_id), "Veo видео")
