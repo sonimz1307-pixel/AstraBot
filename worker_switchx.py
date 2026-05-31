@@ -1504,6 +1504,9 @@ async def handle_gpt_image2_job(job: Dict[str, Any]) -> None:
     photo_file_id = str(job.get("photo_file_id") or "").strip()
     photo_file_ids = [str(item or "").strip() for item in (job.get("photo_file_ids") or []) if str(item or "").strip()]
     photo_urls = [str(item or "").strip() for item in (job.get("photo_urls") or []) if str(item or "").strip()]
+    charge_tokens = int(job.get("charge_tokens") or 0)
+    charge_ref_id = str(job.get("charge_ref_id") or "").strip()
+    refund_reason = str(job.get("refund_reason") or "gpt_image_2_refund").strip() or "gpt_image_2_refund"
     if not photo_file_ids and photo_file_id:
         photo_file_ids = [photo_file_id]
 
@@ -1570,6 +1573,20 @@ async def handle_gpt_image2_job(job: Dict[str, Any]) -> None:
             pass
         err = str(e)[:800]
         print("gpt_image2 failed:", err)
+        if charge_tokens > 0:
+            try:
+                add_tokens(
+                    user_id,
+                    int(charge_tokens),
+                    reason=refund_reason,
+                    ref_id=charge_ref_id or uuid.uuid4().hex,
+                    meta={"error": err, "job_type": job_type},
+                )
+            except Exception:
+                try:
+                    add_tokens(user_id, int(charge_tokens), reason=refund_reason)
+                except Exception:
+                    pass
         if msg_id:
             try:
                 await tg_edit_message_text(chat_id, msg_id, f"❌ Ошибка {label}.\n{err}")
