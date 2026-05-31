@@ -623,7 +623,7 @@
     <div id="klingBlock" style="display:none;">
       <div class="card">
         <h3>Kling — версия</h3>
-        <div class="seg cols4" role="radiogroup" aria-label="Версия Kling">
+        <div class="seg cols3" role="radiogroup" aria-label="Версия Kling">
           <input id="kling_v16" type="radio" name="kling_version" value="1_6" checked>
           <label for="kling_v16">
             <span class="name">Motion Control</span>
@@ -636,12 +636,6 @@
             <span class="desc">Text / Image → Video</span>
           </label>
 
-          <input id="kling_v30" type="radio" name="kling_version" value="3_0">
-          <label for="kling_v30">
-            <span class="name">PRO 3.0</span>
-            <span class="desc">PRO 3.0 </span>
-          </label>
-
           <input id="kling_v30_new" type="radio" name="kling_version" value="3_0_new">
           <label for="kling_v30_new">
             <span class="name">3.0 - New</span>
@@ -651,8 +645,8 @@
         <div class="hint">Motion Control: 2.6 , 3.0 —720p / 1080p.</div>
       </div>
 
-      <div class="card" id="kling3Options" style="display:none;">
-        <h3>Kling PRO 3.0 — настройки</h3>
+      <div class="card" id="kling3Options" style="display:none;" hidden>
+        <h3>Kling PRO 3.0 — настройки отключены</h3>
         <div style="margin-top:10px;">
           <label class="badge" style="display:inline-block;margin-bottom:8px;">Режим</label>
         </div>
@@ -1802,7 +1796,7 @@
         return;
       }
       if (kling3NewOptions) kling3NewOptions.style.display = 'none';
-      if (kling3Options) kling3Options.style.display = 'block';
+      if (kling3Options) kling3Options.style.display = 'none';
     }
 
     function updateTokenRateHint(){
@@ -1812,11 +1806,6 @@
 
       if (version === '3_0_new'){
         el.innerHTML = 'Kling 3.0 - New / KIE: Standard 1/1.5 ток/сек, Pro 1.5/2 ток/сек, 4K 5/6 ток/сек. Multi-shot: сумма шотов 3–15 сек.';
-        return;
-      }
-
-      if (version === '3_0'){
-        el.innerHTML = 'Kling PRO 3.0: <b>720p и 1080p = 2 токена/сек</b>. <b>Audio = +1 токен/сек</b> сверху. Длительность 3–15 сек.';
         return;
       }
 
@@ -2112,13 +2101,7 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
           return { known:true, tokens: Math.max(1, Math.ceil(seconds * rate)), note:'' };
         }
 
-        // Kling PRO 3.0
-        const enable_audio = !!qs('#kling3_audio')?.checked;
-        const seconds = parseInt((qs('#kling3_duration')?.value || "5"), 10);
-        const baseRate = 2;
-        const rate = baseRate + (enable_audio ? 1 : 0);
-        const tokens = rate * seconds;
-        return { known:true, tokens, note:'' };
+        return { known:false, tokens:null, note:'выбери доступную версию Kling' };
       }
 
       // VEO
@@ -2236,26 +2219,9 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
               kling_elements: klingElements
             };
           } else {
-            // Kling PRO 3.0 settings (PiAPI)
-            const resolution = getKling3Resolution(); // "720" | "1080"
-            const enable_audio = !!qs('#kling3_audio')?.checked;
-            const duration = parseInt((qs('#kling3_duration')?.value || "5"), 10);
-
-            const baseGenMode = getKling3GenMode();
-            const preferMultiShots = getKling3PreferMultiShots();
-
-            payload = {
-              type: "kling3_settings",
-              provider: "kling",
-              kling_version,
-              resolution,
-              enable_audio,
-              duration,
-              gen_mode: preferMultiShots ? "multishot" : baseGenMode,
-              base_gen_mode: baseGenMode,
-              aspect_ratio: getKling3Aspect(),
-              prefer_multi_shots: preferMultiShots
-            };
+            alert('Старый Kling/PiAPI Kling 3.0 отключён. Выбери Kling 3.0 - New.');
+            updateCostUI();
+            return;
           }
 
         } else if (provider === 'grok'){
