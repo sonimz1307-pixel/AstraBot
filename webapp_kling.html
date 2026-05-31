@@ -864,6 +864,13 @@
             <span class="name">Veo 3.1</span>
             <span class="desc">1080p / quality</span>
           </label>
+
+
+          <input id="veo_fast_relax" type="radio" name="veo_model" value="fast_relax">
+          <label for="veo_fast_relax">
+            <span class="name">Veo 3.1 Fast Relax</span>
+            <span class="desc">8 сек / 720p или 1080p</span>
+          </label>
         </div>
         <div class="hint" id="veoPriceHint">
           Fast: без звука 1 токен 1сек, со звуком 2 токена 1сек.
@@ -900,13 +907,18 @@
             <option value="8" selected>8 секунд</option>
           </select>
 
+          <select id="veo_resolution" aria-label="Качество" style="display:none;">
+            <option value="720p">720p</option>
+            <option value="1080p" selected>1080p</option>
+          </select>
+
           <select id="veo_aspect" aria-label="Формат">
             <option value="16:9">16:9 (YouTube)</option>
             <option value="9:16">9:16 (Reels)</option>
           </select>
         </div>
 
-        <div class="toggle">
+        <div class="toggle" id="veoAudioToggle">
           <div class="left">
             <div class="tname">Генерировать звук</div>
             <div class="tdesc">Дороже, но “как ролик”</div>
@@ -1644,7 +1656,7 @@
 
 
     // Veo getters
-    function getVeoModel(){ return qs('input[name="veo_model"]:checked')?.value || "fast"; } // fast|pro
+    function getVeoModel(){ return qs('input[name="veo_model"]:checked')?.value || "fast"; } // fast|pro|fast_relax
     function getVeoFlow(){ return qs('input[name="veo_flow"]:checked')?.value || "text"; }   // text|image
 
     // Grok getters
@@ -1832,7 +1844,9 @@
       const el = qs('#veoPriceHint');
       if (!el) return;
 
-      if (model === 'pro'){
+      if (model === 'fast_relax'){
+        el.innerHTML = 'Veo 3.1 Fast Relax: <b>4 токена за генерацию</b>. Длительность фиксирована: 8 сек. 720p или 1080p. Отдельного переключателя звука нет; видео может прийти с фоновым аудио.';
+      } else if (model === 'pro'){
         el.innerHTML = 'Veo 3.1: без звука <b>2 токена 1сек</b>, со звуком <b>3 токена 1сек</b>. Режим 1080p.';
       } else {
         el.innerHTML = 'Fast: без звука <b>1 токен 1сек</b>, со звуком <b>2 токена 1сек</b>. 720p фикс.';
@@ -1840,16 +1854,18 @@
     }
 
     function getVeoAdvancedAvailability(){
-      const isPro = (getVeoModel() === 'pro');
+      const model = getVeoModel();
+      const isPro = (model === 'pro');
+      const isRelax = (model === 'fast_relax');
       const flow = getVeoFlow();
-      const duration = parseInt((qs('#veo_duration')?.value || "8"), 10);
+      const duration = isRelax ? 8 : parseInt((qs('#veo_duration')?.value || "8"), 10);
       const aspect = (qs('#veo_aspect')?.value || "16:9");
 
-      const canUseAdvanced = isPro && flow === 'image';
+      const canUseAdvanced = (isPro || isRelax) && flow === 'image';
       const canUseLastFrame = canUseAdvanced;
-      const canUseRefs = canUseAdvanced && aspect === '16:9' && duration === 8;
+      const canUseRefs = isPro && flow === 'image' && aspect === '16:9' && duration === 8;
 
-      return { isPro, flow, duration, aspect, canUseAdvanced, canUseLastFrame, canUseRefs };
+      return { model, isPro, isRelax, flow, duration, aspect, canUseAdvanced, canUseLastFrame, canUseRefs };
     }
 
     function setVeoAdvancedEnabled(){
@@ -1858,7 +1874,27 @@
       const note = qs('#veoProOnlyNote');
       const advHint = qs('#veoAdvHint');
       const advDetails = qs('#veoAdvDetails');
+      const durationSelect = qs('#veo_duration');
+      const resolutionSelect = qs('#veo_resolution');
+      const audioToggle = qs('#veo_audio');
+      const audioWrap = qs('#veoAudioToggle');
       const state = getVeoAdvancedAvailability();
+
+      if (durationSelect) {
+        durationSelect.value = state.isRelax ? '8' : (durationSelect.value || '8');
+        durationSelect.disabled = !!state.isRelax;
+      }
+      if (resolutionSelect) {
+        resolutionSelect.style.display = state.isRelax ? '' : 'none';
+        resolutionSelect.disabled = !state.isRelax;
+      }
+      if (audioWrap) {
+        audioWrap.style.display = state.isRelax ? 'none' : '';
+      }
+      if (audioToggle) {
+        if (state.isRelax) audioToggle.checked = false;
+        audioToggle.disabled = !!state.isRelax;
+      }
 
       if (lf) lf.disabled = !state.canUseLastFrame;
       if (refs) refs.disabled = !state.canUseRefs;
@@ -1871,10 +1907,10 @@
         if (lf.checked) refs.checked = false;
       }
 
-      if (!state.isPro){
+      if (!state.isPro && !state.isRelax){
         if (note) note.style.display = 'block';
-        if (note) note.textContent = 'Доступно только в Veo 3.1 Pro.';
-        if (advHint) advHint.textContent = 'Last frame и refs доступны только в Veo 3.1 Pro.';
+        if (note) note.textContent = 'Доступно только в Veo 3.1 / Veo 3.1 Fast Relax.';
+        if (advHint) advHint.textContent = 'Last frame доступен в Image → Video для Veo 3.1 и Veo 3.1 Fast Relax.';
         if (advDetails) advDetails.open = false;
         return;
       }
@@ -1882,7 +1918,13 @@
       if (state.flow !== 'image'){
         if (note) note.style.display = 'block';
         if (note) note.textContent = 'Эти опции работают только в режиме Image → Video.';
-        if (advHint) advHint.textContent = 'Для Text → Video доступны только промпт, длительность, формат и звук.';
+        if (advHint) advHint.textContent = state.isRelax ? 'Для Text → Video доступны prompt, 8 сек, качество и формат.' : 'Для Text → Video доступны только промпт, длительность, формат и звук.';
+        return;
+      }
+
+      if (state.isRelax){
+        if (note) note.style.display = 'none';
+        if (advHint) advHint.textContent = 'Для Veo 3.1 Fast Relax доступен опциональный last frame. Reference images здесь не используются.';
         return;
       }
 
@@ -1948,7 +1990,7 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
       updateCostUI();
     }));
     qsa('input[name="omni_flow"]').forEach(el => el.addEventListener('change', () => { updateOmniUI(); updateCostUI(); }));
-    ['#veo_duration', '#veo_aspect', '#omni_duration', '#omni_resolution', '#omni_aspect'].forEach(sel => {
+    ['#veo_duration', '#veo_resolution', '#veo_aspect', '#omni_duration', '#omni_resolution', '#omni_aspect'].forEach(sel => {
       const el = qs(sel);
       if (el) el.addEventListener('change', () => {
         setVeoAdvancedEnabled();
@@ -2105,7 +2147,10 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
       }
 
       // VEO
-      const model = getVeoModel(); // fast|pro
+      const model = getVeoModel(); // fast|pro|fast_relax
+      if (model === 'fast_relax'){
+        return { known:true, tokens:4, note:'8 сек · 720p/1080p · звук без ручного переключателя' };
+      }
       const seconds = parseInt((qs('#veo_duration')?.value || "8"), 10);
       const audio = !!qs('#veo_audio')?.checked;
 
@@ -2291,18 +2336,20 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
             aspect_ratio
           };
         } else {
-          const veo_model = getVeoModel(); // fast|pro
+          const veo_model = getVeoModel(); // fast|pro|fast_relax
           const flow = getVeoFlow();       // text|image
-          const duration = parseInt((qs('#veo_duration')?.value || "8"), 10);
+          const isRelax = (veo_model === 'fast_relax');
+          const duration = isRelax ? 8 : parseInt((qs('#veo_duration')?.value || "8"), 10);
           const aspect_ratio = (qs('#veo_aspect')?.value || "16:9");
           const generate_audio = !!qs('#veo_audio')?.checked;
 
           const isPro = (veo_model === 'pro');
           const veoFlowIsImage = (flow === 'image');
           const refsAllowed = isPro && veoFlowIsImage && aspect_ratio === '16:9' && duration === 8;
-          const lastFrameAllowed = isPro && veoFlowIsImage;
+          const lastFrameAllowed = (isPro || isRelax) && veoFlowIsImage;
           const use_refs = refsAllowed && !!qs('#veo_use_refs')?.checked;
           const use_last_frame = lastFrameAllowed && !use_refs && !!qs('#veo_use_last_frame')?.checked;
+          const relaxResolution = (qs('#veo_resolution')?.value || '1080p');
 
           payload = {
             type: "veo_settings",
@@ -2311,11 +2358,13 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
             flow,
             duration,
             aspect_ratio,
-            generate_audio,
             use_last_frame,
-            use_reference_images: use_refs,
-            resolution: isPro ? '1080p' : '720p'
+            use_reference_images: isRelax ? false : use_refs,
+            resolution: isRelax ? relaxResolution : (isPro ? '1080p' : '720p')
           };
+          if (!isRelax) {
+            payload.generate_audio = generate_audio;
+          }
         }
 
         showDebug(payload);
