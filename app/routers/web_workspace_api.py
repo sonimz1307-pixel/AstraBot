@@ -3073,7 +3073,7 @@ def _workspace_image_cost(provider: str, mode: str, preset_slug: str = "", resol
     if provider_key == "text_to_image":
         return 0
     if provider_key == "gpt_image_2":
-        return 0
+        return 1
     if provider_key == "midjourney":
         return _workspace_midjourney_action_cost(action_type, speed_mode, model=model)
 
@@ -3105,7 +3105,7 @@ def _workspace_image_charge_reason(provider: str, mode: str, action_type: str = 
     if provider_key == "topaz_photo":
         return "workspace_topaz_photo"
     if provider_key == "gpt_image_2":
-        return None
+        return "gpt_image_2"
     if provider_key == "midjourney":
         return _workspace_midjourney_action_reason(action_type)
 
@@ -3629,6 +3629,7 @@ async def workspace_chat_status(job_id: str, user: Dict[str, Any] = Depends(get_
 
 @router.post("/kling3/create")
 async def workspace_kling3_create(payload: WorkspaceKlingCreateIn, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
+    raise HTTPException(status_code=410, detail="Старый Kling/PiAPI Kling 3.0 отключён. Используй Kling 3.0 - New.")
     uid = int(user["telegram_user_id"])
     request_id = str(uuid4())
     generation_id: Optional[str] = None
@@ -3925,25 +3926,7 @@ def _workspace_video_charge_spec(
                 },
             }
         if model == "kling-3.0":
-            tokens = int(calculate_kling3_price(
-                resolution=str(resolution or "720").replace("p", ""),
-                enable_audio=bool(enable_audio),
-                duration=duration,
-            ))
-            return {
-                "tokens": tokens,
-                "charge_reason": "kling3_create",
-                "refund_reason": "kling3_refund",
-                "meta": {
-                    "origin": "workspace_video",
-                    "provider": provider,
-                    "model": model,
-                    "mode": mode,
-                    "duration": duration,
-                    "resolution": str(resolution or "720"),
-                    "enable_audio": bool(enable_audio),
-                },
-            }
+            raise HTTPException(status_code=410, detail="Старый Kling/PiAPI Kling 3.0 отключён. Используй Kling 3.0 - New.")
         if model == "kling-2.5":
             tokens = int(duration)
             return {
@@ -4265,6 +4248,8 @@ async def workspace_video_run(
         )
         source_video_upload_id = str(source_upload_row.get("id") or "").strip()
 
+    if provider == "kling" and model == "kling-3.0":
+        raise HTTPException(status_code=410, detail="Старый Kling/PiAPI Kling 3.0 отключён. Используй Kling 3.0 - New.")
     if provider == "kling" and mode in {"image_to_video", "multi_shot"} and model in {"kling-1.6", "kling-2.5", "kling-3.0"} and not start_frame:
         raise HTTPException(status_code=400, detail="Для Image→Video нужен start frame.")
     if provider == "kling" and model == "kling-3.0-new":
