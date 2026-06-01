@@ -38,6 +38,7 @@ from veo_billing import calc_veo_charge, format_veo_charge_line
 from billing_db import (
     ensure_user_row,
     get_balance,
+    get_balance_history,
     add_tokens,
     ledger_ref_exists,
     charge_photosession_generation,
@@ -885,6 +886,40 @@ def _tg_account_ref_links_for(user_id: int) -> Tuple[str, str, str]:
     return ref_code, site_ref, bot_ref
 
 
+
+def _tg_user_id_from_request(request: Request, payload: Optional[Dict[str, Any]] = None) -> int:
+    """Resolve Telegram user_id from verified WebApp initData, then fallback query/body uid."""
+    init_data = request.headers.get("X-Telegram-Init-Data", "")
+    tg_user = _verify_telegram_webapp_init_data(init_data)
+
+    user_id = 0
+    if tg_user and tg_user.get("id"):
+        try:
+            user_id = int(tg_user.get("id") or 0)
+        except Exception:
+            user_id = 0
+
+    if user_id > 0:
+        return user_id
+
+    payload = payload if isinstance(payload, dict) else {}
+    for value in (
+        payload.get("uid"),
+        payload.get("tg_user_id"),
+        payload.get("user_id"),
+        request.query_params.get("uid"),
+        request.query_params.get("tg_user_id"),
+        request.query_params.get("user_id"),
+    ):
+        try:
+            user_id = int(value or 0)
+        except Exception:
+            user_id = 0
+        if user_id > 0:
+            return user_id
+
+    return 0
+
 @app.get("/api/tg/account")
 async def tg_account_info(request: Request):
     init_data = request.headers.get("X-Telegram-Init-Data", "")
@@ -959,6 +994,42 @@ async def tg_account_info(request: Request):
         "policy_url": f"{NABEX_PUBLIC_SITE_URL}/privacy.html",
         "contact_email": contact_email,
     }
+
+
+@app.get("/api/tg/balance/history")
+async def tg_balance_history(request: Request, limit: int = 50):
+    user_id = _tg_user_id_from_request(request)
+    if user_id <= 0:
+        return {
+            "ok": False,
+            "error": "user_id_required",
+            "items": [],
+            "balance_tokens": 0,
+            "message": "Откройте личный кабинет из Telegram-бота.",
+        }
+
+    try:
+        safe_limit = max(1, min(int(limit or 50), 100))
+    except Exception:
+        safe_limit = 50
+
+    try:
+        ensure_user_row(user_id)
+        items = get_balance_history(user_id, limit=safe_limit)
+        balance = int(get_balance(user_id) or 0)
+        return {"ok": True, "items": items, "balance_tokens": balance}
+    except Exception as exc:
+        try:
+            print(f"[webapp_account] balance history unavailable for user_id={user_id}: {exc}", flush=True)
+        except Exception:
+            pass
+        return {
+            "ok": False,
+            "error": "history_unavailable",
+            "items": [],
+            "balance_tokens": 0,
+            "message": "Не удалось загрузить историю токенов.",
+        }
 
 
 @app.post("/api/tg/topup/create")
