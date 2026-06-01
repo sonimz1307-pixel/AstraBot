@@ -6,6 +6,7 @@ import json
 import os
 import time
 import uuid
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
@@ -15,6 +16,7 @@ from ai_chat import openai_chat_answer
 from chat_file_text import extract_file_text
 from chat_attachment_storage import (
     CHAT_ATTACHMENTS_BUCKET,
+    create_signed_url,
     download_chat_attachment_bytes,
     upload_chat_attachment_bytes,
 )
@@ -60,6 +62,10 @@ AI_CHAT_FILE_TEXT_MAX_CHARS = int(os.getenv("AI_CHAT_FILE_TEXT_MAX_CHARS", "5000
 CHAT_USER_LOCK_TTL_SEC = int(os.getenv("CHAT_USER_LOCK_TTL_SEC", "180") or "180")
 CHAT_USER_LOCK_WAIT_SEC = float(os.getenv("CHAT_USER_LOCK_WAIT_SEC", "1.0") or "1.0")
 CHAT_USER_LOCK_MAX_WAIT_SEC = float(os.getenv("CHAT_USER_LOCK_MAX_WAIT_SEC", "240") or "240")
+
+TG_LONG_ANSWER_FILE_THRESHOLD = int(os.getenv("TG_LONG_ANSWER_FILE_THRESHOLD", "3500") or "3500")
+TG_LONG_ANSWER_PREVIEW_CHARS = int(os.getenv("TG_LONG_ANSWER_PREVIEW_CHARS", "1200") or "1200")
+TG_LONG_ANSWER_SIGNED_TTL_SEC = int(os.getenv("TG_LONG_ANSWER_SIGNED_TTL_SEC", str(7 * 24 * 3600)) or str(7 * 24 * 3600))
 
 DEFAULT_TG_SYSTEM_PROMPT = (
     "Ты Claude Sonnet 4.6 внутри AstraBot. Отвечай на русском, кратко и по делу. "
@@ -131,8 +137,99 @@ async def tg_delete_message(chat_id: int, message_id: Optional[int]) -> None:
         pass
 
 
-async def tg_send_long_message(chat_id: int, text: str, reply_markup: Optional[dict] = None) -> None:
+async def tg_send_document_bytes(
+    chat_id: int,
+    raw: bytes,
+    *,
+    filename: str,
+    caption: Optional[str] = None,
+    reply_markup: Optional[dict] = None,
+) -> bool:
+    if not TG_API:
+        print("[chat_worker] TELEGRAM_BOT_TOKEN is not set", flush=True)
+        return False
+    data: Dict[str, Any] = {"chat_id": str(int(chat_id))}
+    if caption:
+        data["caption"] = str(caption)[:1024]
+    if reply_markup is not None:
+        data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+    files = {"document": (filename, raw, "text/plain; charset=utf-8")}
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(f"{TG_API}/sendDocument", data=data, files=files)
+        payload = response.json() if response.content else {}
+        return bool(isinstance(payload, dict) and payload.get("ok"))
+    except Exception as exc:
+        print(f"[chat_worker] sendDocument failed: {exc}", flush=True)
+        return False
+
+
+async def _upload_long_answer_text(
+    text: str,
+    *,
+    chat_id: int,
+    user_id: int = 0,
+    job_id: str = "",
+) -> str:
+    raw = (text or "").encode("utf-8")
+    if not raw:
+        return ""
+    filename = f"astrabot_answer_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}.txt"
+    try:
+        storage_ref = await upload_chat_attachment_bytes(
+            raw,
+            filename=filename,
+            content_type="text/plain; charset=utf-8",
+            user_id=user_id or chat_id,
+            origin="telegram-long-answer",
+            job_id=job_id or None,
+        )
+        bucket = str(storage_ref.get("storage_bucket") or CHAT_ATTACHMENTS_BUCKET)
+        path = str(storage_ref.get("storage_path") or "")
+        signed = await create_signed_url(bucket, path, expires_in=TG_LONG_ANSWER_SIGNED_TTL_SEC) if path else ""
+        return signed or str(storage_ref.get("storage_url") or "")
+    except Exception as exc:
+        print(f"[chat_worker] long answer upload failed job={job_id}: {exc}", flush=True)
+        return ""
+
+
+async def tg_send_long_message(
+    chat_id: int,
+    text: str,
+    reply_markup: Optional[dict] = None,
+    *,
+    user_id: int = 0,
+    job_id: str = "",
+) -> None:
     clean = str(text or "").strip() or "Пустой ответ от модели."
+
+    if len(clean) >= max(1, TG_LONG_ANSWER_FILE_THRESHOLD):
+        raw = clean.encode("utf-8")
+        preview_limit = max(300, min(TG_LONG_ANSWER_PREVIEW_CHARS, 2500))
+        preview = clean[:preview_limit].strip()
+        if len(clean) > preview_limit:
+            preview += "…"
+
+        download_url = await _upload_long_answer_text(clean, chat_id=chat_id, user_id=user_id, job_id=job_id)
+        filename = f"astrabot_answer_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}.txt"
+        sent_file = await tg_send_document_bytes(
+            chat_id,
+            raw,
+            filename=filename,
+            caption="Полный ответ AstraBot в TXT",
+        )
+        if sent_file or download_url:
+            notice = "📄 Ответ получился длинным.\n"
+            if sent_file:
+                notice += "Полный текст прикрепил отдельным TXT-файлом.\n"
+            if download_url:
+                notice += f"🔗 Ссылка на скачивание: {download_url}\n"
+            notice += f"\nКраткое начало ответа:\n\n{preview}"
+            await tg_send_message(chat_id, notice[:3900], reply_markup=reply_markup)
+            return
+
+        # If both Storage and Telegram document delivery fail, fall back to safe chunking without a misleading file notice.
+
     chunks: List[str] = []
     while len(clean) > 3900:
         cut = clean.rfind("\n", 0, 3900)
@@ -289,7 +386,7 @@ async def process_tg_ai_chat_job(job: Dict[str, Any]) -> None:
             await add_tg_chat_turn(chat_id, user_id, user_text=memory_user, assistant_text=answer)
 
         await tg_delete_message(chat_id, status_message_id)
-        await tg_send_long_message(chat_id, answer, reply_markup=reply_markup)
+        await tg_send_long_message(chat_id, answer, reply_markup=reply_markup, user_id=user_id, job_id=str(job.get("job_id") or ""))
         await log_free_usage_event_async(
             source="telegram",
             service="ChatGPT" if model_key == "openai" else kie_claude_display_name(model_actual),
