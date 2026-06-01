@@ -64,7 +64,7 @@ CHAT_USER_LOCK_WAIT_SEC = float(os.getenv("CHAT_USER_LOCK_WAIT_SEC", "1.0") or "
 CHAT_USER_LOCK_MAX_WAIT_SEC = float(os.getenv("CHAT_USER_LOCK_MAX_WAIT_SEC", "240") or "240")
 
 TG_LONG_ANSWER_FILE_THRESHOLD = int(os.getenv("TG_LONG_ANSWER_FILE_THRESHOLD", "3500") or "3500")
-TG_LONG_ANSWER_PREVIEW_CHARS = int(os.getenv("TG_LONG_ANSWER_PREVIEW_CHARS", "1200") or "1200")
+TG_LONG_ANSWER_PREVIEW_CHARS = int(os.getenv("TG_LONG_ANSWER_PREVIEW_CHARS", "400") or "400")
 TG_LONG_ANSWER_SIGNED_TTL_SEC = int(os.getenv("TG_LONG_ANSWER_SIGNED_TTL_SEC", str(7 * 24 * 3600)) or str(7 * 24 * 3600))
 
 DEFAULT_TG_SYSTEM_PROMPT = (
@@ -205,7 +205,8 @@ async def tg_send_long_message(
 
     if len(clean) >= max(1, TG_LONG_ANSWER_FILE_THRESHOLD):
         raw = clean.encode("utf-8")
-        preview_limit = max(300, min(TG_LONG_ANSWER_PREVIEW_CHARS, 2500))
+        # Keep the chat compact: by default show only ~400 chars, not a huge preview block.
+        preview_limit = max(120, min(TG_LONG_ANSWER_PREVIEW_CHARS, 900))
         preview = clean[:preview_limit].strip()
         if len(clean) > preview_limit:
             preview += "…"
@@ -221,11 +222,23 @@ async def tg_send_long_message(
         if sent_file or download_url:
             notice = "📄 Ответ получился длинным.\n"
             if sent_file:
-                notice += "Полный текст прикрепил отдельным TXT-файлом.\n"
+                notice += "Полный текст прикрепил TXT-файлом.\n"
+            elif download_url:
+                notice += "Полный текст доступен по кнопке ниже.\n"
+            notice += f"\nКраткое начало:\n\n{preview}"
+
+            effective_reply_markup = reply_markup
             if download_url:
-                notice += f"🔗 Ссылка на скачивание: {download_url}\n"
-            notice += f"\nКраткое начало ответа:\n\n{preview}"
-            await tg_send_message(chat_id, notice[:3900], reply_markup=reply_markup)
+                download_button = {"text": "🔗 Скачать TXT", "url": download_url}
+                if isinstance(reply_markup, dict) and isinstance(reply_markup.get("inline_keyboard"), list):
+                    effective_reply_markup = {
+                        **reply_markup,
+                        "inline_keyboard": [[download_button], *reply_markup.get("inline_keyboard", [])],
+                    }
+                else:
+                    effective_reply_markup = {"inline_keyboard": [[download_button]]}
+
+            await tg_send_message(chat_id, notice[:3900], reply_markup=effective_reply_markup)
             return
 
         # If both Storage and Telegram document delivery fail, fall back to safe chunking without a misleading file notice.
