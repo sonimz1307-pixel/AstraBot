@@ -622,6 +622,99 @@
 
     .nav-row:last-child { border-bottom: 0; }
 
+
+    .history-sheet {
+      background:
+        radial-gradient(circle at 28% 0%, rgba(255, 138, 0, 0.14), transparent 34%),
+        radial-gradient(circle at 100% 24%, rgba(154, 77, 255, 0.10), transparent 30%),
+        #101010;
+    }
+
+    .history-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin: -4px 0 16px;
+    }
+
+    .history-pill {
+      min-height: 38px;
+      border-radius: 999px;
+      padding: 8px 13px;
+      color: rgba(255, 255, 255, 0.78);
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.09);
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .history-refresh {
+      min-height: 38px;
+      border-radius: 999px;
+      padding: 8px 14px;
+      color: #130d03;
+      background: linear-gradient(135deg, #fff1c4, #ffb000);
+      font-size: 13px;
+      font-weight: 950;
+    }
+
+    .history-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .history-empty {
+      min-height: 132px;
+      border-radius: 20px;
+      border: 1px dashed rgba(255, 255, 255, 0.14);
+      color: var(--muted);
+      display: grid;
+      place-items: center;
+      text-align: center;
+      padding: 18px;
+      line-height: 1.35;
+    }
+
+    .history-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 14px;
+      align-items: center;
+      border: 1px solid rgba(255, 255, 255, 0.085);
+      border-radius: 18px;
+      padding: 14px 16px;
+      background: rgba(255, 255, 255, 0.045);
+    }
+
+    .history-main { min-width: 0; }
+    .history-title {
+      font-size: 16px;
+      line-height: 1.2;
+      font-weight: 950;
+      color: rgba(255, 255, 255, 0.93);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .history-meta {
+      margin-top: 5px;
+      color: var(--muted-2);
+      font-size: 12px;
+      line-height: 1.35;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .history-delta {
+      font-size: 18px;
+      line-height: 1;
+      font-weight: 950;
+      white-space: nowrap;
+    }
+    .history-delta.plus { color: var(--green); }
+    .history-delta.minus { color: var(--orange); }
+
     .small-icon {
       width: 46px;
       height: 46px;
@@ -1750,6 +1843,11 @@
     </section>
 
     <section class="card list-card">
+      <a class="nav-row" href="#" data-open-history>
+        <span class="small-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h18v12H3z"/><path d="M7 7V5h10v2"/><path d="M3 11h18"/><path d="M7 15h.01"/><path d="M11 15h6"/></svg></span>
+        <span><span class="row-title">История токенов </span><span class="row-text"> Списания, пополнения и возвраты</span></span>
+        <span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></span>
+      </a>
       <a class="nav-row" href="#" data-open="navigation">
         <span class="small-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m16 8-3 8-5 2 3-8 5-2z"/></svg></span>
         <span><span class="row-title">Навигация </span><span class="row-text">    Краткая навигация по разделам бота и сайта</span></span>
@@ -1786,6 +1884,29 @@
       </div>
     </section>
   </main>
+
+
+  <div class="plans-overlay" id="historyOverlay" aria-hidden="true">
+    <section class="plans-sheet history-sheet" role="dialog" aria-modal="true" aria-label="История токенов">
+      <div class="sheet-head">
+        <div>
+          <div class="sheet-title">История токенов</div>
+          <div class="sheet-note">Последние списания, пополнения и возвраты по вашему балансу.</div>
+        </div>
+        <button class="close-sheet" type="button" data-close-history aria-label="Закрыть">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+        </button>
+      </div>
+      <div class="history-actions">
+        <div class="history-pill" id="historyBalance">Баланс: —</div>
+        <div class="history-pill" id="historyCount">Операций: —</div>
+        <button class="history-refresh" type="button" data-refresh-history>Обновить</button>
+      </div>
+      <div class="history-list" id="historyList">
+        <div class="history-empty">История пока не загружена</div>
+      </div>
+    </section>
+  </div>
 
   <div class="plans-overlay" id="topupOverlay" aria-hidden="true">
     <section class="plans-sheet" role="dialog" aria-modal="true" aria-label="Пополнение баланса">
@@ -1898,7 +2019,10 @@
       siteUrl: "https://nabex.ru",
       supportUrl: "https://t.me/HelpNeiroAstra",
       offerUrl: "https://nabex.ru/terms.html",
-      policyUrl: "https://nabex.ru/privacy.html"
+      policyUrl: "https://nabex.ru/privacy.html",
+      historyItems: [],
+      historyLoaded: false,
+      historyLoading: false
     };
 
     if (tg) {
@@ -1910,6 +2034,7 @@
 
     const topupOverlay = document.getElementById("topupOverlay");
     const tariffOverlay = document.getElementById("tariffOverlay");
+    const historyOverlay = document.getElementById("historyOverlay");
     const topupEmailBox = document.getElementById("topupEmailBox");
     const topupEmailInput = document.getElementById("topupEmailInput");
     const toast = document.getElementById("toast");
@@ -1917,6 +2042,9 @@
     const refCode = document.getElementById("refCode");
     const siteRefText = document.getElementById("siteRefText");
     const botRefText = document.getElementById("botRefText");
+    const historyList = document.getElementById("historyList");
+    const historyBalance = document.getElementById("historyBalance");
+    const historyCount = document.getElementById("historyCount");
 
     function showToast(text) {
       toast.textContent = text || "Готово";
@@ -1944,7 +2072,11 @@
       if (!sheet) return;
       sheet.classList.remove("show");
       sheet.setAttribute("aria-hidden", "true");
-      if (!topupOverlay.classList.contains("show") && !tariffOverlay.classList.contains("show")) {
+      if (
+        !topupOverlay.classList.contains("show") &&
+        !tariffOverlay.classList.contains("show") &&
+        !historyOverlay.classList.contains("show")
+      ) {
         document.body.style.overflow = "";
       }
     }
@@ -1999,6 +2131,192 @@
         temp.remove();
       }
       showToast(successText || "Скопировано");
+    }
+
+
+    function escapeHtml(value) {
+      return String(value == null ? "" : value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function formatHistoryDate(value) {
+      if (!value) return "Дата недоступна";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return String(value);
+      return date.toLocaleString("ru-RU", {
+        day: "2-digit",
+        month: "2-digit",
+        year: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit"
+      });
+    }
+
+    function reasonBaseLabel(reason) {
+      const key = String(reason || "").trim().toLowerCase();
+      const labels = {
+        yookassa_topup: "Пополнение баланса",
+        stars_topup: "Пополнение через Telegram Stars",
+        partner_payout_refund: "Возврат партнёрской выплаты",
+        kling3: "Kling 3.0",
+        kling3_create: "Kling 3.0",
+        kling3_kie: "Kling 3.0 - New",
+        kling3_kie_create: "Kling 3.0 - New",
+        kling3_refund: "Kling 3.0",
+        kling3_kie_refund: "Kling 3.0 - New",
+        kling_hold: "Kling",
+        kling_rollback: "Kling",
+        seedance_video: "Seedance 2.0",
+        seedance_video_refund: "Seedance 2.0",
+        seedance_extend: "Seedance Extend",
+        seedance_extend_refund: "Seedance Extend",
+        grok_video: "Grok Video",
+        grok_video_refund: "Grok Video",
+        gemini_omni_video: "Google Omni Flash",
+        gemini_omni_video_refund: "Google Omni Flash",
+        veo31_fast_relax_video: "Veo 3.1 Fast Relax",
+        veo31_fast_relax_video_refund: "Veo 3.1 Fast Relax",
+        veo_video: "Veo Video",
+        veo_video_refund: "Veo Video",
+        sora_video: "Sora Video",
+        sora_video_refund: "Sora Video",
+        switchx_video: "SwitchX Video",
+        switchx_video_refund: "SwitchX Video",
+        suno_music: "Suno Music",
+        suno_music_refund: "Suno Music",
+        suno_generation: "Suno Music",
+        suno_refund: "Suno Music",
+        workspace_music: "Музыка",
+        workspace_music_refund: "Музыка",
+        nano_banana: "Nano Banana",
+        nano_banana_refund: "Nano Banana",
+        nano_banana_2: "Nano Banana 2",
+        nano_banana_2_refund: "Nano Banana 2",
+        nano_banana_pro: "Nano Banana Pro",
+        nano_banana_pro_refund: "Nano Banana Pro",
+        nano_banana_pro_new: "Nano Banana Pro - NEW",
+        nano_banana_pro_new_refund: "Nano Banana Pro - NEW",
+        gpt_image_2: "GPT Image 2.0",
+        gpt_image_2_refund: "GPT Image 2.0",
+        seedream_45_single: "Seedream 4.5",
+        seedream_45_single_refund: "Seedream 4.5",
+        two_photos: "Фото-сессия",
+        two_photos_refund: "Фото-сессия",
+        photosession_generation: "Фото-сессия",
+        photosession_refund: "Фото-сессия",
+        topaz_image_upscale: "Topaz Image",
+        topaz_image_upscale_refund: "Topaz Image",
+        topaz_video_upscale: "Topaz Video",
+        topaz_video_upscale_refund: "Topaz Video",
+        workspace_site_create: "Создание сайта",
+        workspace_site_edit: "Правки сайта",
+        workspace_site_refund: "Возврат за сайт",
+        site_create: "Создание сайта",
+        site_create_refund: "Возврат за сайт",
+        site_revision: "Правки сайта",
+        site_revision_refund: "Возврат за сайт",
+        account_balance_merge: "Перенос баланса",
+        admin_generation_refund: "Ручной возврат"
+      };
+      if (labels[key]) return labels[key];
+      return key
+        .replace(/_refund$/i, "")
+        .split("_")
+        .filter(Boolean)
+        .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" ") || "Операция по балансу";
+    }
+
+    function historyTitle(item) {
+      const reason = String(item && item.reason || "");
+      const delta = Number(item && item.delta_tokens || 0);
+      const base = reasonBaseLabel(reason);
+      if (reason.toLowerCase().includes("refund")) return "Возврат: " + base;
+      if (delta > 0 && /topup|stars|payment|bonus/i.test(reason)) return base;
+      if (delta > 0) return "Зачисление: " + base;
+      if (delta < 0) return "Списание: " + base;
+      return base;
+    }
+
+    function historyMeta(item) {
+      const meta = item && typeof item.meta === "object" && item.meta ? item.meta : {};
+      const parts = [formatHistoryDate(item && item.created_at)];
+      const details = [];
+      if (meta.model || meta.model_name || meta.display_name || meta.service) details.push(meta.model || meta.model_name || meta.display_name || meta.service);
+      if (meta.mode) details.push(meta.mode);
+      if (meta.duration || meta.duration_sec) details.push((meta.duration || meta.duration_sec) + " сек");
+      if (meta.resolution || meta.quality) details.push(meta.resolution || meta.quality);
+      if (details.length) parts.push(details.join(" · "));
+      if (meta.error) parts.push("ошибка: " + String(meta.error).slice(0, 80));
+      return parts.join(" · ");
+    }
+
+    function renderHistory() {
+      const items = Array.isArray(state.historyItems) ? state.historyItems : [];
+      if (historyBalance) historyBalance.textContent = "Баланс: " + (Number.isFinite(Number(state.balance)) ? Math.trunc(Number(state.balance)) : 0) + " токенов";
+      if (historyCount) historyCount.textContent = "Операций: " + items.length;
+      if (!historyList) return;
+      if (state.historyLoading) {
+        historyList.innerHTML = '<div class="history-empty">Загружаю историю…</div>';
+        return;
+      }
+      if (!items.length) {
+        historyList.innerHTML = '<div class="history-empty">Операций по токенам пока нет</div>';
+        return;
+      }
+      historyList.innerHTML = items.map(item => {
+        const delta = Number(item.delta_tokens || 0);
+        const deltaText = (delta > 0 ? "+" : "") + Math.trunc(delta) + " ток.";
+        const deltaClass = delta >= 0 ? "plus" : "minus";
+        return `
+          <div class="history-item">
+            <div class="history-main">
+              <div class="history-title">${escapeHtml(historyTitle(item))}</div>
+              <div class="history-meta">${escapeHtml(historyMeta(item))}</div>
+            </div>
+            <div class="history-delta ${deltaClass}">${escapeHtml(deltaText)}</div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    async function loadHistory(force) {
+      if (state.historyLoading) return;
+      if (state.historyLoaded && !force) {
+        renderHistory();
+        return;
+      }
+      state.historyLoading = true;
+      renderHistory();
+      const params = new URLSearchParams();
+      const uid = query.get("uid") || query.get("tg_user_id") || query.get("user_id") || "";
+      if (uid) params.set("uid", uid);
+      params.set("limit", "50");
+      try {
+        const response = await fetch("/api/tg/balance/history?" + params.toString(), {
+          headers: { "X-Telegram-Init-Data": tg && tg.initData ? tg.initData : "" }
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!data.ok) {
+          showToast(data.message || "Не удалось загрузить историю");
+          state.historyItems = [];
+          return;
+        }
+        state.historyItems = Array.isArray(data.items) ? data.items : [];
+        state.balance = data.balance_tokens ?? state.balance;
+        state.historyLoaded = true;
+        renderAccount();
+      } catch (error) {
+        showToast("Ошибка загрузки истории");
+        state.historyItems = [];
+      } finally {
+        state.historyLoading = false;
+        renderHistory();
+      }
     }
 
 
@@ -2131,6 +2449,13 @@
         return;
       }
 
+      if (event.target.closest("[data-open-history]")) {
+        event.preventDefault();
+        openSheet(historyOverlay);
+        await loadHistory(false);
+        return;
+      }
+
       if (event.target.closest("[data-close-topup]") || event.target === topupOverlay) {
         closeSheet(topupOverlay);
         return;
@@ -2138,6 +2463,16 @@
 
       if (event.target.closest("[data-close-tariffs]") || event.target === tariffOverlay) {
         closeSheet(tariffOverlay);
+        return;
+      }
+
+      if (event.target.closest("[data-close-history]") || event.target === historyOverlay) {
+        closeSheet(historyOverlay);
+        return;
+      }
+
+      if (event.target.closest("[data-refresh-history]")) {
+        await loadHistory(true);
         return;
       }
 
