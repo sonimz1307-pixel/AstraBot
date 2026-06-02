@@ -28,6 +28,7 @@ _ALLOWED_ASPECT_RATIOS = {
     "4:3",
     "3:4",
     "16:9",
+    "21:9",
     "9:16",
 }
 _ALLOWED_REFERENCE_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
