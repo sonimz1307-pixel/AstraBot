@@ -162,6 +162,14 @@ from chat_job_store import create_chat_job_status, get_chat_job_status, set_chat
 from nano_banana import run_nano_banana
 from nano_banana_pro import handle_nano_banana_pro
 from nano_banana_pro_new_kie import handle_nano_banana_pro_new, normalize_nano_banana_pro_new_aspect_ratio, normalize_nano_banana_pro_new_resolution
+from gpt_image_2_kie import (
+    KIE_GPT_IMAGE_2_MAX_INPUT_MB,
+    gpt_image_2_kie_cost,
+    normalize_gpt_image_2_kie_resolution,
+    normalize_gpt_image_2_kie_aspect_ratio,
+    normalize_gpt_image_2_kie_options,
+    validate_gpt_image_2_kie_reference_bytes,
+)
 from switchx_service import SwitchXClient, SwitchXError
 from topaz_image_replicate import TopazImageParams, run_topaz_image_upscale
 from topaz_pricing import get_photo_preset_settings, get_photo_preset_tokens
@@ -3065,6 +3073,18 @@ def _workspace_gpt_image_2_size(aspect_ratio: Any, mode: str = "text_to_image") 
     return mapping.get(ratio, "1024x1024")
 
 
+def _workspace_gpt_image_2_kie_resolution(value: Any) -> str:
+    return normalize_gpt_image_2_kie_resolution(value, default="2K")
+
+
+def _workspace_gpt_image_2_kie_aspect_ratio(value: Any, default: str = "16:9") -> str:
+    return normalize_gpt_image_2_kie_aspect_ratio(value, default=default)
+
+
+def _workspace_gpt_image_2_kie_options(resolution: Any, aspect_ratio: Any) -> tuple[str, str]:
+    return normalize_gpt_image_2_kie_options(resolution, aspect_ratio, default_resolution="2K", default_aspect="16:9")
+
+
 def _workspace_image_cost(provider: str, mode: str, preset_slug: str = "", resolution: str = "2K", speed_mode: str = "fast", action_type: str = "generate", model: Any = None) -> int:
     provider_key = str(provider or "").strip().lower()
     mode_key = str(mode or "").strip().lower()
@@ -3096,6 +3116,8 @@ def _workspace_image_cost(provider: str, mode: str, preset_slug: str = "", resol
         return 0
     if provider_key == "gpt_image_2":
         return 1
+    if provider_key == "gpt_image_2_kie":
+        return gpt_image_2_kie_cost(resolution_key)
     if provider_key == "midjourney":
         return _workspace_midjourney_action_cost(action_type, speed_mode, model=model)
 
@@ -3127,6 +3149,8 @@ def _workspace_image_charge_reason(provider: str, mode: str, action_type: str = 
     if provider_key == "topaz_photo":
         return "workspace_topaz_photo"
     if provider_key == "gpt_image_2":
+        return "gpt_image_2"
+    if provider_key == "gpt_image_2_kie":
         return "gpt_image_2"
     if provider_key == "midjourney":
         return _workspace_midjourney_action_reason(action_type)
@@ -6376,7 +6400,7 @@ async def workspace_image_run(
     if provider != "topaz_photo" and not prompt:
         raise HTTPException(status_code=400, detail="Missing prompt")
 
-    supported = {"nano_banana", "nano_banana_2", "nano_banana_pro", "nano_banana_pro_new", "seedream", "posters", "photosession", "two_images", "text_to_image", "gpt_image_2", "topaz_photo", "midjourney"}
+    supported = {"nano_banana", "nano_banana_2", "nano_banana_pro", "nano_banana_pro_new", "seedream", "posters", "photosession", "two_images", "text_to_image", "gpt_image_2", "gpt_image_2_kie", "topaz_photo", "midjourney"}
     if provider not in supported:
         raise HTTPException(status_code=400, detail=f"Provider {provider} is not supported in /image/run")
 
@@ -6386,12 +6410,27 @@ async def workspace_image_run(
     source_upload = source_uploads_raw[0] if source_uploads_raw else None
     source_image: Optional[bytes] = None
 
-    if provider in {"nano_banana_pro_new", "gpt_image_2"}:
-        source_limit = 8 if provider == "nano_banana_pro_new" else 4
-        for upload in source_uploads_raw[:source_limit]:
+    if provider in {"nano_banana_pro_new", "gpt_image_2", "gpt_image_2_kie"}:
+        source_limit = 8 if provider == "nano_banana_pro_new" else (16 if provider == "gpt_image_2_kie" else 4)
+        if provider == "gpt_image_2_kie" and len(source_uploads_raw) > source_limit:
+            raise HTTPException(status_code=400, detail=f"Для Gpt Image 2 можно загрузить максимум {source_limit} reference images.")
+        for index, upload in enumerate(source_uploads_raw[:source_limit], start=1):
             raw = await _read_optional_upload_bytes(upload)
-            if raw:
-                source_image_uploads.append((upload, raw, getattr(upload, "filename", None)))
+            if not raw:
+                continue
+            upload_name = getattr(upload, "filename", None)
+            if provider == "gpt_image_2_kie":
+                try:
+                    safe_ext, _safe_mime = validate_gpt_image_2_kie_reference_bytes(
+                        raw,
+                        filename=upload_name,
+                        content_type=getattr(upload, "content_type", None),
+                        source_label=f"reference image #{index}",
+                    )
+                except Exception as e:
+                    raise HTTPException(status_code=400, detail=str(e)) from e
+                upload_name = f"gpt_image2_kie_ref_{index}.{safe_ext}"
+            source_image_uploads.append((upload, raw, upload_name))
         if source_image_uploads:
             source_upload = source_image_uploads[0][0]
             source_image = source_image_uploads[0][1]
@@ -6428,6 +6467,8 @@ async def workspace_image_run(
         raise HTTPException(status_code=400, detail="Для нейро фотосессии нужен source image.")
     if provider == "gpt_image_2" and mode == "image_to_image" and not source_image_uploads:
         raise HTTPException(status_code=400, detail="Для GPT Image 2.0 Image→Image нужен хотя бы 1 source/reference image.")
+    if provider == "gpt_image_2_kie" and mode == "image_to_image" and not source_image_uploads:
+        raise HTTPException(status_code=400, detail="Для Gpt Image 2 Image→Image нужен хотя бы 1 reference image.")
     if provider == "two_images" and (not source_image or not base_image):
         raise HTTPException(status_code=400, detail="Для режима Картинка + Картинка нужны base image и source image.")
     if provider == "topaz_photo" and not source_image:
@@ -6450,6 +6491,8 @@ async def workspace_image_run(
 
     if provider in {"nano_banana_2", "nano_banana_pro", "nano_banana_pro_new", "text_to_image", "seedream"} and mode in {"text_to_image", "t2i"} and aspect_ratio == "match_input_image":
         aspect_ratio = "9:16" if provider == "seedream" else "16:9"
+    if provider == "gpt_image_2_kie":
+        resolution, aspect_ratio = _workspace_gpt_image_2_kie_options(resolution, aspect_ratio)
 
     try:
         mj_stylize = max(0, min(1000, int(mj_stylize_raw if mj_stylize_raw not in {None, ""} else 100)))
@@ -6545,8 +6588,8 @@ async def workspace_image_run(
             charged = True
 
         source_image_urls = []
-        if provider in {"nano_banana_pro_new", "gpt_image_2"}:
-            source_limit = 8 if provider == "nano_banana_pro_new" else 4
+        if provider in {"nano_banana_pro_new", "gpt_image_2", "gpt_image_2_kie"}:
+            source_limit = 8 if provider == "nano_banana_pro_new" else (16 if provider == "gpt_image_2_kie" else 4)
             for index, (_upload_obj, raw_bytes, upload_name) in enumerate(source_image_uploads[:source_limit], start=1):
                 source_image_urls.append(_upload_workspace_input_image(uid, raw_bytes, filename=upload_name, slot=f"workspace_image_source_{index}"))
         source_image_url = source_image_urls[0] if source_image_urls else (_upload_workspace_input_image(uid, source_image, filename=getattr(source_upload, "filename", None), slot="workspace_image_source") if source_image else None)
