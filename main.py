@@ -2657,13 +2657,257 @@ def _seedance_refs_collect_kb() -> dict:
     }
 
 
+def _seedance_prompt_collect_kb(mode: str = "") -> dict:
+    rows = [
+        [{"text": "✅ Запустить", "callback_data": "seedance_prompt:done"}],
+        [{"text": "🗑 Очистить промпт", "callback_data": "seedance_prompt:clear"}],
+    ]
+    if str(mode or "").strip() in ("seedance_i2v", "seedance_omni"):
+        rows.append([{"text": "⬅️ Вернуться к refs", "callback_data": "seedance_refs:back"}])
+    rows.append([{"text": "❌ Отмена", "callback_data": "seedance_prompt:cancel"}])
+    return {"inline_keyboard": rows}
+
+
 def _seedance_prompt_back_kb() -> dict:
-    return {
-        "inline_keyboard": [
-            [{"text": "⬅️ Вернуться к refs", "callback_data": "seedance_refs:back"}],
-            [{"text": "❌ Отмена", "callback_data": "seedance_refs:cancel"}],
-        ]
-    }
+    # Backward-compatible wrapper for old call sites.
+    return _seedance_prompt_collect_kb("seedance_omni")
+
+
+def _seedance_prompt_limit_from_settings(settings: Optional[Dict[str, Any]]) -> int:
+    settings = settings or {}
+    provider_kind = str(settings.get("provider_kind") or "seedance").strip() or "seedance"
+    return 20000 if provider_kind == "seedance_kie" else 4000
+
+
+def _seedance_prompt_state_key(st: Dict[str, Any]) -> str:
+    mode_now = str((st or {}).get("mode") or "").strip()
+    return mode_now if mode_now in ("seedance_t2v", "seedance_i2v", "seedance_omni") else ""
+
+
+def _seedance_prompt_text_from_state(st: Dict[str, Any]) -> str:
+    key = _seedance_prompt_state_key(st)
+    if not key:
+        return ""
+    ctx = (st or {}).get(key) or {}
+    parts = ctx.get("prompt_parts") or []
+    cleaned = [str(x or "").strip() for x in parts if str(x or "").strip()]
+    if cleaned:
+        return "\n\n".join(cleaned).strip()
+    return str(ctx.get("prompt") or "").strip()
+
+
+def _seedance_prompt_clear_state(st: Dict[str, Any]) -> None:
+    key = _seedance_prompt_state_key(st)
+    if not key:
+        return
+    ctx = (st or {}).get(key) or {}
+    ctx["prompt_parts"] = []
+    ctx["prompt"] = None
+    st[key] = ctx
+    st["ts"] = _now()
+
+
+def _seedance_prompt_append_part(st: Dict[str, Any], text: str, limit: int) -> Tuple[bool, str, int, int]:
+    key = _seedance_prompt_state_key(st)
+    if not key:
+        return False, "Сейчас я не жду Seedance-промпт.", 0, 0
+
+    part = str(text or "").strip()
+    if not part:
+        return False, "Пустой текст не добавил. Пришли часть промпта текстом.", 0, 0
+
+    ctx = (st or {}).get(key) or {"step": "need_prompt"}
+    parts = [str(x or "").strip() for x in (ctx.get("prompt_parts") or []) if str(x or "").strip()]
+    next_text = "\n\n".join(parts + [part]).strip()
+
+    if int(limit or 0) > 0 and len(next_text) > int(limit):
+        return (
+            False,
+            f"Промпт станет слишком длинным: {len(next_text)} символов. Лимит для этого режима: {int(limit)}.",
+            len(parts),
+            len("\n\n".join(parts).strip()),
+        )
+
+    parts.append(part)
+    ctx["prompt_parts"] = parts
+    ctx["prompt"] = next_text
+    st[key] = ctx
+    st["ts"] = _now()
+    return True, "", len(parts), len(next_text)
+
+
+async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st: Dict[str, Any], prompt: str) -> Dict[str, bool]:
+    mode_now = str((st or {}).get("mode") or "").strip()
+    if mode_now not in ("seedance_t2v", "seedance_i2v", "seedance_omni"):
+        await tg_send_message(chat_id, "Сейчас я не жду Seedance-промпт. Открой настройки Seedance заново.", reply_markup=_main_menu_for(user_id))
+        return {"ok": True}
+
+    settings = st.get("seedance_settings") or {}
+    provider_kind = str(settings.get("provider_kind") or "seedance").strip() or "seedance"
+    seedance_model = str(settings.get("seedance_model") or ("seedance-kie-480p" if provider_kind == "seedance_kie" else "preview")).strip()
+    task_type = str(settings.get("task_type") or ("seedance-2-fast" if seedance_model == "seedance-kie-480p" else ("seedance-2" if provider_kind == "seedance_kie" else "seedance-2-preview"))).strip()
+    duration = int(settings.get("duration") or 5)
+    aspect_ratio = str(settings.get("aspect_ratio") or "16:9").strip()
+    max_images = int(settings.get("max_images") or (7 if provider_kind == "seedance_kie" else 9))
+    max_videos = int(settings.get("max_videos") or 0)
+    max_audios = int(settings.get("max_audios") or 0)
+    prompt_limit = _seedance_prompt_limit_from_settings(settings)
+
+    prompt = str(prompt or "").strip()
+    if not prompt:
+        await tg_send_message(
+            chat_id,
+            "Промпт пока пустой. Пришли текст одной или несколькими частями, потом нажми «✅ Запустить».",
+            reply_markup=_seedance_prompt_collect_kb(mode_now),
+        )
+        return {"ok": True}
+
+    if len(prompt) > prompt_limit:
+        await tg_send_message(
+            chat_id,
+            f"Промпт слишком длинный: {len(prompt)} символов. Лимит для этого режима: {prompt_limit}.",
+            reply_markup=_seedance_prompt_collect_kb(mode_now),
+        )
+        return {"ok": True}
+
+    if mode_now == "seedance_i2v":
+        si = st.get("seedance_i2v") or {}
+        imgs = [x for x in (si.get("image_file_ids") or []) if str(x or "").strip()]
+        if not imgs:
+            await tg_send_message(chat_id, "Сначала пришли хотя бы 1 фото.", reply_markup=_seedance_refs_collect_kb())
+            return {"ok": True}
+
+    if mode_now == "seedance_omni":
+        so = st.get("seedance_omni") or {}
+        image_ids = [x for x in (so.get("image_file_ids") or []) if str(x or "").strip()]
+        video_ids = [x for x in (so.get("video_file_ids") or []) if str(x or "").strip()]
+        audio_ids = [x for x in (so.get("audio_file_ids") or []) if str(x or "").strip()]
+        if len(image_ids) + len(video_ids) + len(audio_ids) <= 0:
+            await tg_send_message(chat_id, "Сначала пришли хотя бы один image/video/audio reference.", reply_markup=_seedance_refs_collect_kb())
+            return {"ok": True}
+        if audio_ids and not (image_ids or video_ids):
+            await tg_send_message(chat_id, "Для Omni Reference аудио нельзя отправлять отдельно. Добавь хотя бы фото или видео reference.", reply_markup=_seedance_refs_collect_kb())
+            return {"ok": True}
+
+    if _busy_is_active(int(user_id)):
+        kind = _busy_kind(int(user_id)) or "генерация"
+        await tg_send_message(
+            chat_id,
+            f"⏳ Сейчас выполняется: {kind}. Дождись завершения (или /reset).",
+            reply_markup=_help_menu_for(user_id),
+        )
+        return {"ok": True}
+
+    if provider_kind == "seedance_kie":
+        seedance_input_video_sec = 0.0
+        if mode_now == "seedance_omni":
+            so_price = st.get("seedance_omni") or {}
+            video_ids_for_price = [x for x in (so_price.get("video_file_ids") or []) if str(x or "").strip()]
+            video_durations_for_price = list(so_price.get("video_durations_sec") or [])
+            if video_ids_for_price:
+                while len(video_durations_for_price) < len(video_ids_for_price):
+                    video_durations_for_price.append(15.4)
+                seedance_input_video_sec = float(sum(float(x or 0.0) for x in video_durations_for_price[:len(video_ids_for_price)]))
+        cost_tokens = int(seedance_kie_tokens_for_duration(
+            seedance_model,
+            duration,
+            input_video_duration_sec=seedance_input_video_sec,
+        ))
+    else:
+        is_fast_preview = seedance_model in ("fast", "seedance-2-fast-preview") or task_type == "seedance-2-fast-preview"
+        preview_price_map = {5: 6, 10: 12, 15: 18} if is_fast_preview else {5: 12, 10: 24, 15: 33}
+        cost_tokens = int(preview_price_map.get(int(duration), preview_price_map[5]))
+
+    _busy_start(int(user_id), "Seedance видео")
+    seedance_charged = False
+    try:
+        try:
+            ensure_user_row(user_id)
+            bal = int(get_balance(user_id) or 0)
+        except Exception:
+            bal = 0
+
+        if bal < cost_tokens:
+            await tg_send_message(
+                chat_id,
+                f"❌ Недостаточно токенов.\nНужно: {cost_tokens}\nБаланс: {bal}",
+                reply_markup=_topup_balance_inline_kb(),
+            )
+            return {"ok": True}
+
+        charge_meta = {
+            "provider_kind": provider_kind,
+            "seedance_model": seedance_model,
+            "task_type": task_type,
+            "duration": int(duration),
+            "aspect_ratio": aspect_ratio,
+            "cost_tokens": int(cost_tokens),
+        }
+        try:
+            add_tokens(user_id, -cost_tokens, reason="seedance_video", meta=charge_meta)
+        except TypeError:
+            add_tokens(user_id, -int(cost_tokens), reason="seedance_video", meta=charge_meta)
+        seedance_charged = True
+
+        job_id = uuid4().hex
+        job: Dict[str, Any] = {
+            "job_id": job_id,
+            "type": "seedance_video",
+            "chat_id": int(chat_id),
+            "user_id": int(user_id),
+            "provider_kind": provider_kind,
+            "seedance_model": seedance_model,
+            "task_type": task_type,
+            "prompt": prompt,
+            "duration": int(duration),
+            "aspect_ratio": aspect_ratio,
+            "charge_tokens": int(cost_tokens),
+        }
+
+        if mode_now == "seedance_i2v":
+            si = st.get("seedance_i2v") or {}
+            job["mode"] = "image_to_video"
+            job["image_file_ids"] = list(si.get("image_file_ids") or [])[:max_images]
+        elif mode_now == "seedance_omni":
+            so = st.get("seedance_omni") or {}
+            job["mode"] = "omni_reference"
+            job["image_file_ids"] = list(so.get("image_file_ids") or [])[:max_images]
+            job["video_file_ids"] = list(so.get("video_file_ids") or [])[:max_videos]
+            job["video_durations_sec"] = list(so.get("video_durations_sec") or [])[:max_videos]
+            job["audio_file_ids"] = list(so.get("audio_file_ids") or [])[:max_audios]
+        else:
+            job["mode"] = "text_to_video"
+
+        if provider_kind != "seedance_kie":
+            se = st.get("seedance_extend") or {}
+            se["task_type"] = task_type
+            st["seedance_extend"] = se
+
+        st.pop("seedance_t2v", None)
+        st.pop("seedance_i2v", None)
+        st.pop("seedance_omni", None)
+        st.pop("seedance_settings", None)
+        st["ts"] = _now()
+        sb_clear_user_state(user_id)
+        _set_mode(chat_id, user_id, "chat")
+
+        await tg_send_message(chat_id, "⏳ Генерация может занять от 5 до 30 минут. Как будет готово — пришлю видео.", reply_markup=_help_menu_for(user_id))
+        await enqueue_job(job, queue_name="gen")
+        return {"ok": True}
+
+    except Exception as e:
+        try:
+            if seedance_charged:
+                try:
+                    add_tokens(user_id, int(cost_tokens), reason="seedance_video_refund", meta={"stage": "main_exception"})
+                except TypeError:
+                    add_tokens(user_id, int(cost_tokens), reason="seedance_video_refund")
+        except Exception:
+            pass
+        await tg_send_message(chat_id, f"❌ Ошибка Seedance: {e}", reply_markup=_main_menu_for(user_id))
+        return {"ok": True}
+    finally:
+        _busy_end(int(user_id))
 
 
 def _seedance_collect_summary_text(mode: str, settings: Optional[Dict[str, Any]] = None) -> str:
@@ -2702,10 +2946,9 @@ def _photo_future_menu_keyboard() -> dict:
     return {
         "keyboard": [
             [{"text": "Gpt Image 2"}, {"text": "GPT Image 2.0"}],
-            [{"text": "Нейро фотосессии"}],
             [{"text": "🍌 Nano Banana"}, {"text": "🍌 Nano Banana 2"}],
-            [{"text": "🍌 Nano Banana Pro - NEW"}],
-            [{"text": "Seedream"}, {"text": "Апскейл"}],
+            [{"text": "🍌 Nano Banana Pro - NEW"}, {"text": "Seedream"}],
+            [{"text": "Нейро фотосессии"}, {"text": "Апскейл"}],
             [{"text": "⬅️ Назад"}],
         ],
         "resize_keyboard": True,
@@ -5235,6 +5478,44 @@ async def webhook(secret: str, request: Request):
             except Exception:
                 pass
 
+        if chat_id and user_id and data.startswith("seedance_prompt:"):
+            st = _ensure_state(chat_id, user_id)
+            action = data.split(":", 1)[1].strip()
+            mode_now = str(st.get("mode") or "").strip()
+
+            if mode_now not in ("seedance_t2v", "seedance_i2v", "seedance_omni"):
+                await tg_send_message(chat_id, "Сейчас я не жду Seedance-промпт. Открой настройки Seedance заново.", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            if action == "cancel":
+                _set_mode(chat_id, user_id, "chat")
+                st.pop("seedance_t2v", None)
+                st.pop("seedance_i2v", None)
+                st.pop("seedance_omni", None)
+                st.pop("seedance_settings", None)
+                st["ts"] = _now()
+                try:
+                    sb_clear_user_state(user_id)
+                except Exception:
+                    pass
+                await tg_send_message(chat_id, "Ок, Seedance отменил. Главное меню.", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            if action == "clear":
+                _seedance_prompt_clear_state(st)
+                await tg_send_message(
+                    chat_id,
+                    "Промпт очищен. Пришли текст одной или несколькими частями, затем нажми «✅ Запустить».",
+                    reply_markup=_seedance_prompt_collect_kb(mode_now),
+                )
+                return {"ok": True}
+
+            if action == "done":
+                prompt = _seedance_prompt_text_from_state(st)
+                return await _seedance_start_generation_from_prompt(chat_id, user_id, st, prompt)
+
+            return {"ok": True}
+
         if chat_id and user_id and data.startswith("seedance_refs:"):
             st = _ensure_state(chat_id, user_id)
             action = data.split(":", 1)[1].strip()
@@ -5293,8 +5574,8 @@ async def webhook(secret: str, request: Request):
                     st["ts"] = _now()
                     await tg_send_message(
                         chat_id,
-                        f"Фото принял ✅ Всего фото: {len(imgs)}.\nТеперь пришли ТЕКСТ (промпт), что должно происходить в видео.",
-                        reply_markup=_seedance_prompt_back_kb(),
+                        f"Фото принял ✅ Всего фото: {len(imgs)}.\nПришли промпт одним или несколькими сообщениями. Когда всё отправишь — нажми «✅ Запустить».",
+                        reply_markup=_seedance_prompt_collect_kb("seedance_i2v"),
                     )
                     return {"ok": True}
 
@@ -5323,8 +5604,8 @@ async def webhook(secret: str, request: Request):
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
-                    f"Референсы принял ✅ Фото: {len(image_ids)}, видео: {len(video_ids)}, аудио: {len(audio_ids)}.\nТеперь пришли ТЕКСТ (промпт), что должно происходить в видео.",
-                    reply_markup=_seedance_prompt_back_kb(),
+                    f"Референсы принял ✅ Фото: {len(image_ids)}, видео: {len(video_ids)}, аудио: {len(audio_ids)}.\nПришли промпт одним или несколькими сообщениями. Когда всё отправишь — нажми «✅ Запустить».",
+                    reply_markup=_seedance_prompt_collect_kb("seedance_omni"),
                 )
                 return {"ok": True}
 
@@ -6756,10 +7037,10 @@ async def webhook(secret: str, request: Request):
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
-                    ("✅ Настройки Seedance 2.0 сохранены.\n\nТеперь пришли ТЕКСТ (промпт), что должно быть в видео."
+                    ("✅ Настройки Seedance 2.0 сохранены.\n\nПришли промпт одним или несколькими сообщениями. Когда всё отправишь — нажми «✅ Запустить»."
                      if provider_kind == "seedance_kie" else
-                     "✅ Настройки Seedance 2.0 Preview сохранены.\n\nТеперь пришли ТЕКСТ (промпт), что должно быть в видео."),
-                    reply_markup=_help_menu_for(user_id),
+                     "✅ Настройки Seedance 2.0 Preview сохранены.\n\nПришли промпт одним или несколькими сообщениями. Когда всё отправишь — нажми «✅ Запустить»."),
+                    reply_markup=_seedance_prompt_collect_kb("seedance_t2v"),
                 )
                 return {"ok": True}
 
@@ -6793,12 +7074,12 @@ async def webhook(secret: str, request: Request):
             if provider_kind == "seedance_kie":
                 msg = (
                     "✅ Настройки Seedance 2.0 Image → Video сохранены.\n\nТеперь пришли 1–2 ФОТО. "
-                    "Если пришлёшь 2 фото — второе будет last frame. После фото нажми «✅ Готово», затем пришли промпт."
+                    "Если пришлёшь 2 фото — второе будет last frame. После фото нажми «✅ Готово», затем пришли промпт частями и нажми «✅ Запустить»."
                 )
             else:
                 msg = (
                     "✅ Настройки Seedance 2.0 Preview сохранены.\n\nТеперь пришли 1–9 ФОТО (референсы).\n"
-                    "Когда все фото отправишь — нажми «✅ Готово», и я попрошу промпт."
+                    "Когда все фото отправишь — нажми «✅ Готово», затем пришли промпт частями и нажми «✅ Запустить»."
                 )
             await tg_send_message(chat_id, msg, reply_markup=_seedance_refs_collect_kb())
             return {"ok": True}
@@ -8063,8 +8344,8 @@ async def webhook(secret: str, request: Request):
                     st["ts"] = _now()
                     await tg_send_message(
                         chat_id,
-                        "Фото принял ✅ Теперь пришли ТЕКСТ (промпт), что должно происходить в видео.",
-                        reply_markup=_seedance_prompt_back_kb(),
+                        "Фото принял ✅ Пришли промпт одним или несколькими сообщениями. Когда всё отправишь — нажми «✅ Запустить».",
+                        reply_markup=_seedance_prompt_collect_kb("seedance_i2v"),
                     )
                     return {"ok": True}
 
@@ -8096,8 +8377,8 @@ async def webhook(secret: str, request: Request):
                     st["ts"] = _now()
                     await tg_send_message(
                         chat_id,
-                        "Референсы принял ✅ Теперь пришли ТЕКСТ (промпт), что должно происходить в видео.",
-                        reply_markup=_seedance_prompt_back_kb(),
+                        "Референсы принял ✅ Пришли промпт одним или несколькими сообщениями. Когда всё отправишь — нажми «✅ Запустить».",
+                        reply_markup=_seedance_prompt_collect_kb("seedance_omni"),
                     )
                     return {"ok": True}
 
@@ -8109,137 +8390,30 @@ async def webhook(secret: str, request: Request):
                 )
                 return {"ok": True}
 
-        prompt = incoming_text.strip()
-        if not prompt:
-            await tg_send_message(chat_id, "Промпт пустой. Пришли текстом, что должно быть в видео.", reply_markup=_seedance_prompt_back_kb() if st.get("mode") in ("seedance_i2v", "seedance_omni") else _help_menu_for(user_id))
-            return {"ok": True}
+        prompt_limit = _seedance_prompt_limit_from_settings(settings)
+        prompt_part = incoming_text.strip()
+        done_words = {"готово", "готов", "запустить", "старт", "done", "start", "go"}
 
-        prompt_limit = 20000 if provider_kind == "seedance_kie" else 4000
-        if len(prompt) > prompt_limit:
+        if prompt_part.lower() in done_words:
+            prompt = _seedance_prompt_text_from_state(st)
+            return await _seedance_start_generation_from_prompt(chat_id, user_id, st, prompt)
+
+        ok, err, parts_count, chars_count = _seedance_prompt_append_part(st, prompt_part, prompt_limit)
+        if not ok:
             await tg_send_message(
                 chat_id,
-                f"Промпт слишком длинный: {len(prompt)} символов. Лимит для этого режима: {prompt_limit}.",
-                reply_markup=_seedance_prompt_back_kb() if st.get("mode") in ("seedance_i2v", "seedance_omni") else _help_menu_for(user_id),
+                err or "Не смог добавить часть промпта. Пришли текст ещё раз.",
+                reply_markup=_seedance_prompt_collect_kb(st.get("mode")),
             )
             return {"ok": True}
 
-        # ---- SEEDANCE BILLING ----
-        if provider_kind == "seedance_kie":
-            seedance_input_video_sec = 0.0
-            if st.get("mode") == "seedance_omni":
-                so_price = st.get("seedance_omni") or {}
-                video_ids_for_price = [x for x in (so_price.get("video_file_ids") or []) if str(x or "").strip()]
-                video_durations_for_price = list(so_price.get("video_durations_sec") or [])
-                if video_ids_for_price:
-                    # If Telegram did not provide/probe duration for a video-document, use the max allowed input duration to avoid undercharging.
-                    while len(video_durations_for_price) < len(video_ids_for_price):
-                        video_durations_for_price.append(15.4)
-                    seedance_input_video_sec = float(sum(float(x or 0.0) for x in video_durations_for_price[:len(video_ids_for_price)]))
-            cost_tokens = int(seedance_kie_tokens_for_duration(
-                seedance_model,
-                duration,
-                input_video_duration_sec=seedance_input_video_sec,
-            ))
-        else:
-            # Preview = 720p grid; Fast Preview = 480p grid.
-            is_fast_preview = seedance_model in ("fast", "seedance-2-fast-preview") or task_type == "seedance-2-fast-preview"
-            preview_price_map = {5: 6, 10: 12, 15: 18} if is_fast_preview else {5: 12, 10: 24, 15: 33}
-            cost_tokens = int(preview_price_map.get(int(duration), preview_price_map[5]))
-
-        _busy_start(int(user_id), "Seedance видео")
-        seedance_charged = False
-        try:
-            try:
-                ensure_user_row(user_id)
-                bal = int(get_balance(user_id) or 0)
-            except Exception:
-                bal = 0
-
-            if bal < cost_tokens:
-                await tg_send_message(
-                    chat_id,
-                    f"❌ Недостаточно токенов.\nНужно: {cost_tokens}\nБаланс: {bal}",
-                    reply_markup=_topup_balance_inline_kb(),
-                )
-                return {"ok": True}
-
-            charge_meta = {
-                "provider_kind": provider_kind,
-                "seedance_model": seedance_model,
-                "task_type": task_type,
-                "duration": int(duration),
-                "aspect_ratio": aspect_ratio,
-                "cost_tokens": int(cost_tokens),
-            }
-            try:
-                add_tokens(user_id, -cost_tokens, reason="seedance_video", meta=charge_meta)
-            except TypeError:
-                add_tokens(user_id, -int(cost_tokens), reason="seedance_video", meta=charge_meta)
-            seedance_charged = True
-
-            # build job for worker
-            job_id = uuid4().hex
-            job: Dict[str, Any] = {
-                "job_id": job_id,
-                "type": "seedance_video",
-                "chat_id": int(chat_id),
-                "user_id": int(user_id),
-                "provider_kind": provider_kind,
-                "seedance_model": seedance_model,
-                "task_type": task_type,
-                "prompt": prompt,
-                "duration": int(duration),
-                "aspect_ratio": aspect_ratio,
-                "charge_tokens": int(cost_tokens),
-            }
-
-            if st.get("mode") == "seedance_i2v":
-                si = st.get("seedance_i2v") or {}
-                job["mode"] = "image_to_video"
-                job["image_file_ids"] = list(si.get("image_file_ids") or [])[:max_images]
-            elif st.get("mode") == "seedance_omni":
-                so = st.get("seedance_omni") or {}
-                job["mode"] = "omni_reference"
-                job["image_file_ids"] = list(so.get("image_file_ids") or [])[:max_images]
-                job["video_file_ids"] = list(so.get("video_file_ids") or [])[:max_videos]
-                job["video_durations_sec"] = list(so.get("video_durations_sec") or [])[:max_videos]
-                job["audio_file_ids"] = list(so.get("audio_file_ids") or [])[:max_audios]
-            else:
-                job["mode"] = "text_to_video"
-
-            if provider_kind != "seedance_kie":
-                se = st.get("seedance_extend") or {}
-                se["task_type"] = task_type
-                st["seedance_extend"] = se
-
-            # очистим контекст, чтобы любой следующий текст не перезапускал генерацию
-            st.pop("seedance_t2v", None)
-            st.pop("seedance_i2v", None)
-            st.pop("seedance_omni", None)
-            st.pop("seedance_settings", None)
-            st["ts"] = _now()
-            sb_clear_user_state(user_id)
-            _set_mode(chat_id, user_id, "chat")
-
-            await tg_send_message(chat_id, "⏳ Генерация может занять от 5 до 30 минут. Как будет готово — пришлю видео.", reply_markup=_help_menu_for(user_id))
-
-            await enqueue_job(job, queue_name="gen")
-            return {"ok": True}
-
-        except Exception as e:
-            # refund if we charged but enqueue/logic failed
-            try:
-                if seedance_charged:
-                    try:
-                        add_tokens(user_id, int(cost_tokens), reason="seedance_video_refund", meta={"stage": "main_exception"})
-                    except TypeError:
-                        add_tokens(user_id, int(cost_tokens), reason="seedance_video_refund")
-            except Exception:
-                pass
-            await tg_send_message(chat_id, f"❌ Ошибка Seedance: {e}", reply_markup=_main_menu_for(user_id))
-            return {"ok": True}
-        finally:
-            _busy_end(int(user_id))
+        await tg_send_message(
+            chat_id,
+            f"✅ Часть промпта добавлена. Сейчас: {parts_count} част(и), {chars_count}/{prompt_limit} символов.\n"
+            "Можешь прислать следующую часть или нажать «✅ Запустить», когда промпт полностью готов.",
+            reply_markup=_seedance_prompt_collect_kb(st.get("mode")),
+        )
+        return {"ok": True}
 
     # ---- Sora 2 (OpenAI) Text→Video: ждём промпт ----
     if st.get("mode") == "sora_t2v" and incoming_text:
