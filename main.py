@@ -1593,9 +1593,9 @@ def _gpt_image_2_kie_inline_kb(mode_key: str, current_aspect: str = "16:9", curr
         text = f"✅ {label}" if safe_resolution == current_resolution else label
         res_row.append({"text": text, "callback_data": f"gi2k:{mode_key}:res:{value}"})
 
-    aspect_values = ("16:9", "9:16", "4:3", "3:4")
+    aspect_values = ("16:9", "21:9", "9:16", "4:3", "3:4")
     if current_resolution != "4K":
-        aspect_values = ("16:9", "9:16", "1:1", "4:3", "3:4")
+        aspect_values = ("16:9", "21:9", "9:16", "1:1", "4:3", "3:4")
     aspect_row = []
     rows = [res_row]
     for index, value in enumerate(aspect_values):
