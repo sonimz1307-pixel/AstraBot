@@ -9,6 +9,7 @@ import httpx
 
 from nano_banana_2_piapi import handle_nano_banana_2
 from nano_banana_pro_new_kie import handle_nano_banana_pro_new
+from gpt_image_2_kie import handle_gpt_image_2_kie
 from billing_db import add_tokens
 from grok_video_replicate import (
     GrokVideoError,
@@ -637,7 +638,7 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
     charge_ref_id = str(job.get("charge_ref_id") or "")
 
     source_image_urls = [str(item or "").strip() for item in (job.get("source_image_urls") or []) if str(item or "").strip()]
-    source_image = None if (provider in {"nano_banana_pro_new", "gpt_image_2"} and source_image_urls) else await _download_optional_bytes(job.get("source_image_url"))
+    source_image = None if (provider in {"nano_banana_pro_new", "gpt_image_2", "gpt_image_2_kie"} and source_image_urls) else await _download_optional_bytes(job.get("source_image_url"))
     base_image = await _download_optional_bytes(job.get("base_image_url"))
 
     ww._update_workspace_image_generation(
@@ -786,6 +787,17 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
             else:
                 out_bytes = await openai_generate_image_v2(prompt=run_prompt, size=size)
             ext = ww._workspace_detect_image_ext(out_bytes, default="png")
+        elif provider == "gpt_image_2_kie":
+            gpt_mode = str(job.get("mode") or "text_to_image").strip().lower()
+            if gpt_mode == "image_to_image" and not source_image_urls:
+                raise RuntimeError("Gpt Image 2 Image→Image requires source image")
+            out_bytes, ext = await handle_gpt_image_2_kie(
+                run_prompt,
+                mode=gpt_mode,
+                source_image_urls=source_image_urls[:16],
+                resolution=resolution,
+                aspect_ratio=aspect_ratio,
+            )
         elif provider == "topaz_photo":
             preset_settings = ww.get_photo_preset_settings(preset_slug)
             source_url = await ww._upload_workspace_topaz_input_image(
