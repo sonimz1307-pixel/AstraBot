@@ -126,6 +126,11 @@ from app.routers.video_editor_v2 import router as video_editor_v2_router, page_r
 from app.routers.site_builder_api import router as site_builder_router
 from app.routers.partner_program_api import router as partner_program_router
 from app.services.partner_program import ensure_partner_profile
+from app.services.legnext_midjourney import (
+    build_midjourney_v7_prompt,
+    normalize_midjourney_model,
+    normalize_midjourney_speed_mode,
+)
 app.include_router(leads_router, prefix="/api/leads", tags=["leads"])
 app.include_router(kling3_router, prefix="/api/kling3", tags=["kling3"])
 app.include_router(kling3_kie_router, prefix="/api/kling3-kie", tags=["kling3-kie"])
@@ -417,7 +422,7 @@ def _is_nav_or_menu_text(t: str) -> bool:
         # submenus you use in keyboards
         "фото/афиши", "нейро фотосессии", "картинка+картинка", "2 фото", "nano banana", "nano banana 2",
         "nano banana pro", "nano banana pro new", "nano banana pro - new",
-        "seedream", "апскейл", "апскейл фото", "апскейл видео",
+        "seedream", "midjourney", "миджорни", "апскейл", "апскейл фото", "апскейл видео",
         "topaz фото • standard • 2 токена", "topaz фото • detail • 3 токена", "topaz фото • max • 4 токена",
         "topaz видео • hd smooth • 1 токен / 5 сек",
         "topaz видео • full hd • 2 токена / 5 сек",
@@ -1195,6 +1200,7 @@ TOPAZ_PHOTO_QUEUE_NAME = os.getenv("TOPAZ_PHOTO_QUEUE_NAME", "topaz_photo").stri
 GPT_IMAGE2_QUEUE_NAME = os.getenv("GPT_IMAGE2_QUEUE_NAME", "gpt_image2").strip() or "gpt_image2"
 GPT_IMAGE2_GENERATION_COST = int(os.getenv("GPT_IMAGE2_GENERATION_COST", "1") or "1")
 WORKSPACE_IMAGE_QUEUE_NAME = (os.getenv("WORKSPACE_IMAGE_QUEUE_NAME", "workspace_image") or "workspace_image").strip() or "workspace_image"
+MIDJOURNEY_TG_QUEUE_NAME = (os.getenv("MIDJOURNEY_TG_QUEUE_NAME", "telegram_midjourney") or "telegram_midjourney").strip() or "telegram_midjourney"
 SEEDREAM_T2I_QUEUE_NAME = os.getenv("SEEDREAM_T2I_QUEUE_NAME", "seedream_t2i").strip() or "seedream_t2i"
 NANO_BANANA_QUEUE_NAME = os.getenv("NANO_BANANA_QUEUE_NAME", "nano_banana").strip() or "nano_banana"
 TOPAZ_VIDEO_QUEUE_NAME = os.getenv("TOPAZ_VIDEO_QUEUE_NAME", "topaz_video").strip() or "topaz_video"
@@ -1613,6 +1619,552 @@ def _gpt_image_2_kie_inline_kb(mode_key: str, current_aspect: str = "16:9", curr
     return {"inline_keyboard": rows}
 
 
+def _midjourney_model_title(model: str) -> str:
+    return "Midjourney V8.1" if normalize_midjourney_model(model) == "midjourney-v8.1" else "Midjourney V7"
+
+
+def _midjourney_cost(model: str = "midjourney-v7", speed_mode: str = "fast") -> int:
+    model_key = normalize_midjourney_model(model)
+    speed = normalize_midjourney_speed_mode(speed_mode, model=model_key)
+    if model_key == "midjourney-v8.1":
+        return 1
+    return 2 if speed == "turbo" else 1
+
+
+def _midjourney_default_state(model: str = "midjourney-v7") -> dict:
+    model_key = normalize_midjourney_model(model)
+    return {
+        "step": "need_prompt",
+        "model": model_key,
+        "prompt": "",
+        "aspect_ratio": "1:1",
+        "speed_mode": "fast",
+        "stylize": 100,
+        "chaos": 0,
+        "raw": False,
+        "style_ref_url": "",
+        "style_ref_file_id": "",
+        "omni_ref_url": "",
+        "omni_ref_file_id": "",
+        "image_prompt_urls": [],
+        "image_prompt_file_ids": [],
+    }
+
+
+def _midjourney_state(st: Dict[str, Any], model: str = "midjourney-v7") -> dict:
+    mj = st.get("midjourney")
+    if not isinstance(mj, dict):
+        mj = _midjourney_default_state(model)
+    mj["model"] = normalize_midjourney_model(mj.get("model") or model)
+    mj["speed_mode"] = normalize_midjourney_speed_mode(mj.get("speed_mode") or "fast", model=mj["model"])
+    try:
+        mj["stylize"] = max(0, min(1000, int(mj.get("stylize") if mj.get("stylize") is not None else 100)))
+    except Exception:
+        mj["stylize"] = 100
+    try:
+        mj["chaos"] = max(0, min(100, int(mj.get("chaos") if mj.get("chaos") is not None else 0)))
+    except Exception:
+        mj["chaos"] = 0
+    if str(mj.get("aspect_ratio") or "").strip() not in {"1:1", "16:9", "9:16", "4:5"}:
+        mj["aspect_ratio"] = "1:1"
+    if mj["model"] == "midjourney-v8.1":
+        mj["speed_mode"] = "fast"
+        mj["omni_ref_url"] = ""
+        mj["omni_ref_file_id"] = ""
+    return mj
+
+
+def _midjourney_settings_text(mj: dict) -> str:
+    model = normalize_midjourney_model(mj.get("model") or "midjourney-v7")
+    speed = normalize_midjourney_speed_mode(mj.get("speed_mode") or "fast", model=model)
+    prompt = str(mj.get("prompt") or "").strip()
+    style_loaded = "загружен" if str(mj.get("style_ref_url") or "").strip() else "не загружен"
+    omni_loaded = "загружен" if str(mj.get("omni_ref_url") or "").strip() else "не загружен"
+    image_ref_count = len([x for x in (mj.get("image_prompt_urls") or []) if str(x or "").strip()])
+    price = _midjourney_cost(model, speed)
+    lines = [
+        _midjourney_model_title(model),
+        "",
+        f"Формат: {mj.get('aspect_ratio') or '1:1'}",
+        f"Скорость: {speed.title()}",
+        f"Stylize: {int(mj.get('stylize') or 100)}",
+        f"Chaos: {int(mj.get('chaos') or 0)}",
+        f"Raw: {'ON' if bool(mj.get('raw')) else 'OFF'}",
+        f"Style ref: {style_loaded}",
+    ]
+    if model != "midjourney-v8.1":
+        lines.append(f"Omni ref: {omni_loaded}")
+    else:
+        lines.append(f"Image refs: {image_ref_count}/4")
+    lines += [
+        f"Prompt: {'задан' if prompt else 'не задан'}",
+        "",
+        f"Цена: {price} токен" if price == 1 else f"Цена: {price} токена",
+        "",
+        "Отправь prompt или измени параметры ниже.",
+    ]
+    return "\n".join(lines)
+
+
+def _midjourney_settings_kb(mj: dict) -> dict:
+    model = normalize_midjourney_model(mj.get("model") or "midjourney-v7")
+    speed = normalize_midjourney_speed_mode(mj.get("speed_mode") or "fast", model=model)
+    rows = [
+        [
+            {"text": f"Формат: {mj.get('aspect_ratio') or '1:1'}", "callback_data": "mj:menu:aspect"},
+            {"text": f"Скорость: {speed.title()}", "callback_data": "mj:menu:speed"},
+        ],
+        [
+            {"text": f"Stylize: {int(mj.get('stylize') or 100)}", "callback_data": "mj:menu:stylize"},
+            {"text": f"Chaos: {int(mj.get('chaos') or 0)}", "callback_data": "mj:menu:chaos"},
+        ],
+        [{"text": f"Raw: {'ON' if bool(mj.get('raw')) else 'OFF'}", "callback_data": "mj:raw"}],
+        [
+            {"text": "Style ref", "callback_data": "mj:ref:style"},
+            {"text": "Omni ref", "callback_data": "mj:ref:omni"} if model != "midjourney-v8.1" else {"text": "Image ref", "callback_data": "mj:ref:image"},
+        ],
+    ]
+    if str(mj.get("prompt") or "").strip():
+        rows.append([{"text": "✏️ Изменить prompt", "callback_data": "mj:prompt:edit"}])
+        rows.append([{"text": f"✅ Запустить • {_midjourney_cost(model, speed)} ток.", "callback_data": "mj:run"}])
+    rows.append([{"text": "⬅️ Назад", "callback_data": "mj:back:photo"}])
+    return {"inline_keyboard": rows}
+
+
+def _midjourney_model_kb() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "Midjourney V7", "callback_data": "mj:model:v7"}],
+            [{"text": "Midjourney V8.1", "callback_data": "mj:model:v81"}],
+            [{"text": "⬅️ Назад", "callback_data": "mj:back:photo"}],
+        ]
+    }
+
+
+def _midjourney_aspect_kb(current: str = "1:1") -> dict:
+    values = ("1:1", "16:9", "9:16", "4:5")
+    return {"inline_keyboard": [[{"text": f"✅ {v}" if v == current else v, "callback_data": f"mj:ar:{v}"} for v in values], [{"text": "⬅️ Назад", "callback_data": "mj:settings"}]]}
+
+
+def _midjourney_speed_kb(model: str, current: str = "fast") -> dict:
+    model_key = normalize_midjourney_model(model)
+    if model_key == "midjourney-v8.1":
+        return {"inline_keyboard": [[{"text": "✅ Fast • 1 токен", "callback_data": "mj:speed:fast"}], [{"text": "⬅️ Назад", "callback_data": "mj:settings"}]]}
+    speed = normalize_midjourney_speed_mode(current, model=model_key)
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "✅ Fast • 1 токен" if speed == "fast" else "Fast • 1 токен", "callback_data": "mj:speed:fast"},
+                {"text": "✅ Turbo • 2 токена" if speed == "turbo" else "Turbo • 2 токена", "callback_data": "mj:speed:turbo"},
+            ],
+            [{"text": "⬅️ Назад", "callback_data": "mj:settings"}],
+        ]
+    }
+
+
+def _midjourney_value_kb(kind: str, current: int) -> dict:
+    if kind == "stylize":
+        values = (0, 100, 250, 500, 750, 1000)
+    else:
+        values = (0, 10, 25, 50, 75, 100)
+    rows = []
+    row = []
+    for idx, value in enumerate(values, start=1):
+        row.append({"text": f"✅ {value}" if int(current) == value else str(value), "callback_data": f"mj:{kind}:{value}"})
+        if len(row) == 3 or idx == len(values):
+            rows.append(row)
+            row = []
+    rows.append([{"text": "✏️ Ввести своё", "callback_data": f"mj:{kind}:custom"}])
+    rows.append([{"text": "⬅️ Назад", "callback_data": "mj:settings"}])
+    return {"inline_keyboard": rows}
+
+
+def _midjourney_ref_kb(kind: str, loaded: bool = False) -> dict:
+    rows = []
+    if loaded:
+        rows.append([{"text": "🗑 Убрать reference", "callback_data": f"mj:ref_clear:{kind}"}])
+    rows.append([{"text": "⬅️ Назад", "callback_data": "mj:settings"}])
+    return {"inline_keyboard": rows}
+
+
+def _midjourney_session_token() -> str:
+    return base64.urlsafe_b64encode(os.urandom(9)).decode("ascii").rstrip("=")
+
+
+def _midjourney_result_caption(session: dict, active_index: Optional[int] = None, *, grid: bool = False) -> str:
+    model_title = _midjourney_model_title(str(session.get("model") or "midjourney-v7"))
+    aspect = str(session.get("aspect_ratio") or "1:1")
+    speed = str(session.get("speed_mode") or "fast").title()
+    if grid:
+        return f"{model_title}\n\nГотово: 4 варианта\nФормат: {aspect}\nСкорость: {speed}\nВыбери изображение для просмотра или remix."
+    idx = int(active_index or 0) + 1
+    return f"{model_title}\nИзображение {idx} из 4\nФормат: {aspect}\nСкорость: {speed}"
+
+
+def _midjourney_grid_result_kb(token: str) -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "1️⃣ Открыть #1", "callback_data": f"mjr:{token}:open:0"},
+                {"text": "2️⃣ Открыть #2", "callback_data": f"mjr:{token}:open:1"},
+            ],
+            [
+                {"text": "3️⃣ Открыть #3", "callback_data": f"mjr:{token}:open:2"},
+                {"text": "4️⃣ Открыть #4", "callback_data": f"mjr:{token}:open:3"},
+            ],
+            [
+                {"text": "🔄 Reroll все 4", "callback_data": f"mjr:{token}:reroll"},
+                {"text": "📄 Prompt", "callback_data": f"mjr:{token}:prompt"},
+            ],
+            [{"text": "⬇️ Скачать все", "callback_data": f"mjr:{token}:download_all"}],
+            [{"text": "🆕 Новый prompt", "callback_data": f"mjr:{token}:new"}],
+        ]
+    }
+
+
+def _midjourney_image_result_kb(token: str, index: int) -> dict:
+    safe_index = max(0, min(3, int(index or 0)))
+    prev_index = (safe_index - 1) % 4
+    next_index = (safe_index + 1) % 4
+    number_row = []
+    for i in range(4):
+        number_row.append({"text": f"✅ {i + 1}" if i == safe_index else str(i + 1), "callback_data": f"mjr:{token}:open:{i}"})
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "◀️", "callback_data": f"mjr:{token}:open:{prev_index}"},
+                {"text": f"{safe_index + 1}/4", "callback_data": "noop"},
+                {"text": "▶️", "callback_data": f"mjr:{token}:open:{next_index}"},
+            ],
+            number_row,
+            [
+                {"text": "✏️ Remix тонкий", "callback_data": f"mjr:{token}:vary:{safe_index}:subtle"},
+                {"text": "🎨 Remix креативный", "callback_data": f"mjr:{token}:vary:{safe_index}:strong"},
+            ],
+            [{"text": "⬇️ Скачать оригинал", "callback_data": f"mjr:{token}:download:{safe_index}"}],
+            [{"text": "🧩 Вернуться к сетке", "callback_data": f"mjr:{token}:grid"}],
+            [
+                {"text": "🔄 Reroll все 4", "callback_data": f"mjr:{token}:reroll"},
+                {"text": "📄 Prompt", "callback_data": f"mjr:{token}:prompt"},
+            ],
+            [{"text": "🆕 Новый prompt", "callback_data": f"mjr:{token}:new"}],
+        ]
+    }
+
+
+def _midjourney_reroll_confirm_kb(token: str) -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "✅ Да, перегенерировать", "callback_data": f"mjr:{token}:reroll_yes"}],
+            [{"text": "❌ Отмена", "callback_data": f"mjr:{token}:reroll_no"}],
+        ]
+    }
+
+
+def _midjourney_submit_reply_markup(ok: bool, message_text: str, mj: Optional[dict] = None) -> Optional[dict]:
+    if ok:
+        return _photo_future_menu_keyboard()
+    if "Недостаточно токенов" in str(message_text or ""):
+        return _topup_packs_kb()
+    if isinstance(mj, dict):
+        return _midjourney_settings_kb(mj)
+    return None
+
+
+def _midjourney_dedupe_key(*parts: Any) -> str:
+    raw = "|".join(str(part or "") for part in parts)
+    return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()[:32]
+
+
+def _midjourney_mark_action_once(holder: dict, key: str, *, ttl_sec: int = 60) -> bool:
+    if not isinstance(holder, dict):
+        return True
+    now = time.time()
+    pending = holder.get("pending_actions")
+    if not isinstance(pending, dict):
+        pending = {}
+        holder["pending_actions"] = pending
+    for old_key, old_ts in list(pending.items()):
+        try:
+            if now - float(old_ts or 0) > ttl_sec:
+                pending.pop(old_key, None)
+        except Exception:
+            pending.pop(old_key, None)
+    if key in pending:
+        return False
+    pending[key] = now
+    return True
+
+
+def _midjourney_clear_action_mark(holder: dict, key: str) -> None:
+    if not isinstance(holder, dict):
+        return
+    pending = holder.get("pending_actions")
+    if isinstance(pending, dict):
+        pending.pop(key, None)
+
+
+def _midjourney_format_prompt_details(session: dict) -> str:
+    model_title = _midjourney_model_title(str(session.get("model") or "midjourney-v7"))
+    action = str(session.get("action") or "generate").strip().lower() or "generate"
+    prompt = str(session.get("prompt") or "").strip()
+    run_prompt = str(session.get("run_prompt") or "").strip()
+    lines = [
+        "📄 Midjourney prompt",
+        "",
+        f"Модель: {model_title}",
+        f"Действие: {action}",
+        f"Формат: {str(session.get('aspect_ratio') or '1:1')}",
+        f"Скорость: {str(session.get('speed_mode') or 'fast').title()}",
+    ]
+    if action == "variation":
+        try:
+            lines.append(f"Remix image: #{int(session.get('selected_image_no') or 0) + 1}")
+        except Exception:
+            pass
+        lines.append(f"Remix type: {str(session.get('variation_type') or 'subtle')}")
+    lines += ["", "Исходный prompt:", prompt or "—"]
+    if run_prompt and run_prompt != prompt:
+        lines += ["", "Prompt, отправленный провайдеру:", run_prompt]
+    return "\n".join(lines).strip()
+
+
+async def _midjourney_send_prompt_details(chat_id: int, session: dict) -> None:
+    text = _midjourney_format_prompt_details(session)
+    if len(text) <= 3500:
+        await tg_send_message(chat_id, text)
+        return
+    await tg_send_document_bytes(
+        chat_id,
+        text.encode("utf-8"),
+        filename="midjourney_prompt.txt",
+        mime="text/plain; charset=utf-8",
+        caption="📄 Midjourney prompt и параметры",
+    )
+
+
+def _midjourney_is_heic_like(image_bytes: bytes, filename: str = "", content_type: str = "") -> bool:
+    name = str(filename or "").strip().lower()
+    mime = str(content_type or "").strip().lower()
+    if name.endswith((".heic", ".heif")) or mime in {"image/heic", "image/heif", "image/heic-sequence", "image/heif-sequence"}:
+        return True
+    head = bytes(image_bytes[:32] if image_bytes else b"")
+    return b"ftypheic" in head or b"ftypheix" in head or b"ftyphevc" in head or b"ftyphevx" in head or b"ftypmif1" in head
+
+
+def _midjourney_get_session(chat_id: int, user_id: int, token: str) -> Optional[dict]:
+    st = _ensure_state(chat_id, user_id)
+    sessions = st.get("midjourney_sessions")
+    if not isinstance(sessions, dict):
+        return None
+    session = sessions.get(str(token or "").strip())
+    return session if isinstance(session, dict) else None
+
+
+def _midjourney_session_storage_path(user_id: int, token: str) -> str:
+    safe_token = re.sub(r"[^A-Za-z0-9_-]", "", str(token or "").strip())
+    return f"midjourney_tg_sessions/{int(user_id)}/{safe_token}.json"
+
+
+def _midjourney_session_public_url(user_id: int, token: str) -> str:
+    if sb is None or not SUPABASE_STORAGE_BUCKET:
+        return ""
+    try:
+        return str(sb.storage.from_(SUPABASE_STORAGE_BUCKET).get_public_url(_midjourney_session_storage_path(user_id, token)) or "").strip()
+    except Exception:
+        return ""
+
+
+def _midjourney_cache_session(chat_id: int, user_id: int, token: str, session: dict, *, persist: bool = False) -> None:
+    st = _ensure_state(chat_id, user_id)
+    sessions = st.setdefault("midjourney_sessions", {})
+    if not isinstance(sessions, dict):
+        sessions = {}
+        st["midjourney_sessions"] = sessions
+    sessions[str(token or "").strip()] = session
+    st["ts"] = _now()
+    if persist:
+        try:
+            payload = json.dumps(session, ensure_ascii=False).encode("utf-8")
+            upload_bytes_to_supabase(_midjourney_session_storage_path(user_id, token), payload, "application/json")
+        except Exception:
+            logging.exception("Midjourney session storage persist failed")
+
+
+async def _midjourney_load_session_from_storage(chat_id: int, user_id: int, token: str) -> Optional[dict]:
+    url = _midjourney_session_public_url(user_id, token)
+    if not url:
+        return None
+    try:
+        payload = await http_download_bytes(url, timeout=30)
+        data = json.loads(payload.decode("utf-8"))
+        if not isinstance(data, dict):
+            return None
+        data["ts"] = _now()
+        _midjourney_cache_session(chat_id, user_id, token, data, persist=False)
+        return data
+    except Exception:
+        logging.exception("Midjourney session storage load failed")
+        return None
+
+
+def _midjourney_prepare_run_prompt(mj: dict) -> str:
+    model = normalize_midjourney_model(mj.get("model") or "midjourney-v7")
+    style_ref_url = str(mj.get("style_ref_url") or "").strip()
+    omni_ref_url = str(mj.get("omni_ref_url") or "").strip()
+    image_prompt_urls = [str(x or "").strip() for x in (mj.get("image_prompt_urls") or []) if str(x or "").strip()]
+    return build_midjourney_v7_prompt(
+        prompt=str(mj.get("prompt") or "").strip(),
+        model=model,
+        aspect_ratio=str(mj.get("aspect_ratio") or "1:1"),
+        stylize=mj.get("stylize") if mj.get("stylize") is not None else 100,
+        chaos=mj.get("chaos") if mj.get("chaos") is not None else 0,
+        raw_mode=bool(mj.get("raw")),
+        speed_mode=str(mj.get("speed_mode") or "fast"),
+        style_ref_urls=[style_ref_url] if style_ref_url else [],
+        omni_ref_url=omni_ref_url if model != "midjourney-v8.1" else "",
+        image_prompt_urls=image_prompt_urls[:4] if model == "midjourney-v8.1" else [],
+        image_weight=mj.get("image_weight") if mj.get("image_weight") is not None else 1,
+    )
+
+
+def _midjourney_upload_reference_bytes(
+    *,
+    user_id: int,
+    image_bytes: bytes,
+    filename: str = "reference.jpg",
+    content_type: str = "image/jpeg",
+) -> str:
+    """Upload Telegram reference bytes to public storage before giving the URL to Midjourney.
+    Never pass Telegram file URLs to external providers because they contain the bot token.
+    """
+    if not image_bytes:
+        raise RuntimeError("Пустой reference image")
+    if _midjourney_is_heic_like(image_bytes, filename=filename, content_type=content_type):
+        raise RuntimeError("HEIC/HEIF пока не поддерживается для Midjourney reference. Отправь JPG, PNG или WEBP.")
+    try:
+        ext, detected_mime = _detect_image_type(image_bytes)
+    except Exception:
+        ext, detected_mime = "jpg", "image/jpeg"
+    raw_name = str(filename or "reference.jpg").strip().lower()
+    if raw_name.endswith(".png"):
+        ext = "png"
+        detected_mime = "image/png"
+    elif raw_name.endswith(".webp"):
+        ext = "webp"
+        detected_mime = "image/webp"
+    elif raw_name.endswith((".jpg", ".jpeg")):
+        ext = "jpg"
+        detected_mime = "image/jpeg"
+    mime = detected_mime or content_type or "image/jpeg"
+    path = f"midjourney_tg_refs/{int(user_id)}/{int(time.time())}_{uuid4().hex[:12]}.{ext or 'jpg'}"
+    url = upload_bytes_to_supabase(path, image_bytes, mime)
+    clean_url = str(url or "").strip()
+    if not clean_url:
+        raise RuntimeError("Не удалось получить public URL для reference image")
+    return clean_url
+
+
+async def _midjourney_charge_and_enqueue(
+    *,
+    chat_id: int,
+    user_id: int,
+    action: str,
+    model: str,
+    prompt: str,
+    run_prompt: str,
+    aspect_ratio: str,
+    speed_mode: str,
+    settings: dict,
+    source_task_id: str = "",
+    selected_image_no: int = 0,
+    variation_type: str = "subtle",
+) -> Tuple[bool, str]:
+    action_name = str(action or "generate").strip().lower() or "generate"
+    model_key = normalize_midjourney_model(model)
+    speed = normalize_midjourney_speed_mode(speed_mode, model=model_key)
+    cost_tokens = int(_midjourney_cost(model_key, speed))
+    if action_name == "generate":
+        prompt_len = len(str(run_prompt or ""))
+        if prompt_len <= 0:
+            return False, "❌ Prompt для Midjourney пустой."
+        if prompt_len > 8192:
+            return False, f"❌ Prompt слишком длинный для Midjourney: {prompt_len}/8192 символов. Уменьши текст или убери часть reference-параметров."
+    if action_name == "variation":
+        try:
+            selected = int(selected_image_no)
+        except Exception:
+            selected = -1
+        if selected < 0 or selected > 3:
+            return False, "❌ Remix может запускаться только для изображения 1–4."
+    try:
+        ensure_user_row(user_id)
+        bal = int(get_balance(user_id) or 0)
+    except Exception:
+        bal = 0
+    if bal < cost_tokens:
+        return False, f"❌ Недостаточно токенов для Midjourney. Нужно: {cost_tokens}, баланс: {bal}"
+
+    reason = "midjourney_generate"
+    if action_name == "reroll":
+        reason = "midjourney_reroll"
+    elif action_name == "variation":
+        reason = "midjourney_variation"
+
+    charge_ref_id = uuid4().hex
+    charged = False
+    try:
+        add_tokens(
+            user_id,
+            -cost_tokens,
+            reason=reason,
+            ref_id=charge_ref_id,
+            meta={
+                "provider": "midjourney",
+                "action": action_name,
+                "model": model_key,
+                "speed_mode": speed,
+                "aspect_ratio": aspect_ratio,
+                "selected_image_no": int(selected_image_no or 0),
+                "variation_type": variation_type,
+                "cost_tokens": int(cost_tokens),
+            },
+        )
+        charged = True
+        await enqueue_job(
+            {
+                "job_id": uuid4().hex,
+                "kind": "telegram_midjourney_run",
+                "type": "midjourney",
+                "chat_id": int(chat_id),
+                "user_id": int(user_id),
+                "mj_action": action_name,
+                "prompt": str(prompt or ""),
+                "run_prompt": str(run_prompt or ""),
+                "model": model_key,
+                "aspect_ratio": str(aspect_ratio or "1:1"),
+                "speed_mode": speed,
+                "settings": settings if isinstance(settings, dict) else {},
+                "source_task_id": str(source_task_id or ""),
+                "selected_image_no": int(selected_image_no or 0),
+                "variation_type": str(variation_type or "subtle"),
+                "charge_tokens": int(cost_tokens),
+                "charge_ref_id": charge_ref_id,
+                "refund_reason": "midjourney_refund",
+            },
+            queue_name=MIDJOURNEY_TG_QUEUE_NAME,
+        )
+    except Exception as e:
+        if charged:
+            try:
+                add_tokens(user_id, cost_tokens, reason="midjourney_refund", ref_id=charge_ref_id, meta={"stage": "enqueue_failed", "provider": "midjourney", "action": action_name, "error": str(e)[:300]})
+            except Exception:
+                pass
+        return False, f"❌ Не удалось поставить Midjourney в очередь: {e}"
+
+    return True, f"✅ Midjourney: запрос принят. Списано {cost_tokens} токен. Пришлю результат, как будет готово."
+
+
 def _seedream_model_for_bot() -> str:
     return (ARK_IMAGE_MODEL_SEEDREAM_45 or ARK_IMAGE_MODEL or "").strip()
 
@@ -1738,6 +2290,8 @@ def _yk_extract_confirmation_url(payment_json: Dict[str, Any]) -> str:
 
 # ---------------- In-memory state ----------------
 STATE_TTL_SECONDS = int(os.getenv("STATE_TTL_SECONDS", "1800"))  # 30 минут
+MIDJOURNEY_SESSION_TTL_SECONDS = int(os.getenv("MIDJOURNEY_SESSION_TTL_SECONDS", "86400") or "86400")
+SUPABASE_STORAGE_BUCKET = (os.getenv("SUPABASE_BUCKET") or "").strip()
 STATE: Dict[Tuple[int, int], Dict[str, Any]] = {}
 
 # ---------------- AI chat memory (in-RAM, only for mode=chat) ----------------
@@ -1770,7 +2324,18 @@ def _cleanup_state():
             ts = float(v.get("ts", 0) or 0)
         except Exception:
             ts = 0.0
-        if now - ts > STATE_TTL_SECONDS:
+        has_live_mj_session = False
+        mj_sessions = v.get("midjourney_sessions")
+        if isinstance(mj_sessions, dict):
+            for meta in mj_sessions.values():
+                try:
+                    ts_mj = float((meta or {}).get("ts", 0) or 0)
+                except Exception:
+                    ts_mj = 0.0
+                if ts_mj and (now - ts_mj <= MIDJOURNEY_SESSION_TTL_SECONDS):
+                    has_live_mj_session = True
+                    break
+        if now - ts > STATE_TTL_SECONDS and not has_live_mj_session:
             expired_state.append(k)
     for k in expired_state:
         STATE.pop(k, None)
@@ -1789,6 +2354,19 @@ def _cleanup_state():
                     expired_tokens.append(tok)
             for tok in expired_tokens:
                 dl.pop(tok, None)
+
+        mj_sessions = _v.get("midjourney_sessions")
+        if isinstance(mj_sessions, dict):
+            expired_mj = []
+            for tok, meta in mj_sessions.items():
+                try:
+                    ts3 = float((meta or {}).get("ts", 0) or 0)
+                except Exception:
+                    ts3 = 0.0
+                if now - ts3 > MIDJOURNEY_SESSION_TTL_SECONDS:
+                    expired_mj.append(tok)
+            for tok in expired_mj:
+                mj_sessions.pop(tok, None)
 
     # Cleanup AI chat memory after TTL (only stored for mode=chat)
     for _k, _v in list(STATE.items()):
@@ -1950,6 +2528,9 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
     elif mode == "gpt_image_2_kie_i2i":
         st["gpt_image_2_kie_i2i"] = {"step": "need_image", "photo_file_id": None, "photo_file_ids": [], "photo_urls": [], "aspect_ratio": "16:9", "resolution": "2K"}
 
+    elif mode == "midjourney":
+        st["midjourney"] = _midjourney_default_state("midjourney-v7")
+
     elif mode == "two_photos":
         # 2 фото: multi-image (если эндпоинт поддерживает)
         st["two_photos"] = {
@@ -2030,6 +2611,7 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
         st.pop("gpt_image_2_i2i", None)
         st.pop("gpt_image_2_kie_t2i", None)
         st.pop("gpt_image_2_kie_i2i", None)
+        st.pop("midjourney", None)
         st.pop("two_photos", None)
         st.pop("nano_banana", None)
         st.pop("nano_banana_pro", None)
@@ -2946,6 +3528,7 @@ def _photo_future_menu_keyboard() -> dict:
     return {
         "keyboard": [
             [{"text": "Gpt Image 2"}, {"text": "GPT Image 2.0"}],
+            [{"text": "Midjourney"}],
             [{"text": "🍌 Nano Banana"}, {"text": "🍌 Nano Banana 2"}],
             [{"text": "🍌 Nano Banana Pro - NEW"}, {"text": "Seedream"}],
             [{"text": "Нейро фотосессии"}, {"text": "Апскейл"}],
@@ -3684,23 +4267,78 @@ async def tg_edit_message_caption(chat_id: int, message_id: int, caption: str):
         await client.post(f"{TELEGRAM_API_BASE}/editMessageCaption", json=payload)
 
 
+def _telegram_api_assert_ok(response: httpx.Response, method: str) -> dict:
+    try:
+        payload = response.json()
+    except Exception:
+        payload = {}
+    if response.status_code >= 400 or not (isinstance(payload, dict) and payload.get("ok")):
+        detail = payload.get("description") if isinstance(payload, dict) else None
+        detail = detail or response.text[:600] or f"Telegram {method} failed with HTTP {response.status_code}"
+        raise RuntimeError(detail)
+    return payload
+
+
 async def tg_edit_message_media_photo(chat_id: int, message_id: int, image_bytes: bytes, caption: Optional[str] = None, reply_markup: Optional[dict] = None):
     """
     Заменяет фото в существующем сообщении (эффект: был силуэт/превью → стало финальное изображение).
+    Бросает исключение, если Telegram не принял editMessageMedia — вызывающий код сможет сделать fallback.
     """
     if not TELEGRAM_BOT_TOKEN:
         return
+    if not image_bytes:
+        raise RuntimeError("Empty image bytes for editMessageMedia")
     media = {"type": "photo", "media": "attach://photo"}
     if caption:
         media["caption"] = caption
 
-    files = {"photo": ("image.png", image_bytes, "image/png")}
+    try:
+        ext, mime = _detect_image_type(image_bytes)
+    except Exception:
+        ext, mime = "png", "image/png"
+    files = {"photo": (f"image.{ext or 'png'}", image_bytes, mime or "image/png")}
     data = {"chat_id": str(chat_id), "message_id": str(message_id), "media": json.dumps(media, ensure_ascii=False)}
     if reply_markup is not None:
         data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
 
     async with httpx.AsyncClient(timeout=180) as client:
-        await client.post(f"{TELEGRAM_API_BASE}/editMessageMedia", data=data, files=files)
+        r = await client.post(f"{TELEGRAM_API_BASE}/editMessageMedia", data=data, files=files)
+    _telegram_api_assert_ok(r, "editMessageMedia")
+
+
+async def tg_edit_message_media_photo_url(chat_id: int, message_id: int, image_url: str, caption: Optional[str] = None, reply_markup: Optional[dict] = None):
+    """Заменяет фото в существующем сообщении по публичной URL без хранения bytes в RAM."""
+    if not TELEGRAM_BOT_TOKEN:
+        return
+    url = str(image_url or "").strip()
+    if not url:
+        raise RuntimeError("Empty image URL for editMessageMedia")
+    media = {"type": "photo", "media": url}
+    if caption:
+        media["caption"] = caption
+    payload = {"chat_id": int(chat_id), "message_id": int(message_id), "media": media}
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(f"{TELEGRAM_API_BASE}/editMessageMedia", json=payload)
+    _telegram_api_assert_ok(r, "editMessageMedia")
+
+
+async def tg_send_photo_url(chat_id: int, image_url: str, caption: Optional[str] = None, reply_markup: Optional[dict] = None) -> Optional[int]:
+    if not TELEGRAM_BOT_TOKEN:
+        return None
+    payload: Dict[str, Any] = {"chat_id": int(chat_id), "photo": str(image_url or "").strip()}
+    if caption:
+        payload["caption"] = caption
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(f"{TELEGRAM_API_BASE}/sendPhoto", json=payload)
+    data = _telegram_api_assert_ok(r, "sendPhoto")
+    try:
+        return int(((data.get("result") or {}) if isinstance(data.get("result"), dict) else {}).get("message_id") or 0) or None
+    except Exception:
+        return None
 
 
 def _make_blur_placeholder(source_image_bytes: Optional[bytes], size_hint: Tuple[int, int] = (768, 1152)) -> bytes:
@@ -5450,6 +6088,64 @@ async def internal_dl2k(request: Request):
     _dl_set_bytes(chat_id, user_id, token, img_bytes)
     return {"ok": True, "token": token}
 
+
+@app.post("/internal/midjourney/register")
+async def internal_midjourney_register(request: Request):
+    """
+    Worker -> main: register Midjourney 2x2 grid + 4 original images for Telegram inline gallery.
+    Stores session in the same per-user state used by inline download buttons.
+    """
+    if not INTERNAL_API_KEY:
+        logging.error("/internal/midjourney/register blocked: INTERNAL_API_KEY is not set")
+        return Response(status_code=503, content="INTERNAL_API_KEY is required")
+    key = (request.headers.get("x-internal-key") or "").strip()
+    if key != INTERNAL_API_KEY:
+        return Response(status_code=401)
+
+    payload = await request.json()
+    chat_id = int(payload.get("chat_id") or 0)
+    user_id = int(payload.get("user_id") or 0)
+    if not (chat_id and user_id):
+        return Response(status_code=400)
+
+    token = _midjourney_session_token()
+    images: List[Dict[str, Any]] = []
+    for item in (payload.get("images") or [])[:4]:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        if not url:
+            continue
+        ext = str(item.get("ext") or "jpg").strip().lower().lstrip(".") or "jpg"
+        images.append({"url": url, "ext": ext})
+
+    grid_url = str(payload.get("grid_url") or "").strip()
+
+    if not images or not grid_url:
+        return Response(status_code=400)
+
+    session = {
+        "ts": _now(),
+        "chat_id": int(chat_id),
+        "user_id": int(user_id),
+        "provider_task_id": str(payload.get("provider_task_id") or "").strip(),
+        "source_task_id": str(payload.get("source_task_id") or "").strip(),
+        "prompt": str(payload.get("prompt") or ""),
+        "run_prompt": str(payload.get("run_prompt") or ""),
+        "model": normalize_midjourney_model(payload.get("model") or "midjourney-v7"),
+        "action": str(payload.get("action") or "generate").strip().lower(),
+        "selected_image_no": int(payload.get("selected_image_no") or 0),
+        "variation_type": str(payload.get("variation_type") or "subtle").strip().lower(),
+        "settings": payload.get("settings") if isinstance(payload.get("settings"), dict) else {},
+        "aspect_ratio": str(payload.get("aspect_ratio") or "1:1").strip() or "1:1",
+        "speed_mode": normalize_midjourney_speed_mode(payload.get("speed_mode") or "fast", model=payload.get("model") or "midjourney-v7"),
+        "charge_tokens": int(payload.get("charge_tokens") or 0),
+        "images": images[:4],
+        "grid_url": grid_url,
+    }
+    _midjourney_cache_session(chat_id, user_id, token, session, persist=True)
+    return {"ok": True, "token": token}
+
 @app.post("/webhook/{secret}")
 async def webhook(secret: str, request: Request):
     if secret != WEBHOOK_SECRET:
@@ -5477,6 +6173,371 @@ async def webhook(secret: str, request: Request):
                 await tg_answer_callback_query(str(cq_id))
             except Exception:
                 pass
+
+        if chat_id and user_id and data.startswith("mj:"):
+            st = _ensure_state(chat_id, user_id)
+            parts = data.split(":")
+            mj = _midjourney_state(st)
+            st["mode"] = "midjourney"
+
+            if data == "mj:back:photo":
+                mj["step"] = "need_prompt"
+                st["midjourney"] = mj
+                st["ts"] = _now()
+                await tg_send_message(chat_id, "📸 Фото будущего — выбери режим:", reply_markup=_photo_future_menu_keyboard())
+                return {"ok": True}
+
+            if data == "mj:settings":
+                mj = _midjourney_state(st)
+                mj["step"] = "need_prompt"
+                st["midjourney"] = mj
+                st["ts"] = _now()
+                await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+                return {"ok": True}
+
+            if len(parts) >= 3 and parts[1] == "model":
+                model = "midjourney-v8.1" if parts[2] in ("v81", "v8.1") else "midjourney-v7"
+                mj = _midjourney_default_state(model)
+                st["midjourney"] = mj
+                st["ts"] = _now()
+                await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+                return {"ok": True}
+
+            if len(parts) >= 3 and parts[1] == "menu":
+                mj["step"] = "need_prompt"
+                st["midjourney"] = mj
+                st["ts"] = _now()
+                menu = parts[2]
+                if menu == "aspect":
+                    await tg_send_message(chat_id, "Выбери формат изображения:", reply_markup=_midjourney_aspect_kb(str(mj.get("aspect_ratio") or "1:1")))
+                    return {"ok": True}
+                if menu == "speed":
+                    model = normalize_midjourney_model(mj.get("model") or "midjourney-v7")
+                    await tg_send_message(chat_id, "Выбери скорость Midjourney:", reply_markup=_midjourney_speed_kb(model, str(mj.get("speed_mode") or "fast")))
+                    return {"ok": True}
+                if menu == "stylize":
+                    await tg_send_message(
+                        chat_id,
+                        "Stylize отвечает за силу художественной стилизации.\n\n0 — ближе к prompt\n100 — стандартно\n1000 — максимально художественно\n\nТекущее значение: " + str(int(mj.get("stylize") or 100)),
+                        reply_markup=_midjourney_value_kb("stylize", int(mj.get("stylize") or 100)),
+                    )
+                    return {"ok": True}
+                if menu == "chaos":
+                    await tg_send_message(
+                        chat_id,
+                        "Chaos отвечает за непредсказуемость результата.\n\n0 — максимально стабильно\n100 — максимально хаотично\n\nТекущее значение: " + str(int(mj.get("chaos") or 0)),
+                        reply_markup=_midjourney_value_kb("chaos", int(mj.get("chaos") or 0)),
+                    )
+                    return {"ok": True}
+
+            if len(parts) >= 3 and parts[1] == "ar":
+                value = ":".join(parts[2:]).strip()
+                if value in {"1:1", "16:9", "9:16", "4:5"}:
+                    mj["aspect_ratio"] = value
+                    mj["step"] = "need_prompt"
+                    st["midjourney"] = mj
+                    st["ts"] = _now()
+                await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+                return {"ok": True}
+
+            if len(parts) >= 3 and parts[1] == "speed":
+                value = parts[2].strip().lower()
+                mj["speed_mode"] = normalize_midjourney_speed_mode(value, model=mj.get("model") or "midjourney-v7")
+                mj["step"] = "need_prompt"
+                st["midjourney"] = mj
+                st["ts"] = _now()
+                await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+                return {"ok": True}
+
+            if data == "mj:raw":
+                mj["raw"] = not bool(mj.get("raw"))
+                mj["step"] = "need_prompt"
+                st["midjourney"] = mj
+                st["ts"] = _now()
+                await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+                return {"ok": True}
+
+            if len(parts) >= 3 and parts[1] in {"stylize", "chaos"}:
+                kind = parts[1]
+                raw_value = parts[2]
+                if raw_value == "custom":
+                    mj["step"] = "need_custom_stylize" if kind == "stylize" else "need_custom_chaos"
+                    st["midjourney"] = mj
+                    st["ts"] = _now()
+                    await tg_send_message(chat_id, "Введи значение Stylize от 0 до 1000." if kind == "stylize" else "Введи значение Chaos от 0 до 100.")
+                    return {"ok": True}
+                try:
+                    value = int(raw_value)
+                except Exception:
+                    value = 100 if kind == "stylize" else 0
+                if kind == "stylize":
+                    mj["stylize"] = max(0, min(1000, value))
+                else:
+                    mj["chaos"] = max(0, min(100, value))
+                mj["step"] = "need_prompt"
+                st["midjourney"] = mj
+                st["ts"] = _now()
+                await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+                return {"ok": True}
+
+            if len(parts) >= 3 and parts[1] == "ref":
+                ref_kind = parts[2].strip().lower()
+                if ref_kind == "style":
+                    mj["step"] = "need_style_ref"
+                    st["midjourney"] = mj
+                    st["ts"] = _now()
+                    await tg_send_message(chat_id, "Отправь изображение для Style Reference. Оно задаёт визуальный стиль результата.", reply_markup=_midjourney_ref_kb("style", bool(mj.get("style_ref_url"))))
+                    return {"ok": True}
+                if ref_kind == "omni" and normalize_midjourney_model(mj.get("model") or "midjourney-v7") != "midjourney-v8.1":
+                    mj["step"] = "need_omni_ref"
+                    st["midjourney"] = mj
+                    st["ts"] = _now()
+                    await tg_send_message(chat_id, "Отправь изображение для Omni Reference. Оно задаёт персонажа/объект для результата.", reply_markup=_midjourney_ref_kb("omni", bool(mj.get("omni_ref_url"))))
+                    return {"ok": True}
+                if ref_kind == "image":
+                    mj["step"] = "need_image_prompt_ref"
+                    st["midjourney"] = mj
+                    st["ts"] = _now()
+                    count = len([x for x in (mj.get("image_prompt_urls") or []) if str(x or "").strip()])
+                    await tg_send_message(chat_id, f"Отправь image reference для V8.1. Можно добавить до 4 фото. Сейчас: {count}/4.", reply_markup=_midjourney_ref_kb("image", count > 0))
+                    return {"ok": True}
+
+            if len(parts) >= 3 and parts[1] == "ref_clear":
+                ref_kind = parts[2].strip().lower()
+                if ref_kind == "style":
+                    mj["style_ref_url"] = ""
+                    mj["style_ref_file_id"] = ""
+                elif ref_kind == "omni":
+                    mj["omni_ref_url"] = ""
+                    mj["omni_ref_file_id"] = ""
+                elif ref_kind == "image":
+                    mj["image_prompt_urls"] = []
+                    mj["image_prompt_file_ids"] = []
+                mj["step"] = "need_prompt"
+                st["midjourney"] = mj
+                st["ts"] = _now()
+                await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+                return {"ok": True}
+
+            if data == "mj:prompt:edit":
+                mj["step"] = "need_prompt"
+                mj["prompt"] = ""
+                st["midjourney"] = mj
+                st["ts"] = _now()
+                await tg_send_message(chat_id, "Пришли новый prompt для Midjourney.")
+                return {"ok": True}
+
+            if data == "mj:run":
+                mj = _midjourney_state(st)
+                prompt = str(mj.get("prompt") or "").strip()
+                if not prompt:
+                    await tg_send_message(chat_id, "Сначала пришли prompt для Midjourney.", reply_markup=_midjourney_settings_kb(mj))
+                    return {"ok": True}
+                try:
+                    run_prompt = _midjourney_prepare_run_prompt(mj)
+                except Exception as e:
+                    await tg_send_message(chat_id, f"❌ Не смог собрать Midjourney prompt: {e}", reply_markup=_midjourney_settings_kb(mj))
+                    return {"ok": True}
+                dedupe_key = _midjourney_dedupe_key(
+                    "generate",
+                    user_id,
+                    str(mj.get("model") or "midjourney-v7"),
+                    str(mj.get("speed_mode") or "fast"),
+                    str(mj.get("aspect_ratio") or "1:1"),
+                    prompt,
+                    run_prompt,
+                )
+                if not _midjourney_mark_action_once(mj, dedupe_key):
+                    st["midjourney"] = mj
+                    st["ts"] = _now()
+                    await tg_send_message(chat_id, "⏳ Этот Midjourney-запрос уже принят. Повторное нажатие не списывает токены.", reply_markup=_photo_future_menu_keyboard())
+                    return {"ok": True}
+                ok, message_text = await _midjourney_charge_and_enqueue(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    action="generate",
+                    model=str(mj.get("model") or "midjourney-v7"),
+                    prompt=prompt,
+                    run_prompt=run_prompt,
+                    aspect_ratio=str(mj.get("aspect_ratio") or "1:1"),
+                    speed_mode=str(mj.get("speed_mode") or "fast"),
+                    settings=mj,
+                )
+                if not ok:
+                    _midjourney_clear_action_mark(mj, dedupe_key)
+                await tg_send_message(chat_id, message_text, reply_markup=_midjourney_submit_reply_markup(ok, message_text, mj))
+                mj["step"] = "need_prompt"
+                st["midjourney"] = mj
+                st["ts"] = _now()
+                return {"ok": True}
+
+            return {"ok": True}
+
+        if chat_id and user_id and data.startswith("mjr:"):
+            parts = data.split(":")
+            token = parts[1].strip() if len(parts) > 1 else ""
+            action = parts[2].strip() if len(parts) > 2 else ""
+            session = _midjourney_get_session(chat_id, user_id, token)
+            if not session:
+                session = await _midjourney_load_session_from_storage(chat_id, user_id, token)
+            if not session:
+                await tg_answer_callback_query(str(cq_id), text="Midjourney результат устарел. Сгенерируй заново.", show_alert=True)
+                return {"ok": True}
+            message_id = int((msg or {}).get("message_id") or 0)
+
+            if action == "open":
+                try:
+                    index = max(0, min(3, int(parts[3] if len(parts) > 3 else 0)))
+                except Exception:
+                    index = 0
+                images = session.get("images") or []
+                if index >= len(images):
+                    await tg_answer_callback_query(str(cq_id), text="Такого изображения нет.", show_alert=True)
+                    return {"ok": True}
+                image = images[index]
+                image_url = str(image.get("url") or "").strip()
+                try:
+                    await tg_edit_message_media_photo_url(chat_id, message_id, image_url, caption=_midjourney_result_caption(session, index), reply_markup=_midjourney_image_result_kb(token, index))
+                except Exception:
+                    await tg_send_photo_url(chat_id, image_url, caption=_midjourney_result_caption(session, index), reply_markup=_midjourney_image_result_kb(token, index))
+                session["active_index"] = index
+                session["ts"] = _now()
+                return {"ok": True}
+
+            if action == "grid":
+                grid_url = str(session.get("grid_url") or "").strip()
+                try:
+                    await tg_edit_message_media_photo_url(chat_id, message_id, grid_url, caption=_midjourney_result_caption(session, grid=True), reply_markup=_midjourney_grid_result_kb(token))
+                except Exception:
+                    await tg_send_photo_url(chat_id, grid_url, caption=_midjourney_result_caption(session, grid=True), reply_markup=_midjourney_grid_result_kb(token))
+                session["ts"] = _now()
+                return {"ok": True}
+
+            if action == "download":
+                try:
+                    index = max(0, min(3, int(parts[3] if len(parts) > 3 else session.get("active_index") or 0)))
+                except Exception:
+                    index = 0
+                images = session.get("images") or []
+                if index >= len(images):
+                    await tg_answer_callback_query(str(cq_id), text="Оригинал не найден.", show_alert=True)
+                    return {"ok": True}
+                image = images[index]
+                image_url = str(image.get("url") or "").strip()
+                try:
+                    file_bytes = await http_download_bytes(image_url, timeout=180)
+                    await tg_send_document_bytes(chat_id, file_bytes, filename=f"midjourney_{index + 1}.{image.get('ext') or 'jpg'}", caption=f"⬇️ Midjourney оригинал #{index + 1}")
+                except Exception as e:
+                    await tg_send_message(chat_id, f"Не удалось отправить оригинал файлом. Открой ссылку: {image_url}\nОшибка: {str(e)[:300]}")
+                return {"ok": True}
+
+            if action == "download_all":
+                images = session.get("images") or []
+                await tg_send_message(chat_id, "Отправляю 4 оригинала файлами без сжатия.")
+                for idx, image in enumerate(images[:4], start=1):
+                    image_url = str(image.get("url") or "").strip()
+                    try:
+                        file_bytes = await http_download_bytes(image_url, timeout=180)
+                        await tg_send_document_bytes(chat_id, file_bytes, filename=f"midjourney_{idx}.{image.get('ext') or 'jpg'}", caption=f"⬇️ Midjourney оригинал #{idx}")
+                    except Exception as e:
+                        await tg_send_message(chat_id, f"Не удалось отправить оригинал #{idx}. Ссылка: {image_url}\nОшибка: {str(e)[:300]}")
+                return {"ok": True}
+
+            if action == "prompt":
+                await _midjourney_send_prompt_details(chat_id, session)
+                return {"ok": True}
+
+            if action == "reroll":
+                cost = int(_midjourney_cost(str(session.get("model") or "midjourney-v7"), str(session.get("speed_mode") or "fast")))
+                await tg_send_message(
+                    chat_id,
+                    f"Reroll создаст новую подборку из 4 изображений и спишет {cost} токен.\n\nПродолжить?",
+                    reply_markup=_midjourney_reroll_confirm_kb(token),
+                )
+                return {"ok": True}
+
+            if action == "reroll_no":
+                await tg_send_message(chat_id, "Ок, Reroll отменён.")
+                return {"ok": True}
+
+            if action == "reroll_yes":
+                source_task_id = str(session.get("provider_task_id") or "").strip()
+                if not source_task_id:
+                    await tg_send_message(chat_id, "❌ Не найден исходный Midjourney task для Reroll.")
+                    return {"ok": True}
+                dedupe_key = _midjourney_dedupe_key("reroll", user_id, token, source_task_id)
+                if not _midjourney_mark_action_once(session, dedupe_key):
+                    session["ts"] = _now()
+                    await tg_send_message(chat_id, "⏳ Reroll уже принят. Повторное нажатие не списывает токены.", reply_markup=_photo_future_menu_keyboard())
+                    return {"ok": True}
+                ok, message_text = await _midjourney_charge_and_enqueue(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    action="reroll",
+                    model=str(session.get("model") or "midjourney-v7"),
+                    prompt=str(session.get("prompt") or ""),
+                    run_prompt=str(session.get("run_prompt") or ""),
+                    aspect_ratio=str(session.get("aspect_ratio") or "1:1"),
+                    speed_mode=str(session.get("speed_mode") or "fast"),
+                    settings=session.get("settings") if isinstance(session.get("settings"), dict) else {},
+                    source_task_id=source_task_id,
+                )
+                if not ok:
+                    _midjourney_clear_action_mark(session, dedupe_key)
+                session["ts"] = _now()
+                await tg_send_message(chat_id, message_text, reply_markup=_midjourney_submit_reply_markup(ok, message_text))
+                return {"ok": True}
+
+            if action == "vary":
+                try:
+                    index = max(0, min(3, int(parts[3] if len(parts) > 3 else session.get("active_index") or 0)))
+                except Exception:
+                    index = int(session.get("active_index") or 0)
+                variation_type = str(parts[4] if len(parts) > 4 else "subtle").strip().lower()
+                if variation_type not in {"subtle", "strong"}:
+                    variation_type = "subtle"
+                source_task_id = str(session.get("provider_task_id") or "").strip()
+                if not source_task_id:
+                    await tg_send_message(chat_id, "❌ Не найден исходный Midjourney task для Remix.")
+                    return {"ok": True}
+                dedupe_key = _midjourney_dedupe_key("variation", user_id, token, source_task_id, index, variation_type)
+                if not _midjourney_mark_action_once(session, dedupe_key):
+                    session["ts"] = _now()
+                    await tg_send_message(chat_id, "⏳ Remix уже принят. Повторное нажатие не списывает токены.", reply_markup=_photo_future_menu_keyboard())
+                    return {"ok": True}
+                ok, message_text = await _midjourney_charge_and_enqueue(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    action="variation",
+                    model=str(session.get("model") or "midjourney-v7"),
+                    prompt=str(session.get("prompt") or ""),
+                    run_prompt=str(session.get("run_prompt") or ""),
+                    aspect_ratio=str(session.get("aspect_ratio") or "1:1"),
+                    speed_mode=str(session.get("speed_mode") or "fast"),
+                    settings=session.get("settings") if isinstance(session.get("settings"), dict) else {},
+                    source_task_id=source_task_id,
+                    selected_image_no=index,
+                    variation_type=variation_type,
+                )
+                if not ok:
+                    _midjourney_clear_action_mark(session, dedupe_key)
+                session["ts"] = _now()
+                await tg_send_message(chat_id, message_text, reply_markup=_midjourney_submit_reply_markup(ok, message_text))
+                return {"ok": True}
+
+            if action == "new":
+                st = _ensure_state(chat_id, user_id)
+                base_settings = session.get("settings") if isinstance(session.get("settings"), dict) else {}
+                mj = _midjourney_state({"midjourney": base_settings})
+                mj["prompt"] = ""
+                mj["step"] = "need_prompt"
+                st["mode"] = "midjourney"
+                st["midjourney"] = mj
+                st["ts"] = _now()
+                await tg_send_message(chat_id, "Ок, пришли новый prompt для Midjourney с текущими настройками.", reply_markup=_midjourney_settings_kb(mj))
+                return {"ok": True}
+
+            return {"ok": True}
 
         if chat_id and user_id and data.startswith("seedance_prompt:"):
             st = _ensure_state(chat_id, user_id)
@@ -8062,6 +9123,15 @@ async def webhook(secret: str, request: Request):
         )
         return {"ok": True}
 
+    if incoming_text in ("Midjourney", "Миджорни"):
+        _set_mode(chat_id, user_id, "midjourney")
+        await tg_send_message(
+            chat_id,
+            "Midjourney — генерация 4 изображений за один запуск.\n\nВыбери модель:",
+            reply_markup=_midjourney_model_kb(),
+        )
+        return {"ok": True}
+
     if incoming_text == "Апскейл":
         st["photo_submenu"] = "upscale"
         st["ts"] = _now()
@@ -9509,6 +10579,52 @@ async def webhook(secret: str, request: Request):
             await tg_send_message(chat_id, f"Ошибка при загрузке фото: {e}", reply_markup=_main_menu_for(user_id))
             return {"ok": True}
 
+        if st.get("mode") == "midjourney":
+            mj = _midjourney_state(st)
+            step = str(mj.get("step") or "need_prompt")
+            if step not in {"need_style_ref", "need_omni_ref", "need_image_prompt_ref"}:
+                await tg_send_message(chat_id, "Фото получил, но сейчас Midjourney ждёт prompt или выбор reference-кнопки.", reply_markup=_midjourney_settings_kb(mj))
+                return {"ok": True}
+            try:
+                file_url = _midjourney_upload_reference_bytes(user_id=user_id, image_bytes=img_bytes, filename="telegram_photo.jpg", content_type="image/jpeg")
+            except Exception as e:
+                logging.exception("Midjourney reference upload failed")
+                await tg_send_message(chat_id, f"❌ Не удалось загрузить reference для Midjourney: {e}", reply_markup=_midjourney_settings_kb(mj))
+                return {"ok": True}
+            if step == "need_style_ref":
+                mj["style_ref_url"] = file_url
+                mj["style_ref_file_id"] = str(file_id or "")
+                mj["step"] = "need_prompt"
+                st["midjourney"] = mj
+                st["ts"] = _now()
+                await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+                return {"ok": True}
+            if step == "need_omni_ref":
+                mj["omni_ref_url"] = file_url
+                mj["omni_ref_file_id"] = str(file_id or "")
+                mj["step"] = "need_prompt"
+                st["midjourney"] = mj
+                st["ts"] = _now()
+                await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+                return {"ok": True}
+            if step == "need_image_prompt_ref":
+                urls = [str(x or "").strip() for x in (mj.get("image_prompt_urls") or []) if str(x or "").strip()]
+                ids = [str(x or "").strip() for x in (mj.get("image_prompt_file_ids") or []) if str(x or "").strip()]
+                if len(urls) >= 4:
+                    await tg_send_message(chat_id, "У Midjourney V8.1 можно добавить максимум 4 image refs. Теперь пришли prompt или нажми запуск.", reply_markup=_midjourney_settings_kb(mj))
+                    return {"ok": True}
+                urls.append(file_url)
+                ids.append(str(file_id or ""))
+                mj["image_prompt_urls"] = urls[:4]
+                mj["image_prompt_file_ids"] = ids[:4]
+                mj["step"] = "need_prompt"
+                st["midjourney"] = mj
+                st["ts"] = _now()
+                await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+                return {"ok": True}
+            await tg_send_message(chat_id, "Фото получил, но сейчас Midjourney ждёт prompt или выбор reference-кнопки.", reply_markup=_midjourney_settings_kb(mj))
+            return {"ok": True}
+
         if st.get("mode") == "gpt_image_2_kie_i2i":
             gi2k = st.get("gpt_image_2_kie_i2i") or {}
             photo_ids = [str(item or "").strip() for item in (gi2k.get("photo_file_ids") or []) if str(item or "").strip()]
@@ -10706,6 +11822,47 @@ async def webhook(secret: str, request: Request):
             mime.startswith("image/")
             or filename_l.endswith((".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"))
         )
+
+        if file_id and is_image_document and st.get("mode") == "midjourney":
+            mj = _midjourney_state(st)
+            step = str(mj.get("step") or "need_prompt")
+            if step not in {"need_style_ref", "need_omni_ref", "need_image_prompt_ref"}:
+                await tg_send_message(chat_id, "Файл-фото получил, но сейчас Midjourney ждёт prompt или выбор reference-кнопки.", reply_markup=_midjourney_settings_kb(mj))
+                return {"ok": True}
+            try:
+                file_path = await tg_get_file_path(file_id)
+                img_bytes = await tg_download_file_bytes(file_path)
+                file_url = _midjourney_upload_reference_bytes(user_id=user_id, image_bytes=img_bytes, filename=filename or "reference.jpg", content_type=mime or "image/jpeg")
+            except Exception as e:
+                logging.exception("Midjourney document reference upload failed")
+                await tg_send_message(chat_id, f"Ошибка при загрузке reference: {e}", reply_markup=_midjourney_settings_kb(mj))
+                return {"ok": True}
+            if step == "need_style_ref":
+                mj["style_ref_url"] = file_url
+                mj["style_ref_file_id"] = str(file_id or "")
+                mj["step"] = "need_prompt"
+            elif step == "need_omni_ref":
+                mj["omni_ref_url"] = file_url
+                mj["omni_ref_file_id"] = str(file_id or "")
+                mj["step"] = "need_prompt"
+            elif step == "need_image_prompt_ref":
+                urls = [str(x or "").strip() for x in (mj.get("image_prompt_urls") or []) if str(x or "").strip()]
+                ids = [str(x or "").strip() for x in (mj.get("image_prompt_file_ids") or []) if str(x or "").strip()]
+                if len(urls) >= 4:
+                    await tg_send_message(chat_id, "У Midjourney V8.1 можно добавить максимум 4 image refs. Теперь пришли prompt или нажми запуск.", reply_markup=_midjourney_settings_kb(mj))
+                    return {"ok": True}
+                urls.append(file_url)
+                ids.append(str(file_id or ""))
+                mj["image_prompt_urls"] = urls[:4]
+                mj["image_prompt_file_ids"] = ids[:4]
+                mj["step"] = "need_prompt"
+            else:
+                await tg_send_message(chat_id, "Файл-фото получил, но сейчас Midjourney ждёт prompt или выбор reference-кнопки.", reply_markup=_midjourney_settings_kb(mj))
+                return {"ok": True}
+            st["midjourney"] = mj
+            st["ts"] = _now()
+            await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+            return {"ok": True}
 
         if file_id and st.get("mode") == "seedance_omni":
             so = st.get("seedance_omni") or {}
@@ -12291,6 +13448,55 @@ async def webhook(secret: str, request: Request):
                 _set_mode(chat_id, user_id, "chat")
                 _busy_end(int(user_id))
 
+            return {"ok": True}
+
+
+        # Midjourney: prompt + custom numeric settings
+        if st.get("mode") == "midjourney":
+            mj = _midjourney_state(st)
+            step = str(mj.get("step") or "need_prompt")
+            if _is_nav_or_menu_text(incoming_text):
+                mj["step"] = "need_prompt"
+                st["midjourney"] = mj
+                st["ts"] = _now()
+                await tg_send_message(chat_id, "Ок. Открыл меню фото.", reply_markup=_photo_future_menu_keyboard())
+                return {"ok": True}
+
+            if step == "need_custom_stylize":
+                try:
+                    value = int(incoming_text.strip())
+                except Exception:
+                    await tg_send_message(chat_id, "Введи число от 0 до 1000.")
+                    return {"ok": True}
+                mj["stylize"] = max(0, min(1000, value))
+                mj["step"] = "need_prompt"
+                st["midjourney"] = mj
+                st["ts"] = _now()
+                await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+                return {"ok": True}
+
+            if step == "need_custom_chaos":
+                try:
+                    value = int(incoming_text.strip())
+                except Exception:
+                    await tg_send_message(chat_id, "Введи число от 0 до 100.")
+                    return {"ok": True}
+                mj["chaos"] = max(0, min(100, value))
+                mj["step"] = "need_prompt"
+                st["midjourney"] = mj
+                st["ts"] = _now()
+                await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+                return {"ok": True}
+
+            prompt = incoming_text.strip()
+            if not prompt:
+                await tg_send_message(chat_id, "Пришли prompt для Midjourney.", reply_markup=_midjourney_settings_kb(mj))
+                return {"ok": True}
+            mj["prompt"] = prompt
+            mj["step"] = "need_prompt"
+            st["midjourney"] = mj
+            st["ts"] = _now()
+            await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
             return {"ok": True}
 
 
