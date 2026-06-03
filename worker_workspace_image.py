@@ -2,18 +2,33 @@ import asyncio
 import base64
 import json
 import os
-from typing import Any, Dict, Optional
+import time
+from io import BytesIO
+from uuid import uuid4
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
 from billing_db import add_tokens
 from gpt_image_2_kie import handle_gpt_image_2_kie
+from kling_flow import upload_bytes_to_supabase
 from queue_redis import dequeue_job
+from app.services.legnext_midjourney import (
+    LegnextMidjourneyError,
+    create_midjourney_diffusion,
+    create_midjourney_reroll,
+    create_midjourney_variation,
+    get_midjourney_job,
+)
 from app.services.workspace_worker_jobs import process_workspace_image_job
 
 WORKSPACE_IMAGE_QUEUE_NAME = (os.getenv("WORKSPACE_IMAGE_QUEUE_NAME", "workspace_image") or "workspace_image").strip() or "workspace_image"
 WORKSPACE_IMAGE_CONCURRENCY = int(os.getenv("WORKSPACE_IMAGE_CONCURRENCY", "3") or "3")
 image_sem = asyncio.Semaphore(WORKSPACE_IMAGE_CONCURRENCY)
+
+MIDJOURNEY_TG_QUEUE_NAME = (os.getenv("MIDJOURNEY_TG_QUEUE_NAME", "telegram_midjourney") or "telegram_midjourney").strip() or "telegram_midjourney"
+MIDJOURNEY_TG_CONCURRENCY = int(os.getenv("MIDJOURNEY_TG_CONCURRENCY", "1") or "1")
+midjourney_tg_sem = asyncio.Semaphore(MIDJOURNEY_TG_CONCURRENCY)
 
 TELEGRAM_BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}" if TELEGRAM_BOT_TOKEN else ""
@@ -22,6 +37,7 @@ MAIN_INTERNAL_URL = (os.getenv("MAIN_INTERNAL_URL") or "").strip().rstrip("/")
 INTERNAL_API_KEY = (os.getenv("INTERNAL_API_KEY") or "").strip()
 PROGRESS_STEP_SEC = float(os.getenv("GPT_IMAGE_2_PROGRESS_STEP_SEC", "4") or "4")
 PROGRESS_SEQUENCE = (os.getenv("GPT_IMAGE_2_PROGRESS_SEQ") or "10,25,45,65,85,95").strip()
+MIDJOURNEY_PROGRESS_STEP_SEC = float(os.getenv("MIDJOURNEY_TG_PROGRESS_STEP_SEC", "7") or "7")
 
 
 def _parse_progress_seq() -> list[int]:
@@ -104,6 +120,14 @@ def _image_mime_type(ext: str) -> str:
     return "image/jpeg"
 
 
+def _upload_midjourney_tg_asset(*, user_id: int, payload: bytes, ext: str = "jpg", prefix: str = "result") -> str:
+    if not payload:
+        raise RuntimeError("empty Midjourney asset")
+    safe_ext = str(ext or "jpg").strip().lower().lstrip(".") or "jpg"
+    path = f"midjourney_tg/{int(user_id)}/{prefix}_{int(time.time())}_{uuid4().hex[:12]}.{safe_ext}"
+    return str(upload_bytes_to_supabase(path, payload, _image_mime_type(safe_ext)) or "").strip()
+
+
 async def tg_send_document_bytes(
     chat_id: int,
     doc_bytes: bytes,
@@ -183,6 +207,318 @@ def _download_keyboard(token: Optional[str], resolution: str) -> Optional[dict]:
         return None
     label = "⬇️ Скачать оригинал 4К" if str(resolution).upper() == "4K" else "⬇️ Скачать оригинал 2К"
     return {"inline_keyboard": [[{"text": label, "callback_data": f"dl2k:{token}"}]]}
+
+
+async def _download_bytes(url: str, *, timeout: float = 180.0) -> bytes:
+    safe_url = str(url or "").strip()
+    if not safe_url:
+        raise RuntimeError("empty download url")
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        r = await client.get(safe_url)
+        r.raise_for_status()
+        return r.content
+
+
+async def _wait_for_midjourney_job(job_id: str, *, poll_interval_sec: float = 3.0, timeout_sec: float = 900.0) -> Dict[str, Any]:
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    while True:
+        payload = await get_midjourney_job(job_id)
+        status = str(payload.get("status") or "").strip().lower()
+        if status in {"completed", "failed"}:
+            return payload
+        if (loop.time() - started) >= timeout_sec:
+            raise LegnextMidjourneyError(f"Midjourney polling timeout for job {job_id}")
+        await asyncio.sleep(poll_interval_sec)
+
+
+def _make_midjourney_grid(image_items: List[Tuple[bytes, str]]) -> bytes:
+    """Create a 2x2 preview grid for the Telegram gallery."""
+    from PIL import Image, ImageDraw  # type: ignore
+
+    if not image_items:
+        raise RuntimeError("no images for grid")
+
+    thumbs = []
+    cell = 768
+    gap = 10
+    bg = (18, 18, 18)
+
+    for idx, (payload, _ext) in enumerate(image_items[:4], start=1):
+        img = Image.open(BytesIO(payload)).convert("RGB")
+        img.thumbnail((cell, cell), Image.LANCZOS)
+        canvas = Image.new("RGB", (cell, cell), bg)
+        x = (cell - img.width) // 2
+        y = (cell - img.height) // 2
+        canvas.paste(img, (x, y))
+        draw = ImageDraw.Draw(canvas)
+        badge = f"#{idx}"
+        draw.rounded_rectangle((16, 16, 92, 62), radius=12, fill=(0, 0, 0))
+        draw.text((30, 27), badge, fill=(255, 255, 255))
+        thumbs.append(canvas)
+
+    while len(thumbs) < 4:
+        thumbs.append(Image.new("RGB", (cell, cell), bg))
+
+    w = cell * 2 + gap
+    h = cell * 2 + gap
+    grid = Image.new("RGB", (w, h), bg)
+    positions = [(0, 0), (cell + gap, 0), (0, cell + gap), (cell + gap, cell + gap)]
+    for img, pos in zip(thumbs[:4], positions):
+        grid.paste(img, pos)
+
+    out = BytesIO()
+    grid.save(out, format="JPEG", quality=92, optimize=True)
+    return out.getvalue()
+
+
+def _midjourney_grid_keyboard(session_token: str) -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "1️⃣ Открыть #1", "callback_data": f"mjr:{session_token}:open:0"},
+                {"text": "2️⃣ Открыть #2", "callback_data": f"mjr:{session_token}:open:1"},
+            ],
+            [
+                {"text": "3️⃣ Открыть #3", "callback_data": f"mjr:{session_token}:open:2"},
+                {"text": "4️⃣ Открыть #4", "callback_data": f"mjr:{session_token}:open:3"},
+            ],
+            [
+                {"text": "🔄 Reroll все 4", "callback_data": f"mjr:{session_token}:reroll"},
+                {"text": "📄 Prompt", "callback_data": f"mjr:{session_token}:prompt"},
+            ],
+            [{"text": "⬇️ Скачать все", "callback_data": f"mjr:{session_token}:download_all"}],
+            [{"text": "🆕 Новый prompt", "callback_data": f"mjr:{session_token}:new"}],
+        ]
+    }
+
+
+async def register_midjourney_session(payload: Dict[str, Any]) -> Optional[str]:
+    if not MAIN_INTERNAL_URL:
+        return None
+    headers: Dict[str, str] = {}
+    if INTERNAL_API_KEY:
+        headers["x-internal-key"] = INTERNAL_API_KEY
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            r = await client.post(f"{MAIN_INTERNAL_URL}/internal/midjourney/register", json=payload, headers=headers)
+        if r.status_code != 200:
+            print(f"[workspace_image] Midjourney register failed HTTP {r.status_code}: {r.text[:300]}", flush=True)
+            return None
+        data = r.json()
+        if isinstance(data, dict) and data.get("ok") and data.get("token"):
+            return str(data["token"])
+    except Exception as exc:
+        print(f"[workspace_image] register_midjourney_session failed: {exc}", flush=True)
+    return None
+
+
+async def process_telegram_midjourney_job(job: Dict[str, Any]) -> None:
+    chat_id = int(job.get("chat_id") or 0)
+    user_id = int(job.get("user_id") or 0)
+    action = str(job.get("mj_action") or "generate").strip().lower() or "generate"
+    run_prompt = str(job.get("run_prompt") or "").strip()
+    source_task_id = str(job.get("source_task_id") or "").strip()
+    selected_image_no = int(job.get("selected_image_no") or 0)
+    variation_type_name = str(job.get("variation_type") or "subtle").strip().lower()
+    charge_tokens = int(job.get("charge_tokens") or 0)
+    charge_ref_id = str(job.get("charge_ref_id") or "").strip() or None
+    refund_reason = str(job.get("refund_reason") or "midjourney_refund").strip() or "midjourney_refund"
+    model = str(job.get("model") or "midjourney-v7").strip() or "midjourney-v7"
+    aspect_ratio = str(job.get("aspect_ratio") or "1:1").strip() or "1:1"
+    speed_mode = str(job.get("speed_mode") or "fast").strip() or "fast"
+    prompt = str(job.get("prompt") or "").strip()
+    settings = job.get("settings") if isinstance(job.get("settings"), dict) else {}
+
+    status_msg_id = await tg_send_message(
+        chat_id,
+        f"⏳ Midjourney: задача в обработке…\nМодель: {model.replace('midjourney-', 'Midjourney ').replace('v', 'V')}\nФормат: {aspect_ratio}\nСкорость: {speed_mode.title()}",
+    )
+    stop = asyncio.Event()
+
+    async def _progress_loop() -> None:
+        if not status_msg_id:
+            return
+        seq = [10, 20, 35, 50, 65, 80, 90, 95]
+        i = 0
+        while not stop.is_set():
+            pct = seq[min(i, len(seq) - 1)]
+            i += 1
+            try:
+                await tg_edit_message_text(chat_id, status_msg_id, f"⏳ Midjourney: обработка… {pct}%\nФормат: {aspect_ratio}\nСкорость: {speed_mode.title()}")
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=MIDJOURNEY_PROGRESS_STEP_SEC)
+            except asyncio.TimeoutError:
+                continue
+
+    progress_task = asyncio.create_task(_progress_loop())
+
+    try:
+        if action == "generate":
+            if not run_prompt:
+                raise LegnextMidjourneyError("Midjourney prompt is empty")
+            created = await create_midjourney_diffusion(text=run_prompt)
+        elif action == "reroll":
+            if not source_task_id:
+                raise LegnextMidjourneyError("Midjourney reroll requires source_task_id")
+            created = await create_midjourney_reroll(job_id=source_task_id)
+        elif action == "variation":
+            if not source_task_id:
+                raise LegnextMidjourneyError("Midjourney variation requires source_task_id")
+            if selected_image_no < 0 or selected_image_no > 3:
+                raise LegnextMidjourneyError("Midjourney variation requires image_no 0..3")
+            variation_type = 1 if variation_type_name == "strong" else 0
+            created = await create_midjourney_variation(
+                job_id=source_task_id,
+                image_no=int(selected_image_no),
+                variation_type=variation_type,
+            )
+        else:
+            raise LegnextMidjourneyError(f"Unsupported Midjourney action: {action}")
+
+        provider_task_id = str(created.get("job_id") or "").strip()
+        if not provider_task_id:
+            raise LegnextMidjourneyError("Midjourney API did not return job_id")
+
+        final_payload = await _wait_for_midjourney_job(provider_task_id)
+        status = str(final_payload.get("status") or "").strip().lower()
+        if status != "completed":
+            error = final_payload.get("error") or {}
+            message = str(error.get("message") or error.get("raw_message") or final_payload.get("detail") or f"Midjourney task finished with status {status}")
+            raise LegnextMidjourneyError(message)
+
+        output = final_payload.get("output") or {}
+        image_urls = [str(item or "").strip() for item in (output.get("image_urls") or []) if str(item or "").strip()]
+        single_image_url = str(output.get("image_url") or "").strip()
+        if not image_urls and single_image_url:
+            image_urls = [single_image_url]
+        if not image_urls:
+            raise LegnextMidjourneyError("Midjourney completed without image URLs")
+
+        image_items: List[Tuple[bytes, str]] = []
+        image_entries: List[Dict[str, str]] = []
+        for idx, url in enumerate(image_urls[:4], start=1):
+            payload = await _download_bytes(url)
+            ext = _detect_image_ext_from_bytes(payload, fallback="jpg")
+            image_items.append((payload, ext))
+            try:
+                stored_url = _upload_midjourney_tg_asset(user_id=user_id, payload=payload, ext=ext, prefix=f"image_{idx}")
+            except Exception as upload_exc:
+                print(f"[workspace_image] Midjourney original upload failed idx={idx}: {upload_exc}", flush=True)
+                stored_url = str(url or "").strip()
+            image_entries.append({"url": stored_url, "ext": ext})
+
+        if not image_items:
+            raise LegnextMidjourneyError("Midjourney images could not be downloaded")
+
+        grid_bytes = _make_midjourney_grid(image_items)
+        try:
+            grid_url = _upload_midjourney_tg_asset(user_id=user_id, payload=grid_bytes, ext="jpg", prefix="grid")
+        except Exception as upload_exc:
+            print(f"[workspace_image] Midjourney grid upload failed: {upload_exc}", flush=True)
+            grid_url = ""
+
+        session_payload = {
+            "chat_id": int(chat_id),
+            "user_id": int(user_id),
+            "provider_task_id": provider_task_id,
+            "source_task_id": source_task_id,
+            "prompt": prompt,
+            "run_prompt": run_prompt,
+            "model": model,
+            "action": action,
+            "selected_image_no": selected_image_no,
+            "variation_type": variation_type_name,
+            "settings": settings,
+            "aspect_ratio": aspect_ratio,
+            "speed_mode": speed_mode,
+            "charge_tokens": charge_tokens,
+            "images": image_entries,
+            "grid_url": grid_url,
+        }
+        session_token = await register_midjourney_session(session_payload)
+
+        stop.set()
+        try:
+            await progress_task
+        except Exception:
+            pass
+        if status_msg_id:
+            try:
+                await tg_edit_message_text(chat_id, status_msg_id, "✅ Midjourney: готово. Отправляю галерею…")
+            except Exception:
+                pass
+
+        model_title = "Midjourney V8.1" if model == "midjourney-v8.1" else "Midjourney V7"
+        action_title = "Готово: 4 варианта"
+        if action == "reroll":
+            action_title = "Reroll готов: новая подборка из 4 вариантов"
+        elif action == "variation":
+            action_title = f"Remix готов: 4 варианта по изображению #{int(selected_image_no) + 1}"
+
+        caption = (
+            f"{model_title}\n\n"
+            f"{action_title}\n"
+            f"Формат: {aspect_ratio}\n"
+            f"Скорость: {speed_mode.title()}\n"
+            "Выбери изображение для просмотра или remix."
+        )
+        if session_token:
+            await tg_send_photo_bytes(
+                chat_id,
+                grid_bytes,
+                caption=caption,
+                reply_markup=_midjourney_grid_keyboard(session_token),
+                filename="midjourney_grid.jpg",
+                mime_type="image/jpeg",
+            )
+        else:
+            await tg_send_photo_bytes(
+                chat_id,
+                grid_bytes,
+                caption=caption + "\n\n⚠️ Интерактивные кнопки недоступны: main server не зарегистрировал галерею. Отправляю 4 оригинала файлами.",
+                reply_markup=None,
+                filename="midjourney_grid.jpg",
+                mime_type="image/jpeg",
+            )
+            for idx, (payload, ext) in enumerate(image_items[:4], start=1):
+                try:
+                    await tg_send_document_bytes(chat_id, payload, filename=f"midjourney_{idx}.{ext or 'jpg'}", caption=f"⬇️ Midjourney оригинал #{idx}")
+                except Exception as send_exc:
+                    print(f"[workspace_image] Midjourney fallback original send failed idx={idx}: {send_exc}", flush=True)
+        if status_msg_id:
+            try:
+                await tg_edit_message_text(chat_id, status_msg_id, "✅ Midjourney: готово")
+            except Exception:
+                pass
+        return
+
+    except Exception as exc:
+        err = str(exc)[:800]
+        print(f"[workspace_image] Midjourney job failed job={job.get('job_id')}: {err}", flush=True)
+        stop.set()
+        try:
+            await progress_task
+        except Exception:
+            pass
+        refund_status = ""
+        if charge_tokens and charge_ref_id and user_id:
+            try:
+                add_tokens(user_id, int(charge_tokens), reason=refund_reason, ref_id=charge_ref_id, meta={"stage": "worker_failed", "provider": "midjourney", "action": action, "error": err})
+                refund_status = "Токены возвращены."
+            except Exception as refund_exc:
+                print(f"[workspace_image] Midjourney refund failed: {refund_exc}", flush=True)
+                refund_status = "Автовозврат токенов не удалось подтвердить. Если баланс не восстановится автоматически, напиши в поддержку."
+        text = f"❌ Midjourney: ошибка генерации." + (f"\n{refund_status}" if refund_status else "") + f"\n{err}"
+        if status_msg_id:
+            try:
+                await tg_edit_message_text(chat_id, status_msg_id, text)
+                return
+            except Exception:
+                pass
+        await tg_send_message(chat_id, text)
 
 
 async def process_telegram_gpt_image_2_kie_job(job: Dict[str, Any]) -> None:
@@ -282,33 +618,110 @@ async def process_telegram_gpt_image_2_kie_job(job: Dict[str, Any]) -> None:
         await tg_send_message(chat_id, text)
 
 
-async def _handle(job: Dict[str, Any]) -> None:
+async def _process_workspace_image_queue_job(job: Dict[str, Any]) -> None:
     kind = str(job.get("kind") or "").strip().lower()
-    async with image_sem:
-        if kind == "workspace_image_run":
-            await process_workspace_image_job(job)
-            print(f"[workspace_image] completed workspace image job={job.get('job_id')}", flush=True)
-            return
-        if kind == "telegram_gpt_image_2_kie_run":
-            await process_telegram_gpt_image_2_kie_job(job)
-            print(f"[workspace_image] completed telegram Gpt Image 2 job={job.get('job_id')}", flush=True)
-            return
-        print(f"[workspace_image] skipped unsupported kind={kind} job={job.get('job_id')}", flush=True)
+    if kind == "workspace_image_run":
+        await process_workspace_image_job(job)
+        print(f"[workspace_image] completed workspace image job={job.get('job_id')}", flush=True)
+        return
+    if kind == "telegram_gpt_image_2_kie_run":
+        await process_telegram_gpt_image_2_kie_job(job)
+        print(f"[workspace_image] completed telegram Gpt Image 2 job={job.get('job_id')}", flush=True)
+        return
+    print(f"[workspace_image] skipped unsupported workspace-image kind={kind} job={job.get('job_id')}", flush=True)
+
+
+async def _process_midjourney_tg_queue_job(job: Dict[str, Any]) -> None:
+    kind = str(job.get("kind") or "").strip().lower()
+    if kind == "telegram_midjourney_run":
+        await process_telegram_midjourney_job(job)
+        print(f"[workspace_image] completed telegram Midjourney job={job.get('job_id')}", flush=True)
+        return
+    print(f"[workspace_image] skipped unsupported Midjourney kind={kind} job={job.get('job_id')}", flush=True)
+
+
+async def _run_acquired_job(
+    *,
+    job: Dict[str, Any],
+    sem: asyncio.Semaphore,
+    processor,
+    queue_label: str,
+) -> None:
+    try:
+        await processor(job)
+    except Exception as exc:
+        print(f"[workspace_image] unhandled job error queue={queue_label} job={job.get('job_id')}: {exc}", flush=True)
+    finally:
+        sem.release()
+
+
+async def _consume_queue(
+    *,
+    queue_name: str,
+    sem: asyncio.Semaphore,
+    processor,
+    queue_label: str,
+) -> None:
+    tasks: set[asyncio.Task] = set()
+    while True:
+        await sem.acquire()
+        try:
+            job: Optional[Dict[str, Any]] = await dequeue_job(timeout_sec=10, queue_names=[queue_name])
+        except Exception as exc:
+            sem.release()
+            print(f"[workspace_image] dequeue crashed queue={queue_label}: {exc}", flush=True)
+            await asyncio.sleep(2)
+            continue
+
+        if not job:
+            sem.release()
+            done = {t for t in tasks if t.done()}
+            for task in done:
+                try:
+                    task.result()
+                except Exception as exc:
+                    print(f"[workspace_image] task finished with error queue={queue_label}: {exc}", flush=True)
+            tasks -= done
+            continue
+
+        task = asyncio.create_task(
+            _run_acquired_job(job=job, sem=sem, processor=processor, queue_label=queue_label)
+        )
+        tasks.add(task)
+        done = {t for t in tasks if t.done()}
+        for done_task in done:
+            try:
+                done_task.result()
+            except Exception as exc:
+                print(f"[workspace_image] task finished with error queue={queue_label}: {exc}", flush=True)
+        tasks -= done
 
 
 async def main() -> None:
-    print(f"[workspace_image] worker started queue={WORKSPACE_IMAGE_QUEUE_NAME} concurrency={WORKSPACE_IMAGE_CONCURRENCY}", flush=True)
-    tasks: set[asyncio.Task] = set()
-    while True:
-        job: Optional[Dict[str, Any]] = await dequeue_job(timeout_sec=10, queue_name=WORKSPACE_IMAGE_QUEUE_NAME)
-        if not job:
-            done = {t for t in tasks if t.done()}
-            tasks -= done
-            continue
-        task = asyncio.create_task(_handle(job))
-        tasks.add(task)
-        done = {t for t in tasks if t.done()}
-        tasks -= done
+    if MIDJOURNEY_TG_QUEUE_NAME == WORKSPACE_IMAGE_QUEUE_NAME:
+        raise RuntimeError("MIDJOURNEY_TG_QUEUE_NAME must be different from WORKSPACE_IMAGE_QUEUE_NAME")
+
+    print(
+        f"[workspace_image] worker started "
+        f"workspace_queue={WORKSPACE_IMAGE_QUEUE_NAME} image_concurrency={WORKSPACE_IMAGE_CONCURRENCY} "
+        f"midjourney_queue={MIDJOURNEY_TG_QUEUE_NAME} midjourney_tg_concurrency={MIDJOURNEY_TG_CONCURRENCY}",
+        flush=True,
+    )
+
+    await asyncio.gather(
+        _consume_queue(
+            queue_name=WORKSPACE_IMAGE_QUEUE_NAME,
+            sem=image_sem,
+            processor=_process_workspace_image_queue_job,
+            queue_label="workspace_image",
+        ),
+        _consume_queue(
+            queue_name=MIDJOURNEY_TG_QUEUE_NAME,
+            sem=midjourney_tg_sem,
+            processor=_process_midjourney_tg_queue_job,
+            queue_label="midjourney_tg",
+        ),
+    )
 
 
 if __name__ == "__main__":
