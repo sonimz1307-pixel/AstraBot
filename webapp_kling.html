@@ -1098,27 +1098,26 @@
 
     <!-- ===================== SEEDANCE BLOCK ===================== -->
     <div id="seedanceBlock">
-      <div class="card">
+      <div class="card" id="seedanceTypeCard" style="display:none;" hidden aria-hidden="true">
         <h3>Тип Seedance</h3>
         <div class="seg" role="radiogroup" aria-label="Тип Seedance">
-          <input id="seed_variant_kie" type="radio" name="seedance_variant" value="kie">
+          <input id="seed_variant_kie" type="radio" name="seedance_variant" value="kie" checked>
           <label for="seed_variant_kie">
             <span class="name">Seedance 2.0</span>
             <span class="desc">Как на сайте</span>
           </label>
 
-          <input id="seed_variant_preview" type="radio" name="seedance_variant" value="preview" checked>
+          <input id="seed_variant_preview" type="radio" name="seedance_variant" value="preview">
           <label for="seed_variant_preview">
             <span class="name">Seedance 2.0 Preview</span>
-            <span class="desc">Текущий режим</span>
+            <span class="desc">Скрытый режим</span>
           </label>
         </div>
-        <div class="hint">Сначала выбери обычный Seedance 2.0 или Preview.</div>
       </div>
 
       <div class="card">
         <h3>Модель Seedance</h3>
-        <div id="seedancePreviewModelWrap">
+        <div id="seedancePreviewModelWrap" style="display:none;">
           <div class="seg" role="radiogroup" aria-label="Модель Seedance Preview">
             <input id="seed_preview" type="radio" name="seedance_model" value="preview" checked>
             <label for="seed_preview">
@@ -1135,7 +1134,7 @@
           <div class="hint">Preview = 720p, Fast Preview = 480p.</div>
         </div>
 
-        <div id="seedanceKieModelWrap" style="display:none;">
+        <div id="seedanceKieModelWrap">
           <div class="seg" role="radiogroup" aria-label="Модель Seedance 2.0">
             <input id="seed_kie_480p" type="radio" name="seedance_kie_model" value="seedance-kie-480p" checked>
             <label for="seed_kie_480p">
@@ -1159,7 +1158,7 @@
         </div>
       </div>
 
-      <div id="seedancePreviewFlowCard" class="card">
+      <div id="seedancePreviewFlowCard" class="card" style="display:none;">
         <h3>Режим</h3>
         <div class="seg" role="radiogroup" aria-label="Режим Seedance Preview">
           <input id="seed_flow_text" type="radio" name="seedance_flow" value="text" checked>
@@ -1177,7 +1176,7 @@
         <div class="hint">Для Image → Video: после сохранения пришли 1–9 фото в чат, затем промпт.</div>
       </div>
 
-      <div id="seedanceKieFlowCard" class="card" style="display:none;">
+      <div id="seedanceKieFlowCard" class="card">
         <h3>Режим</h3>
         <div class="seg" role="radiogroup" aria-label="Режим Seedance 2.0">
           <input id="seed_kie_flow_text" type="radio" name="seedance_kie_flow" value="text" checked>
@@ -1677,13 +1676,15 @@
     }
 
     // Seedance getters
-    function getSeedanceVariant(){ return qs('input[name="seedance_variant"]:checked')?.value || "preview"; }
+    function getSeedanceVariant(){ return "kie"; }
     function getSeedancePreviewModel(){ return qs('input[name="seedance_model"]:checked')?.value || "preview"; }
     function getSeedanceKieModel(){ return qs('input[name="seedance_kie_model"]:checked')?.value || "seedance-kie-480p"; }
     function getSeedanceKieFlow(){ return qs('input[name="seedance_kie_flow"]:checked')?.value || "text"; }
 
     function updateSeedanceUI(){
-      const variant = getSeedanceVariant();
+      const seedTypeCard = qs('#seedanceTypeCard');
+      const seedKieRadio = qs('#seed_variant_kie');
+      const seedPreviewRadio = qs('#seed_variant_preview');
       const previewModelWrap = qs('#seedancePreviewModelWrap');
       const kieModelWrap = qs('#seedanceKieModelWrap');
       const previewFlowCard = qs('#seedancePreviewFlowCard');
@@ -1691,19 +1692,24 @@
       const aspectHint = qs('#seedanceAspectHint');
       const aspectSelect = qs('#seedance_aspect');
 
-      if (previewModelWrap) previewModelWrap.style.display = (variant === 'preview') ? 'block' : 'none';
-      if (kieModelWrap) kieModelWrap.style.display = (variant === 'kie') ? 'block' : 'none';
-      if (previewFlowCard) previewFlowCard.style.display = (variant === 'preview') ? 'block' : 'none';
-      if (kieFlowCard) kieFlowCard.style.display = (variant === 'kie') ? 'block' : 'none';
-
-      if (variant === 'kie'){
-        if (aspectSelect && ['4:3','3:4'].includes(aspectSelect.value)){
-          aspectSelect.value = '16:9';
-        }
-        if (aspectHint) aspectHint.textContent = 'Для обычного Seedance 2.0 доступны форматы 16:9 / 9:16 / 1:1, как на сайте.';
-      } else {
-        if (aspectHint) aspectHint.textContent = 'Если используешь референсы, формат референс‑картинки может переопределить этот параметр.';
+      // Preview intentionally hidden from UI: default Seedance path is the regular Seedance 2.0 branch.
+      if (seedTypeCard) {
+        seedTypeCard.style.display = 'none';
+        seedTypeCard.hidden = true;
+        seedTypeCard.setAttribute('aria-hidden', 'true');
       }
+      if (seedKieRadio) seedKieRadio.checked = true;
+      if (seedPreviewRadio) seedPreviewRadio.checked = false;
+
+      if (previewModelWrap) previewModelWrap.style.display = 'none';
+      if (kieModelWrap) kieModelWrap.style.display = 'block';
+      if (previewFlowCard) previewFlowCard.style.display = 'none';
+      if (kieFlowCard) kieFlowCard.style.display = 'block';
+
+      if (aspectSelect && ['4:3','3:4'].includes(aspectSelect.value)){
+        aspectSelect.value = '16:9';
+      }
+      if (aspectHint) aspectHint.textContent = 'Для обычного Seedance 2.0 доступны форматы 16:9 / 9:16 / 1:1, как на сайте.';
     }
 
     function setFlowLabelText(labelEl, name, desc){
