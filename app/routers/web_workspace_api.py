@@ -490,10 +490,10 @@ def _clamp_int(value: Any, default: int, low: int, high: int) -> int:
 
 WORKSPACE_TOPUP_PACKS: List[Dict[str, Any]] = [
     {"tokens": 5, "rub": 60, "stars": 33, "badge": "💰", "code": "lite"},
-    {"tokens": 20, "rub": 180, "stars": 99, "badge": "⭐", "code": "plus"},
-    {"tokens": 50, "rub": 450, "stars": 247, "badge": "🚀", "code": "pro"},
-    {"tokens": 100, "rub": 850, "stars": 467, "badge": "👑", "code": "ultra"},
-    {"tokens": 200, "rub": 1600, "stars": 879, "badge": "💎", "code": "max"},
+    {"tokens": 20, "rub": 200, "stars": 110, "badge": "⭐", "code": "plus"},
+    {"tokens": 60, "rub": 550, "stars": 302, "badge": "🚀", "code": "pro"},
+    {"tokens": 100, "rub": 890, "stars": 489, "badge": "👑", "code": "ultra"},
+    {"tokens": 200, "rub": 1700, "stars": 934, "badge": "💎", "code": "max"},
 ]
 
 
