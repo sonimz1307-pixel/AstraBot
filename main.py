@@ -1425,11 +1425,11 @@ def sb_set_user_email(user_id: int, email: str) -> bool:
 
 # Пакеты (Вариант A) — продаём токены. Никаких STD/PRO на этапе оплаты.
 # Пример UX:
-#  💎 18 токенов — 99⭐ (≈ 180 ₽)
-#  🔥 36 токенов — 199⭐ (≈ 360 ₽)
-#  🚀 72 токенов — 399⭐ (≈ 720 ₽)
-#  ⭐ 160 токенов — 799⭐ (≈ 1450 ₽)
-#  👑 303 токенов — 1499⭐ (≈ 2700 ₽)
+#  💰 5 токенов — 33⭐ (≈ 60 ₽)
+#  ⭐ 20 токенов — 110⭐ (≈ 200 ₽)
+#  🚀 60 токенов — 302⭐ (≈ 550 ₽)
+#  👑 100 токенов — 489⭐ (≈ 890 ₽)
+#  💎 200 токенов — 934⭐ (≈ 1700 ₽)
 #
 # Примечание:
 # ⭐ Stars — временный способ оплаты
@@ -1437,10 +1437,10 @@ def sb_set_user_email(user_id: int, email: str) -> bool:
 # Токены — внутренняя единица сервиса
 TOPUP_PACKS = [
     {"tokens": 5, "rub": 60, "stars": 33, "badge": "💰"},
-    {"tokens": 20, "rub": 180, "stars": 99, "badge": "⭐"},
-    {"tokens": 50, "rub": 450, "stars": 247, "badge": "🚀"},
-    {"tokens": 100, "rub": 850, "stars": 467, "badge": "👑"},
-    {"tokens": 200, "rub": 1600, "stars": 879, "badge": "💎"},
+    {"tokens": 20, "rub": 200, "stars": 110, "badge": "⭐"},
+    {"tokens": 60, "rub": 550, "stars": 302, "badge": "🚀"},
+    {"tokens": 100, "rub": 890, "stars": 489, "badge": "👑"},
+    {"tokens": 200, "rub": 1700, "stars": 934, "badge": "💎"},
 ]
 
 # Admin-only Stars invoice.
@@ -1453,7 +1453,7 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 ADMIN_STARS_200_TOKENS = _env_int("ADMIN_STARS_200_TOKENS", 200)
-ADMIN_STARS_200_AMOUNT = _env_int("ADMIN_STARS_200_AMOUNT", 879)
+ADMIN_STARS_200_AMOUNT = _env_int("ADMIN_STARS_200_AMOUNT", 934)
 ADMIN_STARS_200_BUTTON_TEXT = "⭐ Админ Stars 200"
 ADMIN_STARS_200_REASON = "telegram_stars_admin_200"
 ADMIN_STARS_200_PROVIDER = "telegram_stars_admin"
