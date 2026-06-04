@@ -980,10 +980,10 @@ def _fetch_admin_ledger_rows_for_stats(*, since: datetime, until: datetime, max_
 _PAYMENT_STATS_REASONS = {"yookassa_topup"}
 _PAYMENT_STATS_PACK_RUB_BY_TOKENS = {
     5: 60,
-    20: 180,
-    50: 450,
-    100: 850,
-    200: 1600,
+    20: 200,
+    60: 550,
+    100: 890,
+    200: 1700,
 }
 
 
