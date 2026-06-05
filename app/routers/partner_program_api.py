@@ -30,6 +30,13 @@ from queue_redis import enqueue_job
 
 from billing_db import add_tokens, get_balance, ledger_ref_exists
 from db_supabase import supabase
+from subscriptions_db import (
+    cancel_user_subscription,
+    extend_user_subscription,
+    get_current_subscription,
+    list_subscription_plans,
+    set_user_subscription,
+)
 
 router = APIRouter(prefix="/api/partner", tags=["partner-program"])
 
@@ -226,6 +233,24 @@ class AdminTokenAdjustPayload(BaseModel):
 class AdminGenerationFailPayload(BaseModel):
     refund_tokens: int = Field(0, ge=0, le=100000)
     admin_note: Optional[str] = Field(None, max_length=1000)
+
+
+class AdminSubscriptionSetPayload(BaseModel):
+    plan_code: str = Field(..., max_length=40)
+    duration_days: int = Field(30, ge=1, le=3660)
+    admin_id: Optional[str] = Field(None, max_length=120)
+    comment: Optional[str] = Field(None, max_length=1000)
+
+
+class AdminSubscriptionExtendPayload(BaseModel):
+    days: int = Field(30, ge=1, le=3660)
+    admin_id: Optional[str] = Field(None, max_length=120)
+    comment: Optional[str] = Field(None, max_length=1000)
+
+
+class AdminSubscriptionCancelPayload(BaseModel):
+    admin_id: Optional[str] = Field(None, max_length=120)
+    comment: Optional[str] = Field(None, max_length=1000)
 
 
 def _admin_sb():
@@ -636,6 +661,11 @@ async def partner_admin_user_overview(
     partner = _partner_info_for_user(effective_id)
     payouts = _try_ordered_rows("partner_payouts", select="*", order="created_at", desc=True, limit=30, partner_user_id=effective_id)
     commissions = _try_ordered_rows("partner_commissions", select="*", order="created_at", desc=True, limit=30, partner_user_id=effective_id)
+    try:
+        subscription = get_current_subscription(effective_id)
+    except Exception as exc:
+        subscription = {"plan_code": "free", "status": "free", "is_active": False, "error": str(exc)}
+
     return {
         "ok": True,
         "user": {
@@ -649,6 +679,7 @@ async def partner_admin_user_overview(
             "primary": balance,
             "old_or_linked_balances": old_balances,
         },
+        "subscription": subscription,
         "ledger": ledger_items,
         "payments": _payment_like_rows(ledger_items),
         "generations": generations,
@@ -656,6 +687,124 @@ async def partner_admin_user_overview(
         "partner_payouts": [serialize_payout(row, include_sensitive=True) for row in payouts],
         "partner_commissions": commissions,
     }
+
+
+@router.get("/admin/subscription-plans")
+async def partner_admin_subscription_plans(
+    x_admin_token: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    _require_admin(x_admin_token)
+    try:
+        # Plans are seeded only by SQL migration. This GET endpoint must not mutate tariff rows.
+        return {"ok": True, "items": list_subscription_plans(include_inactive=True)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Subscription plans error: {e}")
+
+
+@router.get("/admin/users/{user_id}/subscription")
+async def partner_admin_user_subscription(
+    user_id: int,
+    x_admin_token: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    _require_admin(x_admin_token)
+    resolved = _resolve_admin_user_ids(int(user_id))
+    effective_id = int(resolved.get("effective_user_id") or user_id)
+    return {"ok": True, "user_id": effective_id, "subscription": get_current_subscription(effective_id)}
+
+
+@router.post("/admin/users/{user_id}/subscription/set")
+async def partner_admin_set_user_subscription(
+    user_id: int,
+    payload: AdminSubscriptionSetPayload,
+    x_admin_token: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    _require_admin(x_admin_token)
+    resolved = _resolve_admin_user_ids(int(user_id))
+    effective_id = int(resolved.get("effective_user_id") or user_id)
+    try:
+        before = get_current_subscription(effective_id)
+        out = set_user_subscription(
+            effective_id,
+            payload.plan_code,
+            duration_days=int(payload.duration_days or 30),
+            source="admin",
+            admin_id=payload.admin_id or None,
+            comment=payload.comment or "",
+            meta={"origin": "nabex_admin_panel", "input_user_id": int(user_id)},
+        )
+        _admin_log_action(
+            action="subscription_set",
+            target_user_id=effective_id,
+            target_type="user",
+            target_id=str(effective_id),
+            payload={"plan_code": payload.plan_code, "duration_days": payload.duration_days, "comment": payload.comment},
+            before=before,
+            after=out.get("current") or {},
+        )
+        return out
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Не удалось поставить тариф: {e}")
+
+
+@router.post("/admin/users/{user_id}/subscription/extend")
+async def partner_admin_extend_user_subscription(
+    user_id: int,
+    payload: AdminSubscriptionExtendPayload,
+    x_admin_token: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    _require_admin(x_admin_token)
+    resolved = _resolve_admin_user_ids(int(user_id))
+    effective_id = int(resolved.get("effective_user_id") or user_id)
+    try:
+        out = extend_user_subscription(
+            effective_id,
+            days=int(payload.days or 30),
+            source="admin",
+            admin_id=payload.admin_id or None,
+            comment=payload.comment or "",
+        )
+        _admin_log_action(
+            action="subscription_extend",
+            target_user_id=effective_id,
+            target_type="user",
+            target_id=str(effective_id),
+            payload={"days": payload.days, "comment": payload.comment},
+            before=out.get("before") or {},
+            after=out.get("current") or {},
+        )
+        return out
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Не удалось продлить тариф: {e}")
+
+
+@router.post("/admin/users/{user_id}/subscription/cancel")
+async def partner_admin_cancel_user_subscription(
+    user_id: int,
+    payload: AdminSubscriptionCancelPayload,
+    x_admin_token: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    _require_admin(x_admin_token)
+    resolved = _resolve_admin_user_ids(int(user_id))
+    effective_id = int(resolved.get("effective_user_id") or user_id)
+    try:
+        out = cancel_user_subscription(
+            effective_id,
+            source="admin",
+            admin_id=payload.admin_id or None,
+            comment=payload.comment or "",
+        )
+        _admin_log_action(
+            action="subscription_cancel",
+            target_user_id=effective_id,
+            target_type="user",
+            target_id=str(effective_id),
+            payload={"comment": payload.comment},
+            before=out.get("before") or {},
+            after=out.get("current") or {},
+        )
+        return out
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Не удалось отменить тариф: {e}")
 
 
 @router.post("/admin/users/{user_id}/tokens/adjust")
