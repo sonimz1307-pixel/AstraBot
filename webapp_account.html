@@ -2016,6 +2016,165 @@
       }
     }
 
+
+    /* === Stable full-width tariff carousel for Telegram WebApp === */
+    #tariffOverlay .plans-sheet {
+      overflow-x: hidden !important;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+    }
+
+    #tariffOverlay .sheet-head {
+      padding-left: 8px !important;
+      padding-right: 8px !important;
+    }
+
+    #tariffOverlay .sheet-title {
+      max-width: calc(100% - 70px);
+      margin: 0 auto;
+    }
+
+    #tariffOverlay .sheet-note {
+      width: 100% !important;
+      max-width: 620px !important;
+      padding: 0 8px;
+      margin-left: auto !important;
+      margin-right: auto !important;
+      box-sizing: border-box;
+    }
+
+    #tariffOverlay .tariff-carousel-viewport {
+      width: 100%;
+      overflow: hidden;
+      padding: 6px 0 18px;
+      margin: 0;
+      touch-action: pan-y;
+      overscroll-behavior: contain;
+      -webkit-user-select: none;
+      user-select: none;
+      box-sizing: border-box;
+    }
+
+    #tariffOverlay .tariff-preview-grid {
+      display: flex !important;
+      grid-template-columns: none !important;
+      flex-direction: row;
+      align-items: stretch;
+      gap: 0 !important;
+      overflow: visible !important;
+      scroll-snap-type: none !important;
+      scroll-behavior: auto !important;
+      scrollbar-width: none;
+      padding: 0 !important;
+      margin: 0;
+      transform: translate3d(0, 0, 0);
+      transition: transform 0.24s ease;
+      will-change: transform;
+    }
+
+    #tariffOverlay .tariff-preview-grid.is-dragging {
+      transition: none;
+    }
+
+    #tariffOverlay .tariff-preview-grid::-webkit-scrollbar {
+      display: none;
+    }
+
+    #tariffOverlay .tariff-preview-card,
+    #tariffOverlay .tariff-preview-card.is-current,
+    #tariffOverlay .tariff-preview-card.is-popular,
+    #tariffOverlay .tariff-preview-card.is-maximum {
+      flex: 0 0 100% !important;
+      width: 100% !important;
+      max-width: none !important;
+      min-width: 0;
+      scroll-snap-align: none !important;
+      box-sizing: border-box;
+    }
+
+    #tariffOverlay .tariff-swipe-controls {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      padding: 4px 0 2px;
+      user-select: none;
+    }
+
+    #tariffOverlay .tariff-swipe-btn {
+      width: 44px;
+      height: 38px;
+      border: 1px solid rgba(255, 255, 255, 0.13);
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.08);
+      color: rgba(255, 255, 255, 0.9);
+      font-size: 31px;
+      line-height: 1;
+      font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    #tariffOverlay .tariff-swipe-btn:active {
+      transform: translateY(1px) scale(0.98);
+      background: rgba(255, 255, 255, 0.12);
+    }
+
+    #tariffOverlay .tariff-swipe-btn:disabled {
+      opacity: 0.35;
+      cursor: default;
+      transform: none;
+    }
+
+    #tariffOverlay .tariff-swipe-dots {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      min-width: 68px;
+    }
+
+    #tariffOverlay .tariff-swipe-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.22);
+      transition: width 0.18s ease, background 0.18s ease;
+    }
+
+    #tariffOverlay .tariff-swipe-dot.is-active {
+      width: 18px;
+      background: rgba(255, 138, 0, 0.92);
+    }
+
+    @media (max-width: 760px) {
+      #tariffOverlay .plans-sheet {
+        padding-left: 18px !important;
+        padding-right: 18px !important;
+      }
+
+      #tariffOverlay .sheet-head {
+        padding: 2px 4px 14px !important;
+      }
+
+      #tariffOverlay .sheet-note {
+        max-width: 100% !important;
+        font-size: 14px;
+        line-height: 1.42;
+      }
+
+      #tariffOverlay .tariff-preview-card,
+      #tariffOverlay .tariff-preview-card.is-current,
+      #tariffOverlay .tariff-preview-card.is-popular,
+      #tariffOverlay .tariff-preview-card.is-maximum {
+        flex-basis: 100% !important;
+        max-width: none !important;
+      }
+    }
+
   </style>
 </head>
 <body>
@@ -2226,35 +2385,35 @@
       <div class="plans-grid">
         <article class="plan-card topup-plan">
           <div class="plan-top"><div class="plan-icon">💰</div><div class="plan-chip">Быстрый тест</div></div>
-          <div class="plan-name">MINI</div>
+          <div class="plan-name">Lite</div>
           <div class="plan-tokens"><strong>5</strong> токенов</div>
           <div class="plan-desc">Мини-пакет, чтобы проверить генерации и быстро попробовать сервис.</div>
           <div class="plan-foot"><div class="plan-price">60 ₽</div><button class="plan-buy" type="button" data-topup-tokens="5">Купить</button></div>
         </article>
         <article class="plan-card topup-plan featured">
           <div class="plan-top"><div class="plan-icon">⭐</div><div class="plan-chip">Популярный старт</div></div>
-          <div class="plan-name">START</div>
+          <div class="plan-name">Plus</div>
           <div class="plan-tokens"><strong>20</strong> токенов</div>
           <div class="plan-desc">Базовое пополнение для обычной работы с фото, видео, музыкой и другими AI-инструментами.</div>
           <div class="plan-foot"><div class="plan-price">200 ₽</div><button class="plan-buy" type="button" data-topup-tokens="20">Купить</button></div>
         </article>
         <article class="plan-card topup-plan">
           <div class="plan-top"><div class="plan-icon">🚀</div><div class="plan-chip">Для активных</div></div>
-          <div class="plan-name">PRO</div>
+          <div class="plan-name">Pro</div>
           <div class="plan-tokens"><strong>60</strong> токенов</div>
           <div class="plan-desc">Оптимальный запас токенов для регулярных генераций без частых пополнений.</div>
           <div class="plan-foot"><div class="plan-price">550 ₽</div><button class="plan-buy" type="button" data-topup-tokens="60">Купить</button></div>
         </article>
         <article class="plan-card topup-plan">
           <div class="plan-top"><div class="plan-icon">👑</div><div class="plan-chip">Выгоднее</div></div>
-          <div class="plan-name">PLUS</div>
+          <div class="plan-name">Ultra</div>
           <div class="plan-tokens"><strong>100</strong> токенов</div>
           <div class="plan-desc">Большой пакет для видео, изображений, музыки и частого использования.</div>
           <div class="plan-foot"><div class="plan-price">890 ₽</div><button class="plan-buy" type="button" data-topup-tokens="100">Купить</button></div>
         </article>
         <article class="plan-card topup-plan featured">
           <div class="plan-top"><div class="plan-icon">💎</div><div class="plan-chip">Максимум</div></div>
-          <div class="plan-name">MAX</div>
+          <div class="plan-name">Max</div>
           <div class="plan-tokens"><strong>200</strong> токенов</div>
           <div class="plan-desc">Максимальный пакет для регулярной работы и большого запаса токенов.</div>
           <div class="plan-foot"><div class="plan-price">1 700 ₽</div><button class="plan-buy" type="button" data-topup-tokens="200">Купить</button></div>
@@ -2275,7 +2434,8 @@
         </button>
       </div>
 
-      <div class="tariff-preview-grid">
+      <div class="tariff-carousel-viewport">
+        <div class="tariff-preview-grid">
         <article class="tariff-preview-card is-current">
           <div class="tariff-preview-top">
             <div class="tariff-preview-icon">⚡</div>
@@ -2343,6 +2503,18 @@
           <div class="tariff-preview-note">В Nabex токены не сгорают и остаются с вами.</div>
           <button class="tariff-preview-action" type="button" disabled>Скоро</button>
         </article>
+        </div>
+      </div>
+
+      <div class="tariff-swipe-controls" aria-label="Переключение тарифов">
+        <button class="tariff-swipe-btn" type="button" data-tariff-slide="prev" aria-label="Предыдущий тариф">‹</button>
+        <div class="tariff-swipe-dots" aria-hidden="true">
+          <button class="tariff-swipe-dot is-active" type="button" aria-label="Free"></button>
+          <button class="tariff-swipe-dot" type="button" aria-label="Spark"></button>
+          <button class="tariff-swipe-dot" type="button" aria-label="Pulse"></button>
+          <button class="tariff-swipe-dot" type="button" aria-label="Nexus"></button>
+        </div>
+        <button class="tariff-swipe-btn" type="button" data-tariff-slide="next" aria-label="Следующий тариф">›</button>
       </div>
     </section>
   </div>
@@ -2411,6 +2583,9 @@
       sheet.classList.add("show");
       sheet.setAttribute("aria-hidden", "false");
       document.body.style.overflow = "hidden";
+      if (sheet.id === "tariffOverlay" && typeof window.refreshTariffPreviewCarousel === "function") {
+        window.refreshTariffPreviewCarousel();
+      }
     }
 
     function closeSheet(sheet) {
@@ -2791,6 +2966,7 @@
 
       if (event.target.closest("[data-open-tariffs]")) {
         openSheet(tariffOverlay);
+        if (typeof window.refreshTariffPreviewCarousel === "function") window.refreshTariffPreviewCarousel();
         return;
       }
 
@@ -2865,6 +3041,124 @@
         return;
       }
     });
+
+
+    function initTariffPreviewCarousel() {
+      const viewport = document.querySelector("#tariffOverlay .tariff-carousel-viewport");
+      const track = document.querySelector("#tariffOverlay .tariff-preview-grid");
+      const cards = Array.from(document.querySelectorAll("#tariffOverlay .tariff-preview-card"));
+      const dots = Array.from(document.querySelectorAll("#tariffOverlay .tariff-swipe-dot"));
+      const prevBtn = document.querySelector('[data-tariff-slide="prev"]');
+      const nextBtn = document.querySelector('[data-tariff-slide="next"]');
+      if (!viewport || !track || cards.length === 0) return;
+
+      let activeIndex = 0;
+      let currentX = 0;
+      let startX = 0;
+      let startY = 0;
+      let startTranslate = 0;
+      let dragging = false;
+      let horizontalGesture = false;
+      let pointerId = null;
+      let resizeTimer = null;
+
+      function clampIndex(index) {
+        return Math.max(0, Math.min(cards.length - 1, index));
+      }
+
+      function targetXFor(index) {
+        const card = cards[index];
+        if (!card || !viewport.clientWidth) return 0;
+        return Math.round((viewport.clientWidth - card.offsetWidth) / 2 - card.offsetLeft);
+      }
+
+      function applyTranslate(x, animated) {
+        currentX = Math.round(x || 0);
+        track.classList.toggle("is-dragging", !animated);
+        track.style.transform = "translate3d(" + currentX + "px, 0, 0)";
+      }
+
+      function setActive(index, animated) {
+        activeIndex = clampIndex(index);
+        dots.forEach((dot, dotIndex) => {
+          dot.classList.toggle("is-active", dotIndex === activeIndex);
+        });
+        if (prevBtn) prevBtn.disabled = activeIndex === 0;
+        if (nextBtn) nextBtn.disabled = activeIndex === cards.length - 1;
+        applyTranslate(targetXFor(activeIndex), animated !== false);
+      }
+
+      function finishDrag(dx) {
+        track.classList.remove("is-dragging");
+        if (Math.abs(dx) > 44) {
+          setActive(activeIndex + (dx < 0 ? 1 : -1), true);
+        } else {
+          setActive(activeIndex, true);
+        }
+      }
+
+      prevBtn && prevBtn.addEventListener("click", () => setActive(activeIndex - 1, true));
+      nextBtn && nextBtn.addEventListener("click", () => setActive(activeIndex + 1, true));
+
+      dots.forEach((dot, dotIndex) => {
+        dot.addEventListener("click", () => setActive(dotIndex, true));
+      });
+
+      viewport.addEventListener("pointerdown", (event) => {
+        if (event.pointerType === "mouse") return;
+        dragging = true;
+        horizontalGesture = false;
+        pointerId = event.pointerId;
+        startX = event.clientX;
+        startY = event.clientY;
+        startTranslate = currentX;
+        try { viewport.setPointerCapture(pointerId); } catch (e) {}
+      });
+
+      viewport.addEventListener("pointermove", (event) => {
+        if (!dragging || event.pointerId !== pointerId) return;
+        const dx = event.clientX - startX;
+        const dy = event.clientY - startY;
+
+        if (!horizontalGesture && (Math.abs(dx) > 7 || Math.abs(dy) > 7)) {
+          horizontalGesture = Math.abs(dx) > Math.abs(dy) * 1.15;
+        }
+
+        if (!horizontalGesture) return;
+        event.preventDefault();
+        applyTranslate(startTranslate + dx, false);
+      }, { passive: false });
+
+      function endPointer(event) {
+        if (!dragging || event.pointerId !== pointerId) return;
+        const dx = event.clientX - startX;
+        try { viewport.releasePointerCapture(pointerId); } catch (e) {}
+        dragging = false;
+        pointerId = null;
+        if (horizontalGesture) {
+          finishDrag(dx);
+        } else {
+          track.classList.remove("is-dragging");
+        }
+      }
+
+      viewport.addEventListener("pointerup", endPointer);
+      viewport.addEventListener("pointercancel", endPointer);
+
+      window.addEventListener("resize", () => {
+        window.clearTimeout(resizeTimer);
+        resizeTimer = window.setTimeout(() => setActive(activeIndex, false), 120);
+      });
+
+      window.refreshTariffPreviewCarousel = function refreshTariffPreviewCarousel() {
+        window.setTimeout(() => setActive(activeIndex, false), 30);
+      };
+
+      setActive(0, false);
+    }
+
+
+    initTariffPreviewCarousel();
 
     renderAccount();
     loadAccount();
