@@ -15,15 +15,18 @@ from app.services.workspace_worker_jobs import (
 
 WORKSPACE_MEDIA_QUEUE_NAME = (os.getenv("WORKSPACE_MEDIA_QUEUE_NAME", "workspace_media") or "workspace_media").strip() or "workspace_media"
 WORKSPACE_VEO_RELAX_QUEUE_NAME = (os.getenv("WORKSPACE_VEO_RELAX_QUEUE_NAME", "workspace_veo_relax") or "workspace_veo_relax").strip() or "workspace_veo_relax"
+WORKSPACE_GROK15_QUEUE_NAME = (os.getenv("WORKSPACE_GROK15_QUEUE_NAME", "workspace_grok15") or "workspace_grok15").strip() or "workspace_grok15"
 VIDEO_CONCURRENCY = int(os.getenv("WORKSPACE_VIDEO_CONCURRENCY", "3"))
 OMNI_CONCURRENCY = int(os.getenv("WORKSPACE_OMNI_CONCURRENCY", "3"))
 MUSIC_CONCURRENCY = int(os.getenv("WORKSPACE_MUSIC_CONCURRENCY", "2"))
 TTS_CONCURRENCY = int(os.getenv("WORKSPACE_TTS_CONCURRENCY", "4"))
 VEO_RELAX_CONCURRENCY = int(os.getenv("WORKSPACE_VEO_RELAX_CONCURRENCY", "2"))
+GROK15_CONCURRENCY = int(os.getenv("WORKSPACE_GROK15_CONCURRENCY", "2"))
 
 video_sem = asyncio.Semaphore(VIDEO_CONCURRENCY)
 omni_sem = asyncio.Semaphore(OMNI_CONCURRENCY)
 veo_relax_sem = asyncio.Semaphore(VEO_RELAX_CONCURRENCY)
+grok15_sem = asyncio.Semaphore(GROK15_CONCURRENCY)
 music_sem = asyncio.Semaphore(MUSIC_CONCURRENCY)
 tts_sem = asyncio.Semaphore(TTS_CONCURRENCY)
 
@@ -40,6 +43,8 @@ def _sem_for_job(job: Dict[str, Any]) -> asyncio.Semaphore:
         return omni_sem
     if kind == "tg_veo_relax_video_run" or (provider == "veo" and model == "veo-3.1-fast-relax"):
         return veo_relax_sem
+    if (kind == "tg_grok_video_run" and model == "grok-imagine-video-1.5") or (kind == "workspace_video_run" and provider == "grok" and model == "grok-imagine-video-1.5"):
+        return grok15_sem
     if kind in {"workspace_video_run", "workspace_switchx_ref_run", "tg_grok_video_run"}:
         return video_sem
     if kind == "workspace_music_run":
@@ -108,8 +113,10 @@ async def main() -> None:
         f"[workspace_media] worker started "
         f"media_queue={WORKSPACE_MEDIA_QUEUE_NAME} "
         f"veo_relax_queue={WORKSPACE_VEO_RELAX_QUEUE_NAME} "
+        f"grok15_queue={WORKSPACE_GROK15_QUEUE_NAME} "
         f"video={VIDEO_CONCURRENCY} omni={OMNI_CONCURRENCY} "
-        f"veo_relax={VEO_RELAX_CONCURRENCY} music={MUSIC_CONCURRENCY} tts={TTS_CONCURRENCY}",
+        f"veo_relax={VEO_RELAX_CONCURRENCY} grok15={GROK15_CONCURRENCY} "
+        f"music={MUSIC_CONCURRENCY} tts={TTS_CONCURRENCY}",
         flush=True,
     )
     consumers = [
@@ -121,6 +128,14 @@ async def main() -> None:
         print(
             "[workspace_media] WARNING: WORKSPACE_VEO_RELAX_QUEUE_NAME equals WORKSPACE_MEDIA_QUEUE_NAME; "
             "Veo Relax jobs will share the regular media queue.",
+            flush=True,
+        )
+    if WORKSPACE_GROK15_QUEUE_NAME not in {WORKSPACE_MEDIA_QUEUE_NAME, WORKSPACE_VEO_RELAX_QUEUE_NAME}:
+        consumers.append(asyncio.create_task(_consume_queue(WORKSPACE_GROK15_QUEUE_NAME, "grok15")))
+    else:
+        print(
+            "[workspace_media] WARNING: WORKSPACE_GROK15_QUEUE_NAME overlaps another queue; "
+            "Grok 1.5 jobs will not have a fully separate Redis queue.",
             flush=True,
         )
     await asyncio.gather(*consumers)
