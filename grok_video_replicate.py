@@ -15,6 +15,11 @@ KIE_API_BASE = (os.getenv("KIE_API_BASE") or "https://api.kie.ai").rstrip("/")
 KIE_API_TOKEN = (os.getenv("KIE_API_TOKEN") or os.getenv("KIE_API_KEY") or "").strip()
 KIE_GROK_TEXT_MODEL = (os.getenv("KIE_GROK_TEXT_MODEL") or "grok-imagine/text-to-video").strip()
 KIE_GROK_IMAGE_MODEL = (os.getenv("KIE_GROK_IMAGE_MODEL") or "grok-imagine/image-to-video").strip()
+# Public UI/API model slug used inside AstraBot/Nabex. KIE uses a different
+# provider model id, kept configurable so we can switch from preview later.
+GROK_LEGACY_MODEL = "grok-imagine-video"
+GROK15_MODEL = "grok-imagine-video-1.5"
+KIE_GROK15_MODEL = (os.getenv("KIE_GROK15_MODEL") or "grok-imagine-video-1-5-preview").strip()
 KIE_GROK_CALLBACK_URL = (os.getenv("KIE_GROK_CALLBACK_URL") or "").strip()
 KIE_GROK_CREATE_TIMEOUT_SECONDS = float(os.getenv("KIE_GROK_CREATE_TIMEOUT_SECONDS", "60") or "60")
 KIE_GROK_MAX_WAIT_SECONDS = float(os.getenv("KIE_GROK_MAX_WAIT_SECONDS", "900") or "900")
@@ -28,9 +33,22 @@ GROK_TOKEN_PRICE_MAP = {
     "720p": {6: 2, 12: 3, 18: 4, 24: 5, 30: 6},
 }
 GROK_ALLOWED_DURATIONS = (6, 12, 18, 24, 30)
+GROK15_ALLOWED_DURATIONS = (5, 10, 15)
+# KIE Grok 1.5 cost basis:
+#   480p = 14.5 credits/sec, 720p = 25 credits/sec, input image = 2 credits.
+#   1 credit ≈ $0.005; USD/RUB basis = 80; minimum internal token value = 8 ₽.
+# Rounded up so every allowed run is non-negative even at 8 ₽/token.
+GROK15_TOKEN_PRICE_MAP = {
+    "480p": {5: 4, 10: 8, 15: 11},
+    "720p": {5: 7, 10: 13, 15: 19},
+}
+GROK15_MAX_INPUT_IMAGE_BYTES = 20 * 1024 * 1024
 
 GROK_ALLOWED_ASPECT_RATIOS = {
     "2:3", "3:2", "1:1", "16:9", "9:16",
+}
+GROK15_ALLOWED_ASPECT_RATIOS = {
+    "auto", "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3",
 }
 GROK_ALLOWED_RESOLUTIONS = {"480p", "720p"}
 GROK_ALLOWED_PROVIDER_MODES = {"fun", "normal", "spicy"}
@@ -39,6 +57,17 @@ GROK_POLLING_STATES = {"waiting", "queuing", "generating"}
 
 class GrokVideoError(RuntimeError):
     pass
+
+
+def normalize_grok_model(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {GROK15_MODEL, "grok15", "grok-1.5", "grok-imagine-1.5", "grok-imagine-video-15", "grok-imagine-video-1-5", "grok-imagine-video-1-5-preview"}:
+        return GROK15_MODEL
+    return GROK_LEGACY_MODEL
+
+
+def is_grok15_model(value: Any) -> bool:
+    return normalize_grok_model(value) == GROK15_MODEL
 
 
 def normalize_grok_mode(value: Any) -> str:
@@ -86,35 +115,71 @@ def grok_tokens_for_duration(duration: Any, resolution: Any = "480p") -> int:
     return int(price_map.get(seconds) or price_map[GROK_ALLOWED_DURATIONS[0]])
 
 
+def normalize_grok15_duration(value: Any, default: int = 5) -> int:
+    try:
+        out = int(value)
+    except Exception:
+        out = int(default)
+    if out <= GROK15_ALLOWED_DURATIONS[0]:
+        return GROK15_ALLOWED_DURATIONS[0]
+    if out >= GROK15_ALLOWED_DURATIONS[-1]:
+        return GROK15_ALLOWED_DURATIONS[-1]
+    return min(GROK15_ALLOWED_DURATIONS, key=lambda item: (abs(item - out), item))
+
+
+def normalize_grok15_aspect_ratio(value: Any, default: str = "16:9") -> str:
+    raw = str(value or default).strip().lower()
+    return raw if raw in GROK15_ALLOWED_ASPECT_RATIOS else default
+
+
+def normalize_grok15_resolution(value: Any, default: str = "480p") -> str:
+    return normalize_grok_resolution(value, default=default)
+
+
+def grok15_tokens_for_duration(duration: Any, resolution: Any = "480p") -> int:
+    seconds = normalize_grok15_duration(duration)
+    normalized = normalize_grok15_resolution(resolution)
+    price_map = GROK15_TOKEN_PRICE_MAP.get(normalized) or GROK15_TOKEN_PRICE_MAP["480p"]
+    return int(price_map.get(seconds) or price_map[GROK15_ALLOWED_DURATIONS[0]])
+
+
+def _detect_grok_image_type(image_bytes: bytes, filename_hint: Optional[str] = None) -> tuple[str, str]:
+    ext = "jpg"
+    mime = "image/jpeg"
+    head = bytes((image_bytes or b"")[:16])
+    if head.startswith(b"\x89PNG"):
+        return "png", "image/png"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "webp", "image/webp"
+    if head.startswith(b"GIF8"):
+        return "gif", "image/gif"
+    if isinstance(filename_hint, str) and "." in filename_hint:
+        suffix = filename_hint.rsplit(".", 1)[-1].lower().strip()
+        if suffix in {"jpg", "jpeg"}:
+            return "jpg", "image/jpeg"
+        if suffix == "png":
+            return "png", "image/png"
+        if suffix == "webp":
+            return "webp", "image/webp"
+        if suffix == "gif":
+            return "gif", "image/gif"
+    return ext, mime
+
+
+def validate_grok15_input_image(image_bytes: bytes, filename_hint: Optional[str] = None) -> None:
+    if not image_bytes:
+        raise GrokVideoError("Empty Grok 1.5 input image")
+    if len(image_bytes) > GROK15_MAX_INPUT_IMAGE_BYTES:
+        raise GrokVideoError("Grok 1.5 принимает изображение максимум 20 MB")
+    ext, _mime = _detect_grok_image_type(image_bytes, filename_hint)
+    if ext not in {"jpg", "png", "webp"}:
+        raise GrokVideoError("Grok 1.5 принимает только JPG, PNG или WEBP")
+
+
 def upload_grok_input_image(*, user_id: int, image_bytes: bytes, filename_hint: Optional[str] = None) -> str:
     if not image_bytes:
         raise GrokVideoError("Empty Grok input image")
-    ext = "jpg"
-    mime = "image/jpeg"
-    head = bytes(image_bytes[:16])
-    if head.startswith(b"\x89PNG"):
-        ext = "png"
-        mime = "image/png"
-    elif head[:4] == b"RIFF" and head[8:12] == b"WEBP":
-        ext = "webp"
-        mime = "image/webp"
-    elif head.startswith(b"GIF8"):
-        ext = "gif"
-        mime = "image/gif"
-    elif isinstance(filename_hint, str) and "." in filename_hint:
-        suffix = filename_hint.rsplit(".", 1)[-1].lower().strip()
-        if suffix in {"jpg", "jpeg"}:
-            ext = "jpg"
-            mime = "image/jpeg"
-        elif suffix == "png":
-            ext = "png"
-            mime = "image/png"
-        elif suffix == "webp":
-            ext = "webp"
-            mime = "image/webp"
-        elif suffix == "gif":
-            ext = "gif"
-            mime = "image/gif"
+    ext, mime = _detect_grok_image_type(image_bytes, filename_hint)
     path = f"grok_inputs/{int(user_id)}/{int(time.time())}_{os.urandom(4).hex()}.{ext}"
     try:
         return upload_bytes_to_supabase(path, image_bytes, mime)
@@ -298,3 +363,30 @@ async def run_grok_image_to_video(
         "aspect_ratio": normalize_grok_aspect_ratio(aspect_ratio),
     }
     return await _run_grok_kie(task_model=KIE_GROK_IMAGE_MODEL, input_payload=input_payload)
+
+
+async def run_grok15_image_to_video(
+    *,
+    user_id: int,
+    image_bytes: bytes,
+    prompt: str,
+    duration: Any = 5,
+    resolution: Any = "480p",
+    aspect_ratio: Any = "16:9",
+    image_url: Optional[str] = None,
+    filename_hint: Optional[str] = None,
+) -> str:
+    clean_prompt = str(prompt or "").strip()
+    if not clean_prompt:
+        raise GrokVideoError("Prompt is required for Grok 1.5 Image → Video")
+    validate_grok15_input_image(image_bytes, filename_hint)
+    if not image_url:
+        image_url = upload_grok_input_image(user_id=int(user_id), image_bytes=image_bytes, filename_hint=filename_hint)
+    input_payload = {
+        "prompt": clean_prompt,
+        "image_urls": [str(image_url)],
+        "aspect_ratio": normalize_grok15_aspect_ratio(aspect_ratio),
+        "resolution": normalize_grok15_resolution(resolution),
+        "duration": int(normalize_grok15_duration(duration)),
+    }
+    return await _run_grok_kie(task_model=KIE_GROK15_MODEL, input_payload=input_payload)
