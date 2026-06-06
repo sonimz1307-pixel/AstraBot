@@ -73,6 +73,7 @@ from app.services.workspace_account_service import (
 )
 from app.services.workspace_auth import WORKSPACE_SESSION_TTL_SEC, create_access_token, get_current_workspace_user, get_optional_workspace_user
 from billing_db import add_tokens, ensure_user_row, get_balance, get_balance_history
+from subscriptions_db import get_current_subscription
 from db_supabase import supabase, track_user_activity
 from kling3_flow import Kling3Error, create_kling3_task, get_kling3_task
 from kling_flow import (
@@ -858,6 +859,45 @@ def _workspace_user_payload(user: Dict[str, Any]) -> Dict[str, Any]:
         "email_verified": bool(user.get("email_verified", False)),
         "auth_methods": user.get("auth_methods") or (["telegram"] if linked_tg else []) + (["email"] if user.get("email") else []),
     }
+
+
+def _safe_public_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except Exception:
+        return int(default)
+
+
+def _workspace_subscription_public_payload(raw: Optional[Dict[str, Any]], user_id: int) -> Dict[str, Any]:
+    item = raw or {}
+    plan = item.get("plan") if isinstance(item.get("plan"), dict) else {}
+    plan_code = str(item.get("plan_code") or plan.get("code") or "free").strip().lower() or "free"
+    return {
+        "is_active": bool(item.get("is_active")),
+        "status": str(item.get("status") or ("active" if item.get("is_active") else "free")),
+        "plan_code": plan_code,
+        "plan": {
+            "code": str(plan.get("code") or plan_code),
+            "name": str(plan.get("name") or plan_code.title()),
+            "tokens": _safe_public_int(plan.get("tokens"), 0),
+            "price_rub": _safe_public_int(plan.get("price_rub"), 0),
+            "duration_days": _safe_public_int(plan.get("duration_days"), 0),
+            "features": plan.get("features") or {},
+        },
+        "starts_at": item.get("starts_at"),
+        "expires_at": item.get("expires_at"),
+        "days_left": _safe_public_int(item.get("days_left"), 0),
+    }
+
+
+def _workspace_subscription_payload(user_id: int) -> Dict[str, Any]:
+    uid = int(user_id or 0)
+    if uid <= 0:
+        return _workspace_subscription_public_payload(None, uid)
+    try:
+        return _workspace_subscription_public_payload(get_current_subscription(uid), uid)
+    except Exception:
+        return _workspace_subscription_public_payload(None, uid)
 
 
 def _songwriter_prompt_with_context(p: "SongwriterPayload") -> str:
@@ -2570,6 +2610,7 @@ async def workspace_bootstrap(user: Optional[Dict[str, Any]] = Depends(get_optio
         ensure_user_row(uid)
         payload["user"] = _workspace_user_payload(user)
         payload["balance_tokens"] = int(get_balance(uid) or 0)
+        payload["subscription"] = _workspace_subscription_payload(uid)
     return payload
 
 
@@ -3179,6 +3220,7 @@ async def workspace_auth_telegram(payload: TelegramAuthPayload) -> Dict[str, Any
         "expires_in": WORKSPACE_SESSION_TTL_SEC,
         "user": token_user,
         "balance_tokens": int(get_balance(int(account["id"])) or 0),
+        "subscription": _workspace_subscription_payload(int(account["id"])),
     }
 
 
@@ -3211,6 +3253,7 @@ async def workspace_auth_google(payload: GoogleAuthPayload, user: Optional[Dict[
         "expires_in": WORKSPACE_SESSION_TTL_SEC,
         "user": token_user,
         "balance_tokens": int(get_balance(int(account["id"])) or 0),
+        "subscription": _workspace_subscription_payload(int(account["id"])),
     }
 
 
@@ -3239,6 +3282,7 @@ async def workspace_auth_email_register_confirm(payload: EmailAuthConfirmPayload
         "expires_in": WORKSPACE_SESSION_TTL_SEC,
         "user": token_user,
         "balance_tokens": int(get_balance(int(account["id"])) or 0),
+        "subscription": _workspace_subscription_payload(int(account["id"])),
     }
 
 
@@ -3260,6 +3304,7 @@ async def workspace_auth_email_login(payload: EmailLoginPayload) -> Dict[str, An
         "expires_in": WORKSPACE_SESSION_TTL_SEC,
         "user": token_user,
         "balance_tokens": int(get_balance(int(account["id"])) or 0),
+        "subscription": _workspace_subscription_payload(int(account["id"])),
     }
 
 
@@ -3290,6 +3335,7 @@ async def workspace_auth_password_reset_confirm(payload: ResetPasswordConfirmPay
         "expires_in": WORKSPACE_SESSION_TTL_SEC,
         "user": token_user,
         "balance_tokens": int(get_balance(int(account["id"])) or 0),
+        "subscription": _workspace_subscription_payload(int(account["id"])),
     }
 
 
@@ -3320,6 +3366,7 @@ async def workspace_account_link_email_confirm(payload: EmailAuthConfirmPayload,
         "expires_in": WORKSPACE_SESSION_TTL_SEC,
         "user": token_user,
         "balance_tokens": int(get_balance(int(account["id"])) or 0),
+        "subscription": _workspace_subscription_payload(int(account["id"])),
     }
 
 
@@ -3342,6 +3389,7 @@ async def workspace_account_change_password(payload: ChangePasswordPayload, user
         "expires_in": WORKSPACE_SESSION_TTL_SEC,
         "user": token_user,
         "balance_tokens": int(get_balance(int(account["id"])) or 0),
+        "subscription": _workspace_subscription_payload(int(account["id"])),
     }
 
 
@@ -3365,6 +3413,7 @@ async def workspace_account_link_telegram(payload: TelegramAuthPayload, user: Di
         "expires_in": WORKSPACE_SESSION_TTL_SEC,
         "user": token_user,
         "balance_tokens": int(get_balance(int(account["id"])) or 0),
+        "subscription": _workspace_subscription_payload(int(account["id"])),
     }
 
 
@@ -3376,8 +3425,9 @@ async def workspace_logout() -> Dict[str, Any]:
 @router.get("/me")
 async def workspace_me(user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
     account = ensure_workspace_account_from_claims(user)
+    account_id = int(account["id"])
     user_payload = account_to_workspace_user_payload(account)
-    return {"ok": True, "user": user_payload, "balance_tokens": int(get_balance(int(account["id"])) or 0)}
+    return {"ok": True, "user": user_payload, "balance_tokens": int(get_balance(account_id) or 0), "subscription": _workspace_subscription_payload(account_id)}
 
 
 @router.get("/balance")
@@ -3385,7 +3435,7 @@ async def workspace_balance(user: Dict[str, Any] = Depends(get_current_workspace
     uid = int(user.get("workspace_user_id") or user["telegram_user_id"])
     ensure_user_row(uid)
     balance = int(get_balance(uid) or 0)
-    return {"ok": True, "balance_tokens": balance}
+    return {"ok": True, "balance_tokens": balance, "subscription": _workspace_subscription_payload(uid)}
 
 
 @router.get("/balance/history")
@@ -3394,7 +3444,7 @@ async def workspace_balance_history(limit: int = 30, user: Dict[str, Any] = Depe
     ensure_user_row(uid)
     items = get_balance_history(uid, limit=limit)
     balance = int(get_balance(uid) or 0)
-    return {"ok": True, "items": items, "balance_tokens": balance}
+    return {"ok": True, "items": items, "balance_tokens": balance, "subscription": _workspace_subscription_payload(uid)}
 
 
 class WorkspaceTopupCreatePayload(BaseModel):
