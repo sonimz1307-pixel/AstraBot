@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional
 
 from billing_db import ensure_user_row, get_balance, merge_user_balance_records
 from db_supabase import supabase, track_user_activity
+from subscriptions_db import merge_user_subscription_records
 
 
 WORKSPACE_EMAIL_CODE_TTL_MIN = max(3, int(os.getenv("WORKSPACE_EMAIL_CODE_TTL_MIN", "10") or 10))
@@ -180,19 +181,33 @@ def get_workspace_account_by_google_sub(google_sub: str) -> Optional[Dict[str, A
 
 
 def _sync_linked_telegram_balance(row: Dict[str, Any]) -> None:
-    """Best-effort переносит старый TG-баланс на workspace account после привязки."""
+    """Best-effort переносит старые TG-баланс и тариф на workspace account после привязки."""
     try:
         account_id = int(row.get("id") or 0)
         linked_tg = row.get("telegram_user_id")
         if linked_tg in (None, ""):
             return
         tg_id = int(linked_tg)
-        if account_id > 0 and tg_id > 0 and account_id != tg_id:
-            merge_user_balance_records(source_user_id=tg_id, target_user_id=account_id)
+        if account_id <= 0 or tg_id <= 0 or account_id == tg_id:
+            return
+    except Exception:
+        return
+
+    try:
+        merge_user_balance_records(source_user_id=tg_id, target_user_id=account_id)
     except Exception as exc:
         # Не блокируем вход/привязку аккаунта из-за вспомогательной миграции баланса.
         try:
             print(f"[workspace_account] linked Telegram balance sync skipped: {exc}")
+        except Exception:
+            pass
+
+    try:
+        merge_user_subscription_records(source_user_id=tg_id, target_user_id=account_id)
+    except Exception as exc:
+        # Не блокируем вход/привязку аккаунта из-за вспомогательной миграции тарифа.
+        try:
+            print(f"[workspace_account] linked Telegram subscription sync skipped: {exc}")
         except Exception:
             pass
 
@@ -740,13 +755,21 @@ def _merge_current_account_into_existing_telegram_account(
     if not out:
         raise WorkspaceAccountError("Не удалось объединить аккаунты.")
 
-    # Переносим баланс временного Google/email аккаунта в целевой Telegram-аккаунт.
-    # Старый чистый Telegram-баланс также подтянется через _sync_linked_telegram_balance.
+    # Переносим баланс и тариф временного Google/email аккаунта в целевой Telegram-аккаунт.
+    # Старый чистый Telegram-баланс/тариф также подтянется через _sync_linked_telegram_balance.
     try:
         merge_user_balance_records(source_user_id=current_id, target_user_id=target_id)
     except Exception as exc:
         try:
             print(f"[workspace_account] current account balance merge skipped: {exc}")
+        except Exception:
+            pass
+
+    try:
+        merge_user_subscription_records(source_user_id=current_id, target_user_id=target_id)
+    except Exception as exc:
+        try:
+            print(f"[workspace_account] current account subscription merge skipped: {exc}")
         except Exception:
             pass
 
