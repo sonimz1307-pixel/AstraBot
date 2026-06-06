@@ -100,14 +100,24 @@ from veo31_fast_relax_kie import (
     veo31_fast_relax_tokens_for_run,
 )
 from grok_video_replicate import (
+    GROK15_MODEL,
+    GROK_LEGACY_MODEL,
     GrokVideoError,
+    grok15_tokens_for_duration,
     grok_tokens_for_duration,
+    is_grok15_model,
+    normalize_grok15_aspect_ratio,
+    normalize_grok15_duration,
+    normalize_grok15_resolution,
     normalize_grok_aspect_ratio,
     normalize_grok_duration,
+    normalize_grok_model,
     normalize_grok_provider_mode,
     normalize_grok_resolution,
+    run_grok15_image_to_video,
     run_grok_image_to_video,
     run_grok_text_to_video,
+    validate_grok15_input_image,
 )
 from gemini_omni_video import (
     GeminiOmniVideoError,
@@ -212,6 +222,7 @@ TOPAZ_IMAGE_CREATE_RETRIES = max(1, int(os.getenv("TOPAZ_IMAGE_CREATE_RETRIES", 
 TOPAZ_IMAGE_RETRY_DELAY_SEC = max(0.25, float(os.getenv("TOPAZ_IMAGE_RETRY_DELAY_SEC", "1.5") or "1.5"))
 
 WORKSPACE_MEDIA_QUEUE_NAME = (os.getenv("WORKSPACE_MEDIA_QUEUE_NAME", "workspace_media") or "workspace_media").strip() or "workspace_media"
+WORKSPACE_GROK15_QUEUE_NAME = (os.getenv("WORKSPACE_GROK15_QUEUE_NAME", "workspace_grok15") or "workspace_grok15").strip() or "workspace_grok15"
 KLING3_KIE_QUEUE_NAME = (os.getenv("KLING3_KIE_QUEUE_NAME", "kling3_kie") or "kling3_kie").strip() or "kling3_kie"
 WORKSPACE_VEO_RELAX_QUEUE_NAME = (os.getenv("WORKSPACE_VEO_RELAX_QUEUE_NAME", "workspace_veo_relax") or "workspace_veo_relax").strip() or "workspace_veo_relax"
 WORKSPACE_IMAGE_QUEUE_NAME = (os.getenv("WORKSPACE_IMAGE_QUEUE_NAME", "workspace_image") or "workspace_image").strip() or "workspace_image"
@@ -1544,6 +1555,8 @@ def _normalize_workspace_video_resolution(provider: str, model: str, resolution:
             return normalize_veo31_fast_relax_resolution(value or "1080p")
         return "1080p" if model == "veo-3.1-pro" else "720p"
     if provider == "grok":
+        if is_grok15_model(model):
+            return normalize_grok15_resolution(value or "480p")
         return normalize_grok_resolution(value or "480p")
     if provider == "google" and model == "gemini-omni-video":
         return normalize_gemini_omni_resolution(value or "1080p")
@@ -2058,7 +2071,21 @@ async def _run_workspace_video_job(
                 )
 
         elif provider == "grok":
-            if mode == "image_to_video":
+            model = normalize_grok_model(model or GROK_LEGACY_MODEL)
+            if is_grok15_model(model):
+                if mode != "image_to_video":
+                    raise RuntimeError("Grok 1.5 Preview пока доступен только в Image→Video")
+                if not start_frame:
+                    raise RuntimeError("Для Grok 1.5 Image→Video нужен start_frame")
+                provider_video_url = await run_grok15_image_to_video(
+                    user_id=user_id,
+                    image_bytes=start_frame,
+                    prompt=prompt,
+                    duration=duration,
+                    resolution=resolution,
+                    aspect_ratio=aspect_ratio,
+                )
+            elif mode == "image_to_video":
                 if not start_frame:
                     raise RuntimeError("Для Grok Image→Video нужен start_frame")
                 provider_video_url = await run_grok_image_to_video(
@@ -4103,9 +4130,17 @@ def _workspace_video_charge_spec(
         }
 
     if provider == "grok":
-        normalized_resolution = normalize_grok_resolution(resolution)
-        normalized_duration = normalize_grok_duration(duration)
-        tokens = int(grok_tokens_for_duration(normalized_duration, normalized_resolution))
+        normalized_model = normalize_grok_model(model or GROK_LEGACY_MODEL)
+        if is_grok15_model(normalized_model):
+            normalized_resolution = normalize_grok15_resolution(resolution)
+            normalized_duration = normalize_grok15_duration(duration)
+            tokens = int(grok15_tokens_for_duration(normalized_duration, normalized_resolution))
+            pricing = "grok15_fixed_duration_map"
+        else:
+            normalized_resolution = normalize_grok_resolution(resolution)
+            normalized_duration = normalize_grok_duration(duration)
+            tokens = int(grok_tokens_for_duration(normalized_duration, normalized_resolution))
+            pricing = "fixed_duration_map"
         return {
             "tokens": tokens,
             "charge_reason": "grok_video",
@@ -4113,11 +4148,11 @@ def _workspace_video_charge_spec(
             "meta": {
                 "origin": "workspace_video",
                 "provider": provider,
-                "model": model,
+                "model": normalized_model,
                 "mode": mode,
                 "duration": normalized_duration,
                 "resolution": normalized_resolution,
-                "pricing": "fixed_duration_map",
+                "pricing": pricing,
                 "rate": tokens / max(1, int(normalized_duration or 1)),
             },
         }
@@ -4405,14 +4440,29 @@ async def workspace_video_run(
     if provider == "veo" and mode == "image_to_video" and not start_frame:
         raise HTTPException(status_code=400, detail="Для Veo Image→Video нужен start frame.")
     if provider == "grok":
-        if mode not in {"text_to_video", "image_to_video"}:
-            raise HTTPException(status_code=400, detail="Grok поддерживает только Text→Video и Image→Video.")
-        duration = normalize_grok_duration(duration)
-        resolution = normalize_grok_resolution(resolution)
-        aspect_ratio = normalize_grok_aspect_ratio(aspect_ratio)
-        provider_mode = normalize_grok_provider_mode(provider_mode)
-        if mode == "image_to_video" and not start_frame:
-            raise HTTPException(status_code=400, detail="Для Grok Image→Video нужен start frame.")
+        model = normalize_grok_model(model or GROK_LEGACY_MODEL)
+        if is_grok15_model(model):
+            if mode != "image_to_video":
+                raise HTTPException(status_code=400, detail="Grok 1.5 Preview пока поддерживает только Image→Video.")
+            duration = normalize_grok15_duration(duration)
+            resolution = normalize_grok15_resolution(resolution)
+            aspect_ratio = normalize_grok15_aspect_ratio(aspect_ratio)
+            provider_mode = ""
+            if not start_frame:
+                raise HTTPException(status_code=400, detail="Для Grok 1.5 Preview Image→Video нужен start frame.")
+            try:
+                validate_grok15_input_image(start_frame, getattr(start_file, "filename", None))
+            except GrokVideoError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+        else:
+            if mode not in {"text_to_video", "image_to_video"}:
+                raise HTTPException(status_code=400, detail="Grok поддерживает только Text→Video и Image→Video.")
+            duration = normalize_grok_duration(duration)
+            resolution = normalize_grok_resolution(resolution)
+            aspect_ratio = normalize_grok_aspect_ratio(aspect_ratio)
+            provider_mode = normalize_grok_provider_mode(provider_mode)
+            if mode == "image_to_video" and not start_frame:
+                raise HTTPException(status_code=400, detail="Для Grok Image→Video нужен start frame.")
     if provider == "google":
         model = "gemini-omni-video"
         mode = normalize_gemini_omni_mode(mode)
@@ -4748,6 +4798,8 @@ async def workspace_video_run(
             job["mode"] = mode
         if provider == "veo" and model == "veo-3.1-fast-relax":
             target_queue = WORKSPACE_VEO_RELAX_QUEUE_NAME
+        elif provider == "grok" and is_grok15_model(model):
+            target_queue = WORKSPACE_GROK15_QUEUE_NAME
         elif provider == "kling" and model == "kling-3.0-new":
             target_queue = KLING3_KIE_QUEUE_NAME
         else:
