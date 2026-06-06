@@ -956,14 +956,27 @@
     <!-- ===================== GROK BLOCK ===================== -->
     <div id="grokBlock" style="display:none;">
       <div class="card">
-        <h3>Grok Imagine Video</h3>
+        <h3>Версия Grok</h3>
+        <div class="seg" role="radiogroup" aria-label="Версия Grok">
+          <input id="grok_model_legacy" type="radio" name="grok_model" value="grok-imagine-video" checked>
+          <label for="grok_model_legacy">
+            <span class="name">Grok Imagine Video</span>
+            <span class="desc">Старый режим</span>
+          </label>
+
+          <input id="grok_model_15" type="radio" name="grok_model" value="grok-imagine-video-1.5">
+          <label for="grok_model_15">
+            <span class="name">Grok 1.5 Preview</span>
+            <span class="desc">Новый KIE</span>
+          </label>
+        </div>
       </div>
 
-      <div class="card">
+      <div class="card" id="grokFlowCard">
         <h3>Режим</h3>
         <div class="seg" role="radiogroup" aria-label="Режим Grok">
           <input id="grok_flow_text" type="radio" name="grok_flow" value="text" checked>
-          <label for="grok_flow_text">
+          <label for="grok_flow_text" id="grokFlowTextLabel">
             <span class="name">Text → Video</span>
             <span class="desc">Только промпт</span>
           </label>
@@ -1009,7 +1022,7 @@
           </select>
         </div>
 
-        <div class="hint">Grok Mode = Fun / Normal / Spicy, resolution = 480p / 720p, длительности 6 / 12 / 18 / 24 / 30 сек.</div>
+        <div class="hint" id="grok_hint">Grok Mode = Fun / Normal / Spicy, resolution = 480p / 720p, длительности 6 / 12 / 18 / 24 / 30 сек.</div>
       </div>
     </div>
 
@@ -1659,8 +1672,44 @@
     function getVeoFlow(){ return qs('input[name="veo_flow"]:checked')?.value || "text"; }   // text|image
 
     // Grok getters
-    function getGrokFlow(){ return qs('input[name="grok_flow"]:checked')?.value || "text"; }
-    function getGrokProviderMode(){ return qs('#grok_mode')?.value || "normal"; }
+    function getGrokModel(){ return qs('input[name="grok_model"]:checked')?.value || "grok-imagine-video"; }
+    function isGrok15(){ return getGrokModel() === "grok-imagine-video-1.5"; }
+    function getGrokFlow(){ return isGrok15() ? "image" : (qs('input[name="grok_flow"]:checked')?.value || "text"); }
+    function getGrokProviderMode(){ return isGrok15() ? "normal" : (qs('#grok_mode')?.value || "normal"); }
+    function setSelectOptions(selectEl, options, preferredValue){
+      if (!selectEl) return;
+      const current = preferredValue || selectEl.value;
+      selectEl.innerHTML = options.map(([value, label]) => `<option value="${value}">${label}</option>`).join('');
+      const values = options.map(([value]) => String(value));
+      selectEl.value = values.includes(String(current)) ? String(current) : String(options[0]?.[0] || '');
+    }
+    function updateGrokUI(){
+      const newModel = isGrok15();
+      const textRadio = qs('#grok_flow_text');
+      const imageRadio = qs('#grok_flow_image');
+      const textLabel = qs('#grokFlowTextLabel');
+      const modeSelect = qs('#grok_mode');
+      const durationSelect = qs('#grok_duration');
+      const aspectSelect = qs('#grok_aspect');
+      const hint = qs('#grok_hint');
+      if (newModel){
+        if (imageRadio) imageRadio.checked = true;
+        if (textRadio) textRadio.disabled = true;
+        if (textLabel) textLabel.style.display = 'none';
+        if (modeSelect) modeSelect.style.display = 'none';
+        setSelectOptions(durationSelect, [['5','5 секунд'], ['10','10 секунд'], ['15','15 секунд']], durationSelect?.value || '5');
+        setSelectOptions(aspectSelect, [['auto','auto'], ['1:1','1:1'], ['16:9','16:9'], ['9:16','9:16'], ['4:3','4:3'], ['3:4','3:4'], ['3:2','3:2'], ['2:3','2:3']], aspectSelect?.value || '16:9');
+        if (hint) hint.textContent = 'Grok 1.5 Preview: Image → Video, native audio, 480p / 720p, длительности 5 / 10 / 15 сек.';
+      } else {
+        if (textRadio) textRadio.disabled = false;
+        if (textLabel) textLabel.style.display = '';
+        if (modeSelect) modeSelect.style.display = '';
+        setSelectOptions(durationSelect, [['6','6 секунд'], ['12','12 секунд'], ['18','18 секунд'], ['24','24 секунды'], ['30','30 секунд']], durationSelect?.value || '6');
+        const oldAspect = ['2:3', '3:2', '1:1', '16:9', '9:16'].includes(String(aspectSelect?.value || '')) ? aspectSelect.value : '16:9';
+        setSelectOptions(aspectSelect, [['2:3','2:3'], ['3:2','3:2'], ['1:1','1:1'], ['16:9','16:9'], ['9:16','9:16']], oldAspect);
+        if (hint) hint.textContent = 'Grok Mode = Fun / Normal / Spicy, resolution = 480p / 720p, длительности 6 / 12 / 18 / 24 / 30 сек.';
+      }
+    }
 
     // Google Omni Flash getters
     function getOmniFlow(){ return qs('input[name="omni_flow"]:checked')?.value || "text"; }
@@ -1968,6 +2017,8 @@
         setVeoAdvancedEnabled();
       } else if (provider === 'seedance') {
         updateSeedanceUI();
+      } else if (provider === 'grok') {
+        updateGrokUI();
       } else if (provider === 'google') {
         updateOmniUI();
       }
@@ -1995,6 +2046,8 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
       setVeoAdvancedEnabled();
       updateCostUI();
     }));
+    qsa('input[name="grok_model"]').forEach(el => el.addEventListener('change', () => { updateGrokUI(); updateCostUI(); }));
+    qsa('input[name="grok_flow"]').forEach(el => el.addEventListener('change', () => { updateGrokUI(); updateCostUI(); }));
     qsa('input[name="omni_flow"]').forEach(el => el.addEventListener('change', () => { updateOmniUI(); updateCostUI(); }));
     ['#veo_duration', '#veo_resolution', '#veo_aspect', '#omni_duration', '#omni_resolution', '#omni_aspect'].forEach(sel => {
       const el = qs(sel);
@@ -2027,6 +2080,7 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
     updateTokenRateHint();
     updateVeoPriceHint();
     setVeoAdvancedEnabled();
+    updateGrokUI();
     updateCostUI();
 
     // Telegram init (safe)
@@ -2088,13 +2142,16 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
       }
 
       if (provider === 'grok'){
-        const seconds = parseInt((qs('#grok_duration')?.value || "6"), 10);
+        const seconds = parseInt((qs('#grok_duration')?.value || (isGrok15() ? "5" : "6")), 10);
         const resolution = String(qs('#grok_resolution')?.value || '480p').trim().toLowerCase() === '720p' ? '720p' : '480p';
-        const priceMap = {
+        const priceMap = isGrok15() ? {
+          '480p': {5:4, 10:8, 15:11},
+          '720p': {5:7, 10:13, 15:19},
+        } : {
           '480p': {6:1, 12:2, 18:2, 24:3, 30:3},
           '720p': {6:2, 12:3, 18:4, 24:5, 30:6},
         };
-        const tokens = (priceMap[resolution] && priceMap[resolution][seconds]) ? priceMap[resolution][seconds] : 1;
+        const tokens = (priceMap[resolution] && priceMap[resolution][seconds]) ? priceMap[resolution][seconds] : (isGrok15() ? 1 : 1);
         return { known:true, tokens, note:'' };
       }
 
@@ -2276,15 +2333,16 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
           }
 
         } else if (provider === 'grok'){
+          const model = getGrokModel();
           const flow = getGrokFlow();
-          const duration = parseInt((qs('#grok_duration')?.value || "6"), 10);
+          const duration = parseInt((qs('#grok_duration')?.value || (model === 'grok-imagine-video-1.5' ? "5" : "6")), 10);
           const resolution = (qs('#grok_resolution')?.value || '480p');
           const aspect_ratio = (qs('#grok_aspect')?.value || '16:9');
 
           payload = {
             type: "grok_settings",
             provider: "grok",
-            model: "grok-imagine-video",
+            model,
             flow,
             provider_mode: getGrokProviderMode(),
             duration,
