@@ -12,11 +12,18 @@ from nano_banana_pro_new_kie import handle_nano_banana_pro_new
 from gpt_image_2_kie import handle_gpt_image_2_kie
 from billing_db import add_tokens
 from grok_video_replicate import (
+    GROK_LEGACY_MODEL,
     GrokVideoError,
+    is_grok15_model,
+    normalize_grok15_aspect_ratio,
+    normalize_grok15_duration,
+    normalize_grok15_resolution,
     normalize_grok_aspect_ratio,
     normalize_grok_duration,
+    normalize_grok_model,
     normalize_grok_provider_mode,
     normalize_grok_resolution,
+    run_grok15_image_to_video,
     run_grok_image_to_video,
     run_grok_text_to_video,
 )
@@ -346,12 +353,21 @@ async def process_tg_veo_relax_video_job(job: Dict[str, Any]) -> None:
 async def process_tg_grok_video_job(job: Dict[str, Any]) -> None:
     chat_id = int(job.get("chat_id") or 0)
     user_id = int(job.get("user_id") or 0)
+    model = normalize_grok_model(job.get("model") or GROK_LEGACY_MODEL)
     mode = str(job.get("mode") or "text_to_video").strip().lower()
     prompt = str(job.get("prompt") or "")
-    duration = normalize_grok_duration(job.get("duration") or 5)
-    resolution = normalize_grok_resolution(job.get("resolution") or "480p")
-    aspect_ratio = normalize_grok_aspect_ratio(job.get("aspect_ratio") or "16:9")
-    provider_mode = normalize_grok_provider_mode(job.get("provider_mode") or "normal")
+    if is_grok15_model(model):
+        duration = normalize_grok15_duration(job.get("duration") or 5)
+        resolution = normalize_grok15_resolution(job.get("resolution") or "480p")
+        aspect_ratio = normalize_grok15_aspect_ratio(job.get("aspect_ratio") or "16:9")
+        provider_mode = ""
+        display_name = "Grok 1.5 Preview"
+    else:
+        duration = normalize_grok_duration(job.get("duration") or 6)
+        resolution = normalize_grok_resolution(job.get("resolution") or "480p")
+        aspect_ratio = normalize_grok_aspect_ratio(job.get("aspect_ratio") or "16:9")
+        provider_mode = normalize_grok_provider_mode(job.get("provider_mode") or "normal")
+        display_name = "Grok"
     charge_tokens = int(job.get("charge_tokens") or 0)
     charge_ref_id = str(job.get("charge_ref_id") or "")
     refund_reason = str(job.get("refund_reason") or "grok_video_refund")
@@ -361,7 +377,22 @@ async def process_tg_grok_video_job(job: Dict[str, Any]) -> None:
 
     try:
         video_url: Optional[str] = None
-        if mode == "image_to_video":
+        if is_grok15_model(model):
+            if mode != "image_to_video":
+                raise GrokVideoError("Grok 1.5 Preview поддерживает только Image → Video")
+            start_frame = await _download_optional_bytes(job.get("start_frame_url"), timeout=600.0)
+            if not start_frame:
+                raise GrokVideoError("Для Grok 1.5 Image → Video нужен start frame")
+            video_url = await run_grok15_image_to_video(
+                user_id=user_id,
+                image_bytes=start_frame,
+                image_url=str(job.get("start_frame_url") or "").strip() or None,
+                prompt=prompt,
+                duration=duration,
+                resolution=resolution,
+                aspect_ratio=aspect_ratio,
+            )
+        elif mode == "image_to_video":
             start_frame = await _download_optional_bytes(job.get("start_frame_url"), timeout=600.0)
             if not start_frame:
                 raise GrokVideoError("Для Grok Image → Video нужен start frame")
@@ -385,7 +416,7 @@ async def process_tg_grok_video_job(job: Dict[str, Any]) -> None:
             )
         if not video_url:
             raise GrokVideoError("Grok did not return video url")
-        await _tg_send_video_url(chat_id, video_url, caption="✅ Grok готов")
+        await _tg_send_video_url(chat_id, video_url, caption=f"✅ {display_name} готов")
     except Exception as e:
         if charge_tokens > 0:
             try:
@@ -394,14 +425,14 @@ async def process_tg_grok_video_job(job: Dict[str, Any]) -> None:
                     int(charge_tokens),
                     reason=refund_reason,
                     ref_id=charge_ref_id or None,
-                    meta={"origin": "tg_grok_video", "error": str(e)[:300]},
+                    meta={"origin": "tg_grok_video", "model": model, "error": str(e)[:300]},
                 )
             except TypeError:
                 add_tokens(int(user_id), int(charge_tokens), reason=refund_reason)
             except Exception:
                 pass
         try:
-            await _tg_send_message(chat_id, f"❌ Ошибка Grok: {e}")
+            await _tg_send_message(chat_id, f"❌ Ошибка {display_name}: {e}")
         except Exception:
             pass
 
