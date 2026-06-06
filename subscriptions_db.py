@@ -62,9 +62,27 @@ def _iso(dt: Optional[datetime] = None) -> str:
 
 def _safe_int(value: Any, default: int = 0) -> int:
     try:
-        return int(value)
+        return int(float(value))
     except Exception:
         return int(default)
+
+
+def _resolve_subscription_user_id(user_id: int) -> int:
+    """Return canonical workspace account ID for subscription reads/writes.
+
+    The merge function deliberately does not use this helper because it must work
+    with both raw source Telegram ID and target workspace account ID at once.
+    """
+    uid = _safe_int(user_id)
+    if uid <= 0:
+        return uid
+    try:
+        from billing_db import resolve_billing_user_id
+
+        resolved = _safe_int(resolve_billing_user_id(uid), uid)
+        return resolved if resolved > 0 else uid
+    except Exception:
+        return uid
 
 
 def _parse_dt(value: Any) -> Optional[datetime]:
@@ -162,7 +180,7 @@ def _free_subscription(user_id: int, *, error: Optional[str] = None) -> Dict[str
 
 
 def get_current_subscription(user_id: int) -> Dict[str, Any]:
-    uid = _safe_int(user_id)
+    uid = _resolve_subscription_user_id(user_id)
     if uid <= 0:
         raise ValueError("user_id must be positive")
     now_iso = _iso()
@@ -242,7 +260,7 @@ def cancel_user_subscription(
     admin_id: Optional[str] = None,
     comment: Optional[str] = None,
 ) -> Dict[str, Any]:
-    uid = _safe_int(user_id)
+    uid = _resolve_subscription_user_id(user_id)
     if uid <= 0:
         raise ValueError("user_id must be positive")
     sb = _require_client()
@@ -296,7 +314,7 @@ def set_user_subscription(
     comment: Optional[str] = None,
     meta: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    uid = _safe_int(user_id)
+    uid = _resolve_subscription_user_id(user_id)
     if uid <= 0:
         raise ValueError("user_id must be positive")
     plan_code_norm = str(plan_code or "").strip().lower()
@@ -346,6 +364,181 @@ def set_user_subscription(
     return {"ok": True, "plan": plan, "created": created_rows[0] if created_rows else row, "before": before, "current": after}
 
 
+
+def _plan_rank(plan_code: Any) -> tuple[int, int]:
+    """Return a stable rank for conflict resolution during account merges."""
+    code = str(plan_code or "").strip().lower()
+    try:
+        plan = get_subscription_plan(code)
+    except Exception:
+        plan = _default_plan(code) or {}
+    return (_safe_int(plan.get("price_rub"), 0), _safe_int(plan.get("tokens"), 0))
+
+
+def _row_dt(row: Dict[str, Any], key: str) -> Optional[datetime]:
+    return _parse_dt(row.get(key))
+
+
+def _row_id(row: Dict[str, Any]) -> int:
+    return _safe_int(row.get("id"), 0)
+
+
+def _with_merge_meta(row: Dict[str, Any], extra: Dict[str, Any]) -> Dict[str, Any]:
+    old_meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+    new_meta = dict(old_meta or {})
+    new_meta.update(extra)
+    return new_meta
+
+
+def merge_user_subscription_records(
+    *,
+    source_user_id: int,
+    target_user_id: int,
+    source: str = "account_merge",
+) -> Dict[str, Any]:
+    """
+    Best-effort merge for tariff records when workspace accounts are merged.
+
+    Rules:
+    - expired tariffs are not reactivated;
+    - if only the source user has an active tariff, it is moved to target_user_id;
+    - if both users have active tariffs, the highest tariff plan wins;
+    - the winning active tariff keeps the latest expires_at among merged active tariffs
+      so a user does not lose paid days during account linking;
+    - losing active rows are marked as replaced and kept for audit.
+
+    This function is intentionally idempotent: after a successful merge there should be
+    no active source subscription left, so repeated calls become a no-op.
+    """
+    src = _safe_int(source_user_id)
+    dst = _safe_int(target_user_id)
+    if src <= 0 or dst <= 0:
+        raise ValueError("source_user_id and target_user_id must be positive")
+    if src == dst:
+        return {"ok": True, "merged": False, "reason": "same_user", "source_user_id": src, "target_user_id": dst}
+
+    sb = _require_client()
+    now_iso = _iso()
+    res = (
+        sb.table("user_subscriptions")
+        .select("*")
+        .in_("user_id", [src, dst])
+        .eq("status", "active")
+        .gt("expires_at", now_iso)
+        .execute()
+    )
+    active_rows = list(getattr(res, "data", None) or [])
+    source_active = [row for row in active_rows if _safe_int(row.get("user_id")) == src]
+    if not source_active:
+        # Already merged or no subscription to transfer. This makes repeated calls safe.
+        return {"ok": True, "merged": False, "reason": "no_active_source_subscription", "source_user_id": src, "target_user_id": dst}
+
+    def _winner_key(row: Dict[str, Any]) -> tuple[int, int, float, float, int]:
+        price, tokens = _plan_rank(row.get("plan_code"))
+        expires = _row_dt(row, "expires_at")
+        starts = _row_dt(row, "starts_at")
+        return (
+            price,
+            tokens,
+            expires.timestamp() if expires else 0.0,
+            starts.timestamp() if starts else 0.0,
+            _row_id(row),
+        )
+
+    winner = max(active_rows, key=_winner_key)
+    winner_id = _row_id(winner)
+    if winner_id <= 0:
+        raise ValueError("active subscription row has no id")
+
+    max_expires = max((_row_dt(row, "expires_at") or _now()) for row in active_rows)
+    merged_at = _iso()
+    merged_ids = [_row_id(row) for row in active_rows if _row_id(row) > 0]
+    loser_ids = [_row_id(row) for row in active_rows if _row_id(row) > 0 and _row_id(row) != winner_id]
+
+    # 1) First move/update the winning row to the target account.
+    # If this update fails, loser rows are still active and the next retry can safely
+    # run the full merge again without losing the source user's paid tariff.
+    winner_meta = _with_merge_meta(
+        winner,
+        {
+            "merged_at": merged_at,
+            "merged_from_user_id": src,
+            "merged_to_user_id": dst,
+            "merged_subscription_ids": merged_ids,
+            "loser_subscription_ids": loser_ids,
+            "merge_role": "winner",
+        },
+    )
+    winner_update = {
+        "user_id": dst,
+        "status": "active",
+        "expires_at": _iso(max_expires),
+        "updated_at": merged_at,
+        "meta": winner_meta,
+    }
+    sb.table("user_subscriptions").update(winner_update).eq("id", winner_id).eq("status", "active").execute()
+
+    # 2) Only after the winner is safely kept do we close losing active rows. We use
+    # the already-supported replaced status instead of introducing a new status value,
+    # so no extra SQL migration is required. The status filter keeps retries safe.
+    for row in active_rows:
+        row_id = _row_id(row)
+        if row_id <= 0 or row_id == winner_id:
+            continue
+        loser_meta = _with_merge_meta(
+            row,
+            {
+                "merged_at": merged_at,
+                "merged_from_user_id": src,
+                "merged_to_user_id": dst,
+                "kept_subscription_id": winner_id,
+                "merge_role": "replaced_loser",
+                "replaced_reason": "account_merge",
+            },
+        )
+        sb.table("user_subscriptions").update(
+            {"status": "replaced", "updated_at": merged_at, "meta": loser_meta}
+        ).eq("id", row_id).eq("status", "active").execute()
+
+    _insert_subscription_event(
+        user_id=dst,
+        plan_code=str(winner.get("plan_code") or "").lower() or None,
+        event_type="subscription_merged",
+        source=source,
+        meta={
+            "source_user_id": src,
+            "target_user_id": dst,
+            "winner_subscription_id": winner_id,
+            "merged_subscription_ids": merged_ids,
+            "loser_subscription_ids": loser_ids,
+            "expires_at": _iso(max_expires),
+            "status_for_losers": "replaced",
+        },
+    )
+    _insert_subscription_event(
+        user_id=src,
+        plan_code=str(winner.get("plan_code") or "").lower() or None,
+        event_type="subscription_merge_source",
+        source=source,
+        meta={
+            "source_user_id": src,
+            "target_user_id": dst,
+            "winner_subscription_id": winner_id,
+            "merged_subscription_ids": merged_ids,
+            "status_for_losers": "replaced",
+        },
+    )
+    return {
+        "ok": True,
+        "merged": True,
+        "source_user_id": src,
+        "target_user_id": dst,
+        "winner_subscription_id": winner_id,
+        "merged_subscription_ids": merged_ids,
+        "loser_subscription_ids": loser_ids,
+        "current": get_current_subscription(dst),
+    }
+
 def extend_user_subscription(
     user_id: int,
     *,
@@ -354,7 +547,7 @@ def extend_user_subscription(
     admin_id: Optional[str] = None,
     comment: Optional[str] = None,
 ) -> Dict[str, Any]:
-    uid = _safe_int(user_id)
+    uid = _resolve_subscription_user_id(user_id)
     days_int = max(1, min(_safe_int(days, 30), 3660))
     current = get_current_subscription(uid)
     sub = current.get("subscription") or {}
