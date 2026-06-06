@@ -67,11 +67,20 @@ from kling3_pricing import calculate_kling3_price
 from kling3_telegram_handler import handle_kling3_wait_prompt
 from kling3_kie_telegram_handler import handle_kling3_kie_wait_prompt
 from grok_video_replicate import (
+    GROK15_MODEL,
+    GROK_LEGACY_MODEL,
+    grok15_tokens_for_duration,
     grok_tokens_for_duration,
+    is_grok15_model,
+    normalize_grok15_aspect_ratio,
+    normalize_grok15_duration,
+    normalize_grok15_resolution,
     normalize_grok_aspect_ratio,
     normalize_grok_duration,
+    normalize_grok_model,
     normalize_grok_provider_mode,
     normalize_grok_resolution,
+    validate_grok15_input_image,
 )
 from gemini_omni_video import (
     KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC,
@@ -163,6 +172,7 @@ if UVICORN_LOGGER.level > logging.INFO:
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WORKSPACE_MEDIA_QUEUE_NAME = (os.getenv("WORKSPACE_MEDIA_QUEUE_NAME", "workspace_media") or "workspace_media").strip() or "workspace_media"
 WORKSPACE_VEO_RELAX_QUEUE_NAME = (os.getenv("WORKSPACE_VEO_RELAX_QUEUE_NAME", "workspace_veo_relax") or "workspace_veo_relax").strip() or "workspace_veo_relax"
+WORKSPACE_GROK15_QUEUE_NAME = (os.getenv("WORKSPACE_GROK15_QUEUE_NAME", "workspace_grok15") or "workspace_grok15").strip() or "workspace_grok15"
 PARTNER_EVENTS_QUEUE_NAME = (os.getenv("PARTNER_EVENTS_QUEUE_NAME", "partner_events") or "partner_events").strip() or "partner_events"
 
 
@@ -2859,14 +2869,25 @@ async def _enqueue_music_job(*, chat_id: int, user_id: int, settings: dict, char
 
 async def _enqueue_tg_grok_job(*, chat_id: int, user_id: int, mode: str, prompt: str, settings: dict, image_bytes: bytes | None = None, image_name: str | None = None, charge_tokens: int = 0, charge_ref_id: str = "") -> dict:
     settings = dict(settings or {})
-    duration = normalize_grok_duration(settings.get("duration") or 6)
-    resolution = normalize_grok_resolution(settings.get("resolution") or "480p")
-    aspect_ratio = normalize_grok_aspect_ratio(settings.get("aspect_ratio") or "16:9")
-    provider_mode = normalize_grok_provider_mode(settings.get("provider_mode") or "normal")
+    model = normalize_grok_model(settings.get("model") or GROK_LEGACY_MODEL)
+    if is_grok15_model(model):
+        if mode != "image_to_video":
+            raise RuntimeError("Grok 1.5 Preview пока доступен только в Image → Video")
+        duration = normalize_grok15_duration(settings.get("duration") or 5)
+        resolution = normalize_grok15_resolution(settings.get("resolution") or "480p")
+        aspect_ratio = normalize_grok15_aspect_ratio(settings.get("aspect_ratio") or "16:9")
+        provider_mode = ""
+    else:
+        duration = normalize_grok_duration(settings.get("duration") or 6)
+        resolution = normalize_grok_resolution(settings.get("resolution") or "480p")
+        aspect_ratio = normalize_grok_aspect_ratio(settings.get("aspect_ratio") or "16:9")
+        provider_mode = normalize_grok_provider_mode(settings.get("provider_mode") or "normal")
     start_frame_url = None
     if mode == "image_to_video":
         if not image_bytes:
             raise RuntimeError("Для Grok Image → Video нужно стартовое фото")
+        if is_grok15_model(model):
+            validate_grok15_input_image(image_bytes, image_name)
         ext = "jpg"
         mime = "image/jpeg"
         head = bytes((image_bytes or b"")[:16])
@@ -2896,7 +2917,7 @@ async def _enqueue_tg_grok_job(*, chat_id: int, user_id: int, mode: str, prompt:
         "chat_id": int(chat_id),
         "user_id": int(user_id),
         "provider": "grok",
-        "model": "grok-imagine-video",
+        "model": model,
         "mode": "image_to_video" if mode == "image_to_video" else "text_to_video",
         "prompt": str(prompt or "").strip(),
         "duration": duration,
@@ -2909,7 +2930,8 @@ async def _enqueue_tg_grok_job(*, chat_id: int, user_id: int, mode: str, prompt:
         "refund_reason": "grok_video_refund",
         "origin": "telegram",
     }
-    await enqueue_job(job, queue_name=WORKSPACE_MEDIA_QUEUE_NAME)
+    target_queue = WORKSPACE_GROK15_QUEUE_NAME if is_grok15_model(model) else WORKSPACE_MEDIA_QUEUE_NAME
+    await enqueue_job(job, queue_name=target_queue)
     return job
 
 
@@ -8447,20 +8469,30 @@ async def webhook(secret: str, request: Request):
         )
 
         if is_grok:
+            model = normalize_grok_model(payload.get("model") or GROK_LEGACY_MODEL)
             flow = str(payload.get("flow") or payload.get("mode") or "text").lower().strip()
             if flow in ("image", "i2v", "image_to_video", "image2video", "image->video"):
                 flow = "image"
             else:
                 flow = "text"
 
-            duration = normalize_grok_duration(payload.get("duration") or 6)
-            resolution = normalize_grok_resolution(payload.get("resolution") or "480p")
-            aspect_ratio = normalize_grok_aspect_ratio(payload.get("aspect_ratio") or "16:9")
-            provider_mode = normalize_grok_provider_mode(payload.get("provider_mode") or "normal")
+            if is_grok15_model(model):
+                flow = "image"
+                duration = normalize_grok15_duration(payload.get("duration") or 5)
+                resolution = normalize_grok15_resolution(payload.get("resolution") or "480p")
+                aspect_ratio = normalize_grok15_aspect_ratio(payload.get("aspect_ratio") or "16:9")
+                provider_mode = ""
+                display_name = "Grok 1.5 Preview"
+            else:
+                duration = normalize_grok_duration(payload.get("duration") or 6)
+                resolution = normalize_grok_resolution(payload.get("resolution") or "480p")
+                aspect_ratio = normalize_grok_aspect_ratio(payload.get("aspect_ratio") or "16:9")
+                provider_mode = normalize_grok_provider_mode(payload.get("provider_mode") or "normal")
+                display_name = "Grok"
 
             st["grok_settings"] = {
                 "provider": "grok",
-                "model": "grok-imagine-video",
+                "model": model,
                 "flow": flow,
                 "duration": duration,
                 "resolution": resolution,
@@ -8474,15 +8506,16 @@ async def webhook(secret: str, request: Request):
                 st["grok_t2v"] = {"step": "need_prompt"}
                 await tg_send_message(
                     chat_id,
-                    f"✅ Настройки Grok сохранены: Text → Video • {duration} сек • {resolution} • {aspect_ratio} • Mode: {provider_mode}\n\nТеперь пришли промпт одним сообщением.",
+                    f"✅ Настройки {display_name} сохранены: Text → Video • {duration} сек • {resolution} • {aspect_ratio} • Mode: {provider_mode}\n\nТеперь пришли промпт одним сообщением.",
                     reply_markup=_help_menu_for(user_id),
                 )
             else:
                 _set_mode(chat_id, user_id, "grok_i2v")
                 st["grok_i2v"] = {"step": "need_image", "image_bytes": None, "image_name": None}
+                mode_suffix = f" • Mode: {provider_mode}" if provider_mode else ""
                 await tg_send_message(
                     chat_id,
-                    f"✅ Настройки Grok сохранены: Image → Video • {duration} сек • {resolution} • {aspect_ratio} • Mode: {provider_mode}\n\nШаг 1) Пришли стартовое фото.\nШаг 2) Потом пришли текстом, что должно происходить в видео.",
+                    f"✅ Настройки {display_name} сохранены: Image → Video • {duration} сек • {resolution} • {aspect_ratio}{mode_suffix}\n\nШаг 1) Пришли стартовое фото.\nШаг 2) Потом пришли текстом, что должно происходить в видео.",
                     reply_markup=_help_menu_for(user_id),
                 )
             return {"ok": True}
@@ -9615,11 +9648,21 @@ async def webhook(secret: str, request: Request):
             return {"ok": True}
 
         settings = st.get("grok_settings") or {}
-        duration = normalize_grok_duration(settings.get("duration") or 6)
-        resolution = normalize_grok_resolution(settings.get("resolution") or "480p")
-        aspect_ratio = normalize_grok_aspect_ratio(settings.get("aspect_ratio") or "16:9")
-        provider_mode = normalize_grok_provider_mode(settings.get("provider_mode") or "normal")
-        cost_tokens = int(grok_tokens_for_duration(duration, resolution))
+        model = normalize_grok_model(settings.get("model") or GROK_LEGACY_MODEL)
+        if is_grok15_model(model):
+            duration = normalize_grok15_duration(settings.get("duration") or 5)
+            resolution = normalize_grok15_resolution(settings.get("resolution") or "480p")
+            aspect_ratio = normalize_grok15_aspect_ratio(settings.get("aspect_ratio") or "16:9")
+            provider_mode = ""
+            cost_tokens = int(grok15_tokens_for_duration(duration, resolution))
+            display_name = "Grok 1.5 Preview"
+        else:
+            duration = normalize_grok_duration(settings.get("duration") or 6)
+            resolution = normalize_grok_resolution(settings.get("resolution") or "480p")
+            aspect_ratio = normalize_grok_aspect_ratio(settings.get("aspect_ratio") or "16:9")
+            provider_mode = normalize_grok_provider_mode(settings.get("provider_mode") or "normal")
+            cost_tokens = int(grok_tokens_for_duration(duration, resolution))
+            display_name = "Grok"
 
         try:
             ensure_user_row(user_id)
@@ -9644,11 +9687,12 @@ async def webhook(secret: str, request: Request):
                 ref_id=charge_ref_id,
                 meta={
                     "provider": "grok",
+                    "model": model,
                     "duration": duration,
                     "resolution": resolution,
                     "aspect_ratio": aspect_ratio,
                     "flow": ("i2v" if st.get("mode") == "grok_i2v" else "t2v"),
-                    "seconds_per_token": (6 if resolution == "720p" else 12),
+                    "pricing": "grok15_fixed_duration_map" if is_grok15_model(model) else "legacy_fixed_duration_map",
                 },
             )
         except TypeError:
@@ -9683,7 +9727,7 @@ async def webhook(secret: str, request: Request):
                     charge_tokens=cost_tokens,
                     charge_ref_id=charge_ref_id,
                 )
-                await tg_send_message(chat_id, f"⏳ Grok - Генерация началась: Image → Video • {duration} сек • {resolution} • {aspect_ratio} • Mode: {provider_mode}", reply_markup=_help_menu_for(user_id))
+                await tg_send_message(chat_id, f"⏳ {display_name} - Генерация началась: Image → Video • {duration} сек • {resolution} • {aspect_ratio}" + (f" • Mode: {provider_mode}" if provider_mode else ""), reply_markup=_help_menu_for(user_id))
             else:
                 await _enqueue_tg_grok_job(
                     chat_id=int(chat_id),
@@ -9694,7 +9738,7 @@ async def webhook(secret: str, request: Request):
                     charge_tokens=cost_tokens,
                     charge_ref_id=charge_ref_id,
                 )
-                await tg_send_message(chat_id, f"⏳ Grok - Генерация началась: Text → Video • {duration} сек • {resolution} • {aspect_ratio} • Mode: {provider_mode}", reply_markup=_help_menu_for(user_id))
+                await tg_send_message(chat_id, f"⏳ {display_name} - Генерация началась: Text → Video • {duration} сек • {resolution} • {aspect_ratio}" + (f" • Mode: {provider_mode}" if provider_mode else ""), reply_markup=_help_menu_for(user_id))
         except Exception as e:
             try:
                 add_tokens(user_id, int(cost_tokens), reason="grok_video_refund", ref_id=uuid4().hex, meta={"stage": "enqueue_failed", "error": str(e)[:300]})
@@ -11076,13 +11120,22 @@ async def webhook(secret: str, request: Request):
                 st["ts"] = _now()
 
                 gs = st.get("grok_settings") or {}
-                duration = normalize_grok_duration(gs.get("duration") or 6)
-                resolution = normalize_grok_resolution(gs.get("resolution") or "480p")
-                aspect_ratio = normalize_grok_aspect_ratio(gs.get("aspect_ratio") or "16:9")
-                provider_mode = normalize_grok_provider_mode(gs.get("provider_mode") or "normal")
+                model = normalize_grok_model(gs.get("model") or GROK_LEGACY_MODEL)
+                if is_grok15_model(model):
+                    duration = normalize_grok15_duration(gs.get("duration") or 5)
+                    resolution = normalize_grok15_resolution(gs.get("resolution") or "480p")
+                    aspect_ratio = normalize_grok15_aspect_ratio(gs.get("aspect_ratio") or "16:9")
+                    provider_mode = ""
+                    display_name = "Grok 1.5 Preview"
+                else:
+                    duration = normalize_grok_duration(gs.get("duration") or 6)
+                    resolution = normalize_grok_resolution(gs.get("resolution") or "480p")
+                    aspect_ratio = normalize_grok_aspect_ratio(gs.get("aspect_ratio") or "16:9")
+                    provider_mode = normalize_grok_provider_mode(gs.get("provider_mode") or "normal")
+                    display_name = "Grok"
                 await tg_send_message(
                     chat_id,
-                    f"Фото получил ✅\nТеперь напиши текстом, что должно происходить (Grok • {duration} сек • {resolution} • {aspect_ratio} • Mode: {provider_mode})",
+                    f"Фото получил ✅\nТеперь напиши текстом, что должно происходить ({display_name} • {duration} сек • {resolution} • {aspect_ratio}" + (f" • Mode: {provider_mode}" if provider_mode else "") + ")",
                     reply_markup=_help_menu_for(user_id),
                 )
                 return {"ok": True}
