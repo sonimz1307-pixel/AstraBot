@@ -3612,8 +3612,7 @@ def _seedance_collect_summary_text(mode: str, settings: Optional[Dict[str, Any]]
 def _photo_future_menu_keyboard() -> dict:
     return {
         "keyboard": [
-            [{"text": "Gpt Image 2"}],
-            [{"text": "Midjourney"}],
+            [{"text": "Gpt Image 2"}, {"text": "Midjourney"}],
             [{"text": "🍌 Nano Banana"}, {"text": "🍌 Nano Banana 2"}],
             [{"text": "🍌 Nano Banana Pro - NEW"}, {"text": "Seedream"}],
             [{"text": "Нейро фотосессии"}, {"text": "Апскейл"}],
