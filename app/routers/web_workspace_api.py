@@ -70,7 +70,7 @@ from app.services.workspace_account_service import (
 )
 from app.services.workspace_auth import WORKSPACE_SESSION_TTL_SEC, create_access_token, get_current_workspace_user, get_optional_workspace_user
 from billing_db import add_tokens, ensure_user_row, get_balance, get_balance_history
-from subscriptions_db import get_current_subscription
+from subscriptions_db import get_current_subscription, get_subscription_plan
 from free_plan_limits import (
     FEATURE_CHAT,
     FEATURE_TTS,
@@ -517,6 +517,31 @@ WORKSPACE_TOPUP_PACKS: List[Dict[str, Any]] = [
     {"tokens": 200, "rub": 1700, "stars": 934, "badge": "💎", "code": "max"},
 ]
 
+
+PUBLIC_SUBSCRIPTION_PLAN_CODES = {"spark"}
+SEEDREAM_T2I_INCLUDED_PLAN_CODES = {"spark", "pulse", "nexus"}
+
+
+def _workspace_public_subscription_plan(plan_code: Any) -> Optional[Dict[str, Any]]:
+    code = str(plan_code or "").strip().lower()
+    if code not in PUBLIC_SUBSCRIPTION_PLAN_CODES:
+        return None
+    try:
+        plan = get_subscription_plan(code)
+    except Exception:
+        return None
+    if not bool(plan.get("is_active", True)):
+        return None
+    return dict(plan)
+
+
+def _workspace_has_seedream_t2i_included(user_id: Any) -> bool:
+    try:
+        sub = get_current_subscription(int(user_id or 0))
+        code = str(sub.get("plan_code") or "").strip().lower()
+        return bool(sub.get("is_active")) and code in SEEDREAM_T2I_INCLUDED_PLAN_CODES
+    except Exception:
+        return False
 
 def _workspace_find_topup_pack(tokens: Any) -> Optional[Dict[str, Any]]:
     try:
@@ -3224,7 +3249,7 @@ def _workspace_image_cost(provider: str, mode: str, preset_slug: str = "", resol
     if provider_key == "nano_banana_pro_new":
         return 2 if resolution_key == "4K" else 1
     if provider_key == "seedream":
-        return 0 if mode_key in {"text_to_image", "t2i"} else 1
+        return 1
     if provider_key == "photosession":
         return 1
     if provider_key == "two_images":
@@ -3261,6 +3286,8 @@ def _workspace_image_charge_reason(provider: str, mode: str, action_type: str = 
     if provider_key == "nano_banana_pro_new":
         return "nano_banana_pro_new"
     if provider_key == "seedream":
+        if mode_key in {"text_to_image", "t2i"}:
+            return "seedream_t2i"
         if mode_key in {"single", "seedream_45", "seedream_single"}:
             return "seedream_45_single"
         if mode_key in {"image_to_image", "i2i"}:
@@ -3535,6 +3562,11 @@ class WorkspaceTopupCreatePayload(BaseModel):
     return_url: Optional[str] = None
 
 
+class WorkspaceSubscriptionCreatePayload(BaseModel):
+    plan_code: str = Field(..., min_length=1, max_length=32)
+    return_url: Optional[str] = None
+
+
 @router.get("/topup/packs")
 async def workspace_topup_packs() -> Dict[str, Any]:
     return {"ok": True, "packs": WORKSPACE_TOPUP_PACKS}
@@ -3580,6 +3612,65 @@ async def workspace_topup_create(payload: WorkspaceTopupCreatePayload, user: Dic
         "customer_email": email,
     }
 
+
+
+@router.post("/subscription/create")
+async def workspace_subscription_create(payload: WorkspaceSubscriptionCreatePayload, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
+    account = ensure_workspace_account_from_claims(user)
+    uid = int(account.get("id") or user.get("workspace_user_id") or user.get("telegram_user_id") or 0)
+    if uid <= 0:
+        raise HTTPException(status_code=400, detail="Не удалось определить пользователя для тарифа.")
+
+    plan_code = str(payload.plan_code or "").strip().lower()
+    plan = _workspace_public_subscription_plan(plan_code)
+    if not plan:
+        raise HTTPException(status_code=400, detail="Этот тариф пока нельзя подключить через сайт.")
+
+    email = str(account.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Для оплаты тарифа картой или СБП сначала добавь email в профиле аккаунта.")
+
+    price_rub = int(float(plan.get("price_rub") or 0))
+    tokens = int(float(plan.get("tokens") or 0))
+    duration_days = int(float(plan.get("duration_days") or 30))
+    plan_name = str(plan.get("name") or plan_code.title())
+    if price_rub <= 0 or tokens < 0 or duration_days <= 0:
+        raise HTTPException(status_code=400, detail="Тариф настроен некорректно.")
+
+    try:
+        payment_id, confirmation_url = await create_yookassa_payment(
+            amount_rub=price_rub,
+            description=f"Тариф {plan_name}: {tokens} токенов на {duration_days} дней",
+            user_id=uid,
+            tokens=tokens,
+            customer_email=email,
+            return_url=(str(payload.return_url or "").strip() or None),
+            payment_metadata={
+                "payment_type": "subscription",
+                "plan_code": plan_code,
+                "duration_days": duration_days,
+                "amount_rub": price_rub,
+            },
+            receipt_item_description=f"Тариф {plan_name} на {duration_days} дней + {tokens} токенов Nabex",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Не удалось создать оплату тарифа: {e}")
+
+    return {
+        "ok": True,
+        "payment_id": payment_id,
+        "confirmation_url": confirmation_url,
+        "plan_code": plan_code,
+        "plan_name": plan_name,
+        "tokens": tokens,
+        "amount_rub": price_rub,
+        "duration_days": duration_days,
+        "customer_email": email,
+    }
 
 
 @router.post("/chat")
@@ -6722,6 +6813,8 @@ async def workspace_image_run(
     except Exception:
         bal = 0
     cost = int(_workspace_image_cost(provider, mode, preset_slug, resolution, speed_mode=mj_speed_mode, action_type="generate", model=model if provider == "midjourney" else None))
+    if provider == "seedream" and mode in {"text_to_image", "t2i"} and _workspace_has_seedream_t2i_included(uid):
+        cost = 0
     if cost > 0 and bal < cost:
         raise HTTPException(status_code=402, detail=f"Недостаточно токенов. Нужно: {cost} ток.")
 
