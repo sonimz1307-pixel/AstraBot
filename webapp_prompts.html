@@ -393,7 +393,7 @@ body:before{
     <div class="heroFooter">
       <div class="chip"><span class="icon">⚡</span> Быстро <span>1 клик</span></div>
       <div class="chip"><span class="icon">🧠</span> Под модели <span>Kling / Veo / GPT</span></div>
-      <div class="chip"><span class="icon">📋</span> Копирование <span>в буфер</span></div>
+      <div class="chip" id="promptLimitChip"><span class="icon">🎁</span> Free <span id="promptLimitText">5 открытий</span></div>
     </div>
   </div>
 
@@ -456,7 +456,7 @@ body:before{
         <div class="btn primary" id="mCopy">📋 Скопировать</div>
         <div class="btn" id="mClose2">Закрыть</div>
       </div>
-      <div class="footerNote">Сейчас всё бесплатно.</div>
+      <div class="footerNote">Доступ зависит от тарифа.</div>
     </div>
   </div>
 </div>
@@ -473,6 +473,8 @@ const tg = window.Telegram?.WebApp;
 try{tg?.ready(); tg?.expand();}catch(e){}
 
 const API = location.origin + "/api/prompts";
+const URL_PARAMS = new URLSearchParams(location.search || "");
+const UID = (URL_PARAMS.get("uid") || URL_PARAMS.get("tg_user_id") || URL_PARAMS.get("user_id") || "").trim();
 
 const elTabs=document.getElementById("tabs");
 const badgeText=document.getElementById("badgeText");
@@ -504,12 +506,80 @@ const imgModalImg=document.getElementById("imgModalImg");
 const mPrompt=document.getElementById("mPrompt");
 const mCopy=document.getElementById("mCopy");
 const toast=document.getElementById("toast");
+const promptLimitText=document.getElementById("promptLimitText");
 
-let state={categories:[],activeCategory:"photo",activeCategoryTitle:"Фото",groups:[],activeGroup:null,items:[],itemsFiltered:[]};
+let state={categories:[],activeCategory:"photo",activeCategoryTitle:"Фото",groups:[],activeGroup:null,items:[],itemsFiltered:[],access:null};
 
 function toastShow(t){toast.textContent=t||"Готово";toast.classList.add("show");setTimeout(()=>toast.classList.remove("show"),1200);}
 function esc(s){return (s??"").toString();}
-async function apiGet(url){const r=await fetch(url,{headers:{"Accept":"application/json"}});return await r.json();}
+function updateAccess(access){
+  if(!access) return;
+  state.access=access;
+  const limit=access.prompt_limit||{};
+  if(promptLimitText){
+    if(access.is_paid_plan || access.is_admin) promptLimitText.textContent="полный доступ";
+    else promptLimitText.textContent=`осталось ${Number(limit.remaining||0)}/${Number(limit.limit||5)}`;
+  }
+}
+function withUid(url){
+  if(!UID) return url;
+  const u = new URL(url, location.origin);
+  if(!u.searchParams.get("uid")) u.searchParams.set("uid", UID);
+  return u.toString();
+}
+function accountUrl(){
+  const u = new URL("/webapp/account", location.origin);
+  if(UID) u.searchParams.set("uid", UID);
+  return u.toString();
+}
+function lockedMessage(message){
+  const text = message || "Откройте библиотеку промтов через Telegram WebApp или авторизуйтесь заново.";
+  viewItems.style.display="none";
+  viewGroups.style.display="";
+  elGroups.innerHTML = `
+    <div class="empty" style="display:block;padding:20px;text-align:left;line-height:1.5">
+      <b style="font-size:18px">🔐 Нужна авторизация</b><br>
+      <span style="display:block;margin-top:8px">${esc(text)}</span>
+      <button class="btn primary" style="margin-top:14px" onclick="location.href='${accountUrl()}'">Открыть профиль</button>
+    </div>`;
+  elGroupsEmpty.style.display="none";
+  badgeText.textContent="Авторизация";
+  groupsTitle.textContent="Промты";
+}
+function showPromptLimitModal(message, access){
+  updateAccess(access);
+  modalPrompt=null;
+  mTitle.textContent="🔒 Лимит Free исчерпан";
+  mHint.textContent="Полный доступ доступен на платных тарифах";
+  mPrompt.textContent=message || "Вы уже открыли 5 промтов на бесплатном тарифе. Полный доступ к библиотеке промтов доступен на платных тарифах.";
+  mPreview.style.display="none";
+  mPreviewHint.style.display="none";
+  mImg.style.display="none";
+  mVideo.pause();
+  mVideo.removeAttribute("src");
+  mVideo.load();
+  mCopy.textContent="Посмотреть тарифы";
+  mCopy.dataset.action="tariffs";
+  modal.classList.add("open");
+}
+function authHeaders(){
+  const headers={"Accept":"application/json"};
+  const initData=(tg && tg.initData) ? String(tg.initData || "") : "";
+  if(initData) headers["X-TG-INITDATA"] = initData;
+  else if(UID) headers["X-UID"] = UID;
+  return headers;
+}
+
+async function apiGet(url){
+  const r=await fetch(withUid(url),{headers:authHeaders()});
+  let j={};
+  try{j=await r.json();}catch(e){j={ok:false,error:"bad response"};}
+  if(!r.ok){
+    const d=j.detail||{};
+    return {ok:false, locked:r.status===401||r.status===402||d.code==="prompt_auth_required"||d.code==="prompt_library_locked"||d.code==="free_prompt_limit_exceeded", code:d.code||j.code||"", detail:d, access:j.access||d.access||null, limit:d.limit||null, error:d.message||j.error||"Ошибка доступа"};
+  }
+  return j;
+}
 
 function renderTabs(){
   elTabs.innerHTML="";
@@ -526,9 +596,12 @@ function renderTabs(){
 
 async function loadCategories(){
   const j=await apiGet(API+"/categories");
+  if(j.locked){ lockedMessage(j.error); return false; }
+  if(j.access) updateAccess(j.access);
   if(j.ok && Array.isArray(j.items) && j.items.length) state.categories=j.items.map(x=>({slug:x.slug,title:x.title}));
   else state.categories=[];
   renderTabs();
+  return true;
 }
 
 async function selectCategory(slug,title){
@@ -544,6 +617,8 @@ async function selectCategory(slug,title){
   viewGroups.style.display="";
 
   const j=await apiGet(API+"/groups?category="+encodeURIComponent(slug));
+  if(j.locked){ lockedMessage(j.error); return; }
+  if(j.access) updateAccess(j.access);
   state.groups=(j.ok && Array.isArray(j.items))?j.items:[];
   renderGroups();
 }
@@ -580,6 +655,8 @@ async function openGroup(g){
   q.value="";
 
   const j=await apiGet(API+"/items?group_id="+encodeURIComponent(g.id));
+  if(j.locked){ lockedMessage(j.error); return; }
+  if(j.access) updateAccess(j.access);
   state.items=(j.ok && Array.isArray(j.items))?j.items:[];
   state.itemsFiltered=[...state.items];
 
@@ -595,8 +672,7 @@ function applyFilter(){
   else state.itemsFiltered=state.items.filter(p=>{
     const t=(p.title||"").toLowerCase();
     const h=(p.model_hint||"").toLowerCase();
-    const pt=(p.prompt_text||"").toLowerCase();
-    return t.includes(term) || h.includes(term) || pt.includes(term);
+    return t.includes(term) || h.includes(term);
   });
   renderItems(true);
 }
@@ -623,14 +699,21 @@ function renderItems(){
 }
 
 let modalPrompt=null;
-function openPrompt(p){
-  modalPrompt=p;
-  mTitle.textContent=p.title||"Промпт";
-  mHint.textContent=p.model_hint?("Подходит для: "+p.model_hint):"";
-  mPrompt.textContent=p.prompt_text||"";
+async function openPrompt(p){
+  const j=await apiGet(API+"/item?item_id="+encodeURIComponent(p.id));
+  if(j.locked){ showPromptLimitModal(j.error, j.access || {prompt_limit:j.limit}); return; }
+  if(!j.ok || !j.item){ toastShow(j.error||"Не удалось открыть промт"); return; }
+  if(j.access) updateAccess(j.access);
+  const item=j.item;
+  modalPrompt=item;
+  mTitle.textContent=item.title||"Промпт";
+  mHint.textContent=item.model_hint?("Подходит для: "+item.model_hint):"";
+  mPrompt.textContent=item.prompt_text||"";
+  mCopy.textContent="📋 Скопировать";
+  mCopy.dataset.action="copy";
 
-  const previewUrl = (p.preview_url||"").trim();
-  const videoUrl = (p.video_url||p.provider_video_url||"").trim();
+  const previewUrl = (item.preview_url||"").trim();
+  const videoUrl = (item.video_url||item.provider_video_url||"").trim();
 
   mImg.style.display = "none";
   mVideo.style.display = "none";
@@ -680,7 +763,9 @@ imgModal.onclick=(e)=>{
 };
 
 mCopy.onclick=async()=>{
+  if(mCopy.dataset.action==="tariffs"){ location.href=accountUrl(); return; }
   const text=modalPrompt?.prompt_text||"";
+  if(!text){ toastShow("Промт не открыт"); return; }
   try{await navigator.clipboard.writeText(text); toastShow("Скопировано");}
   catch(e){
     const ta=document.createElement("textarea"); ta.value=text; document.body.appendChild(ta);
@@ -700,7 +785,7 @@ window.addEventListener("keydown",(e)=>{
   }
 });
 
-(async function init(){await loadCategories(); await selectCategory("photo","Фото");})();
+(async function init(){const ok=await loadCategories(); if(ok!==false) await selectCategory("photo","Фото");})();
 </script>
 </body>
 </html>
