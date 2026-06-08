@@ -1135,6 +1135,20 @@ async def tg_subscription_create(request: Request):
     if not plan:
         return {"ok": False, "error": "plan_not_available", "message": "Этот тариф пока нельзя подключить через Telegram."}
 
+    plan_name = str(plan.get("name") or plan_code.title())
+    try:
+        current_sub = get_current_subscription(user_id)
+    except Exception:
+        current_sub = {}
+    current_plan_code = str(current_sub.get("plan_code") or "").strip().lower()
+    if bool(current_sub.get("is_active")) and current_plan_code == plan_code:
+        return {
+            "ok": False,
+            "error": "active_same_plan",
+            "message": f"У вас уже активен тариф {plan_name}. Повторная покупка этого же тарифа отключена.",
+            "subscription": _subscription_public_payload_for_tg(user_id),
+        }
+
     if not _yookassa_enabled():
         return {"ok": False, "error": "yookassa_disabled", "message": "Оплата тарифов через ЮKassa сейчас не настроена."}
 
@@ -1160,7 +1174,6 @@ async def tg_subscription_create(request: Request):
     price_rub = int(float(plan.get("price_rub") or 0))
     tokens = int(float(plan.get("tokens") or 0))
     duration_days = int(float(plan.get("duration_days") or 30))
-    plan_name = str(plan.get("name") or plan_code.title())
     if price_rub <= 0 or tokens < 0 or duration_days <= 0:
         return {"ok": False, "error": "bad_plan", "message": "Тариф настроен некорректно."}
 
