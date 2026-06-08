@@ -45,6 +45,15 @@ from billing_db import (
     refund_photosession_generation,
     grant_welcome_bonus_once,
 )
+from free_plan_limits import (
+    FEATURE_CHAT,
+    FEATURE_TTS,
+    FreePlanLimitError,
+    consume_free_usage,
+    is_free_plan_user,
+    release_free_usage,
+    validate_free_tts_text,
+)
 from nano_banana import run_nano_banana
 from nano_banana_pro_new_kie import nano_banana_pro_new_cost
 from gpt_image_2_kie import (
@@ -3134,7 +3143,7 @@ def _main_menu_keyboard(is_admin: bool = False, user_id: Optional[int] = None) -
         ],
         [
             {"text": "🔊 Озвучить текст"},
-            {"text": "📚 Промпты", "web_app": {"url": WEBAPP_PROMPTS_URL}},
+            {"text": "📚 Промпты", "web_app": {"url": _with_uid(WEBAPP_PROMPTS_URL, int(user_id)) if user_id else WEBAPP_PROMPTS_URL}},
         ],
         [{"text": "💰 Баланс"}, {"text": "👤 Кабинет", "web_app": {"url": account_url}}],
     ]
@@ -3188,7 +3197,52 @@ def _pro_menu_keyboard(user_id: int) -> dict:
 
 def _pro_menu_for(user_id: int) -> dict:
     return _pro_menu_keyboard(user_id)
-    
+
+
+def _tg_free_limit_message(exc: FreePlanLimitError) -> str:
+    return str(getattr(exc, "message", "") or str(exc) or "Дневной лимит Free исчерпан. Доступ обновится завтра.")
+
+
+async def _tg_consume_free_chat_or_notify(chat_id: int, user_id: int) -> bool:
+    try:
+        consume_free_usage(user_id, FEATURE_CHAT)
+        return True
+    except FreePlanLimitError as exc:
+        await tg_send_message(chat_id, "🔒 " + _tg_free_limit_message(exc), reply_markup=_main_menu_for(user_id))
+        return False
+    except Exception as exc:
+        await tg_send_message(chat_id, f"❌ Не удалось проверить лимит Free-чата: {exc}", reply_markup=_main_menu_for(user_id))
+        return False
+
+
+async def _tg_consume_free_tts_or_notify(chat_id: int, user_id: int, text: str) -> bool:
+    try:
+        validate_free_tts_text(user_id, text)
+        consume_free_usage(user_id, FEATURE_TTS)
+        return True
+    except FreePlanLimitError as exc:
+        await tg_send_message(chat_id, "🔒 " + _tg_free_limit_message(exc), reply_markup=_help_menu_for(user_id))
+        return False
+    except Exception as exc:
+        await tg_send_message(chat_id, f"❌ Не удалось проверить лимит Free-озвучки: {exc}", reply_markup=_help_menu_for(user_id))
+        return False
+
+
+async def _tg_prompt_access_or_notify(chat_id: int, user_id: int) -> bool:
+    try:
+        if not is_free_plan_user(user_id):
+            return True
+    except Exception as exc:
+        await tg_send_message(chat_id, f"❌ Не удалось проверить тариф: {exc}", reply_markup=_main_menu_for(user_id))
+        return False
+    await tg_send_message(
+        chat_id,
+        "🔒 Библиотека готовых промтов доступна на платных тарифах. Режим «🪄 Промт» в AI-чате доступен на Free в пределах дневного лимита чата.",
+        reply_markup=_ai_chat_mode_inline_kb(),
+    )
+    return False
+
+
 def _tts_gender_keyboard() -> dict:
     return {
         "keyboard": [
@@ -7626,6 +7680,10 @@ async def webhook(secret: str, request: Request):
             await tg_send_message(chat_id, "❌ Не смог распознать текст в голосовом.", reply_markup=_main_menu_for(user_id))
             return {"ok": True}
 
+        if not await _tg_consume_free_chat_or_notify(chat_id, user_id):
+            st["ts"] = _now()
+            return {"ok": True}
+
         queued = await _enqueue_tg_ai_chat_job(
             chat_id=chat_id,
             user_id=user_id,
@@ -7635,6 +7693,7 @@ async def webhook(secret: str, request: Request):
         if queued:
             return {"ok": True}
 
+        release_free_usage(user_id, FEATURE_CHAT)
         await tg_send_message(chat_id, "❌ Не удалось поставить чат в очередь. Проверь REDIS_URL и worker_chat.py.", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
 
@@ -7748,6 +7807,10 @@ async def webhook(secret: str, request: Request):
             )
             return {"ok": True}
 
+        if not await _tg_consume_free_chat_or_notify(chat_id, user_id):
+            st["ts"] = _now()
+            return {"ok": True}
+
         queued = await _enqueue_tg_ai_chat_job(
             chat_id=chat_id,
             user_id=user_id,
@@ -7763,6 +7826,7 @@ async def webhook(secret: str, request: Request):
         if queued:
             return {"ok": True}
 
+        release_free_usage(user_id, FEATURE_CHAT)
         await tg_send_message(chat_id, "❌ Не удалось поставить чат в очередь. Проверь REDIS_URL и worker_chat.py.", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
 
@@ -9213,6 +9277,10 @@ async def webhook(secret: str, request: Request):
                 "Сначала выбери видеомодель ниже, а потом присылай идею или фото.",
                 reply_markup=_ai_prompt_video_inline_kb(),
             )
+            return {"ok": True}
+
+        if not await _tg_consume_free_chat_or_notify(chat_id, user_id):
+            st["ts"] = _now()
             return {"ok": True}
 
         result = await _ai_prompt_generate(pb, incoming_text)
@@ -10902,6 +10970,10 @@ async def webhook(secret: str, request: Request):
 
             caption_prompt = (incoming_text or "").strip()
             if caption_prompt and not _is_nav_or_menu_text(caption_prompt):
+                if not await _tg_consume_free_chat_or_notify(chat_id, user_id):
+                    st["ts"] = _now()
+                    return {"ok": True}
+
                 result = await _ai_prompt_generate(pb, caption_prompt)
                 pb["last_prompt"] = result
                 st["ai_prompt"] = pb
@@ -11632,6 +11704,18 @@ async def webhook(secret: str, request: Request):
             return {"ok": True}
 
         # CHAT mode
+        if st.get("mode") == "chat":
+            if st.get("ai_chat_mode") != "chat":
+                await tg_send_message(
+                    chat_id,
+                    "Фото получил, но сначала выбери модель чата: Claude Sonnet, Claude Opus 4.7 или ChatGPT.",
+                    reply_markup=_ai_chat_mode_inline_kb(),
+                )
+                return {"ok": True}
+            if not await _tg_consume_free_chat_or_notify(chat_id, user_id):
+                st["ts"] = _now()
+                return {"ok": True}
+
         if _is_math_request(incoming_text) or _infer_intent_from_text(incoming_text) == "math":
             prompt = incoming_text if incoming_text else "Реши задачу с картинки. Дай решение по шагам и строку 'Ответ: ...'."
             answer = await openai_chat_answer(
@@ -12412,6 +12496,18 @@ async def webhook(secret: str, request: Request):
                     reply_markup=_poster_menu_keyboard((st.get("poster") or {}).get("light", "bright"))
                 )
                 return {"ok": True}
+
+            if st.get("mode") == "chat":
+                if st.get("ai_chat_mode") != "chat":
+                    await tg_send_message(
+                        chat_id,
+                        "Фото получил, но сначала выбери модель чата: Claude Sonnet, Claude Opus 4.7 или ChatGPT.",
+                        reply_markup=_ai_chat_mode_inline_kb(),
+                    )
+                    return {"ok": True}
+                if not await _tg_consume_free_chat_or_notify(chat_id, user_id):
+                    st["ts"] = _now()
+                    return {"ok": True}
 
             if _is_math_request(incoming_text) or _infer_intent_from_text(incoming_text) == "math":
                 prompt = incoming_text if incoming_text else "Реши задачу с картинки. Дай решение по шагам и строку 'Ответ: ...'."
@@ -14145,6 +14241,10 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(chat_id, "Пришли текст одним сообщением — я озвучу.", reply_markup=_help_menu_for(user_id))
                 return {"ok": True}
 
+            if not await _tg_consume_free_tts_or_notify(chat_id, user_id, user_text):
+                st["ts"] = _now()
+                return {"ok": True}
+
             await tg_send_message(chat_id, f"🔊 Озвучиваю ({voice_name})…", reply_markup=None)
 
             try:
@@ -14168,6 +14268,7 @@ async def webhook(secret: str, request: Request):
                 return {"ok": True}
 
             except Exception as e:
+                release_free_usage(user_id, FEATURE_TTS)
                 await tg_send_message(
                     chat_id,
                     f"❌ Не получилось озвучить: {e}",
@@ -14186,6 +14287,10 @@ async def webhook(secret: str, request: Request):
                 )
                 return {"ok": True}
 
+            if not await _tg_consume_free_chat_or_notify(chat_id, user_id):
+                st["ts"] = _now()
+                return {"ok": True}
+
             queued = await _enqueue_tg_ai_chat_job(
                 chat_id=chat_id,
                 user_id=user_id,
@@ -14195,6 +14300,7 @@ async def webhook(secret: str, request: Request):
             if queued:
                 return {"ok": True}
 
+            release_free_usage(user_id, FEATURE_CHAT)
             await tg_send_message(chat_id, "❌ Не удалось поставить чат в очередь. Проверь REDIS_URL и worker_chat.py.", reply_markup=_main_menu_for(user_id))
             return {"ok": True}
 
