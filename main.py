@@ -1596,6 +1596,15 @@ def _gpt_image_2_aspect_inline_kb(mode_key: str, current: str = "1:1") -> dict:
     return {"inline_keyboard": [row]}
 
 
+def _legacy_gpt_image_2_aspect_to_kie(value: str = "16:9") -> str:
+    raw = str(value or "").strip()
+    # Official GPT Image 2.0 exposed 4:5, while KIE GPT Image 2 exposes 3:4.
+    # Keep old cached Telegram buttons/states usable, but route them to the KIE provider.
+    if raw == "4:5":
+        return "3:4"
+    return raw if raw in {"1:1", "9:16", "16:9", "4:3", "3:4", "21:9"} else "16:9"
+
+
 def _gpt_image_2_kie_resolution(value: str = "2K") -> str:
     return normalize_gpt_image_2_kie_resolution(value, default="2K")
 
@@ -3603,7 +3612,7 @@ def _seedance_collect_summary_text(mode: str, settings: Optional[Dict[str, Any]]
 def _photo_future_menu_keyboard() -> dict:
     return {
         "keyboard": [
-            [{"text": "Gpt Image 2"}, {"text": "GPT Image 2.0"}],
+            [{"text": "Gpt Image 2"}],
             [{"text": "Midjourney"}],
             [{"text": "🍌 Nano Banana"}, {"text": "🍌 Nano Banana 2"}],
             [{"text": "🍌 Nano Banana Pro - NEW"}, {"text": "Seedream"}],
@@ -6982,46 +6991,47 @@ async def webhook(secret: str, request: Request):
         if chat_id and user_id and data.startswith("gi2:"):
             parts = data.split(":")
             mode_key = parts[1].strip() if len(parts) > 1 else ""
-            aspect_ratio = ":".join(parts[3:]).strip() if len(parts) > 3 else ""
+            legacy_aspect = ":".join(parts[3:]).strip() if len(parts) > 3 else ""
             if mode_key not in ("t2i", "i2i"):
                 return {"ok": True}
-            if aspect_ratio not in ("1:1", "4:5", "9:16", "16:9"):
-                return {"ok": True}
 
-            size = _gpt_image_2_size_for_aspect_ratio(aspect_ratio)
             st = _ensure_state(chat_id, user_id)
+            resolution, aspect_ratio = _gpt_image_2_kie_options("2K", _legacy_gpt_image_2_aspect_to_kie(legacy_aspect))
 
             if mode_key == "t2i":
-                st["mode"] = "gpt_image_2_t2i"
-                gi2 = st.get("gpt_image_2_t2i") or {"step": "need_prompt"}
-                gi2["step"] = "need_prompt"
-                gi2["aspect_ratio"] = aspect_ratio
-                gi2["size"] = size
-                st["gpt_image_2_t2i"] = gi2
+                st["mode"] = "gpt_image_2_kie_t2i"
+                st["gpt_image_2_kie_t2i"] = {"step": "need_prompt", "aspect_ratio": aspect_ratio, "resolution": resolution}
+                st.pop("gpt_image_2_t2i", None)
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
-                    f"✅ Формат GPT Image 2.0: {aspect_ratio} ({size})\nТеперь пришли текст для генерации.",
-                    reply_markup=_gpt_image_2_aspect_inline_kb("t2i", aspect_ratio),
+                    f"✅ Gpt Image 2: {resolution} • {gpt_image_2_kie_cost(resolution)} ток.\nФормат: {aspect_ratio}\nТеперь пришли текст для генерации.",
+                    reply_markup=_gpt_image_2_kie_inline_kb("t2i", aspect_ratio, resolution, 0),
                 )
                 return {"ok": True}
 
-            st["mode"] = "gpt_image_2_i2i"
-            gi2 = st.get("gpt_image_2_i2i") or {
-                "step": "need_image",
-                "photo_file_id": None,
-                "photo_file_ids": [],
-                "photo_urls": [],
+            gi2_old = st.get("gpt_image_2_i2i") or {}
+            photo_file_ids = [str(x or "").strip() for x in (gi2_old.get("photo_file_ids") or []) if str(x or "").strip()]
+            if not photo_file_ids and str(gi2_old.get("photo_file_id") or "").strip():
+                photo_file_ids = [str(gi2_old.get("photo_file_id") or "").strip()]
+            photo_urls = [str(x or "").strip() for x in (gi2_old.get("photo_urls") or []) if str(x or "").strip()]
+            st["mode"] = "gpt_image_2_kie_i2i"
+            gi2k = {
+                "step": "need_prompt" if (photo_file_ids or photo_urls) else "need_image",
+                "photo_file_id": photo_file_ids[0] if photo_file_ids else None,
+                "photo_file_ids": photo_file_ids[:16],
+                "photo_urls": photo_urls[:16],
+                "aspect_ratio": aspect_ratio,
+                "resolution": resolution,
             }
-            gi2["aspect_ratio"] = aspect_ratio
-            gi2["size"] = size
-            st["gpt_image_2_i2i"] = gi2
+            st["gpt_image_2_kie_i2i"] = gi2k
+            st.pop("gpt_image_2_i2i", None)
             st["ts"] = _now()
-            refs_count = len([x for x in (gi2.get("photo_file_ids") or []) if str(x or "").strip()])
+            refs_count = len(photo_file_ids[:16] or photo_urls[:16])
             await tg_send_message(
                 chat_id,
-                f"✅ Формат GPT Image 2.0: {aspect_ratio} ({size})\nФото: {refs_count}/4\nТеперь пришли фото или prompt, если фото уже загружены.",
-                reply_markup=_gpt_image_2_aspect_inline_kb("i2i", aspect_ratio),
+                f"✅ Gpt Image 2: {resolution} • {gpt_image_2_kie_cost(resolution)} ток.\nФормат: {aspect_ratio}\nФото: {refs_count}/16\nТеперь пришли фото или prompt, если фото уже загружены.",
+                reply_markup=_gpt_image_2_kie_inline_kb("i2i", aspect_ratio, resolution, refs_count),
             )
             return {"ok": True}
 
@@ -8888,7 +8898,7 @@ async def webhook(secret: str, request: Request):
 
     if incoming_text == "⬅️ Назад":
         submenu = str(st.get("photo_submenu") or "").strip().lower()
-        if submenu in ("seedream", "upscale", "gpt_image_2"):
+        if submenu in ("seedream", "upscale", "gpt_image_2", "gpt_image_2_kie"):
             st.pop("photo_submenu", None)
             st["ts"] = _now()
             await tg_send_message(chat_id, "📸 Фото будущего — выбери режим:", reply_markup=_photo_future_menu_keyboard())
@@ -9201,12 +9211,13 @@ async def webhook(secret: str, request: Request):
         return {"ok": True}
 
     if incoming_text in ("GPT Image 2.0", "Фото/Афиши"):
-        st["photo_submenu"] = "gpt_image_2"
+        # Legacy cached buttons now open the KIE-based GPT Image 2 flow.
+        st["photo_submenu"] = "gpt_image_2_kie"
         st["ts"] = _now()
         await tg_send_message(
             chat_id,
-            "✨ GPT Image 2.0 — Цена 1 токен\n• Текст→Картинка\n• Картинка→Картинка",
-            reply_markup=_photo_gpt_image_2_menu_keyboard(),
+            "✨ Gpt Image 2 — цена: 2K = 1 токен, 4K = 2 токена\n• Текст→Картинка\n• Картинка→Картинка",
+            reply_markup=_photo_gpt_image_2_kie_menu_keyboard(),
         )
         return {"ok": True}
 
@@ -10574,7 +10585,7 @@ async def webhook(secret: str, request: Request):
         return {"ok": True}
 
     if incoming_text == "Текст→Картинка":
-        if str(st.get("photo_submenu") or "").strip().lower() == "gpt_image_2_kie":
+        if str(st.get("photo_submenu") or "").strip().lower() in {"gpt_image_2_kie", "gpt_image_2"}:
             _set_mode(chat_id, user_id, "gpt_image_2_kie_t2i")
             st.pop("photo_submenu", None)
             st["gpt_image_2_kie_t2i"] = {"step": "need_prompt", "aspect_ratio": "16:9", "resolution": "2K"}
@@ -10590,21 +10601,6 @@ async def webhook(secret: str, request: Request):
             )
             return {"ok": True}
 
-        if str(st.get("photo_submenu") or "").strip().lower() == "gpt_image_2":
-            _set_mode(chat_id, user_id, "gpt_image_2_t2i")
-            st.pop("photo_submenu", None)
-            st["gpt_image_2_t2i"] = {"step": "need_prompt", "aspect_ratio": "1:1", "size": "1024x1024"}
-            await tg_send_message(
-                chat_id,
-                "GPT Image 2.0 • режим «Текст→Картинка».\nНапиши одним сообщением, что нужно сгенерировать.",
-                reply_markup=_photo_future_menu_keyboard(),
-            )
-            await tg_send_message(
-                chat_id,
-                "Выбери формат GPT Image 2.0:",
-                reply_markup=_gpt_image_2_aspect_inline_kb("t2i", "1:1"),
-            )
-            return {"ok": True}
 
         # Text-to-image mode (no input photo required)
         _set_mode(chat_id, user_id, "t2i")
@@ -10625,7 +10621,7 @@ async def webhook(secret: str, request: Request):
         return {"ok": True}
 
     if incoming_text == "Картинка→Картинка":
-        if str(st.get("photo_submenu") or "").strip().lower() == "gpt_image_2_kie":
+        if str(st.get("photo_submenu") or "").strip().lower() in {"gpt_image_2_kie", "gpt_image_2"}:
             _set_mode(chat_id, user_id, "gpt_image_2_kie_i2i")
             st.pop("photo_submenu", None)
             st["gpt_image_2_kie_i2i"] = {"step": "need_image", "photo_file_id": None, "photo_file_ids": [], "photo_urls": [], "aspect_ratio": "16:9", "resolution": "2K"}
@@ -10641,18 +10637,19 @@ async def webhook(secret: str, request: Request):
             )
             return {"ok": True}
 
-        _set_mode(chat_id, user_id, "gpt_image_2_i2i")
+        # Fallback for old cached keyboards: route Image→Image to the KIE provider too.
+        _set_mode(chat_id, user_id, "gpt_image_2_kie_i2i")
         st.pop("photo_submenu", None)
-        st["gpt_image_2_i2i"] = {"step": "need_image", "photo_file_id": None, "photo_file_ids": [], "photo_urls": [], "aspect_ratio": "1:1", "size": "1024x1024"}
+        st["gpt_image_2_kie_i2i"] = {"step": "need_image", "photo_file_id": None, "photo_file_ids": [], "photo_urls": [], "aspect_ratio": "16:9", "resolution": "2K"}
         await tg_send_message(
             chat_id,
-            "GPT Image 2.0 • режим «Картинка→Картинка».\n1) Пришли от 1 до 4 фото.\n2) Можно отправить несколько сообщений с фото.\n3) Потом одним сообщением напиши, что нужно изменить.",
+            "Gpt Image 2 • режим «Картинка→Картинка».\n1) Пришли от 1 до 16 фото.\n2) Можно отправить несколько сообщений с фото.\n3) Потом одним сообщением напиши, что нужно изменить.",
             reply_markup=_photo_future_menu_keyboard(),
         )
         await tg_send_message(
             chat_id,
-            "Выбери формат результата GPT Image 2.0:",
-            reply_markup=_gpt_image_2_aspect_inline_kb("i2i", "1:1"),
+            "Выбери качество и формат результата Gpt Image 2:",
+            reply_markup=_gpt_image_2_kie_inline_kb("i2i", "16:9", "2K", 0),
         )
         return {"ok": True}
     if incoming_text == "Помощь":
@@ -13648,6 +13645,35 @@ async def webhook(secret: str, request: Request):
             await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
             return {"ok": True}
 
+
+        # Legacy official GPT Image 2.0 states are now routed to the KIE provider.
+        if st.get("mode") == "gpt_image_2_t2i":
+            gi2_old = st.get("gpt_image_2_t2i") or {}
+            legacy_aspect = gi2_old.get("aspect_ratio") or _gpt_image_2_aspect_for_size(gi2_old.get("size")) or "16:9"
+            resolution, aspect_ratio = _gpt_image_2_kie_options("2K", _legacy_gpt_image_2_aspect_to_kie(legacy_aspect))
+            st["mode"] = "gpt_image_2_kie_t2i"
+            st["gpt_image_2_kie_t2i"] = {"step": "need_prompt", "aspect_ratio": aspect_ratio, "resolution": resolution}
+            st.pop("gpt_image_2_t2i", None)
+            st["ts"] = _now()
+        elif st.get("mode") == "gpt_image_2_i2i":
+            gi2_old = st.get("gpt_image_2_i2i") or {}
+            photo_file_ids = [str(item or "").strip() for item in (gi2_old.get("photo_file_ids") or []) if str(item or "").strip()]
+            if not photo_file_ids and str(gi2_old.get("photo_file_id") or "").strip():
+                photo_file_ids = [str(gi2_old.get("photo_file_id") or "").strip()]
+            photo_urls = [str(item or "").strip() for item in (gi2_old.get("photo_urls") or []) if str(item or "").strip()]
+            legacy_aspect = gi2_old.get("aspect_ratio") or _gpt_image_2_aspect_for_size(gi2_old.get("size")) or "16:9"
+            resolution, aspect_ratio = _gpt_image_2_kie_options("2K", _legacy_gpt_image_2_aspect_to_kie(legacy_aspect))
+            st["mode"] = "gpt_image_2_kie_i2i"
+            st["gpt_image_2_kie_i2i"] = {
+                "step": "need_prompt" if (photo_file_ids or photo_urls) else "need_image",
+                "photo_file_id": photo_file_ids[0] if photo_file_ids else None,
+                "photo_file_ids": photo_file_ids[:16],
+                "photo_urls": photo_urls[:16],
+                "aspect_ratio": aspect_ratio,
+                "resolution": resolution,
+            }
+            st.pop("gpt_image_2_i2i", None)
+            st["ts"] = _now()
 
         # Gpt Image 2: text-to-image through workspace image worker
         if st.get("mode") == "gpt_image_2_kie_t2i":
