@@ -2462,7 +2462,7 @@
 
       <div class="tariff-carousel-viewport">
         <div class="tariff-preview-grid">
-        <article class="tariff-preview-card is-current">
+        <article class="tariff-preview-card is-current" data-plan-code="free">
           <div class="tariff-preview-top">
             <div class="tariff-preview-icon">⚡</div>
             <div class="tariff-preview-badge">Текущий</div>
@@ -2479,7 +2479,7 @@
           <button class="tariff-preview-action" type="button" disabled>Активен</button>
         </article>
 
-        <article class="tariff-preview-card">
+        <article class="tariff-preview-card" data-plan-code="spark">
           <div class="tariff-preview-top">
             <div class="tariff-preview-icon">✨</div>
             <div class="tariff-preview-badge">Старт</div>
@@ -2497,7 +2497,7 @@
           <button class="tariff-preview-action" type="button" data-buy-plan="spark">Подключить за 1 140 ₽</button>
         </article>
 
-        <article class="tariff-preview-card is-popular">
+        <article class="tariff-preview-card is-popular" data-plan-code="pulse">
           <div class="tariff-preview-top">
             <div class="tariff-preview-icon">🚀</div>
             <div class="tariff-preview-badge green">Для изображений</div>
@@ -2515,7 +2515,7 @@
           <button class="tariff-preview-action" type="button" disabled>Скоро</button>
         </article>
 
-        <article class="tariff-preview-card is-maximum">
+        <article class="tariff-preview-card is-maximum" data-plan-code="nexus">
           <div class="tariff-preview-top">
             <div class="tariff-preview-icon">👑</div>
             <div class="tariff-preview-badge purple">Максимум</div>
@@ -2619,11 +2619,60 @@
       return days > 0 ? `Активен · осталось ${Math.trunc(days)} дн.` : "Активен";
     }
 
+    function currentPlanCode() {
+      const sub = currentSubscription();
+      const plan = sub.plan || {};
+      const code = String(sub.plan_code || plan.code || "free").trim().toLowerCase();
+      return sub.is_active ? (code || "free") : "free";
+    }
+
+    function updateTariffPreviewState() {
+      const activeCode = currentPlanCode();
+      const defaults = {
+        free: { badge: "Free", action: "Базовый", disabled: true },
+        spark: { badge: "Старт", action: "Подключить за 1 140 ₽", disabled: false },
+        pulse: { badge: "Для изображений", action: "Скоро", disabled: true },
+        nexus: { badge: "Максимум", action: "Скоро", disabled: true }
+      };
+
+      document.querySelectorAll("#tariffOverlay .tariff-preview-card[data-plan-code]").forEach((card) => {
+        const code = String(card.dataset.planCode || "").trim().toLowerCase();
+        const isCurrent = code === activeCode;
+        const cfg = defaults[code] || { badge: "", action: "Скоро", disabled: true };
+        const badge = card.querySelector(".tariff-preview-badge");
+        const action = card.querySelector(".tariff-preview-action");
+
+        card.classList.toggle("is-current", isCurrent);
+        if (badge) badge.textContent = isCurrent ? "Текущий" : cfg.badge;
+        if (!action) return;
+
+        if (isCurrent) {
+          action.textContent = "Активен";
+          action.disabled = true;
+          action.dataset.currentPlan = "1";
+          action.removeAttribute("data-buy-plan");
+          action.setAttribute("aria-disabled", "true");
+          return;
+        }
+
+        action.textContent = cfg.action;
+        action.disabled = !!cfg.disabled;
+        delete action.dataset.currentPlan;
+        action.setAttribute("aria-disabled", cfg.disabled ? "true" : "false");
+        if (code === "spark" && !cfg.disabled) {
+          action.dataset.buyPlan = "spark";
+        } else {
+          action.removeAttribute("data-buy-plan");
+        }
+      });
+    }
+
     function renderAccount() {
       const balance = Number(state.balance);
       balanceValue.textContent = Number.isFinite(balance) ? String(Math.trunc(balance)) : "0";
       if (tariffName) tariffName.textContent = subscriptionPlanName().toUpperCase();
       if (tariffNote) tariffNote.textContent = subscriptionStatusText();
+      updateTariffPreviewState();
       refCode.textContent = state.refCode || "—";
       siteRefText.textContent = state.siteRef || "Ссылка недоступна";
       botRefText.textContent = state.botRef || "Ссылка недоступна";
@@ -2634,8 +2683,11 @@
       sheet.classList.add("show");
       sheet.setAttribute("aria-hidden", "false");
       document.body.style.overflow = "hidden";
-      if (sheet.id === "tariffOverlay" && typeof window.refreshTariffPreviewCarousel === "function") {
-        window.refreshTariffPreviewCarousel();
+      if (sheet.id === "tariffOverlay") {
+        updateTariffPreviewState();
+        if (typeof window.refreshTariffPreviewCarousel === "function") {
+          window.refreshTariffPreviewCarousel();
+        }
       }
     }
 
@@ -3109,7 +3161,12 @@
       const buyPlanButton = event.target.closest("[data-buy-plan]");
       if (buyPlanButton) {
         event.preventDefault();
-        await createSubscriptionPayment(buyPlanButton.dataset.buyPlan || "", buyPlanButton);
+        const requestedPlan = String(buyPlanButton.dataset.buyPlan || "").trim().toLowerCase();
+        if (buyPlanButton.disabled || buyPlanButton.dataset.currentPlan === "1" || requestedPlan === currentPlanCode()) {
+          showToast("Этот тариф уже активен");
+          return;
+        }
+        await createSubscriptionPayment(requestedPlan, buyPlanButton);
         return;
       }
 
