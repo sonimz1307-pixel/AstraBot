@@ -1602,6 +1602,8 @@ async def handle_seedream_t2i_job(job: Dict[str, Any]) -> None:
     prompt = str(job.get("prompt") or "").strip()
     size = str(job.get("size") or "2K").strip() or "2K"
     seedream_model = str(job.get("seedream_model") or "").strip() or None
+    charge_tokens = int(job.get("charge_tokens") or 0)
+    charge_ref_id = str(job.get("charge_ref_id") or "").strip() or None
     if not chat_id or not user_id:
         raise RuntimeError("seedream_t2i job missing chat_id/user_id")
     if not prompt:
@@ -1635,6 +1637,11 @@ async def handle_seedream_t2i_job(job: Dict[str, Any]) -> None:
             pass
         err = str(e)[:800]
         print("seedream_t2i failed:", err)
+        if charge_tokens > 0 and charge_ref_id:
+            try:
+                add_tokens(user_id, int(charge_tokens), reason="seedream_t2i_refund", ref_id=charge_ref_id, meta={"stage": "worker_failed", "error": err[:300]})
+            except Exception as refund_err:
+                print("seedream_t2i refund failed:", refund_err)
         if msg_id:
             try:
                 await tg_edit_message_text(chat_id, msg_id, f"❌ Ошибка Seedream.\n{err}")
