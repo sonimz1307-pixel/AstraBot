@@ -804,6 +804,8 @@
       max-height: min(88vh, 780px);
       margin: 0 auto;
       overflow: auto;
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior: contain;
       border: 1px solid var(--stroke-strong);
       border-radius: 30px;
       background:
@@ -1972,6 +1974,30 @@
       font-weight: 950;
       cursor: default;
       opacity: 0.78;
+      transition: transform 0.16s ease, filter 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease;
+    }
+
+    .tariff-preview-action:not(:disabled) {
+      color: #150d02;
+      background: linear-gradient(135deg, #ff8a00, #ffb000);
+      border-color: rgba(255, 176, 0, 0.52);
+      box-shadow:
+        0 16px 34px rgba(255, 138, 0, 0.26),
+        0 0 0 1px rgba(255, 255, 255, 0.18) inset;
+      cursor: pointer;
+      opacity: 1;
+    }
+
+    .tariff-preview-action:not(:disabled):hover {
+      filter: brightness(1.06);
+    }
+
+    .tariff-preview-action:not(:disabled):active {
+      transform: translateY(1px) scale(0.99);
+    }
+
+    .tariff-preview-action:disabled {
+      cursor: default;
     }
 
     @media (max-width: 760px) {
@@ -2625,6 +2651,25 @@
         document.body.style.overflow = "";
       }
     }
+
+    function bindOverlayWheelScroll(overlay) {
+      if (!overlay || overlay.dataset.wheelScrollBound === "1") return;
+      overlay.dataset.wheelScrollBound = "1";
+      overlay.addEventListener("wheel", (event) => {
+        if (!overlay.classList.contains("show")) return;
+        const sheet = overlay.querySelector(".plans-sheet");
+        if (!sheet) return;
+        const deltaY = Number(event.deltaY || 0);
+        if (!deltaY || Math.abs(deltaY) < Math.abs(Number(event.deltaX || 0))) return;
+        const maxScroll = Math.max(0, sheet.scrollHeight - sheet.clientHeight);
+        if (maxScroll <= 0) return;
+        const before = sheet.scrollTop;
+        sheet.scrollTop = Math.max(0, Math.min(maxScroll, before + deltaY));
+        if (sheet.scrollTop !== before) event.preventDefault();
+      }, { passive: false });
+    }
+
+    [topupOverlay, tariffOverlay, historyOverlay].forEach(bindOverlayWheelScroll);
 
     function openUrl(url) {
       if (!url) return;
