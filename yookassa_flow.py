@@ -50,6 +50,8 @@ async def create_yookassa_payment(
     customer_email: Optional[str] = None,
     idempotence_key: Optional[str] = None,
     return_url: Optional[str] = None,
+    payment_metadata: Optional[Dict[str, Any]] = None,
+    receipt_item_description: Optional[str] = None,
 ) -> Tuple[str, str]:
     """
     Создаёт платёж в ЮKassa (redirect).
@@ -72,6 +74,19 @@ async def create_yookassa_payment(
     if not email:
         raise ValueError("customer_email is required for receipts")
 
+    metadata: Dict[str, Any] = {
+        "user_id": int(user_id),  # важно: main.py ждёт metadata.user_id / tokens
+        "tokens": int(tokens),
+    }
+    if isinstance(payment_metadata, dict):
+        for key, value in payment_metadata.items():
+            key_text = str(key or "").strip()
+            if not key_text or key_text in {"user_id", "tokens"}:
+                continue
+            metadata[key_text] = value
+
+    receipt_description = (receipt_item_description or f"{int(tokens)} токенов NeiroAstra").strip()
+
     body: Dict[str, Any] = {
         "amount": {"value": f"{rub:.2f}", "currency": "RUB"},
         "confirmation": {
@@ -80,16 +95,13 @@ async def create_yookassa_payment(
         },
         "capture": True,
         "description": description[:128],
-        "metadata": {
-            "user_id": int(user_id),  # важно: main.py ждёт metadata.user_id / tokens
-            "tokens": int(tokens),
-        },
+        "metadata": metadata,
         "receipt": {
             "tax_system_code": tax_code,  # патент = 6
             "customer": {"email": email},
             "items": [
                 {
-                    "description": f"{int(tokens)} токенов NeiroAstra",
+                    "description": receipt_description[:128],
                     "quantity": 1.0,
                     "amount": {"value": f"{rub:.2f}", "currency": "RUB"},
                     "vat_code": 1,  # без НДС
