@@ -44,9 +44,6 @@ from kie_claude_chat import (
     kie_claude_summarize_dialogue,
     normalize_kie_claude_model,
 )
-from app.routers.prompts import categories as prompts_categories
-from app.routers.prompts import groups as prompts_groups
-from app.routers.prompts import items as prompts_items
 from app.routers.tts import ALLOWED_VOICE_IDS, ALLOWED_VOICES
 from app.services.eleven_tts import ElevenTTS
 from app.services.google_auth import GoogleAuthError, get_google_client_id, verify_google_id_token
@@ -74,6 +71,18 @@ from app.services.workspace_account_service import (
 from app.services.workspace_auth import WORKSPACE_SESSION_TTL_SEC, create_access_token, get_current_workspace_user, get_optional_workspace_user
 from billing_db import add_tokens, ensure_user_row, get_balance, get_balance_history
 from subscriptions_db import get_current_subscription
+from free_plan_limits import (
+    FEATURE_CHAT,
+    FEATURE_TTS,
+    FreePlanLimitError,
+    consume_free_prompt_open,
+    consume_free_usage,
+    free_limit_http_detail,
+    release_free_usage,
+    get_free_prompt_open_status,
+    is_free_plan_user,
+    validate_free_tts_text,
+)
 from db_supabase import supabase, track_user_activity
 from kling3_flow import Kling3Error, create_kling3_task, get_kling3_task
 from kling_flow import (
@@ -909,6 +918,53 @@ def _workspace_subscription_payload(user_id: int) -> Dict[str, Any]:
         return _workspace_subscription_public_payload(get_current_subscription(uid), uid)
     except Exception:
         return _workspace_subscription_public_payload(None, uid)
+
+
+def _workspace_prompt_access_required(user_id: int) -> None:
+    # Kept for backward compatibility with older code paths.
+    # The prompt library itself is no longer fully locked on Free: catalog/cards are visible,
+    # and only opening a full prompt spends one lifetime Free opening.
+    return None
+
+
+def _workspace_prompt_access_payload(user_id: int, prompt_id: str = "") -> Dict[str, Any]:
+    status = get_free_prompt_open_status(user_id, prompt_id)
+    return {
+        "authenticated": int(user_id or 0) > 0,
+        "is_admin": False,
+        "is_free_plan": not bool(status.is_paid_plan),
+        "is_paid_plan": bool(status.is_paid_plan),
+        "plan_code": status.plan_code,
+        "prompt_limit": status.as_dict(),
+    }
+
+
+def _workspace_prompt_limit_http(exc: FreePlanLimitError) -> HTTPException:
+    detail = free_limit_http_detail(exc)
+    if isinstance(detail, dict):
+        detail.setdefault("code", getattr(exc, "code", "free_prompt_limit_exceeded"))
+        detail.setdefault("message", str(exc))
+    return HTTPException(status_code=402, detail=detail)
+
+
+def _workspace_consume_free_chat(user_id: int, *, mode: str) -> Optional[Dict[str, Any]]:
+    # Chat and Prompt Builder are both AI-chat modes.
+    # On Free they share the same daily chat limit.
+    try:
+        result = consume_free_usage(user_id, FEATURE_CHAT)
+        return None if result.is_paid_plan else result.as_dict()
+    except FreePlanLimitError as exc:
+        raise HTTPException(status_code=429, detail=free_limit_http_detail(exc))
+
+
+def _workspace_consume_free_tts(user_id: int, text: str) -> Optional[Dict[str, Any]]:
+    try:
+        validate_free_tts_text(user_id, text)
+        result = consume_free_usage(user_id, FEATURE_TTS)
+        return None if result.is_paid_plan else result.as_dict()
+    except FreePlanLimitError as exc:
+        status_code = 413 if exc.code == "free_tts_text_too_long" else 429
+        raise HTTPException(status_code=status_code, detail=free_limit_http_detail(exc))
 
 
 def _songwriter_prompt_with_context(p: "SongwriterPayload") -> str:
@@ -3554,6 +3610,9 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
     if not text_value and not files:
         raise HTTPException(status_code=400, detail="Введите текст или прикрепите хотя бы один файл.")
 
+    uid = int(user["telegram_user_id"])
+    free_limit = None
+
     prepared_files = await _prepare_workspace_chat_attachments(files, user_id=user.get("telegram_user_id"), origin="workspace-sync") if files else {"items": [], "context": "", "image_bytes_list": [], "image_storage_refs": []}
     image_refs = [f"@image{i}" for i in range(1, len(prepared_files.get("image_bytes_list") or []) + 1)]
     audio_count = sum(1 for item in (prepared_files.get("items") or []) if str(item.get("kind") or "") == "audio")
@@ -3579,8 +3638,10 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
                 "attachments": prepared_files.get("items") or [],
                 "is_prompt": False,
             }
+        free_limit = _workspace_consume_free_chat(uid, mode=mode)
         system_prompt = _build_prompt_builder_system_prompt(model_label, image_refs, audio_refs)
     else:
+        free_limit = _workspace_consume_free_chat(uid, mode=mode)
         system_prompt = (
             "Ты — AstraBot Workspace Assistant. "
             "Помогай как product-minded AI co-pilot: сценарии, промпты, creative direction, тексты, планы и упаковка идей в рабочий пайплайн. "
@@ -3621,6 +3682,7 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
         "summary": response_summary,
         "attachments": prepared_files.get("items") or [],
         "is_prompt": _is_prompt_builder_output(answer) if mode == "prompt_builder" else False,
+        "free_limit": free_limit,
     }
 
 
@@ -3652,6 +3714,9 @@ async def workspace_chat_async(request: Request, user: Dict[str, Any] = Depends(
     if not text_value and not files:
         raise HTTPException(status_code=400, detail="Введите текст или прикрепите хотя бы один файл.")
 
+    uid = int(user["telegram_user_id"])
+    free_limit = None
+
     prepared_files = await _prepare_workspace_chat_attachments(files, user_id=user.get("telegram_user_id"), origin="workspace-async") if files else {"items": [], "context": "", "image_bytes_list": [], "image_storage_refs": []}
     image_refs = [f"@image{i}" for i in range(1, len(prepared_files.get("image_bytes_list") or []) + 1)]
     audio_count = sum(1 for item in (prepared_files.get("items") or []) if str(item.get("kind") or "") == "audio")
@@ -3679,10 +3744,13 @@ async def workspace_chat_async(request: Request, user: Dict[str, Any] = Depends(
                 "resolved_model": model_actual,
                 "attachments": prepared_files.get("items") or [],
                 "is_prompt": False,
+                "free_limit": free_limit,
             })
-            return {"ok": True, "job_id": job_id, "status": "completed", "answer": answer, "is_prompt": False}
+            return {"ok": True, "job_id": job_id, "status": "completed", "answer": answer, "is_prompt": False, "free_limit": free_limit}
+        free_limit = _workspace_consume_free_chat(uid, mode=mode)
         system_prompt = _build_prompt_builder_system_prompt(model_label, image_refs, audio_refs)
     else:
+        free_limit = _workspace_consume_free_chat(uid, mode=mode)
         system_prompt = (
             "Ты — AstraBot Workspace Assistant. "
             "Помогай как product-minded AI co-pilot: сценарии, промпты, creative direction, тексты, планы и упаковка идей в рабочий пайплайн. "
@@ -3728,14 +3796,17 @@ async def workspace_chat_async(request: Request, user: Dict[str, Any] = Depends(
         "attachments": prepared_files.get("items") or [],
         "image_storage_refs": prepared_files.get("image_storage_refs") or [],
         "is_prompt_builder": mode == "prompt_builder",
+        "free_limit": free_limit,
     }
     try:
         await enqueue_job(job, queue_name=queue_name)
     except Exception as exc:
+        if free_limit:
+            release_free_usage(uid, FEATURE_CHAT)
         await set_chat_job_status(job_id, status="failed", ok=False, error=str(exc))
         raise HTTPException(status_code=503, detail=f"Чат-очередь недоступна: {exc}")
 
-    return {"ok": True, "job_id": job_id, "status": "queued"}
+    return {"ok": True, "job_id": job_id, "status": "queued", "free_limit": free_limit}
 
 
 @router.get("/chat/status/{job_id}")
@@ -6175,6 +6246,7 @@ async def workspace_tts_run(payload: TTSGenerateIn, user: Dict[str, Any] = Depen
         raise HTTPException(status_code=400, detail="output_format is not allowed")
 
     uid = int(user["telegram_user_id"])
+    free_limit = _workspace_consume_free_tts(uid, payload.text)
     voice_meta = next((item for item in ALLOWED_VOICES if item.get("voice_id") == payload.voice_id), None) or {}
     voice_name = str(voice_meta.get("name") or payload.voice_id)
     now_iso = _utc_now_iso()
@@ -6205,6 +6277,8 @@ async def workspace_tts_run(payload: TTSGenerateIn, user: Dict[str, Any] = Depen
             queue_name=WORKSPACE_MEDIA_QUEUE_NAME,
         )
     except Exception as e:
+        if free_limit:
+            release_free_usage(uid, FEATURE_TTS)
         _mark_workspace_voice_generation_failed(generation_id, str(e), error_code="queue_error")
         raise HTTPException(status_code=500, detail=f"Voice generation failed: {e}")
 
@@ -6219,6 +6293,7 @@ async def workspace_tts_run(payload: TTSGenerateIn, user: Dict[str, Any] = Depen
         "status": "queued",
         "status_text": "Озвучка поставлена в очередь. Файл появится в рабочей зоне автоматически.",
         "created_at": now_iso,
+        "free_limit": free_limit,
     }
 
 
@@ -6979,17 +7054,24 @@ async def workspace_tts_generate(payload: TTSGenerateIn, user: Dict[str, Any] = 
     if payload.output_format not in _WORKSPACE_TTS_ALLOWED_FORMATS:
         raise HTTPException(status_code=400, detail="output_format is not allowed")
 
+    uid = int(user["telegram_user_id"])
+    _workspace_consume_free_tts(uid, payload.text)
+
     language_code = _workspace_tts_language_code(payload.language_code)
     voice_settings = _workspace_tts_voice_settings(payload)
     tts = _get_tts()
-    audio_bytes = await tts.tts(
-        text=payload.text,
-        voice_id=payload.voice_id,
-        model_id=payload.model_id,
-        output_format=payload.output_format,
-        language_code=language_code,
-        voice_settings=voice_settings,
-    )
+    try:
+        audio_bytes = await tts.tts(
+            text=payload.text,
+            voice_id=payload.voice_id,
+            model_id=payload.model_id,
+            output_format=payload.output_format,
+            language_code=language_code,
+            voice_settings=voice_settings,
+        )
+    except Exception:
+        release_free_usage(uid, FEATURE_TTS)
+        raise
     media_type = "audio/mpeg" if payload.output_format.startswith("mp3") else "application/octet-stream"
     return Response(content=audio_bytes, media_type=media_type)
 
@@ -7347,14 +7429,116 @@ async def workspace_music_history_delete_item(
 
 @router.get("/prompts/categories")
 async def workspace_prompts_categories(user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
-    return prompts_categories()
+    uid = int(user.get("workspace_user_id") or user.get("telegram_user_id") or 0)
+    if uid <= 0:
+        raise HTTPException(status_code=401, detail="Auth required")
+    if supabase is None:
+        return {"ok": False, "error": "Supabase disabled (env/client not ready)"}
+    try:
+        r = (
+            supabase.table("prompt_categories")
+            .select("id,slug,title,sort_order")
+            .order("sort_order", desc=False)
+            .order("title", desc=False)
+            .execute()
+        )
+        return {"ok": True, "items": r.data or [], "access": _workspace_prompt_access_payload(uid)}
+    except FreePlanLimitError as exc:
+        raise _workspace_prompt_limit_http(exc)
+    except Exception as e:
+        return {"ok": False, "error": f"failed: {e}"}
 
 
 @router.get("/prompts/groups")
 async def workspace_prompts_groups(category: str, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
-    return prompts_groups(category=category)
+    uid = int(user.get("workspace_user_id") or user.get("telegram_user_id") or 0)
+    if uid <= 0:
+        raise HTTPException(status_code=401, detail="Auth required")
+    if supabase is None:
+        return {"ok": False, "error": "Supabase disabled (env/client not ready)"}
+    try:
+        cat = (
+            supabase.table("prompt_categories")
+            .select("id,slug,title")
+            .eq("slug", category)
+            .limit(1)
+            .execute()
+        )
+        if not cat.data:
+            return {"ok": False, "error": f"category not found: {category}"}
+        category_id = cat.data[0]["id"]
+        r = (
+            supabase.table("prompt_groups")
+            .select("id,category_id,title,cover_url,sort_order")
+            .eq("category_id", category_id)
+            .order("sort_order", desc=False)
+            .order("title", desc=False)
+            .execute()
+        )
+        return {"ok": True, "items": r.data or [], "category": cat.data[0], "access": _workspace_prompt_access_payload(uid)}
+    except FreePlanLimitError as exc:
+        raise _workspace_prompt_limit_http(exc)
+    except Exception as e:
+        return {"ok": False, "error": f"failed: {e}"}
 
 
 @router.get("/prompts/items")
 async def workspace_prompts_items(group_id: str, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
-    return prompts_items(group_id=group_id)
+    uid = int(user.get("workspace_user_id") or user.get("telegram_user_id") or 0)
+    if uid <= 0:
+        raise HTTPException(status_code=401, detail="Auth required")
+    if supabase is None:
+        return {"ok": False, "error": "Supabase disabled (env/client not ready)"}
+    try:
+        # Do not return prompt_text in the list. Full text is returned only by /prompts/item,
+        # where the Free lifetime limit is checked and consumed.
+        r = (
+            supabase.table("prompt_items")
+            .select("id,group_id,title,preview_url,video_url,model_hint,is_pro,sort_order")
+            .eq("group_id", group_id)
+            .order("sort_order", desc=False)
+            .order("title", desc=False)
+            .execute()
+        )
+        return {"ok": True, "items": r.data or [], "access": _workspace_prompt_access_payload(uid)}
+    except FreePlanLimitError as exc:
+        raise _workspace_prompt_limit_http(exc)
+    except Exception as e:
+        return {"ok": False, "error": f"failed: {e}"}
+
+
+@router.get("/prompts/item")
+async def workspace_prompts_item(item_id: str, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
+    uid = int(user.get("workspace_user_id") or user.get("telegram_user_id") or 0)
+    if uid <= 0:
+        raise HTTPException(status_code=401, detail="Auth required")
+    if supabase is None:
+        return {"ok": False, "error": "Supabase disabled (env/client not ready)"}
+    try:
+        r = (
+            supabase.table("prompt_items")
+            .select("id,group_id,title,preview_url,video_url,prompt_text,model_hint,is_pro,sort_order")
+            .eq("id", item_id)
+            .limit(1)
+            .execute()
+        )
+        rows = list(getattr(r, "data", None) or [])
+        if not rows:
+            raise HTTPException(status_code=404, detail={"code": "prompt_not_found", "message": "Промт не найден."})
+        prompt = rows[0]
+        prompt_id = str(prompt.get("id") or item_id)
+        access = _workspace_prompt_access_payload(uid, prompt_id)
+        if not access.get("is_paid_plan"):
+            try:
+                free_result = consume_free_prompt_open(uid, prompt_id)
+            except FreePlanLimitError as exc:
+                raise _workspace_prompt_limit_http(exc)
+            access = _workspace_prompt_access_payload(uid, prompt_id)
+            access["prompt_limit"] = free_result.as_dict()
+        return {"ok": True, "item": prompt, "access": access}
+    except HTTPException:
+        raise
+    except FreePlanLimitError as exc:
+        raise _workspace_prompt_limit_http(exc)
+    except Exception as e:
+        return {"ok": False, "error": f"failed: {e}"}
