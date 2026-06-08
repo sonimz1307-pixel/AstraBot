@@ -193,7 +193,7 @@
       const st = document.getElementById("picker_status");
       _setStatus(st, "Загружаю категории...", "muted");
       try{
-        const r = await fetch("/api/prompts/categories");
+        const r = await fetch("/api/prompts/categories", { headers: buildAuthHeaders({}) });
         const data = await r.json();
         if(!data.ok) throw new Error(_extractErr(data));
         _pickerCategories = data.items || [];
@@ -221,7 +221,7 @@
       }
       _setStatus(st, "Загружаю подборки...", "muted");
       try{
-        const r = await fetch("/api/prompts/groups?category=" + encodeURIComponent(cat));
+        const r = await fetch("/api/prompts/groups?category=" + encodeURIComponent(cat), { headers: buildAuthHeaders({}) });
         const data = await r.json();
         if(!data.ok) throw new Error(_extractErr(data));
         _pickerGroups = data.items || [];
