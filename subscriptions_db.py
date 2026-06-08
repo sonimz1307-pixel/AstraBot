@@ -23,7 +23,16 @@ DEFAULT_SUBSCRIPTION_PLANS: List[Dict[str, Any]] = [
         "tokens": 120,
         "duration_days": 30,
         "is_active": True,
-        "features": {"label": "Стартовый тариф"},
+        "features": {
+            "label": "Стартовый тариф",
+            "benefits": [
+                "120 токенов",
+                "Промты без лимита",
+                "GPT/Claude чат безлимит",
+                "TTS/голоса безлимит",
+                "Seedream 4.5 Text-to-Image бесплатно",
+            ],
+        },
     },
     {
         "code": "pulse",
@@ -32,7 +41,14 @@ DEFAULT_SUBSCRIPTION_PLANS: List[Dict[str, Any]] = [
         "tokens": 250,
         "duration_days": 30,
         "is_active": True,
-        "features": {"label": "Оптимальный тариф"},
+        "features": {
+            "label": "Оптимальный тариф",
+            "benefits": [
+                "Всё из Spark",
+                "Seedream 4.5 Text-to-Image бесплатно",
+                "250 токенов",
+            ],
+        },
     },
     {
         "code": "nexus",
@@ -41,7 +57,14 @@ DEFAULT_SUBSCRIPTION_PLANS: List[Dict[str, Any]] = [
         "tokens": 620,
         "duration_days": 30,
         "is_active": True,
-        "features": {"label": "Максимальный тариф"},
+        "features": {
+            "label": "Максимальный тариф",
+            "benefits": [
+                "Всё из Pulse",
+                "Seedream 4.5 Text-to-Image бесплатно",
+                "620 токенов",
+            ],
+        },
     },
 ]
 
@@ -544,6 +567,7 @@ def extend_user_subscription(
     *,
     days: int = 30,
     source: str = "admin",
+    payment_id: Optional[str] = None,
     admin_id: Optional[str] = None,
     comment: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -558,7 +582,10 @@ def extend_user_subscription(
     base = max(expires_at, _now())
     new_expires = base + timedelta(days=days_int)
     sb = _require_client()
-    updated = sb.table("user_subscriptions").update({"expires_at": _iso(new_expires), "updated_at": _iso()}).eq("id", sub_id).execute()
+    update_payload = {"expires_at": _iso(new_expires), "updated_at": _iso()}
+    if payment_id:
+        update_payload["payment_id"] = payment_id
+    updated = sb.table("user_subscriptions").update(update_payload).eq("id", sub_id).execute()
     updated_rows = list(getattr(updated, "data", None) or [])
     after = get_current_subscription(uid)
     _insert_subscription_event(
@@ -566,6 +593,7 @@ def extend_user_subscription(
         plan_code=current.get("plan_code"),
         event_type="plan_extended",
         source=source,
+        payment_id=payment_id,
         admin_id=admin_id,
         meta={"days": days_int, "comment": comment or "", "before": current, "updated": updated_rows[0] if updated_rows else {}},
     )
