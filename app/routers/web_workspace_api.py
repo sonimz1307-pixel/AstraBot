@@ -3626,6 +3626,18 @@ async def workspace_subscription_create(payload: WorkspaceSubscriptionCreatePayl
     if not plan:
         raise HTTPException(status_code=400, detail="Этот тариф пока нельзя подключить через сайт.")
 
+    plan_name = str(plan.get("name") or plan_code.title())
+    try:
+        current_sub = get_current_subscription(uid)
+    except Exception:
+        current_sub = {}
+    current_plan_code = str(current_sub.get("plan_code") or "").strip().lower()
+    if bool(current_sub.get("is_active")) and current_plan_code == plan_code:
+        raise HTTPException(
+            status_code=409,
+            detail=f"У вас уже активен тариф {plan_name}. Повторная покупка этого же тарифа отключена.",
+        )
+
     email = str(account.get("email") or "").strip().lower()
     if not email:
         raise HTTPException(status_code=400, detail="Для оплаты тарифа картой или СБП сначала добавь email в профиле аккаунта.")
@@ -3633,7 +3645,6 @@ async def workspace_subscription_create(payload: WorkspaceSubscriptionCreatePayl
     price_rub = int(float(plan.get("price_rub") or 0))
     tokens = int(float(plan.get("tokens") or 0))
     duration_days = int(float(plan.get("duration_days") or 30))
-    plan_name = str(plan.get("name") or plan_code.title())
     if price_rub <= 0 or tokens < 0 or duration_days <= 0:
         raise HTTPException(status_code=400, detail="Тариф настроен некорректно.")
 
