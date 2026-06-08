@@ -2232,7 +2232,7 @@
         <div>
           <div class="tariff-title">Тарифный план</div>
           <div class="tariff-name" id="tariffName">FREE</div>
-          <div class="tariff-note">Базовый доступ без подписки</div>
+          <div class="tariff-note" id="tariffNote">Базовый доступ без подписки</div>
           <button class="outline-btn" type="button" data-open-tariffs>
             <span>Смотреть тарифы</span>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
@@ -2465,9 +2465,10 @@
             <li>Доступ к разделу «Промты»</li>
             <li>Безлимитные GPT/Claude-чаты</li>
             <li>Безлимитные TTS/голоса</li>
+            <li>Seedream 4.5 Text-to-Image бесплатно</li>
           </ul>
           <div class="tariff-preview-note">В Nabex токены не сгорают и остаются с вами.</div>
-          <button class="tariff-preview-action" type="button" disabled>Скоро</button>
+          <button class="tariff-preview-action" type="button" data-buy-plan="spark">Подключить за 1 140 ₽</button>
         </article>
 
         <article class="tariff-preview-card is-popular">
@@ -2480,6 +2481,7 @@
           <div class="tariff-preview-tokens"><strong>250</strong><span>токенов / месяц</span></div>
           <ul class="tariff-preview-list">
             <li>Всё из Spark</li>
+            <li>Seedream 4.5 Text-to-Image бесплатно</li>
             <li>Безлимит Nano Banana basic</li>
             <li>Безлимит Midjourney без Turbo</li>
           </ul>
@@ -2531,6 +2533,7 @@
       siteRef: "",
       botRef: "",
       contactEmail: "",
+      subscription: null,
       topupUrl: "https://nabex.ru/tariffs.html",
       topupWebAppUrl: "",
       siteUrl: "https://nabex.ru",
@@ -2556,6 +2559,8 @@
     const topupEmailInput = document.getElementById("topupEmailInput");
     const toast = document.getElementById("toast");
     const balanceValue = document.getElementById("balanceValue");
+    const tariffName = document.getElementById("tariffName");
+    const tariffNote = document.getElementById("tariffNote");
     const refCode = document.getElementById("refCode");
     const siteRefText = document.getElementById("siteRefText");
     const botRefText = document.getElementById("botRefText");
@@ -2570,9 +2575,29 @@
       showToast.timer = setTimeout(() => toast.classList.remove("show"), 1600);
     }
 
+    function currentSubscription() {
+      return state.subscription || { is_active: false, plan_code: "free", plan: { name: "Free" }, days_left: 0 };
+    }
+
+    function subscriptionPlanName() {
+      const sub = currentSubscription();
+      const plan = sub.plan || {};
+      const code = String(sub.plan_code || plan.code || "free").trim();
+      return String(plan.name || code.charAt(0).toUpperCase() + code.slice(1) || "Free");
+    }
+
+    function subscriptionStatusText() {
+      const sub = currentSubscription();
+      if (!sub.is_active) return "Базовый доступ без подписки";
+      const days = Number(sub.days_left || 0);
+      return days > 0 ? `Активен · осталось ${Math.trunc(days)} дн.` : "Активен";
+    }
+
     function renderAccount() {
       const balance = Number(state.balance);
       balanceValue.textContent = Number.isFinite(balance) ? String(Math.trunc(balance)) : "0";
+      if (tariffName) tariffName.textContent = subscriptionPlanName().toUpperCase();
+      if (tariffNote) tariffNote.textContent = subscriptionStatusText();
       refCode.textContent = state.refCode || "—";
       siteRefText.textContent = state.siteRef || "Ссылка недоступна";
       botRefText.textContent = state.botRef || "Ссылка недоступна";
@@ -2680,6 +2705,7 @@
       const key = String(reason || "").trim().toLowerCase();
       const labels = {
         yookassa_topup: "Пополнение баланса",
+        yookassa_subscription: "Оплата тарифа",
         stars_topup: "Пополнение через Telegram Stars",
         partner_payout_refund: "Возврат партнёрской выплаты",
         kling3: "Kling 3.0",
@@ -2722,6 +2748,8 @@
         nano_banana_pro_new_refund: "Nano Banana Pro - NEW",
         gpt_image_2: "GPT Image 2.0",
         gpt_image_2_refund: "GPT Image 2.0",
+        seedream_t2i: "Seedream 4.5 Text-to-Image",
+        seedream_t2i_refund: "Seedream 4.5 Text-to-Image",
         seedream_45_single: "Seedream 4.5",
         seedream_45_single_refund: "Seedream 4.5",
         two_photos: "Фото-сессия",
@@ -2925,6 +2953,68 @@
       }
     }
 
+    async function createSubscriptionPayment(planCode, button, emailOverride) {
+      const emailValue = String(emailOverride || (topupEmailInput ? topupEmailInput.value || "" : "")).trim().toLowerCase();
+      const uid = query.get("uid") || query.get("tg_user_id") || query.get("user_id") || "";
+      const payload = {
+        plan_code: String(planCode || "").toLowerCase(),
+        email: emailValue,
+        return_url: window.location.href
+      };
+      if (uid) payload.uid = uid;
+
+      setTopupLoading(button, true);
+      try {
+        const response = await fetch("/api/tg/subscription/create", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Telegram-Init-Data": tg && tg.initData ? tg.initData : ""
+          },
+          body: JSON.stringify(payload)
+        });
+        const data = await response.json().catch(() => ({}));
+
+        if (data.need_email) {
+          const entered = window.prompt(data.message || "Введите email для чека", emailValue || state.contactEmail || "");
+          if (entered && looksLikeEmail(entered)) {
+            if (topupEmailInput) topupEmailInput.value = String(entered).trim().toLowerCase();
+            await createSubscriptionPayment(planCode, button, String(entered).trim().toLowerCase());
+            return;
+          }
+          showToast(data.message || "Введите email для чека");
+          return;
+        }
+
+        if (!data.ok) {
+          showToast(data.message || "Не удалось создать оплату тарифа");
+          if (tg && typeof tg.showAlert === "function") {
+            tg.showAlert(data.message || "Не удалось создать оплату тарифа. Попробуйте ещё раз.");
+          }
+          return;
+        }
+
+        if (data.confirmation_url) {
+          showToast("Открываю оплату тарифа…");
+          if (tg && tg.HapticFeedback) {
+            try { tg.HapticFeedback.impactOccurred("light"); } catch (e) {}
+          }
+          openUrl(data.confirmation_url);
+          return;
+        }
+
+        showToast("Оплата тарифа создана");
+      } catch (error) {
+        showToast("Ошибка создания оплаты тарифа");
+        if (tg && typeof tg.showAlert === "function") {
+          tg.showAlert("Ошибка создания оплаты тарифа. Проверьте интернет и попробуйте ещё раз.");
+        }
+      } finally {
+        setTopupLoading(button, false);
+      }
+    }
+
+
     async function loadAccount() {
       const params = new URLSearchParams();
       const uid = query.get("uid") || query.get("tg_user_id") || query.get("user_id") || "";
@@ -2943,6 +3033,7 @@
         state.topupUrl = data.topup_url || state.topupUrl;
         state.topupWebAppUrl = data.topup_webapp_url || state.topupWebAppUrl;
         state.contactEmail = data.contact_email || state.contactEmail || "";
+        state.subscription = data.subscription || state.subscription;
         if (topupEmailInput && state.contactEmail) topupEmailInput.value = state.contactEmail;
         state.siteUrl = data.site_url || state.siteUrl;
         state.supportUrl = data.support_url || state.supportUrl;
@@ -2967,6 +3058,13 @@
       if (event.target.closest("[data-open-tariffs]")) {
         openSheet(tariffOverlay);
         if (typeof window.refreshTariffPreviewCarousel === "function") window.refreshTariffPreviewCarousel();
+        return;
+      }
+
+      const buyPlanButton = event.target.closest("[data-buy-plan]");
+      if (buyPlanButton) {
+        event.preventDefault();
+        await createSubscriptionPayment(buyPlanButton.dataset.buyPlan || "", buyPlanButton);
         return;
       }
 
