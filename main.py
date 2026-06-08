@@ -41,6 +41,7 @@ from billing_db import (
     get_balance_history,
     add_tokens,
     ledger_ref_exists,
+    resolve_billing_user_id,
     charge_photosession_generation,
     refund_photosession_generation,
     grant_welcome_bonus_once,
@@ -72,6 +73,7 @@ from topaz_pricing import (
     get_video_preset_settings,
 )
 from yookassa_flow import create_yookassa_payment
+from subscriptions_db import get_current_subscription, get_subscription_plan, set_user_subscription, extend_user_subscription
 from kling3_pricing import calculate_kling3_price
 from kling3_telegram_handler import handle_kling3_wait_prompt
 from kling3_kie_telegram_handler import handle_kling3_kie_wait_prompt
@@ -953,6 +955,54 @@ def _tg_user_id_from_request(request: Request, payload: Optional[Dict[str, Any]]
 
     return 0
 
+
+def _subscription_public_payload_for_tg(user_id: int) -> Dict[str, Any]:
+    try:
+        raw = get_current_subscription(int(user_id or 0))
+    except Exception:
+        raw = {"is_active": False, "status": "free", "plan_code": "free", "plan": {"code": "free", "name": "Free", "tokens": 0, "price_rub": 0}}
+    plan = raw.get("plan") if isinstance(raw.get("plan"), dict) else {}
+    plan_code = str(raw.get("plan_code") or plan.get("code") or "free").strip().lower() or "free"
+    return {
+        "is_active": bool(raw.get("is_active")),
+        "status": str(raw.get("status") or ("active" if raw.get("is_active") else "free")),
+        "plan_code": plan_code,
+        "plan": {
+            "code": str(plan.get("code") or plan_code),
+            "name": str(plan.get("name") or plan_code.title()),
+            "tokens": int(float(plan.get("tokens") or 0)),
+            "price_rub": int(float(plan.get("price_rub") or 0)),
+            "duration_days": int(float(plan.get("duration_days") or 0)),
+            "features": plan.get("features") or {},
+        },
+        "starts_at": raw.get("starts_at"),
+        "expires_at": raw.get("expires_at"),
+        "days_left": int(float(raw.get("days_left") or 0)),
+    }
+
+
+def _public_subscription_plan_for_tg(plan_code: Any) -> Optional[Dict[str, Any]]:
+    code = str(plan_code or "").strip().lower()
+    if code not in PUBLIC_SUBSCRIPTION_PLAN_CODES:
+        return None
+    try:
+        plan = get_subscription_plan(code)
+    except Exception:
+        return None
+    if not bool(plan.get("is_active", True)):
+        return None
+    return dict(plan)
+
+
+def _seedream_t2i_is_included_for_user(user_id: int) -> bool:
+    try:
+        sub = get_current_subscription(int(user_id or 0))
+        code = str(sub.get("plan_code") or "").strip().lower()
+        return bool(sub.get("is_active")) and code in SEEDREAM_T2I_INCLUDED_PLAN_CODES
+    except Exception:
+        return False
+
+
 @app.get("/api/tg/account")
 async def tg_account_info(request: Request):
     init_data = request.headers.get("X-Telegram-Init-Data", "")
@@ -991,6 +1041,7 @@ async def tg_account_info(request: Request):
             "offer_url": f"{NABEX_PUBLIC_SITE_URL}/terms.html",
             "policy_url": f"{NABEX_PUBLIC_SITE_URL}/privacy.html",
             "contact_email": "",
+            "subscription": _subscription_public_payload_for_tg(0),
         }
 
     balance = 0
@@ -1026,6 +1077,7 @@ async def tg_account_info(request: Request):
         "offer_url": f"{NABEX_PUBLIC_SITE_URL}/terms.html",
         "policy_url": f"{NABEX_PUBLIC_SITE_URL}/privacy.html",
         "contact_email": contact_email,
+        "subscription": _subscription_public_payload_for_tg(user_id),
     }
 
 
@@ -1063,6 +1115,90 @@ async def tg_balance_history(request: Request, limit: int = 50):
             "balance_tokens": 0,
             "message": "Не удалось загрузить историю токенов.",
         }
+
+
+@app.post("/api/tg/subscription/create")
+async def tg_subscription_create(request: Request):
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            payload = {}
+    except Exception:
+        payload = {}
+
+    user_id = _tg_user_id_from_request(request, payload)
+    if user_id <= 0:
+        return {"ok": False, "error": "user_id_required", "message": "Откройте личный кабинет из Telegram-бота."}
+
+    plan_code = str(payload.get("plan_code") or "").strip().lower()
+    plan = _public_subscription_plan_for_tg(plan_code)
+    if not plan:
+        return {"ok": False, "error": "plan_not_available", "message": "Этот тариф пока нельзя подключить через Telegram."}
+
+    if not _yookassa_enabled():
+        return {"ok": False, "error": "yookassa_disabled", "message": "Оплата тарифов через ЮKassa сейчас не настроена."}
+
+    email = str(payload.get("email") or "").strip().lower()
+    stored_email = ""
+    try:
+        stored_email = sb_get_user_email(user_id)
+    except Exception:
+        stored_email = ""
+
+    if email:
+        if not _EMAIL_RE.match(email):
+            return {"ok": False, "need_email": True, "message": "Введите корректный email для чека."}
+        try:
+            sb_set_user_email(user_id, email)
+        except Exception:
+            pass
+        stored_email = email
+
+    if not stored_email:
+        return {"ok": False, "need_email": True, "message": "Для оплаты тарифа картой или СБП нужен email для чека."}
+
+    price_rub = int(float(plan.get("price_rub") or 0))
+    tokens = int(float(plan.get("tokens") or 0))
+    duration_days = int(float(plan.get("duration_days") or 30))
+    plan_name = str(plan.get("name") or plan_code.title())
+    if price_rub <= 0 or tokens < 0 or duration_days <= 0:
+        return {"ok": False, "error": "bad_plan", "message": "Тариф настроен некорректно."}
+
+    return_url = str(payload.get("return_url") or WEBAPP_ACCOUNT_URL or "https://t.me").strip()
+    if not (return_url.startswith("https://") or return_url.startswith("http://")):
+        return_url = WEBAPP_ACCOUNT_URL or "https://t.me"
+
+    try:
+        payment_id, url = await create_yookassa_payment(
+            amount_rub=price_rub,
+            description=f"Тариф {plan_name}: {tokens} токенов на {duration_days} дней",
+            user_id=user_id,
+            tokens=tokens,
+            customer_email=stored_email,
+            return_url=return_url,
+            payment_metadata={
+                "payment_type": "subscription",
+                "plan_code": plan_code,
+                "duration_days": duration_days,
+                "amount_rub": price_rub,
+            },
+            receipt_item_description=f"Тариф {plan_name} на {duration_days} дней + {tokens} токенов Nabex",
+        )
+    except Exception as exc:
+        return {"ok": False, "error": "payment_create_failed", "message": f"Не удалось создать оплату тарифа: {exc}"}
+
+    return {
+        "ok": True,
+        "method": "yookassa",
+        "payment_id": payment_id,
+        "confirmation_url": url,
+        "plan_code": plan_code,
+        "plan_name": plan_name,
+        "tokens": tokens,
+        "amount_rub": price_rub,
+        "duration_days": duration_days,
+        "customer_email": stored_email,
+    }
 
 
 @app.post("/api/tg/topup/create")
@@ -1221,6 +1357,8 @@ GPT_IMAGE2_GENERATION_COST = int(os.getenv("GPT_IMAGE2_GENERATION_COST", "1") or
 WORKSPACE_IMAGE_QUEUE_NAME = (os.getenv("WORKSPACE_IMAGE_QUEUE_NAME", "workspace_image") or "workspace_image").strip() or "workspace_image"
 MIDJOURNEY_TG_QUEUE_NAME = (os.getenv("MIDJOURNEY_TG_QUEUE_NAME", "telegram_midjourney") or "telegram_midjourney").strip() or "telegram_midjourney"
 SEEDREAM_T2I_QUEUE_NAME = os.getenv("SEEDREAM_T2I_QUEUE_NAME", "seedream_t2i").strip() or "seedream_t2i"
+PUBLIC_SUBSCRIPTION_PLAN_CODES = {"spark"}
+SEEDREAM_T2I_INCLUDED_PLAN_CODES = {"spark", "pulse", "nexus"}
 NANO_BANANA_QUEUE_NAME = os.getenv("NANO_BANANA_QUEUE_NAME", "nano_banana").strip() or "nano_banana"
 TOPAZ_VIDEO_QUEUE_NAME = os.getenv("TOPAZ_VIDEO_QUEUE_NAME", "topaz_video").strip() or "topaz_video"
 # --- YooKassa (cards/SBP) ---
@@ -2264,13 +2402,69 @@ async def tg_answer_pre_checkout_query(cq_id: str, *, ok: bool, error_message: s
 
 
 # --- YooKassa helpers (payments in RUB: cards + SBP on hosted checkout) ---
-_YK_PROCESSED: Dict[str, float] = {}  # payment_id -> ts
+_YK_PROCESSED: Dict[str, float] = {}  # successfully completed payment_id -> ts
+_YK_PROCESSING: Dict[str, float] = {}  # payment_id currently handled by this process -> ts
 
 def _yk_cleanup_processed(now_ts: Optional[float] = None, ttl_seconds: int = 7 * 24 * 3600) -> None:
     now = float(now_ts or time.time())
-    dead = [pid for pid, ts in _YK_PROCESSED.items() if (now - float(ts)) > ttl_seconds]
-    for pid in dead:
-        _YK_PROCESSED.pop(pid, None)
+    for storage in (_YK_PROCESSED, _YK_PROCESSING):
+        dead = [pid for pid, ts in storage.items() if (now - float(ts)) > ttl_seconds]
+        for pid in dead:
+            storage.pop(pid, None)
+
+def _yk_mark_processed(payment_id: str) -> None:
+    pid = str(payment_id or "").strip()
+    if pid:
+        _YK_PROCESSED[pid] = time.time()
+        _YK_PROCESSING.pop(pid, None)
+
+def _yookassa_subscription_payment_already_applied(user_id: int, payment_id: str) -> bool:
+    """Best-effort idempotency guard for subscription side effects.
+
+    Balance idempotency is checked through bot_balance_ledger(ref_id).
+    Subscription activation/extension is checked separately by YooKassa payment_id,
+    so a retry after partial failure will not extend the tariff twice.
+    """
+    pid = str(payment_id or "").strip()
+    if not pid:
+        return False
+    try:
+        uid = int(resolve_billing_user_id(int(user_id or 0)) or int(user_id or 0))
+    except Exception:
+        try:
+            uid = int(user_id or 0)
+        except Exception:
+            uid = 0
+    if uid <= 0:
+        return False
+
+    try:
+        ev = (
+            sb.table("subscription_events")
+            .select("id")
+            .eq("user_id", uid)
+            .eq("source", "yookassa")
+            .eq("payment_id", pid)
+            .limit(1)
+            .execute()
+        )
+        if getattr(ev, "data", None):
+            return True
+    except Exception:
+        pass
+
+    try:
+        sub = (
+            sb.table("user_subscriptions")
+            .select("id")
+            .eq("user_id", uid)
+            .eq("payment_id", pid)
+            .limit(1)
+            .execute()
+        )
+        return bool(getattr(sub, "data", None))
+    except Exception:
+        return False
 
 async def yookassa_create_payment(*, amount_rub: int, description: str, user_id: int, tokens: int) -> Dict[str, Any]:
     """
@@ -6081,65 +6275,162 @@ async def yookassa_webhook(request: Request):
     _yk_cleanup_processed()
     if payment_id in _YK_PROCESSED:
         return {"ok": True}
-    _YK_PROCESSED[payment_id] = time.time()
+    if payment_id in _YK_PROCESSING:
+        # Duplicate webhook while the first copy is still running in this process.
+        # The first handler will return success or 500 and YooKassa can retry if needed.
+        return {"ok": True}
+    _YK_PROCESSING[payment_id] = time.time()
 
     md = obj.get("metadata") or {}
-    try:
-        uid = int(md.get("user_id") or 0)
-        tokens = int(md.get("tokens") or 0)
-    except Exception:
-        uid = 0
-        tokens = 0
-
-    # If metadata missing, do nothing (to avoid giving tokens to wrong user)
-    if uid <= 0 or tokens <= 0:
-        if ADMIN_IDS:
-            try:
-                admin_id = next(iter(ADMIN_IDS))
-                await tg_send_message(admin_id, f"⚠️ YooKassa webhook: no metadata user_id/tokens. payment_id={payment_id} payload={json.dumps(payload)[:1500]}")
-            except Exception:
-                pass
-        return {"ok": True}
+    uid = 0
+    tokens = 0
+    payment_type = ""
+    plan_code = ""
+    is_subscription_payment = False
+    reason = "yookassa_topup"
+    payment_ref_id = str(uuid5(NAMESPACE_URL, f"nabex:yookassa:{payment_id}"))
+    amount_rub = 0.0
+    plan: Optional[Dict[str, Any]] = None
 
     try:
+        try:
+            uid = int(md.get("user_id") or 0)
+            tokens = int(md.get("tokens") or 0)
+        except Exception:
+            uid = 0
+            tokens = 0
+
+        payment_type = str(md.get("payment_type") or "").strip().lower()
+        plan_code = str(md.get("plan_code") or "").strip().lower()
+        is_subscription_payment = payment_type == "subscription" or plan_code in PUBLIC_SUBSCRIPTION_PLAN_CODES
+        reason = "yookassa_subscription" if is_subscription_payment else "yookassa_topup"
+
+        # If metadata missing, do nothing (to avoid giving tokens to wrong user).
+        # Mark this invalid YooKassa payment as handled so it does not spam retries forever.
+        if uid <= 0 or tokens <= 0:
+            if ADMIN_IDS:
+                try:
+                    admin_id = next(iter(ADMIN_IDS))
+                    await tg_send_message(admin_id, f"⚠️ YooKassa webhook: no metadata user_id/tokens. payment_id={payment_id} payload={json.dumps(payload)[:1500]}")
+                except Exception:
+                    pass
+            _yk_mark_processed(payment_id)
+            return {"ok": True}
+
         amount_obj = obj.get("amount") or {}
         try:
             amount_rub = float(amount_obj.get("value") or md.get("amount_rub") or 0)
         except Exception:
             amount_rub = 0.0
 
+        tokens_already_granted = False
+        try:
+            tokens_already_granted = ledger_ref_exists(reason=reason, ref_id=payment_ref_id)
+        except Exception:
+            tokens_already_granted = False
+
+        subscription_already_applied = False
+        if is_subscription_payment:
+            subscription_already_applied = _yookassa_subscription_payment_already_applied(uid, payment_id)
+            if tokens_already_granted and subscription_already_applied:
+                _yk_mark_processed(payment_id)
+                return {"ok": True}
+        elif tokens_already_granted:
+            _yk_mark_processed(payment_id)
+            return {"ok": True}
+
         ensure_user_row(uid)
-        add_tokens(
-            uid,
-            tokens,
-            reason="yookassa_topup",
-            meta={
-                "payment_id": payment_id,
-                "event": event,
-                "status": status,
-                "amount_rub": amount_rub,
-                "provider": "yookassa",
-                "metadata": md,
-            },
-        )
+
+        # Apply subscription first. If token credit fails afterwards, YooKassa retry will see
+        # the subscription payment_id and will not extend/activate it a second time.
+        if is_subscription_payment and not subscription_already_applied:
+            plan = _public_subscription_plan_for_tg(plan_code)
+            if not plan:
+                raise RuntimeError(f"Unknown or unavailable subscription plan: {plan_code}")
+            duration_days = int(float(md.get("duration_days") or plan.get("duration_days") or 30))
+            current_sub = get_current_subscription(uid)
+            if bool(current_sub.get("is_active")) and str(current_sub.get("plan_code") or "").strip().lower() == plan_code:
+                extend_user_subscription(
+                    uid,
+                    days=duration_days,
+                    source="yookassa",
+                    payment_id=payment_id,
+                    comment=f"YooKassa subscription payment {payment_id}",
+                )
+            else:
+                set_user_subscription(
+                    uid,
+                    plan_code,
+                    duration_days=duration_days,
+                    source="yookassa",
+                    payment_id=payment_id,
+                    comment=f"YooKassa subscription payment {payment_id}",
+                    meta={"payment_id": payment_id, "amount_rub": amount_rub, "tokens_granted": tokens, "metadata": md},
+                )
+
+        if not tokens_already_granted:
+            add_tokens(
+                uid,
+                tokens,
+                reason=reason,
+                ref_id=payment_ref_id,
+                meta={
+                    "payment_id": payment_id,
+                    "event": event,
+                    "status": status,
+                    "amount_rub": amount_rub,
+                    "provider": "yookassa",
+                    "payment_type": payment_type or ("subscription" if is_subscription_payment else "topup"),
+                    "plan_code": plan_code if is_subscription_payment else "",
+                    "metadata": md,
+                },
+            )
+
+        _yk_mark_processed(payment_id)
+
+    except Exception as e:
+        _YK_PROCESSING.pop(payment_id, None)
+        if ADMIN_IDS:
+            try:
+                admin_id = next(iter(ADMIN_IDS))
+                await tg_send_message(admin_id, f"❌ YooKassa начисление упало: {e}\nuser={uid} payment_id={payment_id}")
+            except Exception:
+                pass
+        # Return non-2xx so YooKassa can retry the webhook instead of silently losing the payment.
+        return Response(status_code=500, content="processing error")
+
+    # Non-critical side effects: do not retry financial operations only because a notification failed.
+    try:
         await _enqueue_partner_topup_event(
             user_id=uid,
             payment_id=payment_id,
             amount_rub=amount_rub,
             tokens=tokens,
             provider="yookassa",
-            meta={"event": event, "status": status, "metadata": md},
+            meta={"event": event, "status": status, "metadata": md, "payment_type": payment_type or ("subscription" if is_subscription_payment else "topup")},
         )
-        bal = int(get_balance(uid) or 0)
-        # Notify user
-        await tg_send_message(uid, f"✅ Оплата ЮKassa прошла!\\nНачислено: +{tokens} токенов\\nБаланс: {bal}", reply_markup=_help_menu_for(uid))
     except Exception as e:
         if ADMIN_IDS:
             try:
                 admin_id = next(iter(ADMIN_IDS))
-                await tg_send_message(admin_id, f"❌ YooKassa начисление упало: {e}\\nuser={uid} payment_id={payment_id}")
+                await tg_send_message(admin_id, f"⚠️ YooKassa partner event не записался: {e}\nuser={uid} payment_id={payment_id}")
             except Exception:
                 pass
+
+    try:
+        bal = int(get_balance(uid) or 0)
+        if is_subscription_payment:
+            if plan is None:
+                try:
+                    plan = _public_subscription_plan_for_tg(plan_code)
+                except Exception:
+                    plan = None
+            plan_name = str((plan or {}).get("name") or plan_code.title())
+            await tg_send_message(uid, f"✅ Тариф {plan_name} подключён!\nНачислено: +{tokens} токенов\nБаланс: {bal}", reply_markup=_help_menu_for(uid))
+        else:
+            await tg_send_message(uid, f"✅ Оплата ЮKassa прошла!\nНачислено: +{tokens} токенов\nБаланс: {bal}", reply_markup=_help_menu_for(uid))
+    except Exception:
+        pass
 
     return {"ok": True}
 
@@ -10609,7 +10900,8 @@ async def webhook(secret: str, request: Request):
             chat_id,
             "Seedream 4.5 • режим «Текст→Картинка».\n"
             "Напиши одним сообщением, что нужно сгенерировать.\n"
-            "Промпт уйдёт как есть, без внутренней обвязки.",
+            "Промпт уйдёт как есть, без внутренней обвязки.\n\n"
+            "Стоимость: Free — 1 токен. Spark/Pulse/Nexus — бесплатно.",
             reply_markup=_photo_future_menu_keyboard(),
         )
         await tg_send_message(
@@ -13993,10 +14285,42 @@ async def webhook(secret: str, request: Request):
                 await tg_send_message(chat_id, "Напиши описание для генерации (без фото).", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
+            aspect_ratio = str(t2i.get("aspect_ratio") or "9:16")
+            model = _seedream_model_for_bot()
+            size = _seedream_size_for_aspect_ratio(aspect_ratio)
+            seedream_included = _seedream_t2i_is_included_for_user(int(user_id))
+            cost_tokens = 0 if seedream_included else 1
+            charge_ref_id = ""
+            charged = False
+
+            if cost_tokens > 0:
+                ensure_user_row(int(user_id))
+                try:
+                    bal = int(get_balance(int(user_id)) or 0)
+                except Exception:
+                    bal = 0
+                if bal < cost_tokens:
+                    await tg_send_message(
+                        chat_id,
+                        f"Недостаточно токенов 😕\nНужно: {cost_tokens} токен для Seedream 4.5 Text-to-Image. На Spark/Pulse/Nexus этот режим бесплатный.",
+                        reply_markup=_topup_packs_kb(),
+                    )
+                    return {"ok": True}
+                charge_ref_id = str(uuid4())
+                try:
+                    add_tokens(
+                        int(user_id),
+                        -int(cost_tokens),
+                        reason="seedream_t2i",
+                        ref_id=charge_ref_id,
+                        meta={"cost": int(cost_tokens), "aspect_ratio": aspect_ratio, "model": model},
+                    )
+                    charged = True
+                except Exception as e:
+                    await tg_send_message(chat_id, f"❌ Не удалось списать токен: {e}", reply_markup=_topup_packs_kb())
+                    return {"ok": True}
+
             try:
-                aspect_ratio = str(t2i.get("aspect_ratio") or "9:16")
-                model = _seedream_model_for_bot()
-                size = _seedream_size_for_aspect_ratio(aspect_ratio)
                 await enqueue_job({
                     "job_id": uuid4().hex,
                     "type": "seedream_t2i",
@@ -14006,14 +14330,21 @@ async def webhook(secret: str, request: Request):
                     "size": size,
                     "seedream_model": model,
                     "aspect_ratio": aspect_ratio,
+                    "charge_tokens": int(cost_tokens if charged else 0),
+                    "charge_ref_id": charge_ref_id,
                 }, queue_name=SEEDREAM_T2I_QUEUE_NAME)
             except Exception as e:
+                if charged:
+                    try:
+                        add_tokens(int(user_id), int(cost_tokens), reason="seedream_t2i_refund", ref_id=charge_ref_id, meta={"stage": "enqueue_failed", "error": str(e)[:300]})
+                    except Exception:
+                        pass
                 await tg_send_message(chat_id, f"❌ Не удалось поставить Seedream в очередь: {e}", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
             await tg_send_message(
                 chat_id,
-                f"✅ Seedream: запрос принят ({aspect_ratio}). Пришлю результат, как будет готово.",
+                f"✅ Seedream: запрос принят ({aspect_ratio}). Пришлю результат, как будет готово." + ("\nБесплатно по активному тарифу." if seedream_included else ""),
                 reply_markup=_main_menu_for(user_id),
             )
             st["t2i"] = {"step": "need_prompt", "aspect_ratio": str(t2i.get("aspect_ratio") or "9:16"), "model": "seedream_45"}
