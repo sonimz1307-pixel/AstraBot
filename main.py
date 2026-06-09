@@ -1003,6 +1003,48 @@ def _seedream_t2i_is_included_for_user(user_id: int) -> bool:
         return False
 
 
+def _active_subscription_plan_code_for_user(user_id: int) -> str:
+    try:
+        sub = get_current_subscription(int(user_id or 0))
+        code = str(sub.get("plan_code") or "").strip().lower()
+        return code if bool(sub.get("is_active")) else ""
+    except Exception:
+        return ""
+
+
+def _nano_banana_basic_is_included_for_user(user_id: int, provider: str = "nano_banana", resolution: str = "2K") -> bool:
+    provider_key = str(provider or "").strip().lower()
+    if provider_key != "nano_banana":
+        return False
+    if str(resolution or "2K").strip().upper() == "4K":
+        return False
+    return _active_subscription_plan_code_for_user(user_id) in NANO_BANANA_BASIC_INCLUDED_PLAN_CODES
+
+
+def _nano_banana_basic_cost_hint_for_user(user_id: int, provider: str = "nano_banana", resolution: str = "2K") -> str:
+    if _nano_banana_basic_is_included_for_user(user_id, provider=provider, resolution=resolution):
+        return "Стоимость: 0 токенов по Pulse/Nexus."
+    return "Стоимость: 1 токен за результат."
+
+
+def _midjourney_is_included_for_user(user_id: int, model: str = "midjourney-v7", speed_mode: str = "fast", resolution: str = "2K") -> bool:
+    model_key = normalize_midjourney_model(model)
+    speed = normalize_midjourney_speed_mode(speed_mode, model=model_key)
+    if model_key not in MIDJOURNEY_INCLUDED_MODELS:
+        return False
+    if speed == "turbo":
+        return False
+    if str(resolution or "2K").strip().upper() == "4K":
+        return False
+    return _active_subscription_plan_code_for_user(user_id) in MIDJOURNEY_INCLUDED_PLAN_CODES
+
+
+def _midjourney_user_cost(user_id: Optional[int], model: str = "midjourney-v7", speed_mode: str = "fast", resolution: str = "2K") -> int:
+    if user_id is not None and _midjourney_is_included_for_user(int(user_id or 0), model=model, speed_mode=speed_mode, resolution=resolution):
+        return 0
+    return int(_midjourney_cost(model, speed_mode))
+
+
 @app.get("/api/tg/account")
 async def tg_account_info(request: Request):
     init_data = request.headers.get("X-Telegram-Init-Data", "")
@@ -1370,8 +1412,11 @@ GPT_IMAGE2_GENERATION_COST = int(os.getenv("GPT_IMAGE2_GENERATION_COST", "1") or
 WORKSPACE_IMAGE_QUEUE_NAME = (os.getenv("WORKSPACE_IMAGE_QUEUE_NAME", "workspace_image") or "workspace_image").strip() or "workspace_image"
 MIDJOURNEY_TG_QUEUE_NAME = (os.getenv("MIDJOURNEY_TG_QUEUE_NAME", "telegram_midjourney") or "telegram_midjourney").strip() or "telegram_midjourney"
 SEEDREAM_T2I_QUEUE_NAME = os.getenv("SEEDREAM_T2I_QUEUE_NAME", "seedream_t2i").strip() or "seedream_t2i"
-PUBLIC_SUBSCRIPTION_PLAN_CODES = {"spark"}
+PUBLIC_SUBSCRIPTION_PLAN_CODES = {"spark", "pulse"}
 SEEDREAM_T2I_INCLUDED_PLAN_CODES = {"spark", "pulse", "nexus"}
+NANO_BANANA_BASIC_INCLUDED_PLAN_CODES = {"pulse", "nexus"}
+MIDJOURNEY_INCLUDED_PLAN_CODES = {"pulse", "nexus"}
+MIDJOURNEY_INCLUDED_MODELS = {"midjourney-v7", "midjourney-v8.1"}
 NANO_BANANA_QUEUE_NAME = os.getenv("NANO_BANANA_QUEUE_NAME", "nano_banana").strip() or "nano_banana"
 TOPAZ_VIDEO_QUEUE_NAME = os.getenv("TOPAZ_VIDEO_QUEUE_NAME", "topaz_video").strip() or "topaz_video"
 # --- YooKassa (cards/SBP) ---
@@ -1853,14 +1898,14 @@ def _midjourney_state(st: Dict[str, Any], model: str = "midjourney-v7") -> dict:
     return mj
 
 
-def _midjourney_settings_text(mj: dict) -> str:
+def _midjourney_settings_text(mj: dict, user_id: Optional[int] = None) -> str:
     model = normalize_midjourney_model(mj.get("model") or "midjourney-v7")
     speed = normalize_midjourney_speed_mode(mj.get("speed_mode") or "fast", model=model)
     prompt = str(mj.get("prompt") or "").strip()
     style_loaded = "загружен" if str(mj.get("style_ref_url") or "").strip() else "не загружен"
     omni_loaded = "загружен" if str(mj.get("omni_ref_url") or "").strip() else "не загружен"
     image_ref_count = len([x for x in (mj.get("image_prompt_urls") or []) if str(x or "").strip()])
-    price = _midjourney_cost(model, speed)
+    price = _midjourney_user_cost(user_id, model, speed)
     lines = [
         _midjourney_model_title(model),
         "",
@@ -1885,7 +1930,7 @@ def _midjourney_settings_text(mj: dict) -> str:
     return "\n".join(lines)
 
 
-def _midjourney_settings_kb(mj: dict) -> dict:
+def _midjourney_settings_kb(mj: dict, user_id: Optional[int] = None) -> dict:
     model = normalize_midjourney_model(mj.get("model") or "midjourney-v7")
     speed = normalize_midjourney_speed_mode(mj.get("speed_mode") or "fast", model=model)
     rows = [
@@ -1905,7 +1950,8 @@ def _midjourney_settings_kb(mj: dict) -> dict:
     ]
     if str(mj.get("prompt") or "").strip():
         rows.append([{"text": "✏️ Изменить prompt", "callback_data": "mj:prompt:edit"}])
-        rows.append([{"text": f"✅ Запустить • {_midjourney_cost(model, speed)} ток.", "callback_data": "mj:run"}])
+        run_cost = _midjourney_user_cost(user_id, model, speed)
+        rows.append([{"text": f"✅ Запустить • {run_cost} ток.", "callback_data": "mj:run"}])
     rows.append([{"text": "⬅️ Назад", "callback_data": "mj:back:photo"}])
     return {"inline_keyboard": rows}
 
@@ -2040,13 +2086,13 @@ def _midjourney_reroll_confirm_kb(token: str) -> dict:
     }
 
 
-def _midjourney_submit_reply_markup(ok: bool, message_text: str, mj: Optional[dict] = None) -> Optional[dict]:
+def _midjourney_submit_reply_markup(ok: bool, message_text: str, mj: Optional[dict] = None, user_id: Optional[int] = None) -> Optional[dict]:
     if ok:
         return _photo_future_menu_keyboard()
     if "Недостаточно токенов" in str(message_text or ""):
         return _topup_packs_kb()
     if isinstance(mj, dict):
-        return _midjourney_settings_kb(mj)
+        return _midjourney_settings_kb(mj, user_id=user_id)
     return None
 
 
@@ -2262,7 +2308,7 @@ async def _midjourney_charge_and_enqueue(
     action_name = str(action or "generate").strip().lower() or "generate"
     model_key = normalize_midjourney_model(model)
     speed = normalize_midjourney_speed_mode(speed_mode, model=model_key)
-    cost_tokens = int(_midjourney_cost(model_key, speed))
+    cost_tokens = int(_midjourney_user_cost(user_id, model_key, speed))
     if action_name == "generate":
         prompt_len = len(str(run_prompt or ""))
         if prompt_len <= 0:
@@ -2290,26 +2336,27 @@ async def _midjourney_charge_and_enqueue(
     elif action_name == "variation":
         reason = "midjourney_variation"
 
-    charge_ref_id = uuid4().hex
+    charge_ref_id = uuid4().hex if cost_tokens > 0 else ""
     charged = False
     try:
-        add_tokens(
-            user_id,
-            -cost_tokens,
-            reason=reason,
-            ref_id=charge_ref_id,
-            meta={
-                "provider": "midjourney",
-                "action": action_name,
-                "model": model_key,
-                "speed_mode": speed,
-                "aspect_ratio": aspect_ratio,
-                "selected_image_no": int(selected_image_no or 0),
-                "variation_type": variation_type,
-                "cost_tokens": int(cost_tokens),
-            },
-        )
-        charged = True
+        if cost_tokens > 0:
+            add_tokens(
+                user_id,
+                -cost_tokens,
+                reason=reason,
+                ref_id=charge_ref_id,
+                meta={
+                    "provider": "midjourney",
+                    "action": action_name,
+                    "model": model_key,
+                    "speed_mode": speed,
+                    "aspect_ratio": aspect_ratio,
+                    "selected_image_no": int(selected_image_no or 0),
+                    "variation_type": variation_type,
+                    "cost_tokens": int(cost_tokens),
+                },
+            )
+            charged = True
         await enqueue_job(
             {
                 "job_id": uuid4().hex,
@@ -2341,7 +2388,9 @@ async def _midjourney_charge_and_enqueue(
                 pass
         return False, f"❌ Не удалось поставить Midjourney в очередь: {e}"
 
-    return True, f"✅ Midjourney: запрос принят. Списано {cost_tokens} токен. Пришлю результат, как будет готово."
+    if cost_tokens > 0:
+        return True, f"✅ Midjourney: запрос принят. Списано {cost_tokens} токен. Пришлю результат, как будет готово."
+    return True, "✅ Midjourney: запрос принят бесплатно по тарифу Pulse/Nexus. Пришлю результат, как будет готово."
 
 
 def _seedream_model_for_bot() -> str:
@@ -6580,7 +6629,7 @@ async def webhook(secret: str, request: Request):
                 mj["step"] = "need_prompt"
                 st["midjourney"] = mj
                 st["ts"] = _now()
-                await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+                await tg_send_message(chat_id, _midjourney_settings_text(mj, user_id=user_id), reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
                 return {"ok": True}
 
             if len(parts) >= 3 and parts[1] == "model":
@@ -6588,7 +6637,7 @@ async def webhook(secret: str, request: Request):
                 mj = _midjourney_default_state(model)
                 st["midjourney"] = mj
                 st["ts"] = _now()
-                await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+                await tg_send_message(chat_id, _midjourney_settings_text(mj, user_id=user_id), reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
                 return {"ok": True}
 
             if len(parts) >= 3 and parts[1] == "menu":
@@ -6625,7 +6674,7 @@ async def webhook(secret: str, request: Request):
                     mj["step"] = "need_prompt"
                     st["midjourney"] = mj
                     st["ts"] = _now()
-                await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+                await tg_send_message(chat_id, _midjourney_settings_text(mj, user_id=user_id), reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
                 return {"ok": True}
 
             if len(parts) >= 3 and parts[1] == "speed":
@@ -6634,7 +6683,7 @@ async def webhook(secret: str, request: Request):
                 mj["step"] = "need_prompt"
                 st["midjourney"] = mj
                 st["ts"] = _now()
-                await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+                await tg_send_message(chat_id, _midjourney_settings_text(mj, user_id=user_id), reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
                 return {"ok": True}
 
             if data == "mj:raw":
@@ -6642,7 +6691,7 @@ async def webhook(secret: str, request: Request):
                 mj["step"] = "need_prompt"
                 st["midjourney"] = mj
                 st["ts"] = _now()
-                await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+                await tg_send_message(chat_id, _midjourney_settings_text(mj, user_id=user_id), reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
                 return {"ok": True}
 
             if len(parts) >= 3 and parts[1] in {"stylize", "chaos"}:
@@ -6665,7 +6714,7 @@ async def webhook(secret: str, request: Request):
                 mj["step"] = "need_prompt"
                 st["midjourney"] = mj
                 st["ts"] = _now()
-                await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+                await tg_send_message(chat_id, _midjourney_settings_text(mj, user_id=user_id), reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
                 return {"ok": True}
 
             if len(parts) >= 3 and parts[1] == "ref":
@@ -6704,7 +6753,7 @@ async def webhook(secret: str, request: Request):
                 mj["step"] = "need_prompt"
                 st["midjourney"] = mj
                 st["ts"] = _now()
-                await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+                await tg_send_message(chat_id, _midjourney_settings_text(mj, user_id=user_id), reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
                 return {"ok": True}
 
             if data == "mj:prompt:edit":
@@ -6719,12 +6768,12 @@ async def webhook(secret: str, request: Request):
                 mj = _midjourney_state(st)
                 prompt = str(mj.get("prompt") or "").strip()
                 if not prompt:
-                    await tg_send_message(chat_id, "Сначала пришли prompt для Midjourney.", reply_markup=_midjourney_settings_kb(mj))
+                    await tg_send_message(chat_id, "Сначала пришли prompt для Midjourney.", reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
                     return {"ok": True}
                 try:
                     run_prompt = _midjourney_prepare_run_prompt(mj)
                 except Exception as e:
-                    await tg_send_message(chat_id, f"❌ Не смог собрать Midjourney prompt: {e}", reply_markup=_midjourney_settings_kb(mj))
+                    await tg_send_message(chat_id, f"❌ Не смог собрать Midjourney prompt: {e}", reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
                     return {"ok": True}
                 dedupe_key = _midjourney_dedupe_key(
                     "generate",
@@ -6753,7 +6802,7 @@ async def webhook(secret: str, request: Request):
                 )
                 if not ok:
                     _midjourney_clear_action_mark(mj, dedupe_key)
-                await tg_send_message(chat_id, message_text, reply_markup=_midjourney_submit_reply_markup(ok, message_text, mj))
+                await tg_send_message(chat_id, message_text, reply_markup=_midjourney_submit_reply_markup(ok, message_text, mj, user_id=user_id))
                 mj["step"] = "need_prompt"
                 st["midjourney"] = mj
                 st["ts"] = _now()
@@ -6836,10 +6885,19 @@ async def webhook(secret: str, request: Request):
                 return {"ok": True}
 
             if action == "reroll":
-                cost = int(_midjourney_cost(str(session.get("model") or "midjourney-v7"), str(session.get("speed_mode") or "fast")))
+                cost = int(_midjourney_user_cost(
+                    user_id,
+                    str(session.get("model") or "midjourney-v7"),
+                    str(session.get("speed_mode") or "fast"),
+                    str(session.get("resolution") or "2K"),
+                ))
+                if cost > 0:
+                    reroll_text = f"Reroll создаст новую подборку из 4 изображений и спишет {cost} токен.\n\nПродолжить?"
+                else:
+                    reroll_text = "Reroll создаст новую подборку из 4 изображений бесплатно по тарифу Pulse/Nexus.\n\nПродолжить?"
                 await tg_send_message(
                     chat_id,
-                    f"Reroll создаст новую подборку из 4 изображений и спишет {cost} токен.\n\nПродолжить?",
+                    reroll_text,
                     reply_markup=_midjourney_reroll_confirm_kb(token),
                 )
                 return {"ok": True}
@@ -6922,7 +6980,7 @@ async def webhook(secret: str, request: Request):
                 st["mode"] = "midjourney"
                 st["midjourney"] = mj
                 st["ts"] = _now()
-                await tg_send_message(chat_id, "Ок, пришли новый prompt для Midjourney с текущими настройками.", reply_markup=_midjourney_settings_kb(mj))
+                await tg_send_message(chat_id, "Ок, пришли новый prompt для Midjourney с текущими настройками.", reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
                 return {"ok": True}
 
             return {"ok": True}
@@ -7198,7 +7256,7 @@ async def webhook(secret: str, request: Request):
 
             await tg_send_message(
                 chat_id,
-                f"✅ Формат Nano Banana 2: {aspect_ratio}\nТеперь пришли фото или сразу напиши текст.",
+                f"✅ Формат Nano Banana 2: {aspect_ratio}\nТеперь пришли фото или сразу напиши текст.\n{_nano_banana_basic_cost_hint_for_user(user_id, 'nano_banana_2', '2K')}",
                 reply_markup=_nano_banana_2_aspect_inline_kb(aspect_ratio),
             )
             return {"ok": True}
@@ -10678,10 +10736,10 @@ async def webhook(secret: str, request: Request):
         _set_mode(chat_id, user_id, "nano_banana")
         await tg_send_message(
             chat_id,
-            "🍌 Nano Banana — редактирование фото (платно).\n\n"
+            "🍌 Nano Banana — редактирование фото.\n\n"
             "1) Пришли фото.\n"
             "2) Потом одним сообщением напиши что изменить (стиль/фон/детали).\n\n"
-            "Стоимость: 1 токен за результат.",
+            f"{_nano_banana_basic_cost_hint_for_user(user_id, 'nano_banana', '2K')}",
             reply_markup=_photo_future_menu_keyboard(),
         )
         return {"ok": True}
@@ -10690,13 +10748,13 @@ async def webhook(secret: str, request: Request):
         _set_mode(chat_id, user_id, "nano_banana_2")
         await tg_send_message(
             chat_id,
-            "🍌 Nano Banana 2 — генерация и редактирование 1 токен (2K).\n\n"
+            "🍌 Nano Banana 2 — генерация и редактирование (2K).\n\n"
             "Вариант A (фото→фото):\n"
             "1) Пришли фото.\n"
             "2) Затем напиши что изменить.\n\n"
             "Вариант B (текст→картинка):\n"
             "• Просто пришли текст без фото — сгенерирую картинку.\n\n"
-            "Стоимость: 1 токен за результат.",
+            f"{_nano_banana_basic_cost_hint_for_user(user_id, 'nano_banana_2', '2K')}",
             reply_markup=_photo_future_menu_keyboard(),
         )
         await tg_send_message(
@@ -10996,13 +11054,13 @@ async def webhook(secret: str, request: Request):
             mj = _midjourney_state(st)
             step = str(mj.get("step") or "need_prompt")
             if step not in {"need_style_ref", "need_omni_ref", "need_image_prompt_ref"}:
-                await tg_send_message(chat_id, "Фото получил, но сейчас Midjourney ждёт prompt или выбор reference-кнопки.", reply_markup=_midjourney_settings_kb(mj))
+                await tg_send_message(chat_id, "Фото получил, но сейчас Midjourney ждёт prompt или выбор reference-кнопки.", reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
                 return {"ok": True}
             try:
                 file_url = _midjourney_upload_reference_bytes(user_id=user_id, image_bytes=img_bytes, filename="telegram_photo.jpg", content_type="image/jpeg")
             except Exception as e:
                 logging.exception("Midjourney reference upload failed")
-                await tg_send_message(chat_id, f"❌ Не удалось загрузить reference для Midjourney: {e}", reply_markup=_midjourney_settings_kb(mj))
+                await tg_send_message(chat_id, f"❌ Не удалось загрузить reference для Midjourney: {e}", reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
                 return {"ok": True}
             if step == "need_style_ref":
                 mj["style_ref_url"] = file_url
@@ -11010,7 +11068,7 @@ async def webhook(secret: str, request: Request):
                 mj["step"] = "need_prompt"
                 st["midjourney"] = mj
                 st["ts"] = _now()
-                await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+                await tg_send_message(chat_id, _midjourney_settings_text(mj, user_id=user_id), reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
                 return {"ok": True}
             if step == "need_omni_ref":
                 mj["omni_ref_url"] = file_url
@@ -11018,13 +11076,13 @@ async def webhook(secret: str, request: Request):
                 mj["step"] = "need_prompt"
                 st["midjourney"] = mj
                 st["ts"] = _now()
-                await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+                await tg_send_message(chat_id, _midjourney_settings_text(mj, user_id=user_id), reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
                 return {"ok": True}
             if step == "need_image_prompt_ref":
                 urls = [str(x or "").strip() for x in (mj.get("image_prompt_urls") or []) if str(x or "").strip()]
                 ids = [str(x or "").strip() for x in (mj.get("image_prompt_file_ids") or []) if str(x or "").strip()]
                 if len(urls) >= 4:
-                    await tg_send_message(chat_id, "У Midjourney V8.1 можно добавить максимум 4 image refs. Теперь пришли prompt или нажми запуск.", reply_markup=_midjourney_settings_kb(mj))
+                    await tg_send_message(chat_id, "У Midjourney V8.1 можно добавить максимум 4 image refs. Теперь пришли prompt или нажми запуск.", reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
                     return {"ok": True}
                 urls.append(file_url)
                 ids.append(str(file_id or ""))
@@ -11033,9 +11091,9 @@ async def webhook(secret: str, request: Request):
                 mj["step"] = "need_prompt"
                 st["midjourney"] = mj
                 st["ts"] = _now()
-                await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+                await tg_send_message(chat_id, _midjourney_settings_text(mj, user_id=user_id), reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
                 return {"ok": True}
-            await tg_send_message(chat_id, "Фото получил, но сейчас Midjourney ждёт prompt или выбор reference-кнопки.", reply_markup=_midjourney_settings_kb(mj))
+            await tg_send_message(chat_id, "Фото получил, но сейчас Midjourney ждёт prompt или выбор reference-кнопки.", reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
             return {"ok": True}
 
         if st.get("mode") == "gpt_image_2_kie_i2i":
@@ -11301,7 +11359,7 @@ async def webhook(secret: str, request: Request):
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
-                    "Фото принял ✅\nТеперь напиши одним сообщением, что изменить (фон/стиль/детали).\n\nСтоимость: 1 токен.",
+                    f"Фото принял ✅\nТеперь напиши одним сообщением, что изменить (фон/стиль/детали).\n\n{_nano_banana_basic_cost_hint_for_user(user_id, 'nano_banana', '2K')}",
                     reply_markup=_photo_future_menu_keyboard(),
                 )
                 return {"ok": True}
@@ -11319,7 +11377,7 @@ async def webhook(secret: str, request: Request):
                 current_aspect = (nb2.get("aspect_ratio") or "9:16")
                 await tg_send_message(
                     chat_id,
-                    f"Фото принял ✅\nФормат: {current_aspect}\nТеперь напиши одним сообщением, что изменить (фон/стиль/детали).\n\nСтоимость: 1 токен.",
+                    f"Фото принял ✅\nФормат: {current_aspect}\nТеперь напиши одним сообщением, что изменить (фон/стиль/детали).\n\n{_nano_banana_basic_cost_hint_for_user(user_id, 'nano_banana_2', '2K')}",
                     reply_markup=_photo_future_menu_keyboard(),
                 )
                 return {"ok": True}
@@ -12265,7 +12323,7 @@ async def webhook(secret: str, request: Request):
             mj = _midjourney_state(st)
             step = str(mj.get("step") or "need_prompt")
             if step not in {"need_style_ref", "need_omni_ref", "need_image_prompt_ref"}:
-                await tg_send_message(chat_id, "Файл-фото получил, но сейчас Midjourney ждёт prompt или выбор reference-кнопки.", reply_markup=_midjourney_settings_kb(mj))
+                await tg_send_message(chat_id, "Файл-фото получил, но сейчас Midjourney ждёт prompt или выбор reference-кнопки.", reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
                 return {"ok": True}
             try:
                 file_path = await tg_get_file_path(file_id)
@@ -12273,7 +12331,7 @@ async def webhook(secret: str, request: Request):
                 file_url = _midjourney_upload_reference_bytes(user_id=user_id, image_bytes=img_bytes, filename=filename or "reference.jpg", content_type=mime or "image/jpeg")
             except Exception as e:
                 logging.exception("Midjourney document reference upload failed")
-                await tg_send_message(chat_id, f"Ошибка при загрузке reference: {e}", reply_markup=_midjourney_settings_kb(mj))
+                await tg_send_message(chat_id, f"Ошибка при загрузке reference: {e}", reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
                 return {"ok": True}
             if step == "need_style_ref":
                 mj["style_ref_url"] = file_url
@@ -12287,7 +12345,7 @@ async def webhook(secret: str, request: Request):
                 urls = [str(x or "").strip() for x in (mj.get("image_prompt_urls") or []) if str(x or "").strip()]
                 ids = [str(x or "").strip() for x in (mj.get("image_prompt_file_ids") or []) if str(x or "").strip()]
                 if len(urls) >= 4:
-                    await tg_send_message(chat_id, "У Midjourney V8.1 можно добавить максимум 4 image refs. Теперь пришли prompt или нажми запуск.", reply_markup=_midjourney_settings_kb(mj))
+                    await tg_send_message(chat_id, "У Midjourney V8.1 можно добавить максимум 4 image refs. Теперь пришли prompt или нажми запуск.", reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
                     return {"ok": True}
                 urls.append(file_url)
                 ids.append(str(file_id or ""))
@@ -12295,11 +12353,11 @@ async def webhook(secret: str, request: Request):
                 mj["image_prompt_file_ids"] = ids[:4]
                 mj["step"] = "need_prompt"
             else:
-                await tg_send_message(chat_id, "Файл-фото получил, но сейчас Midjourney ждёт prompt или выбор reference-кнопки.", reply_markup=_midjourney_settings_kb(mj))
+                await tg_send_message(chat_id, "Файл-фото получил, но сейчас Midjourney ждёт prompt или выбор reference-кнопки.", reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
                 return {"ok": True}
             st["midjourney"] = mj
             st["ts"] = _now()
-            await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+            await tg_send_message(chat_id, _midjourney_settings_text(mj, user_id=user_id), reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
             return {"ok": True}
 
         if file_id and st.get("mode") == "seedance_omni":
@@ -12580,7 +12638,7 @@ async def webhook(secret: str, request: Request):
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
-                    "Фото принял ✅\nТеперь напиши одним сообщением, что изменить (фон/стиль/детали).\n\nСтоимость: 1 токен.",
+                    f"Фото принял ✅\nТеперь напиши одним сообщением, что изменить (фон/стиль/детали).\n\n{_nano_banana_basic_cost_hint_for_user(user_id, 'nano_banana', '2K')}",
                     reply_markup=_photo_future_menu_keyboard(),
                 )
                 return {"ok": True}
@@ -12598,7 +12656,7 @@ async def webhook(secret: str, request: Request):
                 current_aspect = (nb2.get("aspect_ratio") or "9:16")
                 await tg_send_message(
                     chat_id,
-                    f"Фото принял ✅\nФормат: {current_aspect}\nТеперь напиши одним сообщением, что изменить (фон/стиль/детали).\n\nСтоимость: 1 токен.",
+                    f"Фото принял ✅\nФормат: {current_aspect}\nТеперь напиши одним сообщением, что изменить (фон/стиль/детали).\n\n{_nano_banana_basic_cost_hint_for_user(user_id, 'nano_banana_2', '2K')}",
                     reply_markup=_photo_future_menu_keyboard(),
                 )
                 return {"ok": True}
@@ -12886,7 +12944,7 @@ async def webhook(secret: str, request: Request):
                 except Exception:
                     bal = 0
 
-                cost = 1.0
+                cost = 0.0 if _nano_banana_basic_is_included_for_user(user_id, "nano_banana", "2K") else 1.0
                 if bal < cost:
                     await tg_send_message(
                         chat_id,
@@ -12895,14 +12953,15 @@ async def webhook(secret: str, request: Request):
                     )
                     return {"ok": True}
 
-                charge_ref_id = uuid4().hex
+                charge_ref_id = uuid4().hex if cost > 0 else ""
                 charged = False
                 try:
-                    try:
-                        add_tokens(user_id, -cost, reason="nano_banana", ref_id=charge_ref_id)
-                    except TypeError:
-                        add_tokens(user_id, -int(cost), reason="nano_banana")
-                    charged = True
+                    if cost > 0:
+                        try:
+                            add_tokens(user_id, -cost, reason="nano_banana", ref_id=charge_ref_id)
+                        except TypeError:
+                            add_tokens(user_id, -int(cost), reason="nano_banana")
+                        charged = True
 
                     await enqueue_job({
                         "job_id": uuid4().hex,
@@ -12923,9 +12982,10 @@ async def webhook(secret: str, request: Request):
                                 add_tokens(user_id, int(cost), reason="nano_banana_refund")
                         except Exception:
                             pass
+                    refund_note = "\nТокены возвращены." if charged else ""
                     await tg_send_message(
                         chat_id,
-                        f"❌ Не удалось поставить Nano Banana в очередь: {e}\nТокены возвращены.",
+                        f"❌ Не удалось поставить Nano Banana в очередь: {e}{refund_note}",
                         reply_markup=_photo_future_menu_keyboard(),
                     )
                     return {"ok": True}
@@ -12963,6 +13023,7 @@ async def webhook(secret: str, request: Request):
                     return {"ok": True}
 
                 user_prompt = nav_text
+                selected_resolution = str(nb2.get("resolution") or "2K").strip().upper() or "2K"
                 cost = 1
                 ensure_user_row(user_id)
                 try:
@@ -12981,11 +13042,12 @@ async def webhook(secret: str, request: Request):
                 nano_banana_2_charged = False
                 job_id = uuid4().hex
                 try:
-                    try:
-                        add_tokens(user_id, -cost, reason="nano_banana_2")
-                    except TypeError:
-                        add_tokens(user_id, -int(cost), reason="nano_banana_2")
-                    nano_banana_2_charged = True
+                    if cost > 0:
+                        try:
+                            add_tokens(user_id, -cost, reason="nano_banana_2")
+                        except TypeError:
+                            add_tokens(user_id, -int(cost), reason="nano_banana_2")
+                        nano_banana_2_charged = True
 
                     await tg_send_message(
                         chat_id,
@@ -13015,9 +13077,10 @@ async def webhook(secret: str, request: Request):
                         except Exception:
                             pass
                     try:
+                        refund_note = "\nТокены возвращены." if nano_banana_2_charged else ""
                         await tg_send_message(
                             chat_id,
-                            f"❌ Не удалось запустить Nano Banana 2: {e}\nТокены возвращены.",
+                            f"❌ Не удалось запустить Nano Banana 2: {e}{refund_note}",
                             reply_markup=_photo_future_menu_keyboard(),
                         )
                     except Exception:
@@ -13063,6 +13126,7 @@ async def webhook(secret: str, request: Request):
                 )
                 return {"ok": True}
 
+            selected_resolution = str(nb2.get("resolution") or "2K").strip().upper() or "2K"
             cost = 1
             ensure_user_row(user_id)
             try:
@@ -13081,11 +13145,12 @@ async def webhook(secret: str, request: Request):
             nano_banana_2_charged = False
             job_id = uuid4().hex
             try:
-                try:
-                    add_tokens(user_id, -cost, reason="nano_banana_2")
-                except TypeError:
-                    add_tokens(user_id, -int(cost), reason="nano_banana_2")
-                nano_banana_2_charged = True
+                if cost > 0:
+                    try:
+                        add_tokens(user_id, -cost, reason="nano_banana_2")
+                    except TypeError:
+                        add_tokens(user_id, -int(cost), reason="nano_banana_2")
+                    nano_banana_2_charged = True
 
                 await tg_send_message(
                     chat_id,
@@ -13114,9 +13179,10 @@ async def webhook(secret: str, request: Request):
                     except Exception:
                         pass
                 try:
+                    refund_note = "\nТокены возвращены." if nano_banana_2_charged else ""
                     await tg_send_message(
                         chat_id,
-                        f"❌ Не удалось запустить Nano Banana 2: {e}\nТокены возвращены.",
+                        f"❌ Не удалось запустить Nano Banana 2: {e}{refund_note}",
                         reply_markup=_photo_future_menu_keyboard(),
                     )
                 except Exception:
@@ -13922,7 +13988,7 @@ async def webhook(secret: str, request: Request):
                 mj["step"] = "need_prompt"
                 st["midjourney"] = mj
                 st["ts"] = _now()
-                await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+                await tg_send_message(chat_id, _midjourney_settings_text(mj, user_id=user_id), reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
                 return {"ok": True}
 
             if step == "need_custom_chaos":
@@ -13935,18 +14001,18 @@ async def webhook(secret: str, request: Request):
                 mj["step"] = "need_prompt"
                 st["midjourney"] = mj
                 st["ts"] = _now()
-                await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+                await tg_send_message(chat_id, _midjourney_settings_text(mj, user_id=user_id), reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
                 return {"ok": True}
 
             prompt = incoming_text.strip()
             if not prompt:
-                await tg_send_message(chat_id, "Пришли prompt для Midjourney.", reply_markup=_midjourney_settings_kb(mj))
+                await tg_send_message(chat_id, "Пришли prompt для Midjourney.", reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
                 return {"ok": True}
             mj["prompt"] = prompt
             mj["step"] = "need_prompt"
             st["midjourney"] = mj
             st["ts"] = _now()
-            await tg_send_message(chat_id, _midjourney_settings_text(mj), reply_markup=_midjourney_settings_kb(mj))
+            await tg_send_message(chat_id, _midjourney_settings_text(mj, user_id=user_id), reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
             return {"ok": True}
 
 
