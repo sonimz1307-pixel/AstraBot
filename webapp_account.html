@@ -2509,10 +2509,10 @@
             <li>Всё из Spark</li>
             <li>Seedream 4.5 Text-to-Image бесплатно</li>
             <li>Безлимит Nano Banana basic</li>
-            <li>Безлимит Midjourney без Turbo</li>
+            <li>Безлимит Midjourney V7/V8.1 без Turbo/4K</li>
           </ul>
           <div class="tariff-preview-note">В Nabex токены не сгорают и остаются с вами.</div>
-          <button class="tariff-preview-action" type="button" disabled>Скоро</button>
+          <button class="tariff-preview-action" type="button" data-buy-plan="pulse">Подключить за 2 225 ₽</button>
         </article>
 
         <article class="tariff-preview-card is-maximum" data-plan-code="nexus">
@@ -2631,7 +2631,7 @@
       const defaults = {
         free: { badge: "Free", action: "Базовый", disabled: true },
         spark: { badge: "Старт", action: "Подключить за 1 140 ₽", disabled: false },
-        pulse: { badge: "Для изображений", action: "Скоро", disabled: true },
+        pulse: { badge: "Для изображений", action: "Подключить за 2 225 ₽", disabled: false },
         nexus: { badge: "Максимум", action: "Скоро", disabled: true }
       };
 
@@ -2659,8 +2659,8 @@
         action.disabled = !!cfg.disabled;
         delete action.dataset.currentPlan;
         action.setAttribute("aria-disabled", cfg.disabled ? "true" : "false");
-        if (code === "spark" && !cfg.disabled) {
-          action.dataset.buyPlan = "spark";
+        if ((code === "spark" || code === "pulse") && !cfg.disabled) {
+          action.dataset.buyPlan = code;
         } else {
           action.removeAttribute("data-buy-plan");
         }
