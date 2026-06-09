@@ -17,7 +17,7 @@ WORKSPACE_AUTH_SECRET = (
     or os.getenv("TELEGRAM_BOT_TOKEN")
     or ""
 ).strip()
-WORKSPACE_SESSION_TTL_SEC = int(os.getenv("WORKSPACE_SESSION_TTL_SEC", "43200") or 43200)
+WORKSPACE_SESSION_TTL_SEC = int(os.getenv("WORKSPACE_SESSION_TTL_SEC", "2592000") or 2592000)
 
 _http_bearer = HTTPBearer(auto_error=False)
 
