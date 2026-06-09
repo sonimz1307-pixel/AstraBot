@@ -127,7 +127,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=WORKSPACE_ALLOWED_ORIGINS,
     allow_origin_regex=WORKSPACE_ALLOWED_ORIGIN_REGEX,
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
