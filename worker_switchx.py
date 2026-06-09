@@ -1656,7 +1656,8 @@ async def handle_nano_banana_job(job: Dict[str, Any]) -> None:
     user_id = int(job.get("user_id") or 0)
     prompt = str(job.get("prompt") or "").strip()
     photo_file_id = str(job.get("photo_file_id") or "").strip()
-    cost = int(job.get("cost") or 1)
+    cost_raw = job.get("cost", 1)
+    cost = int(cost_raw if cost_raw is not None else 1)
     charge_ref_id = str(job.get("charge_ref_id") or "").strip() or None
     if not chat_id or not user_id:
         raise RuntimeError("nano_banana job missing chat_id/user_id")
@@ -1693,20 +1694,22 @@ async def handle_nano_banana_job(job: Dict[str, Any]) -> None:
             pass
         err = str(e)[:800]
         print("nano_banana failed:", err)
-        try:
+        if cost > 0:
             try:
-                add_tokens(user_id, int(cost), reason="nano_banana_refund", ref_id=charge_ref_id, meta={"error": err[:300]})
-            except TypeError:
-                add_tokens(user_id, int(cost), reason="nano_banana_refund")
-        except Exception:
-            pass
+                try:
+                    add_tokens(user_id, int(cost), reason="nano_banana_refund", ref_id=charge_ref_id, meta={"error": err[:300]})
+                except TypeError:
+                    add_tokens(user_id, int(cost), reason="nano_banana_refund")
+            except Exception:
+                pass
+        refund_note = "\nТокены возвращены." if cost > 0 else ""
         if msg_id:
             try:
-                await tg_edit_message_text(chat_id, msg_id, f"❌ Ошибка Nano Banana.\n{err}\nТокены возвращены.")
+                await tg_edit_message_text(chat_id, msg_id, f"❌ Ошибка Nano Banana.\n{err}{refund_note}")
                 return
             except Exception:
                 pass
-        await tg_send_message(chat_id, f"❌ Ошибка Nano Banana.\n{err}\nТокены возвращены.")
+        await tg_send_message(chat_id, f"❌ Ошибка Nano Banana.\n{err}{refund_note}")
 
 
 async def handle_job(job: Dict[str, Any]) -> None:
