@@ -1003,7 +1003,8 @@ async def handle_job(job: Dict[str, Any]) -> None:
         resolution = str(job.get("resolution") or "2K").strip()
         output_format = str(job.get("output_format") or "jpg").strip()
         aspect_ratio = str(job.get("aspect_ratio") or "").strip() or None
-        cost = int(job.get("cost") or 1)
+        cost_raw = job.get("cost", 1)
+        cost = int(cost_raw if cost_raw is not None else 1)
 
         if not chat_id or not user_id:
             raise RuntimeError("nano_banana_2 job missing chat_id/user_id")
@@ -1088,10 +1089,11 @@ async def handle_job(job: Dict[str, Any]) -> None:
             except Exception:
                 pass
 
-            try:
-                add_tokens(user_id, cost, reason="nano_banana_2_refund")
-            except Exception:
-                pass
+            if cost > 0:
+                try:
+                    add_tokens(user_id, cost, reason="nano_banana_2_refund")
+                except Exception:
+                    pass
 
             if msg_id:
                 try:
