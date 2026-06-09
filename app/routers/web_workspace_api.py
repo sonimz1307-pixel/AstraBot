@@ -518,8 +518,11 @@ WORKSPACE_TOPUP_PACKS: List[Dict[str, Any]] = [
 ]
 
 
-PUBLIC_SUBSCRIPTION_PLAN_CODES = {"spark"}
+PUBLIC_SUBSCRIPTION_PLAN_CODES = {"spark", "pulse"}
 SEEDREAM_T2I_INCLUDED_PLAN_CODES = {"spark", "pulse", "nexus"}
+NANO_BANANA_BASIC_INCLUDED_PLAN_CODES = {"pulse", "nexus"}
+MIDJOURNEY_INCLUDED_PLAN_CODES = {"pulse", "nexus"}
+MIDJOURNEY_INCLUDED_MODELS = {"midjourney-v7", "midjourney-v8.1"}
 
 
 def _workspace_public_subscription_plan(plan_code: Any) -> Optional[Dict[str, Any]]:
@@ -542,6 +545,37 @@ def _workspace_has_seedream_t2i_included(user_id: Any) -> bool:
         return bool(sub.get("is_active")) and code in SEEDREAM_T2I_INCLUDED_PLAN_CODES
     except Exception:
         return False
+
+
+def _workspace_active_subscription_plan_code(user_id: Any) -> str:
+    try:
+        sub = get_current_subscription(int(user_id or 0))
+        code = str(sub.get("plan_code") or "").strip().lower()
+        return code if bool(sub.get("is_active")) else ""
+    except Exception:
+        return ""
+
+
+def _workspace_has_nano_banana_basic_included(user_id: Any, provider: str, resolution: str = "2K") -> bool:
+    provider_key = str(provider or "").strip().lower()
+    if provider_key != "nano_banana":
+        return False
+    if str(resolution or "2K").strip().upper() == "4K":
+        return False
+    return _workspace_active_subscription_plan_code(user_id) in NANO_BANANA_BASIC_INCLUDED_PLAN_CODES
+
+
+def _workspace_has_midjourney_included(user_id: Any, model: Any = "midjourney-v7", speed_mode: Any = "fast", resolution: str = "2K") -> bool:
+    model_key = normalize_midjourney_model(model)
+    speed = normalize_midjourney_speed_mode(speed_mode, model=model_key)
+    if model_key not in MIDJOURNEY_INCLUDED_MODELS:
+        return False
+    if speed == "turbo":
+        return False
+    if str(resolution or "2K").strip().upper() == "4K":
+        return False
+    return _workspace_active_subscription_plan_code(user_id) in MIDJOURNEY_INCLUDED_PLAN_CODES
+
 
 def _workspace_find_topup_pack(tokens: Any) -> Optional[Dict[str, Any]]:
     try:
@@ -6826,6 +6860,10 @@ async def workspace_image_run(
     cost = int(_workspace_image_cost(provider, mode, preset_slug, resolution, speed_mode=mj_speed_mode, action_type="generate", model=model if provider == "midjourney" else None))
     if provider == "seedream" and mode in {"text_to_image", "t2i"} and _workspace_has_seedream_t2i_included(uid):
         cost = 0
+    if _workspace_has_nano_banana_basic_included(uid, provider, resolution):
+        cost = 0
+    if provider == "midjourney" and _workspace_has_midjourney_included(uid, model, mj_speed_mode, resolution):
+        cost = 0
     if cost > 0 and bal < cost:
         raise HTTPException(status_code=402, detail=f"Недостаточно токенов. Нужно: {cost} ток.")
 
@@ -7025,7 +7063,10 @@ async def workspace_image_action(
     except Exception:
         bal = 0
 
-    cost = int(_workspace_image_cost("midjourney", "text_to_image", "", "2K", speed_mode=speed_mode, action_type=action, model=source_model))
+    source_resolution = str(source_row.get("resolution") or "2K")
+    cost = int(_workspace_image_cost("midjourney", "text_to_image", "", source_resolution, speed_mode=speed_mode, action_type=action, model=source_model))
+    if _workspace_has_midjourney_included(uid, source_model, speed_mode, source_resolution):
+        cost = 0
     reason = _workspace_image_charge_reason("midjourney", "text_to_image", action_type=action)
     if cost > 0 and bal < cost:
         raise HTTPException(status_code=402, detail=f"Недостаточно токенов. Нужно: {cost} ток.")
