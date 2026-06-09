@@ -68,7 +68,7 @@ from app.services.workspace_account_service import (
     start_link_email,
     start_password_reset,
 )
-from app.services.workspace_auth import WORKSPACE_SESSION_TTL_SEC, create_access_token, get_current_workspace_user, get_optional_workspace_user
+from app.services.workspace_auth import WORKSPACE_SESSION_COOKIE_NAME, WORKSPACE_SESSION_TTL_SEC, create_access_token, get_current_workspace_user, get_optional_workspace_user
 from billing_db import add_tokens, ensure_user_row, get_balance, get_balance_history
 from subscriptions_db import get_current_subscription, get_subscription_plan
 from free_plan_limits import (
@@ -83,6 +83,52 @@ from free_plan_limits import (
     is_free_plan_user,
     validate_free_tts_text,
 )
+
+WORKSPACE_SESSION_COOKIE_SECURE = os.getenv("WORKSPACE_SESSION_COOKIE_SECURE", "1").strip().lower() not in ("0", "false", "no", "off")
+WORKSPACE_SESSION_COOKIE_SAMESITE = os.getenv("WORKSPACE_SESSION_COOKIE_SAMESITE", "lax").strip().lower() or "lax"
+if WORKSPACE_SESSION_COOKIE_SAMESITE not in ("lax", "strict", "none"):
+    WORKSPACE_SESSION_COOKIE_SAMESITE = "lax"
+
+
+def _set_workspace_session_cookie(response: Response, access_token: str) -> None:
+    if not access_token:
+        return
+    response.set_cookie(
+        key=WORKSPACE_SESSION_COOKIE_NAME,
+        value=access_token,
+        max_age=WORKSPACE_SESSION_TTL_SEC,
+        expires=WORKSPACE_SESSION_TTL_SEC,
+        path="/",
+        secure=WORKSPACE_SESSION_COOKIE_SECURE,
+        httponly=True,
+        samesite=WORKSPACE_SESSION_COOKIE_SAMESITE,
+    )
+
+
+def _clear_workspace_session_cookie(response: Response) -> None:
+    response.delete_cookie(
+        key=WORKSPACE_SESSION_COOKIE_NAME,
+        path="/",
+        secure=WORKSPACE_SESSION_COOKIE_SECURE,
+        httponly=True,
+        samesite=WORKSPACE_SESSION_COOKIE_SAMESITE,
+    )
+
+
+def _workspace_auth_payload(response: Response, *, account: Dict[str, Any]) -> Dict[str, Any]:
+    token_user = account_to_workspace_user_payload(account)
+    access_token = create_access_token(user=token_user)
+    _set_workspace_session_cookie(response, access_token)
+    return {
+        "ok": True,
+        "access_token": access_token,
+        "token_type": "Bearer",
+        "expires_in": WORKSPACE_SESSION_TTL_SEC,
+        "user": token_user,
+        "balance_tokens": int(get_balance(int(account["id"])) or 0),
+        "subscription": _workspace_subscription_payload(int(account["id"])),
+    }
+
 from db_supabase import supabase, track_user_activity
 from kling3_flow import Kling3Error, create_kling3_task, get_kling3_task
 from kling_flow import (
@@ -3343,7 +3389,7 @@ def _workspace_image_charge_reason(provider: str, mode: str, action_type: str = 
     return None
 
 @router.post("/auth/telegram")
-async def workspace_auth_telegram(payload: TelegramAuthPayload) -> Dict[str, Any]:
+async def workspace_auth_telegram(payload: TelegramAuthPayload, response: Response) -> Dict[str, Any]:
     try:
         verified = validate_telegram_login_data(payload.auth_data)
     except TelegramWebAuthError as e:
@@ -3355,17 +3401,7 @@ async def workspace_auth_telegram(payload: TelegramAuthPayload) -> Dict[str, Any
         raise HTTPException(status_code=403, detail="Пользователь не найден в AstraBot. Сначала открой Telegram-бота и запусти его хотя бы один раз.")
 
     account = get_or_create_workspace_account_for_telegram(verified, existing)
-    token_user = account_to_workspace_user_payload(account)
-    access_token = create_access_token(user=token_user)
-    return {
-        "ok": True,
-        "access_token": access_token,
-        "token_type": "Bearer",
-        "expires_in": WORKSPACE_SESSION_TTL_SEC,
-        "user": token_user,
-        "balance_tokens": int(get_balance(int(account["id"])) or 0),
-        "subscription": _workspace_subscription_payload(int(account["id"])),
-    }
+    return _workspace_auth_payload(response, account=account)
 
 
 @router.get("/auth/google/config")
@@ -3378,7 +3414,7 @@ async def workspace_auth_google_config() -> Dict[str, Any]:
 
 
 @router.post("/auth/google")
-async def workspace_auth_google(payload: GoogleAuthPayload, user: Optional[Dict[str, Any]] = Depends(get_optional_workspace_user)) -> Dict[str, Any]:
+async def workspace_auth_google(payload: GoogleAuthPayload, response: Response, user: Optional[Dict[str, Any]] = Depends(get_optional_workspace_user)) -> Dict[str, Any]:
     try:
         verified = verify_google_id_token(payload.credential)
         current_account_id = int(user.get("workspace_user_id") or 0) if user else None
@@ -3388,17 +3424,7 @@ async def workspace_auth_google(payload: GoogleAuthPayload, user: Optional[Dict[
     except WorkspaceAccountError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    token_user = account_to_workspace_user_payload(account)
-    access_token = create_access_token(user=token_user)
-    return {
-        "ok": True,
-        "access_token": access_token,
-        "token_type": "Bearer",
-        "expires_in": WORKSPACE_SESSION_TTL_SEC,
-        "user": token_user,
-        "balance_tokens": int(get_balance(int(account["id"])) or 0),
-        "subscription": _workspace_subscription_payload(int(account["id"])),
-    }
+    return _workspace_auth_payload(response, account=account)
 
 
 @router.post("/auth/email-register/start")
@@ -3411,27 +3437,17 @@ async def workspace_auth_email_register_start(payload: EmailAuthStartPayload) ->
 
 
 @router.post("/auth/email-register/confirm")
-async def workspace_auth_email_register_confirm(payload: EmailAuthConfirmPayload) -> Dict[str, Any]:
+async def workspace_auth_email_register_confirm(payload: EmailAuthConfirmPayload, response: Response) -> Dict[str, Any]:
     try:
         account = confirm_email_registration(payload.email, payload.code)
     except (WorkspaceCodeExpired, WorkspaceCodeTooManyAttempts, WorkspaceAccountError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    token_user = account_to_workspace_user_payload(account)
-    access_token = create_access_token(user=token_user)
-    return {
-        "ok": True,
-        "access_token": access_token,
-        "token_type": "Bearer",
-        "expires_in": WORKSPACE_SESSION_TTL_SEC,
-        "user": token_user,
-        "balance_tokens": int(get_balance(int(account["id"])) or 0),
-        "subscription": _workspace_subscription_payload(int(account["id"])),
-    }
+    return _workspace_auth_payload(response, account=account)
 
 
 @router.post("/auth/email-login")
-async def workspace_auth_email_login(payload: EmailLoginPayload) -> Dict[str, Any]:
+async def workspace_auth_email_login(payload: EmailLoginPayload, response: Response) -> Dict[str, Any]:
     try:
         account = login_with_email(payload.email, payload.password)
     except WorkspaceAuthFailed as e:
@@ -3439,17 +3455,7 @@ async def workspace_auth_email_login(payload: EmailLoginPayload) -> Dict[str, An
     except WorkspaceAccountError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    token_user = account_to_workspace_user_payload(account)
-    access_token = create_access_token(user=token_user)
-    return {
-        "ok": True,
-        "access_token": access_token,
-        "token_type": "Bearer",
-        "expires_in": WORKSPACE_SESSION_TTL_SEC,
-        "user": token_user,
-        "balance_tokens": int(get_balance(int(account["id"])) or 0),
-        "subscription": _workspace_subscription_payload(int(account["id"])),
-    }
+    return _workspace_auth_payload(response, account=account)
 
 
 
@@ -3464,23 +3470,13 @@ async def workspace_auth_password_reset_start(payload: EmailOnlyPayload) -> Dict
 
 
 @router.post("/auth/password-reset/confirm")
-async def workspace_auth_password_reset_confirm(payload: ResetPasswordConfirmPayload) -> Dict[str, Any]:
+async def workspace_auth_password_reset_confirm(payload: ResetPasswordConfirmPayload, response: Response) -> Dict[str, Any]:
     try:
         account = confirm_password_reset(payload.email, payload.code, payload.password)
     except (WorkspaceCodeExpired, WorkspaceCodeTooManyAttempts, WorkspaceAuthFailed, WorkspaceAccountError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    token_user = account_to_workspace_user_payload(account)
-    access_token = create_access_token(user=token_user)
-    return {
-        "ok": True,
-        "access_token": access_token,
-        "token_type": "Bearer",
-        "expires_in": WORKSPACE_SESSION_TTL_SEC,
-        "user": token_user,
-        "balance_tokens": int(get_balance(int(account["id"])) or 0),
-        "subscription": _workspace_subscription_payload(int(account["id"])),
-    }
+    return _workspace_auth_payload(response, account=account)
 
 
 @router.post("/account/link-email/start")
@@ -3494,51 +3490,31 @@ async def workspace_account_link_email_start(payload: EmailAuthStartPayload, use
 
 
 @router.post("/account/link-email/confirm")
-async def workspace_account_link_email_confirm(payload: EmailAuthConfirmPayload, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
+async def workspace_account_link_email_confirm(payload: EmailAuthConfirmPayload, response: Response, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
     account = ensure_workspace_account_from_claims(user)
     try:
         account = confirm_link_email(account_id=int(account["id"]), email=payload.email, code=payload.code)
     except (WorkspaceCodeExpired, WorkspaceCodeTooManyAttempts, WorkspaceAccountError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    token_user = account_to_workspace_user_payload(account)
-    access_token = create_access_token(user=token_user)
-    return {
-        "ok": True,
-        "access_token": access_token,
-        "token_type": "Bearer",
-        "expires_in": WORKSPACE_SESSION_TTL_SEC,
-        "user": token_user,
-        "balance_tokens": int(get_balance(int(account["id"])) or 0),
-        "subscription": _workspace_subscription_payload(int(account["id"])),
-    }
+    return _workspace_auth_payload(response, account=account)
 
 
 
 
 @router.post("/account/change-password")
-async def workspace_account_change_password(payload: ChangePasswordPayload, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
+async def workspace_account_change_password(payload: ChangePasswordPayload, response: Response, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
     account = ensure_workspace_account_from_claims(user)
     try:
         account = change_password(account_id=int(account["id"]), current_password=payload.current_password, new_password=payload.new_password)
     except (WorkspaceAuthFailed, WorkspaceAccountError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    token_user = account_to_workspace_user_payload(account)
-    access_token = create_access_token(user=token_user)
-    return {
-        "ok": True,
-        "access_token": access_token,
-        "token_type": "Bearer",
-        "expires_in": WORKSPACE_SESSION_TTL_SEC,
-        "user": token_user,
-        "balance_tokens": int(get_balance(int(account["id"])) or 0),
-        "subscription": _workspace_subscription_payload(int(account["id"])),
-    }
+    return _workspace_auth_payload(response, account=account)
 
 
 @router.post("/account/link-telegram")
-async def workspace_account_link_telegram(payload: TelegramAuthPayload, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
+async def workspace_account_link_telegram(payload: TelegramAuthPayload, response: Response, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
     account = ensure_workspace_account_from_claims(user)
     try:
         verified = validate_telegram_login_data(payload.auth_data)
@@ -3548,30 +3524,19 @@ async def workspace_account_link_telegram(payload: TelegramAuthPayload, user: Di
     except WorkspaceAccountError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    token_user = account_to_workspace_user_payload(account)
-    access_token = create_access_token(user=token_user)
-    return {
-        "ok": True,
-        "access_token": access_token,
-        "token_type": "Bearer",
-        "expires_in": WORKSPACE_SESSION_TTL_SEC,
-        "user": token_user,
-        "balance_tokens": int(get_balance(int(account["id"])) or 0),
-        "subscription": _workspace_subscription_payload(int(account["id"])),
-    }
+    return _workspace_auth_payload(response, account=account)
 
 
 @router.post("/logout")
-async def workspace_logout() -> Dict[str, Any]:
+async def workspace_logout(response: Response) -> Dict[str, Any]:
+    _clear_workspace_session_cookie(response)
     return {"ok": True}
 
 
 @router.get("/me")
-async def workspace_me(user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
+async def workspace_me(response: Response, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
     account = ensure_workspace_account_from_claims(user)
-    account_id = int(account["id"])
-    user_payload = account_to_workspace_user_payload(account)
-    return {"ok": True, "user": user_payload, "balance_tokens": int(get_balance(account_id) or 0), "subscription": _workspace_subscription_payload(account_id)}
+    return _workspace_auth_payload(response, account=account)
 
 
 @router.get("/balance")
