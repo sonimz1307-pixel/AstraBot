@@ -18,6 +18,7 @@ WORKSPACE_AUTH_SECRET = (
     or ""
 ).strip()
 WORKSPACE_SESSION_TTL_SEC = int(os.getenv("WORKSPACE_SESSION_TTL_SEC", "2592000") or 2592000)
+WORKSPACE_SESSION_COOKIE_NAME = os.getenv("WORKSPACE_SESSION_COOKIE_NAME", "astrabot_ws_session").strip() or "astrabot_ws_session"
 
 _http_bearer = HTTPBearer(auto_error=False)
 
@@ -113,33 +114,58 @@ def decode_access_token(token: str) -> Dict[str, Any]:
     return payload
 
 
+def _token_from_session_cookie(request: Request) -> str:
+    return (request.cookies.get(WORKSPACE_SESSION_COOKIE_NAME) or "").strip()
+
+
+def _decode_credentials_or_cookie(
+    *,
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None,
+    allow_cookie_fallback: bool = True,
+) -> Optional[Dict[str, Any]]:
+    if credentials is not None and credentials.credentials:
+        return decode_access_token(credentials.credentials)
+
+    if allow_cookie_fallback:
+        cookie_token = _token_from_session_cookie(request)
+        if cookie_token:
+            return decode_access_token(cookie_token)
+
+    return None
+
+
 async def get_optional_workspace_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_http_bearer),
 ) -> Optional[Dict[str, Any]]:
-    if credentials is None or not credentials.credentials:
-        return None
     try:
-        return decode_access_token(credentials.credentials)
+        return _decode_credentials_or_cookie(request=request, credentials=credentials)
     except WorkspaceAuthError:
         return None
 
 
 async def get_current_workspace_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_http_bearer),
 ) -> Dict[str, Any]:
-    if credentials is None or not credentials.credentials:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
     try:
-        return decode_access_token(credentials.credentials)
+        user = _decode_credentials_or_cookie(request=request, credentials=credentials)
     except WorkspaceAuthError as e:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
+
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
+    return user
 
 
 def workspace_user_from_request(request: Request) -> Optional[Dict[str, Any]]:
     auth = request.headers.get("Authorization", "")
-    if not auth.lower().startswith("bearer "):
-        return None
-    token = auth[7:].strip()
+    token = ""
+    if auth.lower().startswith("bearer "):
+        token = auth[7:].strip()
+    if not token:
+        token = _token_from_session_cookie(request)
     if not token:
         return None
     try:
