@@ -20,6 +20,8 @@ KIE_CLAUDE_MODEL_ID = (os.getenv("KIE_CLAUDE_MODEL", "claude-sonnet-4-6") or "cl
 KIE_CLAUDE_DISPLAY_NAME = "Claude Sonnet 4.6"
 KIE_CLAUDE_OPUS_MODEL_ID = (os.getenv("KIE_CLAUDE_OPUS_MODEL", "claude-opus-4-7") or "claude-opus-4-7").strip()
 KIE_CLAUDE_OPUS_DISPLAY_NAME = "Claude Opus 4.7"
+KIE_CLAUDE_FABLE_MODEL_ID = (os.getenv("KIE_CLAUDE_FABLE_MODEL", "claude-fable-5") or "claude-fable-5").strip()
+KIE_CLAUDE_FABLE_DISPLAY_NAME = "Claude Fable 5"
 KIE_CLAUDE_API_URL = (
     os.getenv("KIE_CLAUDE_API_URL", "https://api.kie.ai/claude/v1/messages")
     or "https://api.kie.ai/claude/v1/messages"
@@ -28,6 +30,17 @@ KIE_CLAUDE_TIMEOUT_SEC = float(os.getenv("KIE_CLAUDE_TIMEOUT_SEC", "120") or "12
 KIE_CLAUDE_MAX_TOKENS = int(os.getenv("KIE_CLAUDE_MAX_TOKENS", "1500") or "1500")
 KIE_CLAUDE_SUMMARY_MAX_CHARS = int(os.getenv("KIE_CLAUDE_SUMMARY_MAX_CHARS", "5000") or "5000")
 KIE_CLAUDE_HISTORY_MESSAGES = int(os.getenv("KIE_CLAUDE_HISTORY_MESSAGES", "10") or "10")
+
+# Claude Fable 5 is intentionally billed separately. Keep context predictable,
+# but allow useful long answers for code/prompts. Thinking mode can output more.
+KIE_CLAUDE_FABLE_MAX_TOKENS = int(os.getenv("KIE_CLAUDE_FABLE_MAX_TOKENS", "4000") or "4000")
+KIE_CLAUDE_FABLE_THINKING_MAX_TOKENS = int(os.getenv("KIE_CLAUDE_FABLE_THINKING_MAX_TOKENS", "8000") or "8000")
+KIE_CLAUDE_FABLE_SUMMARY_MAX_CHARS = int(os.getenv("KIE_CLAUDE_FABLE_SUMMARY_MAX_CHARS", "1500") or "1500")
+KIE_CLAUDE_FABLE_HISTORY_MESSAGES = int(os.getenv("KIE_CLAUDE_FABLE_HISTORY_MESSAGES", "4") or "4")
+KIE_CLAUDE_FABLE_MAX_INPUT_CHARS = int(os.getenv("KIE_CLAUDE_FABLE_MAX_INPUT_CHARS", "40000") or "40000")
+KIE_CLAUDE_FABLE_BASE_TOKENS = int(os.getenv("KIE_CLAUDE_FABLE_BASE_TOKENS", "2") or "2")
+KIE_CLAUDE_FABLE_FILE_TOKENS = int(os.getenv("KIE_CLAUDE_FABLE_FILE_TOKENS", "3") or "3")
+KIE_CLAUDE_FABLE_THINKING_EXTRA_TOKENS = int(os.getenv("KIE_CLAUDE_FABLE_THINKING_EXTRA_TOKENS", "2") or "2")
 
 
 def _unique_nonempty(values: List[str]) -> List[str]:
@@ -40,7 +53,7 @@ def _unique_nonempty(values: List[str]) -> List[str]:
 
 
 def kie_claude_model_ids() -> List[str]:
-    return _unique_nonempty([KIE_CLAUDE_MODEL_ID, KIE_CLAUDE_OPUS_MODEL_ID])
+    return _unique_nonempty([KIE_CLAUDE_MODEL_ID, KIE_CLAUDE_OPUS_MODEL_ID, KIE_CLAUDE_FABLE_MODEL_ID])
 
 
 def normalize_kie_claude_model(model: Any) -> str:
@@ -69,6 +82,19 @@ def normalize_kie_claude_model(model: Any) -> str:
         "opus",
         "claude_opus",
     }
+    fable_aliases = {
+        KIE_CLAUDE_FABLE_MODEL_ID.lower(),
+        "claude-fable-5",
+        "claude fable 5",
+        "claude_fable_5",
+        "fable-5",
+        "fable 5",
+        "claude-fable",
+        "fable",
+        "claude_fable",
+    }
+    if low in fable_aliases:
+        return KIE_CLAUDE_FABLE_MODEL_ID
     if low in opus_aliases:
         return KIE_CLAUDE_OPUS_MODEL_ID
     if low in sonnet_aliases:
@@ -82,8 +108,42 @@ def is_kie_claude_model(model: Any) -> bool:
     return bool(normalize_kie_claude_model(model))
 
 
+def kie_claude_is_fable_model(model: Any) -> bool:
+    resolved = normalize_kie_claude_model(model)
+    return bool(resolved and resolved.lower() == KIE_CLAUDE_FABLE_MODEL_ID.lower())
+
+
+def kie_claude_history_messages_for_model(model: Any) -> int:
+    return KIE_CLAUDE_FABLE_HISTORY_MESSAGES if kie_claude_is_fable_model(model) else KIE_CLAUDE_HISTORY_MESSAGES
+
+
+def kie_claude_summary_chars_for_model(model: Any) -> int:
+    return KIE_CLAUDE_FABLE_SUMMARY_MAX_CHARS if kie_claude_is_fable_model(model) else KIE_CLAUDE_SUMMARY_MAX_CHARS
+
+
+def kie_claude_max_tokens_for_model(model: Any, *, thinking: bool = False) -> int:
+    if kie_claude_is_fable_model(model):
+        if thinking:
+            return max(KIE_CLAUDE_FABLE_MAX_TOKENS, KIE_CLAUDE_FABLE_THINKING_MAX_TOKENS)
+        return KIE_CLAUDE_FABLE_MAX_TOKENS
+    return KIE_CLAUDE_MAX_TOKENS
+
+
+def kie_claude_input_chars_for_model(model: Any) -> int:
+    return KIE_CLAUDE_FABLE_MAX_INPUT_CHARS if kie_claude_is_fable_model(model) else 70000
+
+
+def kie_claude_fable_tokens(*, has_files: bool = False, thinking: bool = False) -> int:
+    base = KIE_CLAUDE_FABLE_FILE_TOKENS if has_files else KIE_CLAUDE_FABLE_BASE_TOKENS
+    if thinking:
+        base += max(0, KIE_CLAUDE_FABLE_THINKING_EXTRA_TOKENS)
+    return max(1, int(base))
+
+
 def kie_claude_display_name(model: Any) -> str:
     resolved = normalize_kie_claude_model(model) or KIE_CLAUDE_MODEL_ID
+    if resolved.lower() == KIE_CLAUDE_FABLE_MODEL_ID.lower():
+        return KIE_CLAUDE_FABLE_DISPLAY_NAME
     if resolved.lower() == KIE_CLAUDE_OPUS_MODEL_ID.lower():
         return KIE_CLAUDE_OPUS_DISPLAY_NAME
     if resolved.lower() == KIE_CLAUDE_MODEL_ID.lower():
@@ -171,14 +231,14 @@ def _detect_image_type(data: bytes) -> Tuple[str, str]:
     return ("jpg", "image/jpeg")
 
 
-def _build_claude_user_content(user_text: str, image_bytes_list: Optional[List[bytes]] = None) -> Any:
+def _build_claude_user_content(user_text: str, image_bytes_list: Optional[List[bytes]] = None, *, text_limit: int = 70000) -> Any:
     images: List[bytes] = []
     if isinstance(image_bytes_list, list):
         for item in image_bytes_list:
             if isinstance(item, (bytes, bytearray)) and item:
                 images.append(bytes(item))
 
-    text = _clean_text(user_text, 70000)
+    text = _clean_text(user_text, max(1000, int(text_limit or 70000)))
     if not images:
         return text
 
@@ -208,27 +268,41 @@ async def kie_claude_answer(
     timeout_sec: float = KIE_CLAUDE_TIMEOUT_SEC,
     image_bytes_list: Optional[List[bytes]] = None,
     model: Optional[str] = None,
+    raise_on_error: bool = False,
 ) -> str:
     api_key = _api_key()
     if not api_key:
+        if raise_on_error:
+            raise RuntimeError("KIE_API_KEY не задан в переменных окружения.")
         return "KIE_API_KEY не задан в переменных окружения."
 
-    messages = sanitize_claude_history(history, max_messages=KIE_CLAUDE_HISTORY_MESSAGES)
-    user_content = _build_claude_user_content(user_text, image_bytes_list)
+    resolved_model = normalize_kie_claude_model(model) or KIE_CLAUDE_MODEL_ID
+    history_limit = kie_claude_history_messages_for_model(resolved_model)
+    summary_limit = kie_claude_summary_chars_for_model(resolved_model)
+    input_limit = kie_claude_input_chars_for_model(resolved_model)
+
+    messages = sanitize_claude_history(history, max_messages=history_limit)
+    user_content = _build_claude_user_content(user_text, image_bytes_list, text_limit=input_limit)
     if user_content:
         messages.append({"role": "user", "content": user_content})
     if not messages:
+        if raise_on_error:
+            raise RuntimeError("Пустой запрос.")
         return "Пустой запрос."
 
-    resolved_model = normalize_kie_claude_model(model) or KIE_CLAUDE_MODEL_ID
+    model_max_tokens = kie_claude_max_tokens_for_model(resolved_model, thinking=thinking)
+    requested_max_tokens = int(max_tokens or model_max_tokens)
+    if kie_claude_is_fable_model(resolved_model) and thinking:
+        # Fable thinking mode is a paid upgrade, so it gets its own longer output cap.
+        requested_max_tokens = model_max_tokens
 
     payload: Dict[str, Any] = {
         "model": resolved_model,
-        "system": build_claude_system_prompt(system_prompt, summary),
+        "system": build_claude_system_prompt(system_prompt, _clean_text(summary, summary_limit)),
         "messages": messages,
         "thinkingFlag": bool(thinking),
         "stream": False,
-        "max_tokens": max(150, min(int(max_tokens or KIE_CLAUDE_MAX_TOKENS), 1500)),
+        "max_tokens": max(150, min(requested_max_tokens, model_max_tokens)),
     }
 
     async with httpx.AsyncClient(timeout=timeout_sec) as client:
@@ -242,10 +316,15 @@ async def kie_claude_answer(
         )
 
     if response.status_code >= 400:
-        return f"Ошибка KIE Claude ({response.status_code}): {response.text[:1600]}"
+        message = f"Ошибка KIE Claude ({response.status_code}): {response.text[:1600]}"
+        if raise_on_error:
+            raise RuntimeError(message)
+        return message
 
     data = response.json()
     answer = _extract_claude_text(data)
+    if not answer and raise_on_error:
+        raise RuntimeError("Пустой ответ от Claude.")
     return answer or "Пустой ответ от Claude."
 
 
