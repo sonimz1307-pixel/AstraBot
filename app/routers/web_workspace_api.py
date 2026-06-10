@@ -36,9 +36,16 @@ from kie_claude_chat import (
     KIE_CLAUDE_DISPLAY_NAME,
     KIE_CLAUDE_HISTORY_MESSAGES,
     KIE_CLAUDE_MODEL_ID,
+    KIE_CLAUDE_FABLE_MODEL_ID,
+    KIE_CLAUDE_FABLE_THINKING_EXTRA_TOKENS,
     KIE_CLAUDE_SUMMARY_MAX_CHARS,
     is_kie_claude_model,
     kie_claude_answer,
+    kie_claude_fable_tokens,
+    kie_claude_history_messages_for_model,
+    kie_claude_is_fable_model,
+    kie_claude_max_tokens_for_model,
+    kie_claude_summary_chars_for_model,
     kie_claude_display_name,
     kie_claude_model_ids,
     kie_claude_summarize_dialogue,
@@ -283,6 +290,7 @@ WORKSPACE_VEO_RELAX_QUEUE_NAME = (os.getenv("WORKSPACE_VEO_RELAX_QUEUE_NAME", "w
 WORKSPACE_IMAGE_QUEUE_NAME = (os.getenv("WORKSPACE_IMAGE_QUEUE_NAME", "workspace_image") or "workspace_image").strip() or "workspace_image"
 WORKSPACE_CHAT_OPENAI_QUEUE_NAME = (os.getenv("WORKSPACE_CHAT_OPENAI_QUEUE_NAME", "workspace_chat_openai") or "workspace_chat_openai").strip() or "workspace_chat_openai"
 WORKSPACE_CHAT_CLAUDE_QUEUE_NAME = (os.getenv("WORKSPACE_CHAT_CLAUDE_QUEUE_NAME", "workspace_chat_claude") or "workspace_chat_claude").strip() or "workspace_chat_claude"
+WORKSPACE_CHAT_FABLE_QUEUE_NAME = (os.getenv("WORKSPACE_CHAT_FABLE_QUEUE_NAME", "workspace_chat_fable") or "workspace_chat_fable").strip() or "workspace_chat_fable"
 SEEDANCE_AUDIO_MAX_DURATION_SEC = 15.0
 SEEDANCE_AUDIO_MAX_UPLOAD_MB = max(1, int(os.getenv("SEEDANCE_AUDIO_MAX_UPLOAD_MB", "30") or "30"))
 SEEDANCE_AUDIO_MAX_UPLOAD_BYTES = SEEDANCE_AUDIO_MAX_UPLOAD_MB * 1024 * 1024
@@ -673,21 +681,23 @@ def _dedupe_latest_user_from_history(history: List[Dict[str, str]], latest_text:
     return history
 
 
-async def _prepare_workspace_claude_memory(history: List[Dict[str, str]], summary: str) -> Dict[str, Any]:
+async def _prepare_workspace_claude_memory(history: List[Dict[str, str]], summary: str, *, model: Any = None) -> Dict[str, Any]:
     cleaned = [m for m in (history or []) if isinstance(m, dict) and m.get("role") in ("user", "assistant") and str(m.get("content") or "").strip()]
-    current_summary = _sanitize_chat_summary(summary)
-    recent = cleaned[-KIE_CLAUDE_HISTORY_MESSAGES:]
-    overflow = cleaned[:-KIE_CLAUDE_HISTORY_MESSAGES]
+    history_limit = kie_claude_history_messages_for_model(model)
+    summary_limit = kie_claude_summary_chars_for_model(model)
+    current_summary = _sanitize_chat_summary(summary)[:summary_limit]
+    recent = cleaned[-history_limit:]
+    overflow = cleaned[:-history_limit]
     if overflow:
         try:
             current_summary = await kie_claude_summarize_dialogue(
                 messages=overflow,
                 previous_summary=current_summary,
-                max_chars=MAX_CHAT_SUMMARY_CHARS,
+                max_chars=summary_limit,
             )
         except Exception:
-            current_summary = _sanitize_chat_summary(current_summary)
-    return {"summary": _sanitize_chat_summary(current_summary), "history": recent}
+            current_summary = _sanitize_chat_summary(current_summary)[:summary_limit]
+    return {"summary": _sanitize_chat_summary(current_summary)[:summary_limit], "history": recent}
 
 
 def _resolve_workspace_chat_model(requested_model: Any, mode: str) -> Dict[str, str]:
@@ -1061,6 +1071,73 @@ def _workspace_consume_free_chat(user_id: int, *, mode: str) -> Optional[Dict[st
     except FreePlanLimitError as exc:
         raise HTTPException(status_code=429, detail=free_limit_http_detail(exc))
 
+
+
+
+def _workspace_chat_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _workspace_fable_cost_tokens(*, has_files: bool = False, thinking: bool = False) -> int:
+    return kie_claude_fable_tokens(has_files=has_files, thinking=thinking)
+
+
+def _workspace_charge_fable_chat_or_402(
+    user_id: int,
+    *,
+    cost_tokens: int,
+    thinking: bool,
+    has_files: bool,
+    source: str,
+) -> str:
+    try:
+        ensure_user_row(user_id)
+        balance = int(get_balance(user_id) or 0)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Не удалось проверить баланс Claude Fable 5: {exc}")
+    if balance < int(cost_tokens):
+        raise HTTPException(status_code=402, detail={
+            "code": "not_enough_tokens",
+            "message": f"Недостаточно токенов для Claude Fable 5. Нужно: {cost_tokens}, баланс: {balance}.",
+            "required_tokens": int(cost_tokens),
+            "balance_tokens": int(balance),
+            "model": KIE_CLAUDE_FABLE_MODEL_ID,
+        })
+    ref_id = str(uuid4())
+    try:
+        add_tokens(
+            user_id,
+            -int(cost_tokens),
+            reason="claude_fable_chat",
+            ref_id=ref_id,
+            meta={
+                "source": source,
+                "model": KIE_CLAUDE_FABLE_MODEL_ID,
+                "cost_tokens": int(cost_tokens),
+                "thinking": bool(thinking),
+                "has_files": bool(has_files),
+            },
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=402, detail=f"Не удалось списать токены Claude Fable 5: {exc}")
+    return ref_id
+
+
+def _workspace_refund_fable_chat(user_id: int, *, tokens: int, ref_id: str, stage: str, error: str = "") -> None:
+    if int(tokens or 0) <= 0 or not str(ref_id or "").strip():
+        return
+    try:
+        add_tokens(
+            user_id,
+            int(tokens),
+            reason="claude_fable_chat_refund",
+            ref_id=str(ref_id),
+            meta={"source": "site", "stage": stage, "error": str(error or "")[:500], "model": KIE_CLAUDE_FABLE_MODEL_ID},
+        )
+    except Exception:
+        pass
 
 def _workspace_consume_free_tts(user_id: int, text: str) -> Optional[Dict[str, Any]]:
     try:
@@ -2638,13 +2715,14 @@ class ChatTurn(BaseModel):
 
 
 class WorkspaceChatIn(BaseModel):
-    text: str = Field(..., min_length=1, max_length=12000)
+    text: str = Field(..., min_length=1, max_length=40000)
     history: Optional[List[ChatTurn]] = None
     summary: Optional[str] = Field(default="", max_length=10000)
     model: Optional[str] = None
     mode: str = Field(default="chat", pattern="^(chat|prompt_builder)$")
     temperature: float = Field(default=0.6, ge=0.0, le=1.5)
     max_tokens: int = Field(default=900, ge=150, le=4000)
+    thinking: bool = False
 
 
 class WorkspaceKlingCreateIn(BaseModel):
@@ -3696,6 +3774,7 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
         summary_value = _sanitize_chat_summary(form.get("summary"))
         temperature = _clamp_float(form.get("temperature"), 0.6, 0.0, 1.5)
         max_tokens = _clamp_int(form.get("max_tokens"), 900, 150, 4000)
+        thinking = _workspace_chat_bool(form.get("thinking"))
         resolved_model = _resolve_workspace_chat_model(form.get("model"), mode)
         files = [f for f in form.getlist("files") if getattr(f, "filename", None)]
     else:
@@ -3706,6 +3785,7 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
         summary_value = _sanitize_chat_summary(payload.summary)
         temperature = payload.temperature
         max_tokens = payload.max_tokens
+        thinking = bool(payload.thinking)
         resolved_model = _resolve_workspace_chat_model(payload.model, mode)
 
     if not text_value and not files:
@@ -3742,7 +3822,10 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
         free_limit = _workspace_consume_free_chat(uid, mode=mode)
         system_prompt = _build_prompt_builder_system_prompt(model_label, image_refs, audio_refs)
     else:
-        free_limit = _workspace_consume_free_chat(uid, mode=mode)
+        if kie_claude_is_fable_model(model_actual):
+            free_limit = None
+        else:
+            free_limit = _workspace_consume_free_chat(uid, mode=mode)
         system_prompt = (
             "Ты — AstraBot Workspace Assistant. "
             "Помогай как product-minded AI co-pilot: сценарии, промпты, creative direction, тексты, планы и упаковка идей в рабочий пайплайн. "
@@ -3751,19 +3834,30 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
         )
 
     response_summary = summary_value
+    charge_ref_id = ""
+    charge_tokens = 0
+    if kie_claude_is_fable_model(model_actual) and mode == "chat":
+        charge_tokens = _workspace_fable_cost_tokens(has_files=bool(files), thinking=thinking)
+        charge_ref_id = _workspace_charge_fable_chat_or_402(uid, cost_tokens=charge_tokens, thinking=thinking, has_files=bool(files), source="site-sync")
+
     if is_kie_claude_model(model_actual) and mode == "chat":
-        memory = await _prepare_workspace_claude_memory(history, summary_value)
+        memory = await _prepare_workspace_claude_memory(history, summary_value, model=model_actual)
         response_summary = memory.get("summary") or ""
-        answer = await kie_claude_answer(
-            user_text=user_text,
-            system_prompt=system_prompt,
-            history=memory.get("history") or [],
-            summary=response_summary,
-            max_tokens=1500,
-            thinking=True,
-            image_bytes_list=prepared_files.get("image_bytes_list") or None,
-            model=model_actual,
-        )
+        try:
+            answer = await kie_claude_answer(
+                user_text=user_text,
+                system_prompt=system_prompt,
+                history=memory.get("history") or [],
+                summary=response_summary,
+                max_tokens=kie_claude_max_tokens_for_model(model_actual),
+                thinking=bool(thinking) if kie_claude_is_fable_model(model_actual) else True,
+                image_bytes_list=prepared_files.get("image_bytes_list") or None,
+                model=model_actual,
+                raise_on_error=bool(charge_ref_id),
+            )
+        except Exception as exc:
+            _workspace_refund_fable_chat(uid, tokens=charge_tokens, ref_id=charge_ref_id, stage="site_sync_exception", error=str(exc))
+            raise
     else:
         answer = await openai_chat_answer(
             user_text=user_text,
@@ -3784,6 +3878,7 @@ async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_cu
         "attachments": prepared_files.get("items") or [],
         "is_prompt": _is_prompt_builder_output(answer) if mode == "prompt_builder" else False,
         "free_limit": free_limit,
+        "charge_tokens": int(charge_tokens or 0),
     }
 
 
@@ -3800,6 +3895,7 @@ async def workspace_chat_async(request: Request, user: Dict[str, Any] = Depends(
         summary_value = _sanitize_chat_summary(form.get("summary"))
         temperature = _clamp_float(form.get("temperature"), 0.6, 0.0, 1.5)
         max_tokens = _clamp_int(form.get("max_tokens"), 900, 150, 4000)
+        thinking = _workspace_chat_bool(form.get("thinking"))
         resolved_model = _resolve_workspace_chat_model(form.get("model"), mode)
         files = [f for f in form.getlist("files") if getattr(f, "filename", None)]
     else:
@@ -3810,6 +3906,7 @@ async def workspace_chat_async(request: Request, user: Dict[str, Any] = Depends(
         summary_value = _sanitize_chat_summary(payload.summary)
         temperature = payload.temperature
         max_tokens = payload.max_tokens
+        thinking = bool(payload.thinking)
         resolved_model = _resolve_workspace_chat_model(payload.model, mode)
 
     if not text_value and not files:
@@ -3851,7 +3948,10 @@ async def workspace_chat_async(request: Request, user: Dict[str, Any] = Depends(
         free_limit = _workspace_consume_free_chat(uid, mode=mode)
         system_prompt = _build_prompt_builder_system_prompt(model_label, image_refs, audio_refs)
     else:
-        free_limit = _workspace_consume_free_chat(uid, mode=mode)
+        if kie_claude_is_fable_model(model_actual):
+            free_limit = None
+        else:
+            free_limit = _workspace_consume_free_chat(uid, mode=mode)
         system_prompt = (
             "Ты — AstraBot Workspace Assistant. "
             "Помогай как product-minded AI co-pilot: сценарии, промпты, creative direction, тексты, планы и упаковка идей в рабочий пайплайн. "
@@ -3859,11 +3959,19 @@ async def workspace_chat_async(request: Request, user: Dict[str, Any] = Depends(
             f"Если пользователь спрашивает, какая модель выбрана в интерфейсе, отвечай только названием модели: {model_label}."
         )
 
+    charge_ref_id = ""
+    charge_tokens = 0
+    if kie_claude_is_fable_model(model_actual) and mode == "chat":
+        charge_tokens = _workspace_fable_cost_tokens(has_files=bool(files), thinking=thinking)
+        charge_ref_id = _workspace_charge_fable_chat_or_402(uid, cost_tokens=charge_tokens, thinking=thinking, has_files=bool(files), source="site-async")
+
     if is_kie_claude_model(model_actual) and mode == "chat":
-        model_key = "claude"
-        queue_name = WORKSPACE_CHAT_CLAUDE_QUEUE_NAME
-        history_for_model = history[-KIE_CLAUDE_HISTORY_MESSAGES:]
-        response_summary = summary_value[:KIE_CLAUDE_SUMMARY_MAX_CHARS]
+        model_key = "claude_fable" if kie_claude_is_fable_model(model_actual) else "claude"
+        queue_name = WORKSPACE_CHAT_FABLE_QUEUE_NAME if model_key == "claude_fable" else WORKSPACE_CHAT_CLAUDE_QUEUE_NAME
+        history_limit = kie_claude_history_messages_for_model(model_actual)
+        summary_limit = kie_claude_summary_chars_for_model(model_actual)
+        history_for_model = history[-history_limit:]
+        response_summary = summary_value[:summary_limit]
     else:
         model_key = "openai"
         queue_name = WORKSPACE_CHAT_OPENAI_QUEUE_NAME
@@ -3894,6 +4002,10 @@ async def workspace_chat_async(request: Request, user: Dict[str, Any] = Depends(
         "summary": response_summary,
         "temperature": temperature,
         "max_tokens": max_tokens,
+        "thinking": bool(thinking) if model_key == "claude_fable" else True,
+        "charge_tokens": int(charge_tokens or 0),
+        "charge_ref_id": str(charge_ref_id or ""),
+        "refund_reason": "claude_fable_chat_refund" if model_key == "claude_fable" else "",
         "attachments": prepared_files.get("items") or [],
         "image_storage_refs": prepared_files.get("image_storage_refs") or [],
         "is_prompt_builder": mode == "prompt_builder",
@@ -3902,12 +4014,14 @@ async def workspace_chat_async(request: Request, user: Dict[str, Any] = Depends(
     try:
         await enqueue_job(job, queue_name=queue_name)
     except Exception as exc:
-        if free_limit:
+        if charge_ref_id:
+            _workspace_refund_fable_chat(uid, tokens=charge_tokens, ref_id=charge_ref_id, stage="enqueue_failed", error=str(exc))
+        elif free_limit:
             release_free_usage(uid, FEATURE_CHAT)
         await set_chat_job_status(job_id, status="failed", ok=False, error=str(exc))
         raise HTTPException(status_code=503, detail=f"Чат-очередь недоступна: {exc}")
 
-    return {"ok": True, "job_id": job_id, "status": "queued", "free_limit": free_limit}
+    return {"ok": True, "job_id": job_id, "status": "queued", "free_limit": free_limit, "charge_tokens": int(charge_tokens or 0)}
 
 
 @router.get("/chat/status/{job_id}")
