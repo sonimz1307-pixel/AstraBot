@@ -1271,16 +1271,50 @@ const SHEETS = {
     <p><b>Veo</b> — Fast, Pro и Fast Relax.</p>
     <p><b>Grok / Google / Sora</b> — отдельные режимы генерации видео.</p>
   `,
-  prompt: `
-    <h3>Про промпт и refs</h3>
-    <p>Общий промпт вводится в Telegram после сохранения настроек — так текущий backend проекта работает стабильно для всех моделей.</p>
-    <p><b>Kling 3.0 - New Multi-shot</b> — исключение: shot prompts заполняются прямо в WebApp и сохраняются в payload как multi_shots.</p>
-    <p>Фото, видео, audio refs и first/last frame также отправляются в Telegram после сохранения. Для Kling Multi-shot image elements можно загрузить прямо в WebApp.</p>
-  `,
 };
+function buildPromptSheet(){
+  const m = getModel();
+  const modeLabel = getModeLabel();
+  const title = `${esc(m.name)} · ${esc(modeLabel)}`;
+  const instruction = esc(nextStepInstruction());
+  let extra = '';
+
+  if (state.provider === 'seedance') {
+    if (state.mode === 'text') extra = 'Референсы не нужны: после сохранения бот сразу ждёт текстовый prompt.';
+    else if (state.mode === 'image') extra = 'Можно отправить 1 или 2 фото. Если фото два — второе используется как финальный кадр.';
+    else extra = 'Можно отправлять image / video / audio refs. После refs нажми «✅ Готово», затем отправь prompt.';
+  } else if (state.provider === 'kling') {
+    if (state.model === 'kling_motion') extra = 'Сначала нужен аватар/фото, затем видео движения. Длина и цена зависят от reference-video.';
+    else if (state.model === 'kling25') extra = state.mode === 'i2v' ? 'Формат кадра берётся из стартового изображения.' : 'Для Text → Video нужен только prompt.';
+    else if (state.mode === 'multi_shot') extra = 'Shot prompts и image elements заполняются прямо здесь, в WebApp. В Telegram останется только отправить «СТАРТ» или общий стартовый кадр.';
+    else if (state.mode === 'image_to_video') extra = 'Первое фото — стартовый кадр. Второе фото можно отправить как финальный кадр.';
+    else extra = 'Для Text → Video бот после сохранения попросит prompt.';
+  } else if (state.provider === 'veo') {
+    if (state.mode === 'image') {
+      if (state.useRefs) extra = 'Сейчас включены Reference images: отправь стартовое фото и refs.';
+      else if (state.useLastFrame) extra = 'Сейчас включён Last frame: отправь стартовый и финальный кадр.';
+      else extra = 'Нужно одно стартовое изображение и prompt.';
+    } else extra = 'Для Text → Video нужен только prompt.';
+  } else if (state.provider === 'grok') {
+    extra = state.mode === 'image' ? 'Сначала отправь фото, потом prompt.' : 'После сохранения бот попросит prompt.';
+  } else if (state.provider === 'google') {
+    if (state.mode === 'image') extra = 'Можно отправить до 7 фото-референсов.';
+    else if (state.mode === 'video_edit') extra = 'Нужно отправить исходное видео до 60 секунд, затем refs по желанию и prompt.';
+    else extra = 'Для Text → Video нужен prompt.';
+  } else if (state.provider === 'sora') {
+    extra = 'Для Sora 2 доступен только Text → Video: после сохранения отправь prompt.';
+  }
+
+  return `
+    <h3>${title}</h3>
+    <p>${instruction}</p>
+    ${extra ? `<p><b>Важно:</b> ${esc(extra)}</p>` : ''}
+    <p>Эта подсказка меняется под выбранную модель, режим и включённые опции.</p>
+  `;
+}
 function openSheet(key){
   haptic('light');
-  $('sheetContent').innerHTML = SHEETS[key] || '';
+  $('sheetContent').innerHTML = key === 'prompt' ? buildPromptSheet() : (SHEETS[key] || '');
   $('sheetOverlay').classList.add('open');
   $('sheet').classList.add('open');
 }
