@@ -22,7 +22,13 @@ from kie_claude_chat import (
     KIE_CLAUDE_HISTORY_MESSAGES,
     KIE_CLAUDE_MODEL_ID,
     KIE_CLAUDE_OPUS_MODEL_ID,
+    KIE_CLAUDE_FABLE_MODEL_ID,
+    KIE_CLAUDE_FABLE_DISPLAY_NAME,
+    KIE_CLAUDE_FABLE_THINKING_EXTRA_TOKENS,
+    KIE_CLAUDE_FABLE_MAX_TOKENS,
     kie_claude_answer,
+    kie_claude_fable_tokens,
+    kie_claude_is_fable_model,
     kie_claude_display_name,
     kie_claude_summarize_dialogue,
     normalize_kie_claude_model,
@@ -316,6 +322,7 @@ async def _enqueue_partner_topup_event(
 CHAT_WORKER_ENABLED = (os.getenv("CHAT_WORKER_ENABLED", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
 TG_CHAT_OPENAI_QUEUE_NAME = (os.getenv("TG_CHAT_OPENAI_QUEUE_NAME", "tg_chat_openai") or "tg_chat_openai").strip() or "tg_chat_openai"
 TG_CHAT_CLAUDE_QUEUE_NAME = (os.getenv("TG_CHAT_CLAUDE_QUEUE_NAME", "tg_chat_claude") or "tg_chat_claude").strip() or "tg_chat_claude"
+TG_CHAT_FABLE_QUEUE_NAME = (os.getenv("TG_CHAT_FABLE_QUEUE_NAME", "tg_chat_fable") or "tg_chat_fable").strip() or "tg_chat_fable"
 
 BALANCE_BANNER_PATH = os.getenv("BALANCE_BANNER_PATH", "").strip()
 
@@ -3480,6 +3487,63 @@ async def _tg_consume_free_chat_or_notify(chat_id: int, user_id: int) -> bool:
         return False
 
 
+
+
+def _is_fable_chat_model_key(model_key: Any) -> bool:
+    return _ai_chat_model_key_from_value(model_key) == "claude_fable"
+
+
+def _tg_fable_thinking_enabled(st: Dict[str, Any]) -> bool:
+    return bool((st or {}).get("ai_fable_thinking"))
+
+
+def _tg_fable_chat_cost_tokens(st: Dict[str, Any], *, has_files: bool = False) -> int:
+    return kie_claude_fable_tokens(has_files=has_files, thinking=_tg_fable_thinking_enabled(st))
+
+
+async def _tg_charge_fable_chat_or_notify(
+    *,
+    chat_id: int,
+    user_id: int,
+    st: Dict[str, Any],
+    has_files: bool = False,
+) -> str:
+    cost_tokens = _tg_fable_chat_cost_tokens(st, has_files=has_files)
+    try:
+        ensure_user_row(user_id)
+        balance = int(get_balance(user_id) or 0)
+    except Exception as exc:
+        await tg_send_message(chat_id, f"❌ Не удалось проверить баланс для Claude Fable 5: {exc}", reply_markup=_main_menu_for(user_id))
+        return ""
+
+    if balance < cost_tokens:
+        await tg_send_message(
+            chat_id,
+            f"❌ Недостаточно токенов для Claude Fable 5\nНужно: {cost_tokens}\nБаланс: {balance}",
+            reply_markup=_topup_balance_inline_kb(),
+        )
+        return ""
+
+    ref_id = str(uuid4())
+    try:
+        add_tokens(
+            user_id,
+            -cost_tokens,
+            reason="claude_fable_chat",
+            ref_id=ref_id,
+            meta={
+                "source": "telegram",
+                "model": KIE_CLAUDE_FABLE_MODEL_ID,
+                "cost_tokens": cost_tokens,
+                "has_files": bool(has_files),
+                "thinking": _tg_fable_thinking_enabled(st),
+            },
+        )
+        return ref_id
+    except Exception as exc:
+        await tg_send_message(chat_id, f"❌ Не удалось списать токены для Claude Fable 5: {exc}", reply_markup=_main_menu_for(user_id))
+        return ""
+
 async def _tg_consume_free_tts_or_notify(chat_id: int, user_id: int, text: str) -> bool:
     try:
         validate_free_tts_text(user_id, text)
@@ -3994,22 +4058,37 @@ def _seedance_continue_kb(task_id: str) -> dict:
         ]
     }
 
-def _ai_chat_mode_inline_kb() -> dict:
-    return {
-        "inline_keyboard": [
-            [
-                {"text": "💬 Claude Sonnet", "callback_data": "aichat:model:claude"},
-                {"text": "💬 Claude Opus 4.7", "callback_data": "aichat:model:opus"},
-            ],
-            [
-                {"text": "💬 ChatGPT", "callback_data": "aichat:model:openai"},
-            ],
-            [
-                {"text": "🪄 Промт", "callback_data": "aichat:mode:prompt"},
-                {"text": "🆕 New Chat", "callback_data": "aichat:new_chat"},
-            ],
-        ]
-    }
+def _ai_chat_mode_inline_kb(fable_thinking: bool = False, *, selected_model: Any = None) -> dict:
+    """Inline menu for Telegram AI chat.
+
+    The paid Fable thinking toggle is shown only when Fable is the selected
+    model, so Sonnet/Opus/ChatGPT menus do not expose a setting that silently
+    switches the user to another paid model.
+    """
+    rows = [
+        [
+            {"text": "💬 Claude Sonnet", "callback_data": "aichat:model:claude"},
+            {"text": "💬 Claude Opus 4.7", "callback_data": "aichat:model:opus"},
+        ],
+        [
+            {"text": f"💬 {KIE_CLAUDE_FABLE_DISPLAY_NAME} · 2 токена", "callback_data": "aichat:model:fable"},
+        ],
+    ]
+    if _ai_chat_model_key_from_value(selected_model) == "claude_fable":
+        thinking_label = "🧠 Углублённое мышление: ON" if fable_thinking else "🧠 Углублённое мышление: OFF"
+        rows.append([
+            {"text": f"{thinking_label} (+{KIE_CLAUDE_FABLE_THINKING_EXTRA_TOKENS} ток.)", "callback_data": "aichat:fable_thinking:toggle"},
+        ])
+    rows.extend([
+        [
+            {"text": "💬 ChatGPT", "callback_data": "aichat:model:openai"},
+        ],
+        [
+            {"text": "🪄 Промт", "callback_data": "aichat:mode:prompt"},
+            {"text": "🆕 New Chat", "callback_data": "aichat:new_chat"},
+        ],
+    ])
+    return {"inline_keyboard": rows}
 
 
 def _ai_chat_model_key_from_value(value: Any) -> str:
@@ -4018,6 +4097,8 @@ def _ai_chat_model_key_from_value(value: Any) -> str:
         return "openai"
     if model in ("opus", "claude_opus", "claude-opus", "claude-opus-4-7", "opus-4-7"):
         return "claude_opus"
+    if model in ("fable", "claude_fable", "claude-fable", "claude-fable-5", "fable-5"):
+        return "claude_fable"
     return "claude"
 
 
@@ -4027,6 +4108,8 @@ def _ai_chat_model_title(model: str) -> str:
         return "ChatGPT"
     if key == "claude_opus":
         return kie_claude_display_name(KIE_CLAUDE_OPUS_MODEL_ID)
+    if key == "claude_fable":
+        return kie_claude_display_name(KIE_CLAUDE_FABLE_MODEL_ID)
     return kie_claude_display_name(KIE_CLAUDE_MODEL_ID)
 
 
@@ -4040,6 +4123,8 @@ def _ai_chat_model_actual(model_key: str) -> str:
         return OPENAI_CHAT_MODEL
     if key == "claude_opus":
         return normalize_kie_claude_model(KIE_CLAUDE_OPUS_MODEL_ID) or KIE_CLAUDE_OPUS_MODEL_ID
+    if key == "claude_fable":
+        return normalize_kie_claude_model(KIE_CLAUDE_FABLE_MODEL_ID) or KIE_CLAUDE_FABLE_MODEL_ID
     return normalize_kie_claude_model(KIE_CLAUDE_MODEL_ID) or KIE_CLAUDE_MODEL_ID
 
 
@@ -4048,16 +4133,26 @@ def _ai_chat_system_prompt(model_key: str) -> str:
     if key == "openai":
         return DEFAULT_TEXT_SYSTEM_PROMPT
     title = _ai_chat_model_title(key)
+    thinking_line = (
+        "Углублённое мышление может быть включено отдельной настройкой, но внутренние рассуждения не раскрывай — сразу давай готовый ответ. "
+        if key == "claude_fable"
+        else "Рассуждение включено, но не раскрывай внутренние рассуждения — сразу давай готовый ответ. "
+    )
     return (
         f"Ты {title} внутри AstraBot. Отвечай на русском, кратко и по делу. "
-        "Рассуждение включено, но не раскрывай внутренние рассуждения — сразу давай готовый ответ. "
-        "Интернет выключен. Если нужны актуальные данные, честно скажи, что без интернета их нельзя проверить. "
-        "Файлы анализируй только по тексту, который передал backend. Не используй LaTeX/TeX."
+        + thinking_line
+        + "Интернет выключен. Если нужны актуальные данные, честно скажи, что без интернета их нельзя проверить. "
+        + "Файлы анализируй только по тексту, который передал backend. Не используй LaTeX/TeX."
     )
 
 
 def _tg_chat_queue_for_model(model_key: str) -> str:
-    return TG_CHAT_OPENAI_QUEUE_NAME if _ai_chat_model_key_from_value(model_key) == "openai" else TG_CHAT_CLAUDE_QUEUE_NAME
+    key = _ai_chat_model_key_from_value(model_key)
+    if key == "openai":
+        return TG_CHAT_OPENAI_QUEUE_NAME
+    if key == "claude_fable":
+        return TG_CHAT_FABLE_QUEUE_NAME
+    return TG_CHAT_CLAUDE_QUEUE_NAME
 
 
 def _clear_ai_chat_memory_state(st: Dict[str, Any]) -> None:
@@ -4085,6 +4180,9 @@ async def _enqueue_tg_ai_chat_job(
     text: str,
     model_key: str,
     file_meta: Optional[Dict[str, Any]] = None,
+    thinking: bool = True,
+    charge_tokens: int = 0,
+    charge_ref_id: str = "",
 ) -> bool:
     """Queue a Telegram GPT/Claude chat request so main.py does not wait for the model."""
     if not CHAT_WORKER_ENABLED:
@@ -4106,9 +4204,13 @@ async def _enqueue_tg_ai_chat_job(
         "model_key": normalized_model_key,
         "model": _ai_chat_model_actual(normalized_model_key),
         "system_prompt": _ai_chat_system_prompt(normalized_model_key),
+        "thinking": bool(thinking),
+        "charge_tokens": int(charge_tokens or 0),
+        "charge_ref_id": str(charge_ref_id or ""),
+        "refund_reason": "claude_fable_chat_refund" if normalized_model_key == "claude_fable" else "",
         # Показываем inline-меню ИИ-чата под ответом, чтобы New Chat всегда был под рукой.
         # Reply-клавиатура главного меню при этом не ломается — Telegram оставляет её внизу.
-        "reply_markup": _ai_chat_mode_inline_kb(),
+        "reply_markup": _ai_chat_mode_inline_kb(bool(thinking) if normalized_model_key == "claude_fable" else False, selected_model=normalized_model_key),
     }
     if status_message_id:
         job["status_message_id"] = int(status_message_id)
@@ -4128,6 +4230,60 @@ async def _enqueue_tg_ai_chat_job(
         except Exception:
             pass
         return False
+
+
+async def _enqueue_tg_fable_image_chat_or_notify(
+    *,
+    chat_id: int,
+    user_id: int,
+    st: Dict[str, Any],
+    file_id: str,
+    filename: str = "telegram_photo.jpg",
+    mime_type: str = "image/jpeg",
+    size_bytes: int = 0,
+    prompt: str = "",
+) -> bool:
+    """Handle Telegram photo/image-document through Claude Fable when Fable is selected.
+
+    Returns True when the message was handled (queued, rejected for balance, or
+    failed with a user-facing error). Returns False for non-Fable models so the
+    legacy OpenAI vision path can continue unchanged.
+    """
+    model_key = _ai_chat_model_key(st)
+    if not _is_fable_chat_model_key(model_key):
+        return False
+
+    charge_tokens = _tg_fable_chat_cost_tokens(st, has_files=True)
+    charge_ref_id = await _tg_charge_fable_chat_or_notify(chat_id=chat_id, user_id=user_id, st=st, has_files=True)
+    if not charge_ref_id:
+        st["ts"] = _now()
+        return True
+
+    queued = await _enqueue_tg_ai_chat_job(
+        chat_id=chat_id,
+        user_id=user_id,
+        text=(prompt or VISION_DEFAULT_USER_PROMPT),
+        model_key=model_key,
+        file_meta={
+            "filename": filename or "telegram_photo.jpg",
+            "file_id": str(file_id or ""),
+            "mime_type": mime_type or "image/jpeg",
+            "size_bytes": int(size_bytes or 0),
+            "kind": "image",
+        },
+        thinking=_tg_fable_thinking_enabled(st),
+        charge_tokens=charge_tokens,
+        charge_ref_id=charge_ref_id,
+    )
+    if queued:
+        return True
+
+    try:
+        add_tokens(user_id, int(charge_tokens), reason="claude_fable_chat_refund", ref_id=charge_ref_id, meta={"stage": "enqueue_failed", "source": "telegram_photo"})
+    except Exception:
+        pass
+    await tg_send_message(chat_id, "❌ Не удалось поставить Claude Fable 5 в очередь. Проверь REDIS_URL и worker_chat.py.", reply_markup=_main_menu_for(user_id))
+    return True
 
 
 def _ai_prompt_root_inline_kb() -> dict:
@@ -7498,23 +7654,46 @@ async def webhook(secret: str, request: Request):
                     st["ai_chat_mode"] = "menu"
                     msg = (
                         "✅ New Chat создан. История очищена.\n\n"
-                        "Выбери модель чата: Claude Sonnet, Claude Opus 4.7 или ChatGPT."
+                        "Выбери модель чата: Claude Sonnet, Claude Opus 4.7, Claude Fable 5 или ChatGPT."
                     )
                 st["ts"] = _now()
-                await tg_send_message(chat_id, msg, reply_markup=_ai_chat_mode_inline_kb())
+                await tg_send_message(chat_id, msg, reply_markup=_ai_chat_mode_inline_kb(_tg_fable_thinking_enabled(st), selected_model=model))
                 return {"ok": True}
 
-            if data in ("aichat:model:claude", "aichat:model:opus", "aichat:model:openai", "aichat:mode:chat"):
+            if data == "aichat:fable_thinking:toggle":
                 _set_mode(chat_id, user_id, "chat")
-                model = "openai" if data == "aichat:model:openai" else ("claude_opus" if data == "aichat:model:opus" else "claude")
+                st["ai_fable_thinking"] = not bool(st.get("ai_fable_thinking"))
+                st["ai_chat_mode"] = "chat"
+                st["ai_chat_model"] = "claude_fable"
+                st["ts"] = _now()
+                cost = _tg_fable_chat_cost_tokens(st, has_files=False)
+                await tg_send_message(
+                    chat_id,
+                    f"{KIE_CLAUDE_FABLE_DISPLAY_NAME}: углублённое мышление {'включено' if st.get('ai_fable_thinking') else 'выключено'}.\nСтоимость обычного запроса: {cost} токенов.",
+                    reply_markup=_ai_chat_mode_inline_kb(_tg_fable_thinking_enabled(st), selected_model="claude_fable"),
+                )
+                return {"ok": True}
+
+            if data in ("aichat:model:claude", "aichat:model:opus", "aichat:model:fable", "aichat:model:openai", "aichat:mode:chat"):
+                _set_mode(chat_id, user_id, "chat")
+                model = "openai" if data == "aichat:model:openai" else ("claude_opus" if data == "aichat:model:opus" else ("claude_fable" if data == "aichat:model:fable" else "claude"))
                 st["ai_chat_mode"] = "chat"
                 st["ai_chat_model"] = model
                 st["ai_prompt"] = _new_ai_prompt_state()
                 st["ts"] = _now()
+                if model == "claude_fable":
+                    msg = (
+                        f"💬 Режим чата включён: {_ai_chat_model_title(model)}.\n"
+                        f"Стоимость: {_tg_fable_chat_cost_tokens(st, has_files=False)} ток. обычный запрос, "
+                        f"{_tg_fable_chat_cost_tokens(st, has_files=True)} ток. с файлом.\n"
+                        "Можешь писать вопрос или прислать файл."
+                    )
+                else:
+                    msg = f"💬 Режим чата включён: {_ai_chat_model_title(model)}.\nМожешь писать вопрос или прислать фото для анализа."
                 await tg_send_message(
                     chat_id,
-                    f"💬 Режим чата включён: {_ai_chat_model_title(model)}.\nМожешь писать вопрос или прислать фото для анализа.",
-                    reply_markup=_ai_chat_mode_inline_kb(),
+                    msg,
+                    reply_markup=_ai_chat_mode_inline_kb(_tg_fable_thinking_enabled(st), selected_model=model),
                 )
                 return {"ok": True}
 
@@ -8006,7 +8185,7 @@ async def webhook(secret: str, request: Request):
         if st.get("ai_chat_mode") != "chat":
             await tg_send_message(
                 chat_id,
-                "Голосовое получил, но сначала выбери модель чата: Claude Sonnet, Claude Opus 4.7 или ChatGPT.",
+                "Голосовое получил, но сначала выбери модель чата: Claude Sonnet, Claude Opus 4.7, Claude Fable 5 или ChatGPT.",
                 reply_markup=_ai_chat_mode_inline_kb(),
             )
             return {"ok": True}
@@ -8051,20 +8230,39 @@ async def webhook(secret: str, request: Request):
             await tg_send_message(chat_id, "❌ Не смог распознать текст в голосовом.", reply_markup=_main_menu_for(user_id))
             return {"ok": True}
 
-        if not await _tg_consume_free_chat_or_notify(chat_id, user_id):
-            st["ts"] = _now()
-            return {"ok": True}
+        model_key = _ai_chat_model_key(st)
+        charge_ref_id = ""
+        charge_tokens = 0
+        if _is_fable_chat_model_key(model_key):
+            charge_tokens = _tg_fable_chat_cost_tokens(st, has_files=False)
+            charge_ref_id = await _tg_charge_fable_chat_or_notify(chat_id=chat_id, user_id=user_id, st=st, has_files=False)
+            if not charge_ref_id:
+                st["ts"] = _now()
+                return {"ok": True}
+        else:
+            if not await _tg_consume_free_chat_or_notify(chat_id, user_id):
+                st["ts"] = _now()
+                return {"ok": True}
 
         queued = await _enqueue_tg_ai_chat_job(
             chat_id=chat_id,
             user_id=user_id,
             text=recognized_text,
-            model_key=_ai_chat_model_key(st),
+            model_key=model_key,
+            thinking=_tg_fable_thinking_enabled(st) if _is_fable_chat_model_key(model_key) else True,
+            charge_tokens=charge_tokens,
+            charge_ref_id=charge_ref_id,
         )
         if queued:
             return {"ok": True}
 
-        release_free_usage(user_id, FEATURE_CHAT)
+        if charge_ref_id:
+            try:
+                add_tokens(user_id, int(charge_tokens), reason="claude_fable_chat_refund", ref_id=charge_ref_id, meta={"stage": "enqueue_failed", "source": "telegram"})
+            except Exception:
+                pass
+        else:
+            release_free_usage(user_id, FEATURE_CHAT)
         await tg_send_message(chat_id, "❌ Не удалось поставить чат в очередь. Проверь REDIS_URL и worker_chat.py.", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
 
@@ -8173,31 +8371,50 @@ async def webhook(secret: str, request: Request):
         if st.get("ai_chat_mode") != "chat":
             await tg_send_message(
                 chat_id,
-                "Файл получил, но сначала выбери модель чата: Claude Sonnet, Claude Opus 4.7 или ChatGPT.",
+                "Файл получил, но сначала выбери модель чата: Claude Sonnet, Claude Opus 4.7, Claude Fable 5 или ChatGPT.",
                 reply_markup=_ai_chat_mode_inline_kb(),
             )
             return {"ok": True}
 
-        if not await _tg_consume_free_chat_or_notify(chat_id, user_id):
-            st["ts"] = _now()
-            return {"ok": True}
+        model_key = _ai_chat_model_key(st)
+        charge_ref_id = ""
+        charge_tokens = 0
+        if _is_fable_chat_model_key(model_key):
+            charge_tokens = _tg_fable_chat_cost_tokens(st, has_files=True)
+            charge_ref_id = await _tg_charge_fable_chat_or_notify(chat_id=chat_id, user_id=user_id, st=st, has_files=True)
+            if not charge_ref_id:
+                st["ts"] = _now()
+                return {"ok": True}
+        else:
+            if not await _tg_consume_free_chat_or_notify(chat_id, user_id):
+                st["ts"] = _now()
+                return {"ok": True}
 
         queued = await _enqueue_tg_ai_chat_job(
             chat_id=chat_id,
             user_id=user_id,
             text=incoming_text or "Проанализируй приложенный файл и дай краткий полезный вывод.",
-            model_key=_ai_chat_model_key(st),
+            model_key=model_key,
             file_meta={
                 "filename": filename,
                 "file_id": file_id,
                 "mime_type": mime_type,
                 "size_bytes": size_bytes,
             },
+            thinking=_tg_fable_thinking_enabled(st) if _is_fable_chat_model_key(model_key) else True,
+            charge_tokens=charge_tokens,
+            charge_ref_id=charge_ref_id,
         )
         if queued:
             return {"ok": True}
 
-        release_free_usage(user_id, FEATURE_CHAT)
+        if charge_ref_id:
+            try:
+                add_tokens(user_id, int(charge_tokens), reason="claude_fable_chat_refund", ref_id=charge_ref_id, meta={"stage": "enqueue_failed", "source": "telegram"})
+            except Exception:
+                pass
+        else:
+            release_free_usage(user_id, FEATURE_CHAT)
         await tg_send_message(chat_id, "❌ Не удалось поставить чат в очередь. Проверь REDIS_URL и worker_chat.py.", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
 
@@ -9627,7 +9844,7 @@ async def webhook(secret: str, request: Request):
     if st.get("mode") == "chat" and st.get("ai_chat_mode") == "menu" and incoming_text and not _is_nav_or_menu_text(incoming_text):
         await tg_send_message(
             chat_id,
-            "Сначала выбери модель чата: Claude Sonnet, Claude Opus 4.7 или ChatGPT. Либо выбери 🪄 Промт.",
+            "Сначала выбери модель чата: Claude Sonnet, Claude Opus 4.7, Claude Fable 5 или ChatGPT. Либо выбери 🪄 Промт.",
             reply_markup=_ai_chat_mode_inline_kb(),
         )
         return {"ok": True}
@@ -12067,9 +12284,20 @@ async def webhook(secret: str, request: Request):
             if st.get("ai_chat_mode") != "chat":
                 await tg_send_message(
                     chat_id,
-                    "Фото получил, но сначала выбери модель чата: Claude Sonnet, Claude Opus 4.7 или ChatGPT.",
+                    "Фото получил, но сначала выбери модель чата: Claude Sonnet, Claude Opus 4.7, Claude Fable 5 или ChatGPT.",
                     reply_markup=_ai_chat_mode_inline_kb(),
                 )
+                return {"ok": True}
+            if await _enqueue_tg_fable_image_chat_or_notify(
+                chat_id=chat_id,
+                user_id=user_id,
+                st=st,
+                file_id=str(file_id or ""),
+                filename="telegram_photo.jpg",
+                mime_type="image/jpeg",
+                size_bytes=int(largest.get("file_size") or 0),
+                prompt=incoming_text or "",
+            ):
                 return {"ok": True}
             if not await _tg_consume_free_chat_or_notify(chat_id, user_id):
                 st["ts"] = _now()
@@ -12860,9 +13088,20 @@ async def webhook(secret: str, request: Request):
                 if st.get("ai_chat_mode") != "chat":
                     await tg_send_message(
                         chat_id,
-                        "Фото получил, но сначала выбери модель чата: Claude Sonnet, Claude Opus 4.7 или ChatGPT.",
+                        "Фото получил, но сначала выбери модель чата: Claude Sonnet, Claude Opus 4.7, Claude Fable 5 или ChatGPT.",
                         reply_markup=_ai_chat_mode_inline_kb(),
                     )
+                    return {"ok": True}
+                if await _enqueue_tg_fable_image_chat_or_notify(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    st=st,
+                    file_id=str(file_id or ""),
+                    filename=filename or "telegram_image.jpg",
+                    mime_type=mime or "image/jpeg",
+                    size_bytes=int(doc.get("file_size") or 0),
+                    prompt=incoming_text or "",
+                ):
                     return {"ok": True}
                 if not await _tg_consume_free_chat_or_notify(chat_id, user_id):
                     st["ts"] = _now()
@@ -14717,25 +14956,44 @@ async def webhook(secret: str, request: Request):
             if st.get("ai_chat_mode") != "chat":
                 await tg_send_message(
                     chat_id,
-                    "Сначала выбери модель чата: Claude Sonnet, Claude Opus 4.7 или ChatGPT. Либо выбери 🪄 Промт.",
+                    "Сначала выбери модель чата: Claude Sonnet, Claude Opus 4.7, Claude Fable 5 или ChatGPT. Либо выбери 🪄 Промт.",
                     reply_markup=_ai_chat_mode_inline_kb(),
                 )
                 return {"ok": True}
 
-            if not await _tg_consume_free_chat_or_notify(chat_id, user_id):
-                st["ts"] = _now()
-                return {"ok": True}
+            model_key = _ai_chat_model_key(st)
+            charge_ref_id = ""
+            charge_tokens = 0
+            if _is_fable_chat_model_key(model_key):
+                charge_tokens = _tg_fable_chat_cost_tokens(st, has_files=False)
+                charge_ref_id = await _tg_charge_fable_chat_or_notify(chat_id=chat_id, user_id=user_id, st=st, has_files=False)
+                if not charge_ref_id:
+                    st["ts"] = _now()
+                    return {"ok": True}
+            else:
+                if not await _tg_consume_free_chat_or_notify(chat_id, user_id):
+                    st["ts"] = _now()
+                    return {"ok": True}
 
             queued = await _enqueue_tg_ai_chat_job(
                 chat_id=chat_id,
                 user_id=user_id,
                 text=incoming_text,
-                model_key=_ai_chat_model_key(st),
+                model_key=model_key,
+                thinking=_tg_fable_thinking_enabled(st) if _is_fable_chat_model_key(model_key) else True,
+                charge_tokens=charge_tokens,
+                charge_ref_id=charge_ref_id,
             )
             if queued:
                 return {"ok": True}
 
-            release_free_usage(user_id, FEATURE_CHAT)
+            if charge_ref_id:
+                try:
+                    add_tokens(user_id, int(charge_tokens), reason="claude_fable_chat_refund", ref_id=charge_ref_id, meta={"stage": "enqueue_failed", "source": "telegram"})
+                except Exception:
+                    pass
+            else:
+                release_free_usage(user_id, FEATURE_CHAT)
             await tg_send_message(chat_id, "❌ Не удалось поставить чат в очередь. Проверь REDIS_URL и worker_chat.py.", reply_markup=_main_menu_for(user_id))
             return {"ok": True}
 
