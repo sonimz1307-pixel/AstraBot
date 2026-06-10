@@ -1,1342 +1,2451 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ru">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>Генерация видео</title>
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
-<style>
-/* ============================================================
-   ДИЗАЙН-ТОКЕНЫ
-============================================================ */
-:root{
-  --bg:        #0a0a0c;
-  --surface:   #141417;
-  --surface-2: #1c1c21;
-  --surface-3: #232329;
-  --text:      #f5f5f7;
-  --text-muted:#98989f;
-  --text-dim:  #6e6e76;
-  --accent:    #ff9d00;
-  --accent-soft: rgba(255,157,0,.12);
-  --stroke:        rgba(255,255,255,.08);
-  --stroke-hover:  rgba(255,255,255,.16);
-  --stroke-active: rgba(255,157,0,.55);
-  --danger:  #ff5c5c;
-  --success: #34c77b;
-  --radius-sm: 12px;
-  --radius-md: 16px;
-  --radius-lg: 20px;
-  --shadow-card: 0 1px 0 rgba(255,255,255,.03) inset;
-}
-*{ margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
-html,body{ min-height:100%; }
-html{ overflow-y:auto; }
-body{
-  background:
-    radial-gradient(800px 360px at 15% -10%, rgba(255,157,0,.12), transparent 56%),
-    radial-gradient(700px 320px at 110% 0%, rgba(255,90,0,.10), transparent 55%),
-    var(--bg);
-  color:var(--text);
-  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,sans-serif;
-  font-size:15px; line-height:1.45;
-  -webkit-font-smoothing:antialiased;
-  overflow-x:hidden;
-  overflow-y:auto;
-  padding-bottom:220px;
-}
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Видео будущего — настройки</title>
+  <style>
+    :root{
+      --bg:#050505;
+      --card:#101010;
+      --card2:#15110b;
+      --text:#f6f0e8;
+      --muted:#b9aa96;
+      --stroke:rgba(255,170,0,.16);
+      --accent:#ff9d00;
+      --accent2:#ff5a00;
+      --danger:#ff4d4d;
+      --shadow:0 12px 30px rgba(0,0,0,.45);
+      --radius:18px;
+    }
+    *{ box-sizing:border-box; }
+    body{
+      margin:0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "Apple Color Emoji","Segoe UI Emoji";
+      background: radial-gradient(1000px 420px at 25% -10%, rgba(255,157,0,.16), transparent 60%),
+                  radial-gradient(900px 420px at 110% 0%, rgba(255,90,0,.14), transparent 55%),
+                  linear-gradient(180deg, #070707 0%, var(--bg) 55%, #030303 100%);
+      color:var(--text);
+      padding: 18px 16px 88px;
+    }
+    .wrap{ max-width: 520px; margin: 0 auto; }
+    .title{
+      display:flex; align-items:center; gap:10px;
+      font-weight:800; letter-spacing:.2px;
+      font-size: 20px;
+      margin: 6px 0 14px;
+      flex-wrap: wrap;
+    }
+    .badge{
+      font-size:12px; color:var(--muted);
+      border:1px solid var(--stroke);
+      padding:4px 10px; border-radius:999px;
+      background: rgba(255,255,255,.02);
+    }
 
-/* ============================================================
-   ШАПКА + ШАГИ
-============================================================ */
-.header{ padding:18px 20px 6px; text-align:center; position:relative; }
-.header h1{ font-size:18px; font-weight:700; letter-spacing:-.2px; }
-.header p{ font-size:13px; color:var(--text-muted); margin-top:2px; }
-.top-back{
-  position:absolute; left:16px; top:14px; z-index:5;
-  width:42px; height:42px; border-radius:15px;
-  display:none; align-items:center; justify-content:center;
-  background:rgba(28,28,33,.82); border:1px solid var(--stroke);
-  color:var(--text); font-family:inherit; font-size:25px; line-height:1;
-  cursor:pointer; box-shadow:var(--shadow-card); backdrop-filter:blur(10px);
-  transition:transform .15s ease, border-color .15s ease, background .15s ease, opacity .2s;
-}
-.top-back:active{ transform:scale(.94); background:var(--surface-3); border-color:var(--stroke-hover); }
-@media (max-width:360px){ .top-back{ left:12px; top:13px; width:38px; height:38px; border-radius:13px; font-size:23px; } }
-.model-context{
-  display:none; align-items:center; justify-content:center;
-  width:max-content; max-width:calc(100vw - 40px);
-  margin:10px auto 0; padding:7px 12px;
-  border-radius:999px; border:1px solid var(--stroke-active);
-  background:var(--accent-soft); color:var(--accent);
-  font-size:12px; font-weight:750; line-height:1.15;
-  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-}
-.model-context.visible{ display:flex; }
-.steps{ display:flex; align-items:center; justify-content:center; gap:0; padding:16px 40px 8px; }
-.step{
-  width:28px; height:28px; flex:none; border-radius:50%;
-  display:flex; align-items:center; justify-content:center;
-  font-size:12px; font-weight:700;
-  background:var(--surface-2); color:var(--text-dim);
-  border:1px solid var(--stroke); transition:all .3s ease;
-}
-.step.active{ background:var(--accent); color:#1a1000; border-color:var(--accent); box-shadow:0 0 0 4px var(--accent-soft); }
-.step.done{ background:var(--surface-2); color:var(--accent); border-color:var(--stroke-active); }
-.step-line{ flex:1; height:1px; background:var(--stroke); margin:0 6px; transition:background .3s ease; }
-.step-line.done{ background:var(--stroke-active); }
-.step-labels{ display:flex; justify-content:space-between; padding:0 28px 4px; max-width:340px; margin:0 auto; }
-.step-labels span{ font-size:11px; color:var(--text-dim); width:33%; text-align:center; transition:color .3s ease; }
-.step-labels span.active{ color:var(--text); font-weight:600; }
+    .card{
+      background: linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02));
+      border:1px solid var(--stroke);
+      border-radius: var(--radius);
+      padding: 14px 14px 12px;
+      box-shadow: 0 8px 18px rgba(0,0,0,.45);
+      margin: 10px 0;
+    }
+    .card h3{
+      margin:0 0 10px;
+      font-size:14px;
+      font-weight:700;
+      color: var(--muted);
+      letter-spacing:.25px;
+      text-transform: uppercase;
+    }
 
-/* ============================================================
-   ЭКРАНЫ
-============================================================ */
-.screen{ display:none; padding:8px 16px 180px; max-width:480px; margin:0 auto; }
-.screen.visible{ display:block; }
-.screen.visible .card, .screen.visible .provider-tabs{ animation:fadeUp .35s ease both; }
-.screen.visible .card:nth-child(2){ animation-delay:.05s; }
-.screen.visible .card:nth-child(3){ animation-delay:.1s; }
-.screen.visible .card:nth-child(4){ animation-delay:.15s; }
-.screen.visible .card:nth-child(5){ animation-delay:.2s; }
-@keyframes fadeUp{ from{ opacity:0; transform:translateY(10px); } to{ opacity:1; transform:none; } }
-.screen.no-anim .card, .screen.no-anim .provider-tabs{ animation:none !important; }
-#screen2.screen.visible .card, #screen2.screen.visible .provider-tabs{ animation:none !important; }
-#screen2 .card{ animation:none !important; }
-#screen2.mode-refreshing, #screen2.mode-refreshing *{ animation:none !important; transition:none !important; }
+    /* Segmented controls */
+    .seg{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap:10px;
+    }
+    .seg.cols3{
+      grid-template-columns: 1fr 1fr 1fr;
+    }
+    .seg.cols4{
+      grid-template-columns: 1fr 1fr;
+    }
+    @media (min-width:560px){ .seg.cols4{ grid-template-columns: 1fr 1fr 1fr 1fr; } }
+    .seg input{ display:none; }
+    .seg label{
+      cursor:pointer;
+      user-select:none;
+      background: rgba(255,255,255,.03);
+      border:1px solid var(--stroke);
+      border-radius: 14px;
+      padding: 12px 12px;
+      display:flex;
+      flex-direction:column;
+      gap:4px;
+      transition: transform .06s ease, border-color .15s ease, background .15s ease, box-shadow .15s ease;
+    }
+    .seg label:active{ transform: scale(.99); }
+    .seg .name{ font-weight:800; font-size:15px; }
+    .seg .desc{ font-size:12px; color: var(--muted); line-height:1.25; }
 
-/* ============================================================
-   КАРТОЧКИ
-============================================================ */
-.card{
-  background:var(--surface);
-  border:1px solid var(--stroke);
-  border-radius:var(--radius-lg);
-  padding:16px;
-  margin-bottom:12px;
-  box-shadow:var(--shadow-card);
-}
-.card-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:12px; }
-.card-title{ font-size:13px; font-weight:600; color:var(--text-muted); }
-.card-hint{ font-size:12px; color:var(--text-dim); margin-top:8px; line-height:1.35; }
-.info-btn{
-  width:24px; height:24px; border-radius:50%;
-  background:var(--surface-2); border:1px solid var(--stroke);
-  color:var(--text-muted); font-size:12px; cursor:pointer;
-  display:flex; align-items:center; justify-content:center; transition:all .15s ease;
-}
-.info-btn:active{ transform:scale(.92); background:var(--surface-3); }
+    /* Seedance legacy segtitle/segsub (kept for backward compatibility) */
+    .seg .segtitle{ font-weight:800; font-size:15px; }
+    .seg .segsub{ font-size:12px; color: var(--muted); line-height:1.25; }
 
-/* ============================================================
-   ТАБЫ ПРОВАЙДЕРОВ
-============================================================ */
-.provider-tabs{
-  display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:6px;
-  background:var(--surface); border:1px solid var(--stroke);
-  border-radius:var(--radius-md); padding:4px; margin-bottom:12px;
-}
-.provider-tab{
-  padding:9px 4px; border:none; border-radius:11px;
-  background:transparent; color:var(--text-muted);
-  font-size:13px; font-weight:600; cursor:pointer; font-family:inherit;
-  transition:all .2s ease; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-}
-.provider-tab.active{ background:var(--surface-3); color:var(--text); box-shadow:0 2px 8px rgba(0,0,0,.3); }
-@media (max-width:360px){ .provider-tab{ font-size:12px; padding:8px 2px; } }
+    .seg input:checked + label{
+      border-color: rgba(255,157,0,.55);
+      background: linear-gradient(180deg, rgba(255,157,0,.18), rgba(255,90,0,.10));
+      box-shadow: 0 10px 22px rgba(255,157,0,.12);
+    }
 
-/* ============================================================
-   КАРТОЧКИ МОДЕЛЕЙ
-============================================================ */
-.model-grid{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }
-.model-grid input{ display:none; }
-.model-card{
-  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:5px;
-  min-height:104px; padding:16px 8px 13px;
-  background:var(--surface-2); border:1px solid var(--stroke);
-  border-radius:var(--radius-md); cursor:pointer; text-align:center;
-  transition:all .2s ease;
-}
-.model-card:active{ transform:scale(.97); }
-.model-icon{ font-size:24px; line-height:1; }
-.model-name{ font-size:14px; font-weight:650; line-height:1.15; }
-.model-tag{ font-size:11px; color:var(--text-dim); line-height:1.2; }
-input:checked + .model-card{
-  border-color:var(--accent);
-  background:linear-gradient(180deg, var(--accent-soft), transparent 70%), var(--surface-2);
-}
-input:checked + .model-card .model-tag{ color:var(--accent); }
+    .row{
+      display:flex; gap:10px; flex-wrap:wrap;
+    }
 
-/* ============================================================
-   СЕГМЕНТ-КОНТРОЛЫ
-============================================================ */
-.segment{ display:flex; gap:8px; flex-wrap:wrap; }
-.segment input{ display:none; }
-.seg-item{
-  flex:1; min-width:72px;
-  padding:11px 8px; text-align:center;
-  background:var(--surface-2); border:1px solid var(--stroke);
-  border-radius:var(--radius-sm); font-size:13px; font-weight:600; color:var(--text-muted);
-  cursor:pointer; transition:all .18s ease;
-  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px;
-}
-.seg-item small{ font-size:10px; font-weight:400; color:var(--text-dim); line-height:1.15; }
-.seg-item:active{ transform:scale(.96); }
-input:checked + .seg-item{ border-color:var(--accent); color:var(--text); background:var(--accent-soft); }
-input:checked + .seg-item small{ color:var(--accent); }
+    /* Select */
+    select{
+      width:100%;
+      padding: 12px 44px 12px 14px;
+      border-radius: 14px;
+      border:1px solid rgba(255,255,255,.14);
+      background-color: #05070d;
+      color: #ffffff;
+      outline:none;
+      font-size: 15px;
+      font-weight: 600;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.03);
+      -webkit-appearance: none;
+      appearance: none;
+      background-image:
+        linear-gradient(45deg, transparent 50%, #ffffff 50%),
+        linear-gradient(135deg, #ffffff 50%, transparent 50%);
+      background-position:
+        calc(100% - 18px) calc(50% - 3px),
+        calc(100% - 12px) calc(50% - 3px);
+      background-size: 6px 6px, 6px 6px;
+      background-repeat: no-repeat;
+    }
+    select:hover{
+      border-color: rgba(255,255,255,.24);
+      background-color: #0a0d14;
+    }
+    select:focus{
+      border-color: rgba(255,157,0,.75);
+      box-shadow: 0 0 0 3px rgba(255,157,0,.14), inset 0 1px 0 rgba(255,255,255,.03);
+    }
+    select option{
+      background: #05070d;
+      color: #ffffff;
+    }
 
-/* ============================================================
-   SWITCH / SHOTS / TEXTAREA
-============================================================ */
-.toggle-row{
-  display:flex; align-items:center; justify-content:space-between; gap:12px;
-  background:var(--surface-2); border:1px solid var(--stroke);
-  border-radius:var(--radius-sm); padding:12px 14px; margin-top:8px;
-}
-.toggle-row:first-child{ margin-top:0; }
-.toggle-title{ font-size:14px; font-weight:650; }
-.toggle-desc{ font-size:11px; color:var(--text-dim); margin-top:2px; line-height:1.25; }
-.toggle-row input[type="checkbox"]{ width:22px; height:22px; accent-color:var(--accent); flex:none; }
-.toggle-row input[type="checkbox"][disabled]{ opacity:.35; }
-textarea, .mini-input{
-  width:100%; resize:vertical;
-  background:var(--surface-2); border:1px solid var(--stroke);
-  border-radius:var(--radius-sm); color:var(--text); font-family:inherit; font-size:14px;
-  padding:12px 14px; outline:none; transition:border-color .2s ease;
-}
-textarea{ min-height:96px; }
-textarea::placeholder, .mini-input::placeholder{ color:var(--text-dim); }
-textarea:focus, .mini-input:focus{ border-color:var(--stroke-active); }
-.char-count{ font-size:11px; color:var(--text-dim); text-align:right; margin-top:6px; }
-.shot-card{ padding:12px; border:1px solid var(--stroke); background:var(--surface-2); border-radius:var(--radius-md); margin-top:10px; }
-.shot-head{ display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; color:var(--text-muted); font-size:12px; font-weight:650; }
-.shot-duration{ width:110px; padding:8px; border-radius:10px; border:1px solid var(--stroke); background:var(--surface-3); color:var(--text); outline:none; }
-.mini-actions{ display:flex; gap:8px; margin-top:10px; }
-.mini-btn{ border:1px solid var(--stroke); background:var(--surface-2); color:var(--text-muted); border-radius:999px; padding:9px 12px; font-family:inherit; font-weight:650; cursor:pointer; }
-.mini-btn.primary{ border-color:rgba(255,157,0,.35); color:var(--accent); background:var(--accent-soft); }
-.mini-btn.danger{ border-color:rgba(255,92,92,.35); color:#ffb3b3; background:rgba(255,92,92,.08); }
-.filepick{
-  display:flex; align-items:center; justify-content:center;
-  width:100%; margin-top:10px; padding:11px 12px;
-  border-radius:var(--radius-sm); border:1px dashed rgba(255,157,0,.36);
-  background:var(--accent-soft); color:var(--accent); font-size:13px; font-weight:700;
-  cursor:pointer; text-align:center;
-}
-.upload-status{ margin-top:7px; min-height:15px; font-size:11px; color:var(--text-dim); line-height:1.25; }
-.upload-status.good{ color:var(--success); }
-.upload-status.bad{ color:var(--danger); }
-.element-chip{
-  display:flex; align-items:center; justify-content:space-between; gap:8px;
-  margin-top:8px; padding:8px 10px; border-radius:var(--radius-sm);
-  background:rgba(255,255,255,.035); border:1px solid var(--stroke);
-  font-size:12px; color:var(--text-muted);
-}
-.element-chip b{ color:var(--text); }
+    /* Textarea / prompt input */
+    textarea{
+      width:100%;
+      min-height:96px;
+      padding: 14px 16px;
+      border-radius: 16px;
+      border:1px solid rgba(255,255,255,.14);
+      background: linear-gradient(180deg, rgba(4,8,18,.96), rgba(10,16,30,.98));
+      color: #eef4ff;
+      outline:none;
+      font-size: 14px;
+      line-height: 1.5;
+      font-family: inherit;
+      resize: vertical;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.03), inset 0 0 0 1px rgba(255,255,255,.02);
+      transition: border-color .15s ease, box-shadow .15s ease, background .15s ease, transform .06s ease;
+    }
+    textarea::placeholder{
+      color: #8ea2cc;
+    }
+    textarea:hover{
+      border-color: rgba(255,255,255,.22);
+      background: linear-gradient(180deg, rgba(7,12,24,.98), rgba(12,19,35,1));
+    }
+    textarea:focus{
+      border-color: rgba(255,157,0,.75);
+      background: linear-gradient(180deg, rgba(8,14,28,1), rgba(12,21,40,1));
+      box-shadow: 0 0 0 3px rgba(255,157,0,.14), inset 0 1px 0 rgba(255,255,255,.04);
+    }
+    textarea::-webkit-scrollbar{
+      width:10px;
+    }
+    textarea::-webkit-scrollbar-thumb{
+      background: rgba(255,255,255,.14);
+      border-radius: 999px;
+      border:2px solid rgba(0,0,0,0);
+      background-clip: padding-box;
+    }
+    .field-title{
+      margin: 12px 0 8px;
+      font-size: 13px;
+      font-weight: 700;
+      color: #dfe8ff;
+      letter-spacing: .2px;
+    }
 
-/* ============================================================
-   ИТОГ
-============================================================ */
-.summary-row{ display:flex; justify-content:space-between; align-items:center; gap:16px; padding:11px 0; border-bottom:1px solid var(--stroke); font-size:14px; }
-.summary-row:last-child{ border-bottom:none; }
-.summary-row span{ color:var(--text-muted); }
-.summary-row b{ font-weight:600; text-align:right; }
-.summary-row.total{ padding-top:14px; }
-.summary-row.total span{ color:var(--text); font-weight:600; }
-.summary-row.total b{ color:var(--accent); font-size:17px; font-weight:700; }
-.prompt-preview{ background:var(--surface-2); border:1px solid var(--stroke); border-radius:var(--radius-sm); padding:12px 14px; font-size:13px; color:var(--text-muted); margin-top:4px; word-break:break-word; max-height:110px; overflow:auto; }
-.prompt-preview.empty{ color:var(--text-dim); font-style:italic; }
-.debug{ display:none; white-space:pre-wrap; word-break:break-word; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:11px; color:#9fb6ff; }
-.debug.show{ display:block; }
+    .hint{
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.35;
+    }
 
-/* ============================================================
-   НИЖНЯЯ ПАНЕЛЬ
-============================================================ */
-.bottom-bar{
-  position:fixed; left:0; right:0; bottom:0; z-index:20;
-  padding:12px 16px calc(12px + env(safe-area-inset-bottom));
-  background:linear-gradient(180deg, transparent, var(--bg) 30%);
-  display:flex; gap:0; max-width:480px; margin:0 auto;
-  pointer-events:none;
-}
-.bottom-bar .btn{ pointer-events:auto; }
-.btn{ flex:1; padding:15px; border:none; cursor:pointer; border-radius:14px; font-family:inherit; font-size:15px; font-weight:700; transition:transform .15s ease, box-shadow .15s ease, opacity .2s; }
-.btn:active{ transform:scale(.98); }
-.btn-primary{ background:linear-gradient(180deg, #ffb340, #ff9d00); color:#1a1000; box-shadow:0 4px 16px rgba(255,157,0,.25); }
-.btn-primary:disabled{ opacity:.45; box-shadow:none; }
-.btn-ghost{ flex:0 0 auto; width:54px; background:var(--surface-2); color:var(--text-muted); border:1px solid var(--stroke); }
-.bottom-bar.tg-native{ display:none; }
+    /* Toggle */
+    .toggle{
+      display:flex;
+      align-items:center;
+      justify-content: space-between;
+      gap:12px;
+      padding: 10px 12px;
+      border-radius: 14px;
+      border:1px solid var(--stroke);
+      background: rgba(255,255,255,.03);
+      margin-top: 10px;
+    }
+    .toggle .tname{
+      font-weight:800;
+      font-size: 14px;
+    }
+    .toggle .tdesc{
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 2px;
+      line-height: 1.25;
+    }
+    .toggle .left{
+      display:flex;
+      flex-direction:column;
+      gap:2px;
+    }
+    .toggle input[type="checkbox"]{
+      width: 22px; height: 22px;
+      accent-color: var(--accent);
+    }
+    .toggle input[type="checkbox"][disabled]{
+      opacity: .35;
+      cursor: not-allowed;
+    }
+    .disabled-note{
+      font-size: 11px;
+      color: rgba(190,205,240,.75);
+      margin-top: 6px;
+    }
 
-/* ============================================================
-   BOTTOM SHEET / TOAST
-============================================================ */
-.sheet-overlay{ position:fixed; inset:0; background:rgba(0,0,0,.6); opacity:0; pointer-events:none; transition:opacity .25s ease; z-index:50; }
-.sheet-overlay.open{ opacity:1; pointer-events:auto; }
-.sheet{ position:fixed; left:0; right:0; bottom:0; z-index:51; background:var(--surface); border-radius:var(--radius-lg) var(--radius-lg) 0 0; border-top:1px solid var(--stroke); padding:10px 20px calc(24px + env(safe-area-inset-bottom)); transform:translateY(105%); transition:transform .3s cubic-bezier(.32,.72,.25,1); max-width:480px; margin:0 auto; }
-.sheet.open{ transform:none; }
-.sheet-grip{ width:36px; height:4px; border-radius:2px; background:var(--stroke-hover); margin:0 auto 16px; }
-.sheet h3{ font-size:16px; font-weight:700; margin-bottom:10px; }
-.sheet p{ font-size:14px; color:var(--text-muted); margin-bottom:8px; }
-.sheet p b{ color:var(--text); font-weight:600; }
-.toast{ position:fixed; top:14px; left:50%; transform:translate(-50%,-80px); background:var(--surface-3); border:1px solid var(--stroke); color:var(--text); font-size:13px; font-weight:600; padding:10px 18px; border-radius:99px; z-index:60; transition:transform .3s cubic-bezier(.32,.72,.25,1); box-shadow:0 8px 24px rgba(0,0,0,.4); max-width:calc(100vw - 32px); text-align:center; }
-.toast.show{ transform:translate(-50%,0); }
-</style>
+    /* Advanced details */
+    details.adv{
+      margin-top:10px;
+      border:1px dashed rgba(170,190,255,.22);
+      border-radius: 14px;
+      padding: 10px 12px;
+      background: rgba(0,0,0,.12);
+    }
+    details.adv summary{
+      cursor:pointer;
+      font-weight:800;
+      color: rgba(200,220,255,.95);
+      list-style:none;
+    }
+    details.adv summary::-webkit-details-marker{ display:none; }
+    .adv .hint{ margin-top: 8px; }
+
+    /* Bottom action bar */
+    
+    .bar{
+      position: fixed;
+      left:0; right:0; bottom:0;
+      padding: 14px 16px calc(14px + env(safe-area-inset-bottom));
+      background: linear-gradient(180deg, rgba(6,11,22,0), rgba(0,0,0,.85) 35%, rgba(0,0,0,.96));
+      backdrop-filter: blur(14px);
+    }
+
+    .bar .inner{ max-width: 520px; margin:0 auto; }
+    
+    .btn{
+      width:100%;
+      border:0;
+      border-radius: 18px;
+      padding: 16px 16px;
+      font-weight: 900;
+      font-size: 16px;
+      cursor:pointer;
+      color: #000;
+      background: linear-gradient(90deg, #ffcc00, #ff8800, #ffcc00);
+      background-size: 200% 200%;
+      box-shadow: 
+        0 0 12px rgba(255,170,0,.6),
+        0 0 24px rgba(255,140,0,.4),
+        0 12px 28px rgba(0,0,0,.45);
+      transition: transform .08s ease, filter .2s ease;
+      animation: neonFlow 3s ease infinite;
+      letter-spacing:.3px;
+    }
+    @keyframes neonFlow{
+      0%{ background-position: 0% 50%; }
+      50%{ background-position: 100% 50%; }
+      100%{ background-position: 0% 50%; }
+    }
+    .btn:active{ transform: scale(.99); }
+    
+    .btn[disabled]{
+      background: linear-gradient(90deg, #777, #555);
+      box-shadow:none;
+      filter: grayscale(.6) brightness(.8);
+      cursor:not-allowed;
+      animation:none;
+    }
+
+    /* Small action buttons inside dynamic blocks */
+    .mini{
+      appearance:none;
+      -webkit-appearance:none;
+      border:1px solid rgba(255,157,0,.32);
+      border-radius:999px;
+      padding:10px 14px;
+      min-height:38px;
+      background: linear-gradient(180deg, rgba(255,157,0,.20), rgba(255,90,0,.10));
+      color:#dceaff;
+      font-family:inherit;
+      font-size:13px;
+      font-weight:800;
+      line-height:1;
+      cursor:pointer;
+      box-shadow: 0 8px 18px rgba(0,0,0,.26), inset 0 1px 0 rgba(255,255,255,.05);
+      transition: transform .08s ease, border-color .15s ease, background .15s ease, box-shadow .15s ease, color .15s ease;
+      white-space:nowrap;
+    }
+    .mini:hover{
+      border-color: rgba(255,157,0,.62);
+      background: linear-gradient(180deg, rgba(255,157,0,.30), rgba(255,90,0,.16));
+      box-shadow: 0 10px 22px rgba(255,157,0,.12), 0 8px 18px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.08);
+      color:#ffffff;
+    }
+    .mini:focus-visible{
+      outline:none;
+      border-color: rgba(255,157,0,.78);
+      box-shadow: 0 0 0 3px rgba(255,157,0,.16), 0 10px 22px rgba(255,157,0,.12);
+    }
+    .mini:active{
+      transform: translateY(1px) scale(.99);
+    }
+    #k3n_add_shot_btn{
+      border-color: rgba(255,157,0,.45);
+      background: linear-gradient(180deg, rgba(255,157,0,.28), rgba(255,90,0,.14));
+    }
+    #k3n_remove_shot_btn{
+      border-color: rgba(255,120,120,.26);
+      background: linear-gradient(180deg, rgba(255,120,120,.13), rgba(255,120,120,.06));
+      color:#ffd9d9;
+    }
+    #k3n_remove_shot_btn:hover{
+      border-color: rgba(255,120,120,.48);
+      background: linear-gradient(180deg, rgba(255,120,120,.20), rgba(255,120,120,.09));
+      box-shadow: 0 10px 22px rgba(255,80,80,.10), 0 8px 18px rgba(0,0,0,.28);
+    }
+
+    .mini-input{
+      width:100%;
+      margin-top:8px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border:1px solid rgba(255,255,255,.14);
+      background: rgba(0,0,0,.20);
+      color: var(--text);
+      outline:none;
+    }
+    .mini-input::placeholder{ color: rgba(220,230,255,.55); }
+    .filepick{
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      width:100%;
+      margin-top:8px;
+      padding: 12px 14px;
+      min-height:42px;
+      border-radius: 14px;
+      border:1px dashed rgba(255,157,0,.34);
+      background: linear-gradient(180deg, rgba(255,157,0,.10), rgba(255,255,255,.025));
+      color: #bcd4ff;
+      font-size:13px;
+      font-weight:800;
+      transition: border-color .15s ease, background .15s ease, color .15s ease, box-shadow .15s ease, transform .08s ease;
+    }
+    .filepick:hover{
+      border-color: rgba(255,157,0,.62);
+      background: linear-gradient(180deg, rgba(255,157,0,.18), rgba(255,255,255,.04));
+      color:#ffffff;
+      box-shadow: 0 10px 22px rgba(255,157,0,.10);
+    }
+    .filepick:active{
+      transform: translateY(1px) scale(.99);
+    }
+    .upload-status{
+      margin-top:6px;
+      font-size:11px;
+      line-height:1.3;
+      color: rgba(190,205,240,.82);
+      word-break: break-word;
+    }
+    .upload-status.good{ color:#8df0a5; }
+    .upload-status.bad{ color:#ff9a9a; }
+
+    .toast{
+      margin-top:10px;
+      padding: 10px 12px;
+      border-radius: 14px;
+      border:1px solid var(--stroke);
+      background: rgba(255,255,255,.03);
+      color: var(--muted);
+      font-size: 12px;
+      display:none;
+    }
+    .toast.show{ display:block; }
+
+    .debug{
+      margin-top:10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+      color: rgba(180,200,255,.85);
+      opacity:.9;
+      display:none;
+      word-break: break-word;
+      white-space: pre-wrap;
+    }
+    .debug.show{ display:block; }
+
+    /* ===================== Provider compact tabs (Nabex style) ===================== */
+    .providerCard{
+      padding: 10px 10px 8px !important;
+      background: linear-gradient(180deg, rgba(255,157,0,.055), rgba(255,255,255,.018));
+      border-color: rgba(255,170,0,.18);
+    }
+    .providerCard h3{
+      margin-bottom: 8px !important;
+      color: #f5d19a;
+    }
+    .seg.providerSeg{
+      display:grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap:8px;
+      overflow:visible;
+      padding: 2px 0 0;
+      margin: 0;
+      scroll-snap-type:none;
+    }
+    .seg.providerSeg::-webkit-scrollbar{ display:none; }
+    .seg.providerSeg{ scrollbar-width:none; }
+
+    .seg.providerSeg label{
+      min-width: 0;
+      height: 52px;
+      padding: 0 8px;
+      border-radius: 14px;
+      overflow: hidden;
+      position: relative;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      background: linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.025));
+      border:1px solid rgba(255,170,0,.14);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.045), 0 6px 14px rgba(0,0,0,.20);
+    }
+
+    .seg.providerSeg label .pimg,
+    .seg.providerSeg label .pfill,
+    .seg.providerSeg label .poverlay,
+    .seg.providerSeg label .pnote{
+      display:none;
+    }
+
+    .seg.providerSeg label .ptxt{
+      position:static;
+      inset:auto;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      gap:0;
+      width:auto;
+    }
+
+    .seg.providerSeg label .pname{
+      font-weight:900;
+      font-size: 15px;
+      line-height:1.1;
+      letter-spacing:0;
+      color:#e9dfd2;
+      text-shadow:none;
+      white-space:nowrap;
+      overflow:visible;
+      text-overflow:clip;
+      max-width:100%;
+    }
+
+    @media (max-width: 360px){
+      .seg.providerSeg{ gap:6px; }
+      .seg.providerSeg label{ height:48px; padding:0 6px; border-radius:12px; }
+      .seg.providerSeg label .pname{ font-size:14px; letter-spacing:-.15px; }
+    }
+
+    .seg.providerSeg input:checked + label{
+      border-color: rgba(255,170,0,.78);
+      background: linear-gradient(180deg, rgba(255,157,0,.26), rgba(255,90,0,.13));
+      box-shadow: 0 0 0 1px rgba(255,157,0,.12), 0 10px 24px rgba(255,120,0,.16), inset 0 1px 0 rgba(255,255,255,.08);
+    }
+    .seg.providerSeg input:checked + label .pname{
+      color:#fff7e8;
+    }
+
+    .seg.providerSeg label:hover{
+      border-color: rgba(255,170,0,.38);
+      background: linear-gradient(180deg, rgba(255,157,0,.13), rgba(255,255,255,.03));
+    }
+
+    .seg.providerSeg label:active{
+      transform: translateY(1px) scale(.99);
+    }
+
+    /* ===================== Desktop (Telegram Desktop) button fix ===================== */
+    /* Telegram Desktop often renders a narrow viewport (<768px), so min-width media queries won't trigger.
+       We switch to desktop styling via a runtime class + pointer:fine fallback. */
+
+    .is-desktop .bar .inner{
+      display:flex;
+      justify-content:center;
+    }
+    .is-desktop .btn{
+      width:auto;
+      min-width:300px;
+      max-width:420px;
+      padding:14px 26px;
+      font-size:15px;
+      border-radius:16px;
+      white-space: normal;
+      line-height: 1.15;
+      text-align:center;
+    }
+    .is-desktop body{ padding-bottom: 96px; }
+
+    /* Fallback for desktop browsers even if we fail to set the class */
+    @media (pointer: fine){
+      .bar .inner{
+        display:flex;
+        justify-content:center;
+      }
+      .btn{
+        width:auto;
+        min-width:300px;
+        max-width:420px;
+        padding:14px 26px;
+        font-size:15px;
+        border-radius:16px;
+        white-space: normal;
+        line-height: 1.15;
+        text-align:center;
+      }
+    }
+
+  </style>
+
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
+  <div class="wrap">
 
-<div class="header">
-  <button class="top-back" id="btnBack" type="button" onclick="goBack()" aria-label="Назад">←</button>
-  <h1 id="headerTitle">Генерация видео</h1>
-  <p id="headerSub">Выберите модель</p>
-  <div class="model-context" id="modelContext"></div>
-</div>
+    <!-- Provider compact tabs -->
+    <div class="card providerCard" style="padding:12px 12px 10px;">
+      <h3 style="margin-bottom:8px;">Модель видео</h3>
+      <div class="seg providerSeg" role="radiogroup" aria-label="Провайдер">
+        <input id="provider_kling" type="radio" name="provider" value="kling">
+        <label for="provider_kling" aria-label="Kling">
+          <img class="pimg" src="/static/img/providers/kling.png" alt="Kling">
+          <div class="poverlay"></div>
+          <div class="ptxt">
+            <div class="pname">Kling</div>
+          </div>
+        </label>
 
-<div class="steps">
-  <div class="step active" id="stepDot1">1</div>
-  <div class="step-line" id="line1"></div>
-  <div class="step" id="stepDot2">2</div>
-  <div class="step-line" id="line2"></div>
-  <div class="step" id="stepDot3">3</div>
-</div>
-<div class="step-labels">
-  <span class="active" id="stepLbl1">Модель</span>
-  <span id="stepLbl2">Параметры</span>
-  <span id="stepLbl3">Запуск</span>
-</div>
 
-<section class="screen visible" id="screen1">
-  <div class="provider-tabs" id="providerTabs"></div>
-  <div class="card">
-    <div class="card-head">
-      <div class="card-title">Модель</div>
-      <button class="info-btn" type="button" onclick="openSheet('models')">i</button>
+        <input id="provider_seedance" type="radio" name="provider" value="seedance" checked>
+        <label for="provider_seedance" aria-label="Seedance 2.0">
+          <img class="pimg" src="/static/img/providers/seedance.png" alt="Seedance">
+          <div class="poverlay"></div>
+          <div class="ptxt">
+            <div class="pname">Seedance</div>
+          </div>
+        </label>
+
+        <input id="provider_veo" type="radio" name="provider" value="veo">
+        <label for="provider_veo" aria-label="Veo 3">
+          <img class="pimg" src="/static/img/providers/veo3.png" alt="Veo 3">
+          <div class="poverlay"></div>
+          <div class="ptxt">
+            <div class="pname">Veo</div>
+            <div class="pnote">Работает</div>
+          </div>
+        </label>
+
+        <input id="provider_grok" type="radio" name="provider" value="grok">
+        <label for="provider_grok" aria-label="Grok">
+          <img class="pimg" src="/static/img/providers/grok.png" alt="Grok">
+          <div class="poverlay"></div>
+          <div class="ptxt">
+            <div class="pname">Grok</div>
+            <div class="pnote">Video</div>
+          </div>
+        </label>
+
+        <input id="provider_google" type="radio" name="provider" value="google">
+        <label for="provider_google" aria-label="Google">
+          <img class="pimg" src="/static/img/providers/google.png" alt="Google">
+          <div class="poverlay"></div>
+          <div class="ptxt">
+            <div class="pname">Google</div>
+            <div class="pnote">Omni Flash</div>
+          </div>
+        </label>
+
+        <input id="provider_sora" type="radio" name="provider" value="sora">
+        <label for="provider_sora" aria-label="Sora 2">
+          <img class="pimg" src="/static/img/providers/sora2.png" alt="Sora 2">
+          <div class="poverlay"></div>
+          <div class="ptxt">
+            <div class="pname">Sora</div>
+            <div class="pnote">OpenAI</div>
+          </div>
+        </label>
+      </div>
+      <div class="hint">Выбери модель, настрой параметры и нажми “Сохранить”.</div>
     </div>
-    <div class="model-grid" id="modelGrid"></div>
+
+    <!-- ===================== KLING BLOCK ===================== -->
+    <div id="klingBlock" style="display:none;">
+      <div class="card">
+        <h3>Kling — версия</h3>
+        <div class="seg cols3" role="radiogroup" aria-label="Версия Kling">
+          <input id="kling_v16" type="radio" name="kling_version" value="1_6" checked>
+          <label for="kling_v16">
+            <span class="name">Motion Control</span>
+            <span class="desc">2.6 / 3.0</span>
+          </label>
+
+          <input id="kling_v25" type="radio" name="kling_version" value="2_5">
+          <label for="kling_v25">
+            <span class="name">2.5 Turbo Pro</span>
+            <span class="desc">Text / Image → Video</span>
+          </label>
+
+          <input id="kling_v30_new" type="radio" name="kling_version" value="3_0_new">
+          <label for="kling_v30_new">
+            <span class="name">3.0 - New</span>
+            <span class="desc">3.0 / shots / refs</span>
+          </label>
+        </div>
+        <div class="hint">Motion Control: 2.6 , 3.0 —720p / 1080p.</div>
+      </div>
+
+      <div class="card" id="kling3Options" style="display:none;" hidden>
+        <h3>Kling PRO 3.0 — настройки отключены</h3>
+        <div style="margin-top:10px;">
+          <label class="badge" style="display:inline-block;margin-bottom:8px;">Режим</label>
+        </div>
+
+
+        <div class="seg" role="radiogroup" aria-label="Режим Kling 3.0">
+          <input id="k3_mode_i2v" type="radio" name="kling3_gen_mode" value="i2v" checked>
+          <label for="k3_mode_i2v">
+            <span class="name">Image → Video</span>
+            <span class="desc">Фото → промпт → видео</span>
+          </label>
+
+          <input id="k3_mode_t2v" type="radio" name="kling3_gen_mode" value="t2v">
+          <label for="k3_mode_t2v">
+            <span class="name">Text → Video</span>
+            <span class="desc">Только промпт</span>
+          </label>
+        </div>
+        <div class="hint" style="margin-top:10px;"><b>Text → Video</b>: напиши текст → получи видео.<br><b>Image → Video</b>: загрузи фото → опиши действия → получи видео.</div>
+
+        <div style="margin-top:14px;">
+          <label class="badge" style="display:inline-block;margin-bottom:8px;">Разрешение</label>
+        </div>
+
+
+
+        <div class="seg" role="radiogroup" aria-label="Разрешение Kling 3.0">
+          <input id="k3_720" type="radio" name="kling3_resolution" value="720" checked>
+          <label for="k3_720">
+            <span class="name">720p</span>
+            <span class="desc">2 токена / сек</span>
+          </label>
+
+          <input id="k3_1080" type="radio" name="kling3_resolution" value="1080">
+          <label for="k3_1080">
+            <span class="name">1080p</span>
+            <span class="desc">2 токена / сек</span>
+          </label>
+        </div>
+
+        <div class="row" style="margin-top:12px;">
+          <div style="flex:1; min-width: 180px;">
+            <label class="badge" style="display:inline-block;margin-bottom:8px;">Формат</label>
+            <select id="kling3_aspect">
+              <option value="16:9" selected>16:9 (YouTube)</option>
+              <option value="9:16">9:16 (Reels)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="toggle" style="margin-top:12px;">
+          <div class="left">
+            <div class="tname">Multi-shot</div>
+            <div class="tdesc">Сценарий из нескольких планов (запуск по промпту). В тексте используй планы/шоты.</div>
+          </div>
+          <input id="kling3_multishot" type="checkbox">
+        </div>
+
+        <div class="toggle">
+          <div class="left">
+            <div class="tname">Audio</div>
+            <div class="tdesc">Добавляет звук к ролику. Audio = +1 токен/сек к стоимости.</div>
+          </div>
+          <input id="kling3_audio" type="checkbox">
+        </div>
+
+        <div class="row" style="margin-top:10px;">
+          <div style="flex:1; min-width: 180px;">
+            <label class="badge" style="display:inline-block;margin-bottom:8px;">Длительность (3–15 сек)</label>
+            <select id="kling3_duration">
+              <option value="3">3</option>
+              <option value="4">4</option>
+              <option value="5" selected>5</option>
+              <option value="6">6</option>
+              <option value="7">7</option>
+              <option value="8">8</option>
+              <option value="9">9</option>
+              <option value="10">10</option>
+              <option value="11">11</option>
+              <option value="12">12</option>
+              <option value="13">13</option>
+              <option value="14">14</option>
+              <option value="15">15</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="hint">Эти настройки применяются только если выбран Kling PRO 3.0.</div>
+      </div>
+      <div class="card" id="kling3NewOptions" style="display:none;">
+        <h3>Kling 3.0 - New — KIE</h3>
+        <div class="seg cols3" role="radiogroup" aria-label="Kling 3.0 New mode">
+          <input id="k3n_mode_text" type="radio" name="kling3_new_gen_mode" value="text_to_video" checked>
+          <label for="k3n_mode_text"><span class="name">Text</span><span class="desc">только prompt</span></label>
+          <input id="k3n_mode_image" type="radio" name="kling3_new_gen_mode" value="image_to_video">
+          <label for="k3n_mode_image"><span class="name">Image</span><span class="desc">start/end frame</span></label>
+          <input id="k3n_mode_multi" type="radio" name="kling3_new_gen_mode" value="multi_shot">
+          <label for="k3n_mode_multi"><span class="name">Multi-shot</span><span class="desc">shots + elements</span></label>
+        </div>
+
+        <div style="margin-top:14px;"><label class="badge" style="display:inline-block;margin-bottom:8px;">Качество</label></div>
+        <div class="seg cols3" role="radiogroup" aria-label="Kling 3.0 New quality">
+          <input id="k3n_mode_std" type="radio" name="kling3_new_quality" value="std" checked>
+          <label for="k3n_mode_std"><span class="name">Standard</span><span class="desc">1 / 1.5 ток/сек</span></label>
+          <input id="k3n_mode_pro" type="radio" name="kling3_new_quality" value="pro">
+          <label for="k3n_mode_pro"><span class="name">Pro</span><span class="desc">1.5 / 2 ток/сек</span></label>
+          <input id="k3n_mode_4k" type="radio" name="kling3_new_quality" value="4K">
+          <label for="k3n_mode_4k"><span class="name">4K</span><span class="desc">5 / 6 ток/сек</span></label>
+        </div>
+
+        <div class="row" style="margin-top:12px;">
+          <div style="flex:1; min-width: 160px;">
+            <label class="badge" style="display:inline-block;margin-bottom:8px;">Формат</label>
+            <select id="kling3_new_aspect"><option value="16:9">16:9</option><option value="9:16">9:16</option><option value="1:1">1:1</option></select>
+          </div>
+          <div style="flex:1; min-width: 160px;" id="kling3NewDurationWrap">
+            <label class="badge" style="display:inline-block;margin-bottom:8px;">Длительность</label>
+            <select id="kling3_new_duration"><option value="3">3</option><option value="5" selected>5</option><option value="10">10</option><option value="15">15</option></select>
+          </div>
+        </div>
+
+        <div class="toggle" style="margin-top:12px;">
+          <div class="left"><div class="tname">Audio</div><div class="tdesc">Включить звук. Цена зависит от качества.</div></div>
+          <input id="kling3_new_audio" type="checkbox">
+        </div>
+
+        <div id="kling3NewShotsWrap" style="display:none; margin-top:12px;">
+          <h3>Multi-shot scenes</h3>
+          <div class="hint">Заполни минимум 2 шота. Сумма 3–15 сек. Основной prompt для Multi-shot не нужен: используются только shot prompt. Image element можно загрузить прямо внутри каждого shot — на 1 element нужно минимум 2 фото и максимум 4 фото, имя вставится в prompt как @name.</div>
+          <div id="kling3NewShotsFields"></div>
+        </div>
+
+        <div id="kling3NewElementsWrap" style="display:none; margin-top:12px;"></div>
+        <div class="hint">После сохранения: Text → пришли prompt; Image → пришли стартовое фото, опционально второй кадр, затем prompt; Multi-shot → основной prompt не нужен, заполни только shot-блоки, при желании пришли общий стартовый кадр, затем отправь в боте сообщением: «СТАРТ». Elements уже будут загружены автоматически.</div>
+      </div>
+      <div class="card" id="klingFlowCard">
+        <h3 id="klingFlowTitle">Тип генерации</h3>
+        <div class="seg" role="radiogroup" aria-label="Тип генерации">
+          <input id="flow_motion" type="radio" name="flow" value="motion" checked>
+          <label for="flow_motion" id="flowMotionLabel">
+            <span class="name">2.6</span>
+            <span class="desc">Motion Control</span>
+          </label>
+
+          <input id="flow_i2v" type="radio" name="flow" value="i2v">
+          <label for="flow_i2v" id="flowI2VLabel">
+            <span class="name">3.0</span>
+            <span class="desc">720p / 1080p</span>
+          </label>
+
+          <input id="flow_t2v" type="radio" name="flow" value="t2v">
+          <label for="flow_t2v" id="flowT2VLabel" style="display:none;">
+            <span class="name">Text → Video</span>
+            <span class="desc">Только промпт</span>
+          </label>
+        </div>
+        <div class="hint" id="klingFlowHint">2.6 и 3.0 Motion Control используют одно фото персонажа + одно видео движения. Длительность берётся из референс-видео.</div>
+      </div>
+
+      <div class="card" id="klingLegacyModeCard">
+        <h3>Качество</h3>
+        <div class="seg" role="radiogroup" aria-label="Качество">
+          <input id="mode_std" type="radio" name="mode" value="std" checked>
+          <label for="mode_std">
+            <span class="name">Standard</span>
+            <span class="desc">Быстрее / дешевле</span>
+          </label>
+
+          <input id="mode_pro" type="radio" name="mode" value="pro">
+          <label for="mode_pro">
+            <span class="name">Pro</span>
+            <span class="desc">Лучше качество</span>
+          </label>
+        </div>
+
+        <div class="hint" id="tokenRateHint">
+          Standard — <b>1 сек = 1 токен (≈9–10 ₽)</b><br>
+          Pro — 1 сек = 2 токена (≈18–20 ₽)
+        </div>
+      </div>
+
+      <div class="card" id="durationCard" style="display:none;">
+        <h3>Длительность</h3>
+        <select id="duration" aria-label="Длительность">
+          <option value="5">5 секунд</option>
+          <option value="10">10 секунд</option>
+        </select>
+        <div class="hint" id="durationHint">Длительность применяется только для Image → Video.</div>
+      </div>
+
+      <div class="card" id="kling25AspectCard" style="display:none;">
+        <h3>Формат</h3>
+        <select id="kling25_aspect" aria-label="Формат Kling 2.5">
+          <option value="16:9" selected>16:9 (YouTube)</option>
+          <option value="9:16">9:16 (Reels)</option>
+          <option value="1:1">1:1</option>
+        </select>
+        <div class="hint">Для Kling 2.5 Text → Video. В Image → Video формат берётся из стартового кадра.</div>
+      </div>
+    </div>
+
+    <!-- ===================== VEO BLOCK ===================== -->
+    <div id="veoBlock" style="display:none;">
+      <div class="card">
+        <h3>Модель Veo</h3>
+        <div class="seg" role="radiogroup" aria-label="Модель Veo">
+          <input id="veo_fast" type="radio" name="veo_model" value="fast" checked>
+          <label for="veo_fast">
+            <span class="name">Veo Fast</span>
+            <span class="desc">720p / дешевле</span>
+          </label>
+
+          <input id="veo_pro" type="radio" name="veo_model" value="pro">
+          <label for="veo_pro">
+            <span class="name">Veo 3.1</span>
+            <span class="desc">1080p / quality</span>
+          </label>
+
+
+          <input id="veo_fast_relax" type="radio" name="veo_model" value="fast_relax">
+          <label for="veo_fast_relax">
+            <span class="name">Veo 3.1 Fast Relax</span>
+            <span class="desc">8 сек / 720p или 1080p</span>
+          </label>
+        </div>
+        <div class="hint" id="veoPriceHint">
+          Fast: без звука 1 токен 1сек, со звуком 2 токена 1сек.
+        </div>
+      </div>
+
+      <div class="card" id="veoModeCard">
+        <h3>Режим</h3>
+        <div class="seg" role="radiogroup" aria-label="Режим Veo">
+          <input id="veo_flow_text" type="radio" name="veo_flow" value="text" checked>
+          <label for="veo_flow_text">
+            <span class="name">Text → Video</span>
+            <span class="desc">Только промпт</span>
+          </label>
+
+          <input id="veo_flow_image" type="radio" name="veo_flow" value="image">
+          <label for="veo_flow_image">
+            <span class="name">Image → Video</span>
+            <span class="desc">Фото + промпт</span>
+          </label>
+        </div>
+        <div class="hint" style="margin-top:10px;"><b>Text → Video</b>: напиши текст → получи видео.<br><b>Image → Video</b>: загрузи фото → опиши действия → получи видео.</div>
+
+        <div class="hint">Промпт ты введёшь в боте, WebApp сейчас задаёт только параметры.</div>
+      </div>
+
+      <div class="card">
+        <h3>Параметры</h3>
+
+        <div class="row">
+          <select id="veo_duration" aria-label="Длительность">
+            <option value="4">4 секунды</option>
+            <option value="6">6 секунд</option>
+            <option value="8" selected>8 секунд</option>
+          </select>
+
+          <select id="veo_resolution" aria-label="Качество" style="display:none;">
+            <option value="720p">720p</option>
+            <option value="1080p" selected>1080p</option>
+          </select>
+
+          <select id="veo_aspect" aria-label="Формат">
+            <option value="16:9">16:9 (YouTube)</option>
+            <option value="9:16">9:16 (Reels)</option>
+          </select>
+        </div>
+
+        <div class="toggle" id="veoAudioToggle">
+          <div class="left">
+            <div class="tname">Генерировать звук</div>
+            <div class="tdesc">Дороже, но “как ролик”</div>
+          </div>
+          <input id="veo_audio" type="checkbox" />
+        </div>
+
+        <details class="adv" id="veoAdvDetails">
+          <summary>Доп. настройки Veo</summary>
+          <div class="hint" id="veoAdvHint">
+            Эти опции доступны только в Veo 3.1 Pro для Image → Video.
+          </div>
+
+          <div class="toggle">
+            <div class="left">
+              <div class="tname">Last frame (финальный кадр)</div>
+              <div class="tdesc">Доп. финальный кадр для перехода. Недоступно вместе с refs.</div>
+            </div>
+            <input id="veo_use_last_frame" type="checkbox" disabled />
+          </div>
+
+          <div class="toggle">
+            <div class="left">
+              <div class="tname">Reference images (до 3)</div>
+              <div class="tdesc">Только Veo 3.1 Pro + Image → Video + 16:9 + 8 сек. Last frame при refs не используется.</div>
+            </div>
+            <input id="veo_use_refs" type="checkbox" disabled />
+          </div>
+
+          <div class="disabled-note" id="veoProOnlyNote">Доступно только в Veo 3.1 Pro для Image → Video. Refs: только 16:9 и 8 сек.</div>
+        </details>
+      </div>
+    </div>
+
+    <!-- ===================== GROK BLOCK ===================== -->
+    <div id="grokBlock" style="display:none;">
+      <div class="card">
+        <h3>Версия Grok</h3>
+        <div class="seg" role="radiogroup" aria-label="Версия Grok">
+          <input id="grok_model_legacy" type="radio" name="grok_model" value="grok-imagine-video" checked>
+          <label for="grok_model_legacy">
+            <span class="name">Grok Imagine Video</span>
+            <span class="desc">Старый режим</span>
+          </label>
+
+          <input id="grok_model_15" type="radio" name="grok_model" value="grok-imagine-video-1.5">
+          <label for="grok_model_15">
+            <span class="name">Grok 1.5 Preview</span>
+            <span class="desc">Новый KIE</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="card" id="grokFlowCard">
+        <h3>Режим</h3>
+        <div class="seg" role="radiogroup" aria-label="Режим Grok">
+          <input id="grok_flow_text" type="radio" name="grok_flow" value="text" checked>
+          <label for="grok_flow_text" id="grokFlowTextLabel">
+            <span class="name">Text → Video</span>
+            <span class="desc">Только промпт</span>
+          </label>
+
+          <input id="grok_flow_image" type="radio" name="grok_flow" value="image">
+          <label for="grok_flow_image">
+            <span class="name">Image → Video</span>
+            <span class="desc">Фото + промпт</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Параметры</h3>
+        <div class="row">
+          <select id="grok_mode" aria-label="Mode Grok">
+            <option value="fun">Mode: Fun</option>
+            <option value="normal" selected>Mode: Normal</option>
+            <option value="spicy">Mode: Spicy</option>
+          </select>
+
+          <select id="grok_duration" aria-label="Длительность Grok">
+            <option value="6" selected>6 секунд</option>
+            <option value="12">12 секунд</option>
+            <option value="18">18 секунд</option>
+            <option value="24">24 секунды</option>
+            <option value="30">30 секунд</option>
+          </select>
+        </div>
+
+        <div class="row" style="margin-top:10px;">
+          <select id="grok_resolution" aria-label="Разрешение Grok">
+            <option value="480p" selected>480p</option>
+            <option value="720p">720p</option>
+          </select>
+
+          <select id="grok_aspect" aria-label="Формат Grok">
+            <option value="2:3">2:3</option>
+            <option value="3:2">3:2</option>
+            <option value="1:1">1:1</option>
+            <option value="16:9" selected>16:9</option>
+            <option value="9:16">9:16</option>
+          </select>
+        </div>
+
+        <div class="hint" id="grok_hint">Grok Mode = Fun / Normal / Spicy, resolution = 480p / 720p, длительности 6 / 12 / 18 / 24 / 30 сек.</div>
+      </div>
+    </div>
+
+    <!-- ===================== GOOGLE OMNI FLASH BLOCK ===================== -->
+    <div id="omniFlashBlock" style="display:none;">
+      <div class="card">
+        <h3>Google Omni Flash</h3>
+        <div class="hint">Новая Google video AI модель. После сохранения ты продолжишь в боте. В Image → Video можно загрузить до 7 фото-референсов.</div>
+      </div>
+
+      <div class="card">
+        <h3>Режим</h3>
+        <div class="seg" role="radiogroup" aria-label="Режим Google Omni Flash">
+          <input id="omni_flow_text" type="radio" name="omni_flow" value="text" checked>
+          <label for="omni_flow_text">
+            <span class="name">Text → Video</span>
+            <span class="desc">Только промпт</span>
+          </label>
+
+          <input id="omni_flow_image" type="radio" name="omni_flow" value="image">
+          <label for="omni_flow_image">
+            <span class="name">Image → Video</span>
+            <span class="desc">До 7 фото + промпт</span>
+          </label>
+
+          <input id="omni_flow_video_edit" type="radio" name="omni_flow" value="video_edit">
+          <label for="omni_flow_video_edit">
+            <span class="name">Video Edit</span>
+            <span class="desc">Видео до 60 сек + промпт</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Параметры</h3>
+        <div class="row">
+          <select id="omni_duration" aria-label="Длительность Google Omni Flash">
+            <option value="6">6 секунд</option>
+            <option value="8" selected>8 секунд</option>
+            <option value="10">10 секунд</option>
+          </select>
+
+          <select id="omni_resolution" aria-label="Разрешение Google Omni Flash">
+            <option value="720p">720p</option>
+            <option value="1080p" selected>1080p</option>
+            <option value="4k">4K</option>
+          </select>
+        </div>
+
+        <div class="row" style="margin-top:10px;">
+          <select id="omni_aspect" aria-label="Формат Google Omni Flash">
+            <option value="16:9" selected>16:9</option>
+            <option value="9:16">9:16</option>
+          </select>
+        </div>
+
+        <div id="omni_hint" class="hint">Длительности только 6 / 8 / 10 сек.</div>
+      </div>
+    </div>
+
+    <!-- ===================== SORA BLOCK ===================== -->
+    <div id="soraBlock" style="display:none;">
+      <div class="card">
+        <h3>Sora 2</h3>
+        <div class="hint">OpenAI text → video. После сохранения ты введёшь промпт уже в боте.</div>
+      </div>
+
+      <div class="card">
+        <h3>Параметры</h3>
+        <div class="row">
+          <select id="sora_duration" aria-label="Длительность Sora">
+            <option value="4" selected>4 секунды • 5 токенов</option>
+            <option value="8">8 секунд • 10 токенов</option>
+            <option value="12">12 секунд • 15 токенов</option>
+          </select>
+
+          <select id="sora_aspect" aria-label="Формат Sora">
+            <option value="16:9">16:9 (YouTube)</option>
+            <option value="9:16">9:16 (Reels)</option>
+          </select>
+        </div>
+        <div class="hint">Sora 2 в этом режиме работает как text → video.</div>
+      </div>
+    </div>
+
+
+    <!-- ===================== SEEDANCE BLOCK ===================== -->
+    <div id="seedanceBlock">
+      <div class="card" id="seedanceTypeCard" style="display:none;" hidden aria-hidden="true">
+        <h3>Тип Seedance</h3>
+        <div class="seg" role="radiogroup" aria-label="Тип Seedance">
+          <input id="seed_variant_kie" type="radio" name="seedance_variant" value="kie" checked>
+          <label for="seed_variant_kie">
+            <span class="name">Seedance 2.0</span>
+            <span class="desc">Как на сайте</span>
+          </label>
+
+          <input id="seed_variant_preview" type="radio" name="seedance_variant" value="preview">
+          <label for="seed_variant_preview">
+            <span class="name">Seedance 2.0 Preview</span>
+            <span class="desc">Скрытый режим</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Модель Seedance</h3>
+        <div id="seedancePreviewModelWrap" style="display:none;">
+          <div class="seg" role="radiogroup" aria-label="Модель Seedance Preview">
+            <input id="seed_preview" type="radio" name="seedance_model" value="preview" checked>
+            <label for="seed_preview">
+              <span class="name">Preview 720p</span>
+              <span class="desc">12 / 24 / 33 токенов</span>
+            </label>
+
+            <input id="seed_fast" type="radio" name="seedance_model" value="fast">
+            <label for="seed_fast">
+              <span class="name">Fast 480p</span>
+              <span class="desc">6 / 12 / 18 токенов</span>
+            </label>
+          </div>
+          <div class="hint">Preview = 720p, Fast Preview = 480p.</div>
+        </div>
+
+        <div id="seedanceKieModelWrap">
+          <div class="seg" role="radiogroup" aria-label="Модель Seedance 2.0">
+            <input id="seed_kie_480p" type="radio" name="seedance_kie_model" value="seedance-kie-480p" checked>
+            <label for="seed_kie_480p">
+              <span class="name">Seedance 2.0 480p</span>
+              <span class="desc">6 / 12 / 18 токенов</span>
+            </label>
+
+            <input id="seed_kie_720p" type="radio" name="seedance_kie_model" value="seedance-kie-720p">
+            <label for="seed_kie_720p">
+              <span class="name">Seedance 2.0 720p</span>
+              <span class="desc">12 / 24 / 33 токенов</span>
+            </label>
+
+            <input id="seed_kie_1080p" type="radio" name="seedance_kie_model" value="seedance-kie-1080p">
+            <label for="seed_kie_1080p">
+              <span class="name">Seedance 2.0 1080p</span>
+              <span class="desc">28 / 55 / 80 токенов</span>
+            </label>
+          </div>
+          <div class="hint">Обычный Seedance 2.0.</div>
+        </div>
+      </div>
+
+      <div id="seedancePreviewFlowCard" class="card" style="display:none;">
+        <h3>Режим</h3>
+        <div class="seg" role="radiogroup" aria-label="Режим Seedance Preview">
+          <input id="seed_flow_text" type="radio" name="seedance_flow" value="text" checked>
+          <label for="seed_flow_text">
+            <span class="name">Text → Video</span>
+            <span class="desc">Только промпт</span>
+          </label>
+
+          <input id="seed_flow_image" type="radio" name="seedance_flow" value="image">
+          <label for="seed_flow_image">
+            <span class="name">Image → Video</span>
+            <span class="desc">По референсам</span>
+          </label>
+        </div>
+        <div class="hint">Для Image → Video: после сохранения пришли 1–9 фото в чат, затем промпт.</div>
+      </div>
+
+      <div id="seedanceKieFlowCard" class="card">
+        <h3>Режим</h3>
+        <div class="seg" role="radiogroup" aria-label="Режим Seedance 2.0">
+          <input id="seed_kie_flow_text" type="radio" name="seedance_kie_flow" value="text" checked>
+          <label for="seed_kie_flow_text">
+            <span class="name">Text → Video</span>
+            <span class="desc">Только промпт</span>
+          </label>
+
+          <input id="seed_kie_flow_image" type="radio" name="seedance_kie_flow" value="image">
+          <label for="seed_kie_flow_image">
+            <span class="name">Image → Video</span>
+            <span class="desc">Стартовая картинка / first-last frame</span>
+          </label>
+
+          <input id="seed_kie_flow_omni" type="radio" name="seedance_kie_flow" value="omni">
+          <label for="seed_kie_flow_omni">
+            <span class="name">Omni Reference</span>
+            <span class="desc">Фото + видео + аудио refs</span>
+          </label>
+        </div>
+        <div class="hint">Text → Video, Image → Video и Omni Reference — отдельные режимы. В Omni можно отправить image/video/audio refs.</div>
+        <div class="hint">После сохранения: Text → Video — сразу отправь промпт; Image → Video — пришли 1–2 фото, нажми «Готово», затем промпт; Omni Reference — пришли image/video/audio refs, нажми «Готово», затем промпт.</div>
+      </div>
+
+      <div class="card">
+        <h3>Длительность</h3>
+        <select id="seedance_duration" aria-label="Длительность Seedance">
+          <option value="5">5 секунд</option>
+          <option value="10">10 секунд</option>
+          <option value="15">15 секунд</option>
+        </select>
+      </div>
+
+      <div class="card">
+        <h3>Формат (соотношение сторон)</h3>
+        <select id="seedance_aspect" aria-label="Формат Seedance">
+          <option value="16:9">16:9 (YouTube)</option>
+          <option value="9:16">9:16 (Reels)</option>
+          <option value="1:1">1:1</option>
+          <option value="4:3">4:3</option>
+          <option value="3:4">3:4</option>
+        </select>
+        <div id="seedanceAspectHint" class="hint">Если используешь референсы, формат референс‑картинки может переопределить этот параметр.</div>
+      </div>
+    </div>
+
+    <div class="debug" id="debug"></div>
   </div>
-</section>
 
-<section class="screen" id="screen2">
-  <div id="paramsRoot"></div>
-</section>
-
-<section class="screen" id="screen3">
-  <div class="card">
-    <div class="card-head"><div class="card-title">Ваш заказ</div></div>
-    <div class="summary-row"><span>Модель</span><b id="sumModel">—</b></div>
-    <div class="summary-row"><span>Режим</span><b id="sumMode">—</b></div>
-    <div class="summary-row"><span>Формат</span><b id="sumAspect">—</b></div>
-    <div class="summary-row"><span>Длительность</span><b id="sumDuration">—</b></div>
-    <div class="summary-row total"><span>Спишется</span><b id="sumPrice">—</b></div>
+  <div class="bar">
+    <div class="inner">
+      <button class="btn" id="saveBtn" type="button">Сохранить и вернуться в бот</button>
+      <div class="toast" id="toast">Готово ✅ Если окно не закрылось — закрой его крестиком (×).</div>
+    </div>
   </div>
-  <div class="card">
-    <div class="card-head"><div class="card-title" id="sumNextTitle">Дальше в Telegram</div></div>
-    <div class="prompt-preview empty" id="sumPrompt">После сохранения бот подскажет следующий шаг</div>
-  </div>
-  <div class="card debug" id="debug"></div>
-</section>
 
-<div class="bottom-bar" id="bottomBar">
-  <button class="btn btn-primary" id="btnNext" type="button" onclick="goNext()">Далее</button>
-</div>
+  <script>
+    const qs = (s) => document.querySelector(s);
+    const qsa = (s) => Array.from(document.querySelectorAll(s));
+    const debugEl = qs('#debug');
+    const toastEl = qs('#toast');
 
-<div class="sheet-overlay" id="sheetOverlay" onclick="closeSheet()"></div>
-<div class="sheet" id="sheet">
-  <div class="sheet-grip"></div>
-  <div id="sheetContent"></div>
-</div>
+    const DEBUG = new URLSearchParams(location.search).get('debug') === '1';
 
-<div class="toast" id="toast"></div>
+    function getProvider(){ return qs('input[name="provider"]:checked')?.value || "seedance"; }
 
-<script>
-/* ============================================================
-   CONFIG — реальные ключи/payload совместимы с текущим webapp_kling.html
-============================================================ */
-const CONFIG = {
-  providers: [
-    {
-      id:'kling', name:'Kling',
-      models:[
-        { id:'kling_motion', name:'Motion Control', icon:'🎥', tag:'2.6 / 3.0', modes:[{id:'motion',label:'2.6',hint:'Motion Control'},{id:'i2v',label:'3.0',hint:'720p / 1080p'}], aspects:[], durations:[], qualities:[{id:'std',label:'Standard / 720p',hint:'дешевле'},{id:'pro',label:'Pro / 1080p',hint:'лучше'}], defaultQuality:'std', priceKind:'kling_motion' },
-        { id:'kling25', name:'Kling 2.5 Turbo Pro', icon:'✨', tag:'Text / Image → Video', modes:[{id:'t2v',label:'Text → Video',hint:'только prompt'},{id:'i2v',label:'Image → Video',hint:'стартовое фото'}], aspects:[{id:'16:9',label:'16:9',hint:'YouTube'},{id:'9:16',label:'9:16',hint:'Reels'},{id:'1:1',label:'1:1',hint:'квадрат'}], durations:[5,10], priceKind:'kling25' },
-        { id:'kling3new', name:'Kling 3.0 - New', icon:'🔥', tag:'shots / refs / 4K', modes:[{id:'text_to_video',label:'Text',hint:'prompt'},{id:'image_to_video',label:'Image',hint:'start/end frame'},{id:'multi_shot',label:'Multi-shot',hint:'2–5 сцен'}], aspects:[{id:'16:9',label:'16:9',hint:'YouTube'},{id:'9:16',label:'9:16',hint:'Reels'},{id:'1:1',label:'1:1',hint:'квадрат'}], durations:[3,5,10,15], qualities:[{id:'std',label:'Standard',hint:'1 / 1.5 ток/сек'},{id:'pro',label:'Pro',hint:'1.5 / 2 ток/сек'},{id:'4K',label:'4K',hint:'5 / 6 ток/сек'}], defaultQuality:'std', audio:true, priceKind:'kling3new' }
-      ]
-    },
-    {
-      id:'seedance', name:'Seedance',
-      models:[
-        { id:'seedance-kie-480p', name:'Seedance 2.0 480p', icon:'🪶', tag:'6 / 12 / 18 ток.', modes:[{id:'text',label:'Text → Video',hint:'prompt'},{id:'image',label:'Image → Video',hint:'1–2 фото'},{id:'omni',label:'Omni Reference',hint:'image/video/audio'}], aspects:[{id:'16:9',label:'16:9',hint:'YouTube'},{id:'9:16',label:'9:16',hint:'Reels'},{id:'1:1',label:'1:1',hint:'квадрат'}], durations:[5,10,15], priceKind:'seedance' },
-        { id:'seedance-kie-720p', name:'Seedance 2.0 720p', icon:'🚀', tag:'12 / 24 / 33 ток.', modes:[{id:'text',label:'Text → Video',hint:'prompt'},{id:'image',label:'Image → Video',hint:'1–2 фото'},{id:'omni',label:'Omni Reference',hint:'image/video/audio'}], aspects:[{id:'16:9',label:'16:9',hint:'YouTube'},{id:'9:16',label:'9:16',hint:'Reels'},{id:'1:1',label:'1:1',hint:'квадрат'}], durations:[5,10,15], priceKind:'seedance' },
-        { id:'seedance-kie-1080p', name:'Seedance 2.0 1080p', icon:'💎', tag:'28 / 55 / 80 ток.', modes:[{id:'text',label:'Text → Video',hint:'prompt'},{id:'image',label:'Image → Video',hint:'1–2 фото'},{id:'omni',label:'Omni Reference',hint:'image/video/audio'}], aspects:[{id:'16:9',label:'16:9',hint:'YouTube'},{id:'9:16',label:'9:16',hint:'Reels'},{id:'1:1',label:'1:1',hint:'квадрат'}], durations:[5,10,15], priceKind:'seedance' }
-      ]
-    },
-    {
-      id:'veo', name:'Veo',
-      models:[
-        { id:'veo_fast', name:'Veo Fast', icon:'⚡', tag:'720p / дешевле', veoModel:'fast', modes:[{id:'text',label:'Text → Video',hint:'prompt'},{id:'image',label:'Image → Video',hint:'фото + prompt'}], aspects:[{id:'16:9',label:'16:9',hint:'YouTube'},{id:'9:16',label:'9:16',hint:'Reels'}], durations:[4,6,8], audio:true, priceKind:'veo' },
-        { id:'veo_pro', name:'Veo 3.1', icon:'🎬', tag:'1080p / quality', veoModel:'pro', modes:[{id:'text',label:'Text → Video',hint:'prompt'},{id:'image',label:'Image → Video',hint:'last frame / refs'}], aspects:[{id:'16:9',label:'16:9',hint:'YouTube'},{id:'9:16',label:'9:16',hint:'Reels'}], durations:[4,6,8], audio:true, advancedVeo:true, priceKind:'veo' },
-        { id:'veo_fast_relax', name:'Veo 3.1 Fast Relax', icon:'🧘', tag:'8 сек / 4 токена', veoModel:'fast_relax', modes:[{id:'text',label:'Text → Video',hint:'prompt'},{id:'image',label:'Image → Video',hint:'first/last'}], aspects:[{id:'16:9',label:'16:9',hint:'YouTube'},{id:'9:16',label:'9:16',hint:'Reels'}], durations:[8], resolutions:[{id:'720p',label:'720p',hint:'Relax'},{id:'1080p',label:'1080p',hint:'Relax'}], defaultResolution:'1080p', advancedVeo:true, priceKind:'veo' }
-      ]
-    },
-    {
-      id:'grok', name:'Grok',
-      models:[
-        { id:'grok-imagine-video', name:'Grok Imagine Video', icon:'🌀', tag:'Fun / Normal / Spicy', modes:[{id:'text',label:'Text → Video',hint:'prompt'},{id:'image',label:'Image → Video',hint:'фото + prompt'}], aspects:[{id:'2:3',label:'2:3',hint:'портрет'},{id:'3:2',label:'3:2',hint:'альбом'},{id:'1:1',label:'1:1',hint:'квадрат'},{id:'16:9',label:'16:9',hint:'YouTube'},{id:'9:16',label:'9:16',hint:'Reels'}], durations:[6,12,18,24,30], resolutions:[{id:'480p',label:'480p',hint:'дешевле'},{id:'720p',label:'720p',hint:'лучше'}], providerModes:[{id:'fun',label:'Fun',hint:'креативно'},{id:'normal',label:'Normal',hint:'обычно'},{id:'spicy',label:'Spicy',hint:'смелее'}], defaultProviderMode:'normal', priceKind:'grok' },
-        { id:'grok-imagine-video-1.5', name:'Grok 1.5 Preview', icon:'🚀', tag:'Image → Video / audio', modes:[{id:'image',label:'Image → Video',hint:'только фото'}], aspects:[{id:'auto',label:'auto',hint:'как фото'},{id:'1:1',label:'1:1',hint:'квадрат'},{id:'16:9',label:'16:9',hint:'YouTube'},{id:'9:16',label:'9:16',hint:'Reels'},{id:'4:3',label:'4:3',hint:'альбом'},{id:'3:4',label:'3:4',hint:'портрет'},{id:'3:2',label:'3:2',hint:'альбом'},{id:'2:3',label:'2:3',hint:'портрет'}], durations:[5,10,15], resolutions:[{id:'480p',label:'480p',hint:'дешевле'},{id:'720p',label:'720p',hint:'лучше'}], priceKind:'grok15' }
-      ]
-    },
-    {
-      id:'google', name:'Google',
-      models:[
-        { id:'gemini-omni-video', name:'Google Omni Flash', icon:'🌐', tag:'до 7 refs / Video Edit', modes:[{id:'text',label:'Text → Video',hint:'prompt'},{id:'image',label:'Image → Video',hint:'до 7 фото'},{id:'video_edit',label:'Video Edit',hint:'видео до 60 сек'}], aspects:[{id:'16:9',label:'16:9',hint:'YouTube'},{id:'9:16',label:'9:16',hint:'Reels'}], durations:[6,8,10], resolutions:[{id:'720p',label:'720p',hint:'HD'},{id:'1080p',label:'1080p',hint:'Full HD'},{id:'4k',label:'4K',hint:'дороже'}], defaultResolution:'1080p', priceKind:'omni' }
-      ]
-    },
-    {
-      id:'sora', name:'Sora',
-      models:[
-        { id:'sora-2', name:'Sora 2', icon:'☁️', tag:'OpenAI text → video', modes:[{id:'text',label:'Text → Video',hint:'prompt'}], aspects:[{id:'16:9',label:'16:9',hint:'YouTube'},{id:'9:16',label:'9:16',hint:'Reels'}], durations:[4,8,12], priceKind:'sora' }
-      ]
+    // Kling getters
+    function getFlow(){ return qs('input[name="flow"]:checked')?.value || "motion"; }
+    function getMode(){ return qs('input[name="mode"]:checked')?.value || "std"; }
+
+    function getKlingVersion(){ return qs('input[name="kling_version"]:checked')?.value || "1_6"; }
+    function getKling3Resolution(){ return qs('input[name="kling3_resolution"]:checked')?.value || "720"; }
+    function getKling3GenMode(){ return qs('input[name="kling3_gen_mode"]:checked')?.value || "i2v"; }
+    function getKling3Aspect(){ return qs('#kling3_aspect')?.value || "16:9"; }
+    function getKling3PreferMultiShots(){ return !!qs('#kling3_multishot')?.checked; }
+    function getKling25Aspect(){ return qs('#kling25_aspect')?.value || "16:9"; }
+    function getKling3NewGenMode(){ return qs('input[name="kling3_new_gen_mode"]:checked')?.value || "text_to_video"; }
+    function getKling3NewQuality(){ return qs('input[name="kling3_new_quality"]:checked')?.value || "std"; }
+    function getKling3NewAspect(){ return qs('#kling3_new_aspect')?.value || "16:9"; }
+    function getKling3NewDuration(){ return parseInt((qs('#kling3_new_duration')?.value || "5"), 10); }
+    function getKling3NewAudio(){ return !!qs('#kling3_new_audio')?.checked; }
+
+    function getK3NShotStore(){
+      if (!Array.isArray(window.__k3n_shots_store)) {
+        window.__k3n_shots_store = Array.from({length:5}, () => ({ prompt:'', duration:'3' }));
+      }
+      while (window.__k3n_shots_store.length < 5) window.__k3n_shots_store.push({ prompt:'', duration:'3' });
+      return window.__k3n_shots_store;
     }
-  ]
-};
 
-/* ============================================================
-   СОСТОЯНИЕ
-============================================================ */
-const state = {
-  step: 1,
-  provider: 'seedance',
-  model: 'seedance-kie-480p',
-  mode: 'text',
-  aspect: '16:9',
-  duration: 5,
-  quality: 'std',
-  resolution: '1080p',
-  providerMode: 'normal',
-  audio: false,
-  useLastFrame: false,
-  useRefs: false,
-  prompt: '',
-  elements: [],
-  uploading: 0,
-  shots: [
-    { prompt:'', duration:3 },
-    { prompt:'', duration:3 }
-  ]
-};
+    function getK3NShotCount(){
+      const raw = parseInt(window.__k3n_shot_count || 2, 10);
+      return Math.max(2, Math.min(5, raw || 2));
+    }
 
-const tg = window.Telegram?.WebApp;
-const inTelegram = !!(tg && tg.initData);
-const DEBUG = new URLSearchParams(location.search).get('debug') === '1';
+    function syncK3NShotStoreFromDom(){
+      const store = getK3NShotStore();
+      for (let i=1; i<=5; i++){
+        const promptEl = qs(`#k3n_shot_${i}_prompt`);
+        const durationEl = qs(`#k3n_shot_${i}_duration`);
+        if (promptEl) store[i-1].prompt = promptEl.value || '';
+        if (durationEl) store[i-1].duration = String(durationEl.value || '3');
+      }
+    }
 
-/* ============================================================
-   ХЕЛПЕРЫ
-============================================================ */
-const $ = id => document.getElementById(id);
-const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    function addK3NShot(){
+      syncK3NShotStoreFromDom();
+      window.__k3n_shot_count = Math.min(5, getK3NShotCount() + 1);
+      const wrap = qs('#kling3NewShotsFields');
+      if (wrap) wrap.dataset.ready = '';
+      renderKling3NewEditors();
+      updateCostUI();
+    }
 
-function getProvider(){ return CONFIG.providers.find(p => p.id === state.provider) || CONFIG.providers[0]; }
-function getModel(){
-  for (const p of CONFIG.providers){
-    const m = p.models.find(x => x.id === state.model);
-    if (m) return m;
-  }
-  return getProvider().models[0];
-}
-function pluralizeToken(n){
-  const n10 = n % 10, n100 = n % 100;
-  if (n10 === 1 && n100 !== 11) return 'токен';
-  if (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14)) return 'токена';
-  return 'токенов';
-}
-function haptic(type){
-  try{
-    if (!tg?.HapticFeedback) return;
-    if (type === 'success' || type === 'error') tg.HapticFeedback.notificationOccurred(type);
-    else tg.HapticFeedback.impactOccurred(type || 'light');
-  }catch(e){}
-}
-function first(arr, fallback=null){ return Array.isArray(arr) && arr.length ? arr[0] : fallback; }
-function hasAspect(m){ return Array.isArray(m.aspects) && m.aspects.length > 0; }
-function hasDurations(m){ return Array.isArray(m.durations) && m.durations.length > 0; }
-function isKling3MultiShot(){ return state.model === 'kling3new' && state.mode === 'multi_shot'; }
-function getShotSeconds(){ return state.shots.reduce((sum, sh) => sum + (parseInt(sh.duration, 10) || 0), 0); }
+    function removeLastK3NShot(){
+      syncK3NShotStoreFromDom();
+      const count = getK3NShotCount();
+      if (count <= 2) return;
+      const store = getK3NShotStore();
+      store[count - 1] = { prompt:'', duration:'3' };
+      const elements = getKling3NewElementStore();
+      window.__k3n_elements_store = elements.filter(el => Number(el.shotIndex || 0) !== count);
+      window.__k3n_shot_count = count - 1;
+      const wrap = qs('#kling3NewShotsFields');
+      if (wrap) wrap.dataset.ready = '';
+      renderKling3NewEditors();
+      updateCostUI();
+    }
 
-function resetStateForModel(modelId){
-  const m = getModel();
-  state.mode = first(m.modes)?.id || 'text';
-  state.aspect = first(m.aspects)?.id || '16:9';
-  state.duration = first(m.durations, null);
-  state.quality = m.defaultQuality || first(m.qualities)?.id || 'std';
-  state.resolution = m.defaultResolution || first(m.resolutions)?.id || (m.veoModel === 'fast' ? '720p' : '1080p');
-  state.providerMode = m.defaultProviderMode || first(m.providerModes)?.id || 'normal';
-  state.audio = false;
-  state.useLastFrame = false;
-  state.useRefs = false;
-  if (modelId === 'kling3new') ensureShots();
-}
+    function getKling3NewShots(){
+      syncK3NShotStoreFromDom();
+      const store = getK3NShotStore();
+      const count = getK3NShotCount();
+      const shots = [];
+      for (let i=1; i<=count; i++){
+        const item = store[i-1] || {};
+        const prompt = String(item.prompt || '').trim();
+        const duration = parseInt(String(item.duration || '3'), 10);
+        if (prompt) shots.push({ prompt, duration: Math.max(1, Math.min(12, duration || 3)) });
+      }
+      return shots;
+    }
+    function getTelegramUserId(){
+      try{
+        const unsafe = window.Telegram?.WebApp?.initDataUnsafe || {};
+        return parseInt(unsafe?.user?.id || unsafe?.receiver?.id || 0, 10) || 0;
+      }catch(_){ return 0; }
+    }
 
-function setState(key, value){
-  state[key] = value;
-  if (key === 'mode' && state.model === 'gemini-omni-video' && value === 'video_edit') state.duration = null;
-  if (key === 'mode' || key === 'aspect' || key === 'duration' || key === 'model') normalizeAdvanced();
-  haptic('light');
+    function getKling3NewElementStore(){
+      if (!Array.isArray(window.__k3n_elements_store)) window.__k3n_elements_store = [];
+      return window.__k3n_elements_store;
+    }
 
-  const m = getModel();
-  const needsDependentRefresh = key === 'mode' || ((key === 'aspect' || key === 'duration') && !!m.advancedVeo);
-  if (needsDependentRefresh && state.step === 2){
-    const keepY = window.scrollY || document.documentElement.scrollTop || 0;
-    refreshModeDependentParams();
-    if ((window.scrollY || document.documentElement.scrollTop || 0) !== keepY) window.scrollTo(0, keepY);
-  } else {
-    refreshDurationLabels();
-  }
+    function appendK3NToken(text, token){
+      const src = String(text || '').trim();
+      if (!src) return token;
+      if (src.includes(token)) return src;
+      return `${src} ${token}`.trim();
+    }
 
-  updateMainButton();
-}
+    function escapeK3NHtml(value){
+      return String(value || '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
 
-function normalizeAdvanced(){
-  const m = getModel();
-  if (m.veoModel !== 'pro' && m.veoModel !== 'fast_relax'){
-    state.useLastFrame = false;
-    state.useRefs = false;
-    return;
-  }
-  if (state.mode !== 'image'){
-    state.useLastFrame = false;
-    state.useRefs = false;
-    return;
-  }
-  const refsAllowed = m.veoModel === 'pro' && state.aspect === '16:9' && Number(state.duration) === 8;
-  if (!refsAllowed) state.useRefs = false;
-  if (state.useRefs) state.useLastFrame = false;
-}
+    function escapeK3NRegExp(value){
+      return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
 
-/* ============================================================
-   TELEGRAM ИНИЦИАЛИЗАЦИЯ
-============================================================ */
-if (tg) {
-  try{
-    tg.ready();
-    tg.expand();
-    tg.setHeaderColor('#0a0a0c');
-    tg.setBackgroundColor('#0a0a0c');
-  }catch(e){}
-}
-if (inTelegram) {
-  $('bottomBar').classList.add('tg-native');
-  tg.MainButton.setParams({ color:'#ff9d00', text_color:'#1a1000' });
-  tg.MainButton.onClick(goNext);
-  tg.BackButton.onClick(goBack);
-}
+    function removeK3NToken(text, token){
+      const safeToken = escapeK3NRegExp(String(token || '').trim());
+      if (!safeToken) return String(text || '').trim();
+      return String(text || '')
+        .replace(new RegExp(`(^|\\s)${safeToken}(?=\\s|$)`, 'g'), ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
 
-/* ============================================================
-   РЕНДЕР: ПРОВАЙДЕРЫ И МОДЕЛИ
-============================================================ */
-function renderProviders(){
-  $('providerTabs').innerHTML = CONFIG.providers.map(p => `
-    <button class="provider-tab ${p.id === state.provider ? 'active' : ''}" type="button"
-            onclick="selectProvider('${esc(p.id)}')">${esc(p.name)}</button>
-  `).join('');
-}
+    function removeK3NShotElement(shotIndex, name){
+      const cleanName = String(name || '').trim();
+      if (!cleanName) return;
+      const store = getKling3NewElementStore();
+      const idx = store.findIndex(el => Number(el.shotIndex || 0) === Number(shotIndex || 0) && String(el.name || '') === cleanName);
+      if (idx < 0) return;
+      store.splice(idx, 1);
+      const promptEl = qs(`#k3n_shot_${shotIndex}_prompt`);
+      if (promptEl) {
+        promptEl.value = removeK3NToken(promptEl.value, `@${cleanName}`);
+        const shotStore = getK3NShotStore();
+        shotStore[Number(shotIndex || 1) - 1].prompt = promptEl.value || '';
+      }
+      renderK3NShotElements(shotIndex);
+      updateCostUI();
+    }
 
-function renderModels(){
-  const p = getProvider();
-  $('modelGrid').innerHTML = p.models.map(m => `
-    <input type="radio" name="model" id="m_${esc(m.id)}" value="${esc(m.id)}"
-           ${m.id === state.model ? 'checked' : ''} onchange="selectModel('${esc(m.id)}')">
-    <label class="model-card" for="m_${esc(m.id)}">
-      <div class="model-icon">${esc(m.icon)}</div>
-      <div class="model-name">${esc(m.name)}</div>
-      <div class="model-tag">${esc(m.tag || '')}</div>
-    </label>
-  `).join('');
-}
+    function removeK3NShotElementImage(shotIndex, name, imageIndex){
+      const cleanName = String(name || '').trim();
+      const refIndex = Number(imageIndex || 0);
+      const store = getKling3NewElementStore();
+      const item = store.find(el => Number(el.shotIndex || 0) === Number(shotIndex || 0) && String(el.name || '') === cleanName);
+      if (!item || !Array.isArray(item.element_input_urls)) return;
+      if (refIndex < 0 || refIndex >= item.element_input_urls.length) return;
+      item.element_input_urls.splice(refIndex, 1);
+      if (!item.element_input_urls.length) {
+        removeK3NShotElement(shotIndex, cleanName);
+        return;
+      }
+      renderK3NShotElements(shotIndex);
+      updateCostUI();
+    }
 
-function selectProvider(id){
-  const p = CONFIG.providers.find(x => x.id === id) || CONFIG.providers[0];
-  state.provider = p.id;
-  state.model = p.models[0].id;
-  resetStateForModel(state.model);
-  haptic('light');
-  renderProviders();
-  renderModels();
-  updateModelContext();
-  updateMainButton();
-}
+    function renderK3NShotElements(i){
+      const wrap = qs(`#k3n_shot_${i}_elements`);
+      if (!wrap) return;
+      const tokens = getKling3NewElementStore().filter(el => Number(el.shotIndex || 0) === i);
+      if (!tokens.length){
+        wrap.innerHTML = '<div class="hint">Элементы для этого shot можно загрузить прямо здесь. На 1 element нужно 2–4 фото. Имя вставится в prompt автоматически.</div>';
+        return;
+      }
+      wrap.innerHTML = tokens.map(el => {
+        const name = escapeK3NHtml(el.name || '');
+        const isVideo = !!(el.element_input_video_urls || []).length;
+        const imageCount = (el.element_input_urls || []).length;
+        const refButtons = isVideo ? '' : `<div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:6px;">${(el.element_input_urls || []).map((_, idx) => `<button type="button" class="mini" data-k3n-remove-ref="1" data-shot-index="${i}" data-element-name="${name}" data-ref-index="${idx}">Удалить фото ${idx + 1}</button>`).join('')}</div>`;
+        return `<div style="margin-top:8px; padding:10px; border:1px solid rgba(170,190,255,.16); border-radius:14px; background:rgba(255,255,255,.025);">
+          <div style="display:flex; gap:8px; align-items:center; justify-content:space-between; flex-wrap:wrap;">
+            <span class="badge">@${name} · ${isVideo ? 'video' : `${imageCount} img`}</span>
+            <button type="button" class="mini" data-k3n-remove-element="1" data-shot-index="${i}" data-element-name="${name}">Удалить element</button>
+          </div>
+          ${refButtons}
+        </div>`;
+      }).join('');
 
-function selectModel(id){
-  state.model = id;
-  resetStateForModel(id);
-  haptic('light');
-  renderModels();
-  updateModelContext();
-  updateMainButton();
-}
+      wrap.querySelectorAll('[data-k3n-remove-element]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          removeK3NShotElement(Number(btn.dataset.shotIndex || i), btn.dataset.elementName || '');
+        });
+      });
+      wrap.querySelectorAll('[data-k3n-remove-ref]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          removeK3NShotElementImage(Number(btn.dataset.shotIndex || i), btn.dataset.elementName || '', Number(btn.dataset.refIndex || 0));
+        });
+      });
+    }
 
-/* ============================================================
-   РЕНДЕР: ПАРАМЕТРЫ
-============================================================ */
-function renderSegment(name, items, selected, key){
-  return `<div class="segment">${items.map(x => `
-    <input type="radio" name="${esc(name)}" id="${esc(name)}_${esc(x.id)}" value="${esc(x.id)}"
-           ${String(x.id) === String(selected) ? 'checked' : ''} onchange="setState('${esc(key)}','${esc(x.id)}')">
-    <label class="seg-item" for="${esc(name)}_${esc(x.id)}">${esc(x.label)}<small>${esc(x.hint || '')}</small></label>
-  `).join('')}</div>`;
-}
+    async function attachK3NShotElement(i, files, kind){
+      const picked = Array.from(files || []);
+      if (!picked.length) return;
+      const store = getKling3NewElementStore();
+      const shotIndex = Number(i || 0);
 
-function renderDurationSegment(m){
-  if (state.model === 'gemini-omni-video' && state.mode === 'video_edit'){
-    return `<div class="card"><div class="card-head"><div class="card-title">Длительность</div></div><div class="card-hint">Video Edit: исходное видео до 60 сек. Длительность результата определяет модель.</div></div>`;
-  }
-  if (!hasDurations(m)) return '';
-  if (!state.duration || !m.durations.includes(Number(state.duration))) state.duration = m.durations[0];
-  return `<div class="card"><div class="card-head"><div class="card-title">Длительность</div></div>
-    <div class="segment">${m.durations.map(d => `
-      <input type="radio" name="dur" id="dur_${d}" value="${d}" ${Number(d) === Number(state.duration) ? 'checked' : ''} onchange="setState('duration',${d})">
-      <label class="seg-item" for="dur_${d}">${d} сек<small data-duration-price="${d}">${esc(priceLabelForDuration(m, d))}</small></label>
-    `).join('')}</div>
-  </div>`;
-}
+      if (kind === 'image') {
+        const bad = picked.filter(file => {
+          const type = String(file?.type || '').toLowerCase();
+          const name = String(file?.name || '').toLowerCase();
+          return !(['image/jpeg', 'image/jpg', 'image/png'].includes(type) || /\.(jpe?g|png)$/.test(name));
+        });
+        if (bad.length) throw new Error('Для image element доступны только JPG/PNG. WEBP не отправляем в KIE.');
 
-function refreshDurationLabels(){
-  const m = getModel();
-  document.querySelectorAll('[data-duration-price]').forEach(el => {
-    const d = Number(el.getAttribute('data-duration-price') || 0);
-    if (d) el.textContent = priceLabelForDuration(m, d);
-  });
-}
+        const imageElementsForShot = store.filter(el =>
+          Number(el.shotIndex || 0) === shotIndex &&
+          !(el.element_input_video_urls || []).length
+        );
+        let item = [...imageElementsForShot].reverse().find(el => ((el.element_input_urls || []).length < 4));
+        let created = false;
 
-function updateModelContext(){
-  const el = $('modelContext');
-  if (!el) return;
-  if (state.step >= 2){
-    el.textContent = getModel().name;
-    el.classList.add('visible');
-  } else {
-    el.textContent = '';
-    el.classList.remove('visible');
-  }
-}
+        if (item) {
+          const currentCount = (item.element_input_urls || []).length;
+          if (currentCount + picked.length > 4) {
+            throw new Error(`Element @${item.name}: максимум 4 фото. Сейчас ${currentCount}, можно добавить ещё ${4 - currentCount}.`);
+          }
+        } else {
+          if (store.length >= 3) throw new Error('Лимит: максимум 3 elements на один multi-shot ролик.');
+          const localCount = imageElementsForShot.length + 1;
+          item = {
+            shotIndex,
+            name: `shot${shotIndex}_el${localCount}`,
+            description: `Shot ${shotIndex} element ${localCount}`,
+            element_input_urls: [],
+          };
+          store.push(item);
+          created = true;
+        }
 
-function renderParamsQuiet(){
-  const screen = $('screen2');
-  if (screen) screen.classList.add('no-anim');
-  renderParams();
-  requestAnimationFrame(() => requestAnimationFrame(() => {
-    if (screen) screen.classList.remove('no-anim');
-  }));
-}
+        for (const file of picked){
+          const url = await uploadKling3NewOneFile(file, `shot_${shotIndex}_image`);
+          item.element_input_urls.push(url);
+        }
 
-function nextStepInstruction(){
-  const m = getModel();
-  if (state.provider === 'seedance'){
-    if (state.mode === 'text') return 'После сохранения бот попросит промпт в Telegram. Его можно отправить одной или несколькими частями, потом нажать «✅ Запустить».';
-    if (state.mode === 'image') return 'После сохранения пришли в Telegram 1–2 фото. Если пришлёшь 2 фото — второе будет last frame. Потом бот попросит промпт.';
-    return 'После сохранения пришли image/video/audio refs в Telegram, нажми «✅ Готово», затем бот попросит промпт.';
-  }
-  if (state.provider === 'kling'){
-    if (state.model === 'kling_motion') return 'После сохранения пришли фото аватара, затем видео движения. После этого бот попросит промпт или можно написать «Старт».';
-    if (state.model === 'kling25' && state.mode === 'i2v') return 'После сохранения пришли стартовое фото в Telegram. Затем бот попросит промпт.';
-    if (state.model === 'kling25') return 'После сохранения бот попросит промпт в Telegram.';
-    if (state.model === 'kling3new' && state.mode === 'image_to_video') return 'После сохранения пришли стартовое фото. Можно прислать второй кадр как финальный. Затем бот попросит prompt.';
-    if (state.model === 'kling3new' && state.mode === 'multi_shot') return 'Shot prompts сохраняются прямо из WebApp. После сохранения можно прислать общий стартовый кадр, затем отправить сообщением «СТАРТ».';
-    return 'После сохранения бот попросит текстовый prompt в Telegram.';
-  }
-  if (state.provider === 'veo'){
-    if (state.mode === 'image') return state.useRefs
-      ? 'После сохранения пришли стартовое фото и reference images в Telegram. Потом бот попросит промпт.'
-      : (state.useLastFrame ? 'После сохранения пришли стартовый и финальный кадр в Telegram. Потом бот попросит промпт.' : 'После сохранения пришли стартовое фото в Telegram. Потом бот попросит промпт.');
-    return 'После сохранения бот попросит промпт в Telegram.';
-  }
-  if (state.provider === 'grok'){
-    if (state.mode === 'image') return 'После сохранения пришли фото в Telegram. Потом бот попросит промпт.';
-    return 'После сохранения бот попросит промпт в Telegram.';
-  }
-  if (state.provider === 'google'){
-    if (state.mode === 'image') return 'После сохранения пришли до 7 фото-референсов в Telegram, нажми «✅ Готово», затем бот попросит промпт.';
-    if (state.mode === 'video_edit') return 'После сохранения пришли видео до 60 секунд в Telegram, затем refs по желанию и промпт.';
-    return 'После сохранения бот попросит промпт в Telegram.';
-  }
-  if (state.provider === 'sora') return 'После сохранения бот попросит промпт в Telegram.';
-  return 'После сохранения продолжи генерацию в Telegram.';
-}
+        if (created) {
+          const promptEl = qs(`#k3n_shot_${shotIndex}_prompt`);
+          if (promptEl) {
+            promptEl.value = appendK3NToken(promptEl.value, `@${item.name}`);
+            const shotStore = getK3NShotStore();
+            shotStore[shotIndex - 1].prompt = promptEl.value || '';
+          }
+        }
+        renderK3NShotElements(shotIndex);
+        return item;
+      }
 
-function renderToggles(m){
-  let html = '';
-  if (m.audio){
-    html += `<div class="toggle-row"><div><div class="toggle-title">Генерировать звук</div><div class="toggle-desc">Цена зависит от выбранной модели/качества.</div></div><input type="checkbox" ${state.audio ? 'checked' : ''} onchange="state.audio=this.checked; haptic('light'); refreshDurationLabels(); updateMainButton()"></div>`;
-  }
-  if (m.advancedVeo){
-    const canLastFrame = (m.veoModel === 'pro' || m.veoModel === 'fast_relax') && state.mode === 'image';
-    const canRefs = m.veoModel === 'pro' && state.mode === 'image' && state.aspect === '16:9' && Number(state.duration) === 8;
-    html += `<div class="toggle-row"><div><div class="toggle-title">Last frame</div><div class="toggle-desc">Финальный кадр. Работает в Image → Video для Veo 3.1 / Fast Relax.</div></div><input type="checkbox" ${state.useLastFrame ? 'checked' : ''} ${canLastFrame ? '' : 'disabled'} onchange="state.useLastFrame=this.checked; if(this.checked) state.useRefs=false; haptic('light'); renderParamsQuiet(); updateMainButton()"></div>`;
-    html += `<div class="toggle-row"><div><div class="toggle-title">Reference images</div><div class="toggle-desc">Только Veo 3.1 + Image → Video + 16:9 + 8 сек. Last frame отключается.</div></div><input type="checkbox" ${state.useRefs ? 'checked' : ''} ${canRefs ? '' : 'disabled'} onchange="state.useRefs=this.checked; if(this.checked) state.useLastFrame=false; haptic('light'); renderParamsQuiet(); updateMainButton()"></div>`;
-  }
-  if (!html) return '';
-  return `<div class="card"><div class="card-head"><div class="card-title">Дополнительно</div></div>${html}</div>`;
-}
+      if (store.length >= 3) throw new Error('Лимит: максимум 3 elements на один multi-shot ролик.');
+      const localCount = store.filter(el => Number(el.shotIndex || 0) === shotIndex).length + 1;
+      const name = `shot${shotIndex}_el${localCount}`;
+      const urls = [];
+      for (const file of picked){
+        urls.push(await uploadKling3NewOneFile(file, `shot_${shotIndex}_${kind}`));
+      }
+      const item = {
+        shotIndex,
+        name,
+        description: `Shot ${shotIndex} element ${localCount}`,
+      };
+      if (kind === 'video') item.element_input_video_urls = [urls[0]].filter(Boolean);
+      store.push(item);
+      const promptEl = qs(`#k3n_shot_${shotIndex}_prompt`);
+      if (promptEl) {
+        promptEl.value = appendK3NToken(promptEl.value, `@${name}`);
+        const shotStore = getK3NShotStore();
+        shotStore[shotIndex - 1].prompt = promptEl.value || '';
+      }
+      renderK3NShotElements(shotIndex);
+      return item;
+    }
 
-function ensureShots(){
-  if (!Array.isArray(state.shots) || state.shots.length < 2){
-    state.shots = [{ prompt:'', duration:3 }, { prompt:'', duration:3 }];
-  }
-  state.shots = state.shots.slice(0,5).map(x => ({ prompt:String(x.prompt || ''), duration:Number(x.duration || 3) }));
-}
-function addShot(){
-  ensureShots();
-  if (state.shots.length < 5) state.shots.push({ prompt:'', duration:3 });
-  haptic('light'); renderParams(); updateMainButton();
-}
-function removeShot(){
-  ensureShots();
-  if (state.shots.length > 2) state.shots.pop();
-  haptic('light'); renderParams(); updateMainButton();
-}
-function updateShot(index, key, value){
-  ensureShots();
-  if (!state.shots[index]) return;
-  state.shots[index][key] = key === 'duration' ? Number(value || 3) : String(value || '');
-  updateMainButton();
-}
-function getTelegramUserId(){
-  try{
-    const unsafe = window.Telegram?.WebApp?.initDataUnsafe || {};
-    return parseInt(unsafe?.user?.id || unsafe?.receiver?.id || 0, 10) || 0;
-  }catch(_){ return 0; }
-}
-function cleanElementName(value){ return String(value || '').trim().replace(/^@+/, '').replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0,40); }
-function appendToken(text, token){
-  const src = String(text || '').trim();
-  if (!src) return token;
-  if (src.split(/\s+/).includes(token)) return src;
-  return `${src} ${token}`.trim();
-}
-function removeToken(text, token){
-  return String(text || '').split(/\s+/).filter(x => x && x !== token).join(' ').trim();
-}
-async function uploadKling3NewOneFile(file, slot){
-  const type = String(file?.type || '').toLowerCase();
-  const name = String(file?.name || '').toLowerCase();
-  if (!(type === 'image/jpeg' || type === 'image/jpg' || type === 'image/png' || /\.(jpe?g|png)$/.test(name))){
-    throw new Error('Для image element доступны только JPG/PNG. WEBP не отправляем в KIE.');
-  }
-  const fd = new FormData();
-  fd.append('file', file);
-  fd.append('telegram_user_id', String(getTelegramUserId() || 0));
-  fd.append('slot', slot || 'element');
-  const res = await fetch('/api/kling3-kie/upload-reference', { method:'POST', body:fd });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || !data.ok) throw new Error(data.detail || data.message || `Upload failed: ${res.status}`);
-  return data.public_url || data.url;
-}
-function setUploadStatus(index, text, cls=''){
-  const el = $('shotStatus_' + index);
-  if (!el) return;
-  el.className = `upload-status ${cls}`.trim();
-  el.textContent = text || '';
-}
-function elementsForShot(index){ return (state.elements || []).filter(el => Number(el.shotIndex || 0) === Number(index)); }
-function renderElementChips(index){
-  const root = $('shotElements_' + index);
-  if (!root) return;
-  const items = elementsForShot(index);
-  if (!items.length){ root.innerHTML = ''; return; }
-  root.innerHTML = items.map(el => `
-    <div class="element-chip">
-      <span><b>@${esc(el.name)}</b> · ${(el.element_input_urls || []).length} фото</span>
-      <button type="button" class="mini-btn danger" onclick="removeKlingElement('${esc(el.name)}')">Удалить</button>
-    </div>
-  `).join('');
-}
-function removeKlingElement(name){
-  const clean = cleanElementName(name);
-  state.elements = (state.elements || []).filter(el => String(el.name) !== clean);
-  state.shots = state.shots.map(sh => ({...sh, prompt:removeToken(sh.prompt, '@' + clean)}));
-  haptic('light');
-  renderParams();
-  updateMainButton();
-}
-async function attachShotElement(index, fileList){
-  const files = Array.from(fileList || []);
-  if (!files.length) return;
-  if (files.length < 2 || files.length > 4) throw new Error('Для одного image element нужно выбрать сразу 2–4 фото.');
-  if ((state.elements || []).length >= 3) throw new Error('Лимит Kling 3.0 New: максимум 3 elements на ролик.');
-  const bad = files.find(file => {
-    const type = String(file?.type || '').toLowerCase();
-    const name = String(file?.name || '').toLowerCase();
-    return !(type === 'image/jpeg' || type === 'image/jpg' || type === 'image/png' || /\.(jpe?g|png)$/.test(name));
-  });
-  if (bad) throw new Error('Для image element доступны только JPG/PNG.');
-  const localCount = elementsForShot(index).length + 1;
-  const name = cleanElementName(`shot${index}_el${localCount}`);
-  state.uploading += 1;
-  updateMainButton();
-  try{
-    setUploadStatus(index, `Загружаю @${name}...`);
-    const urls = [];
-    for (let i=0; i<files.length; i++) urls.push(await uploadKling3NewOneFile(files[i], `shot_${index}_image_${i+1}`));
-    state.elements.push({ shotIndex:index, name, description:`Shot ${index} element ${localCount}`, element_input_urls:urls });
-    if (state.shots[index - 1]) state.shots[index - 1].prompt = appendToken(state.shots[index - 1].prompt, '@' + name);
-    setUploadStatus(index, `Готово: @${name}, ${urls.length} фото.`, 'good');
-    renderParams();
-  }finally{
-    state.uploading = Math.max(0, state.uploading - 1);
-    updateMainButton();
-  }
-}
-function getKling3NewElements(){
-  if (!isKling3MultiShot()) return [];
-  return (state.elements || []).map(el => ({
-    name:String(el.name || '').trim(),
-    description:String(el.description || el.name || '').trim(),
-    element_input_urls:Array.isArray(el.element_input_urls) ? el.element_input_urls.slice(0,4) : [],
-    element_input_video_urls:Array.isArray(el.element_input_video_urls) ? el.element_input_video_urls.slice(0,1) : []
-  }));
-}
-function renderShotsCard(){
-  if (!isKling3MultiShot()) return '';
-  ensureShots();
-  const total = getShotSeconds();
-  const items = state.shots.map((sh, i) => {
-    const n = i + 1;
-    return `<div class="shot-card">
-      <div class="shot-head"><span>Shot ${n}</span><select class="shot-duration" onchange="updateShot(${i}, 'duration', this.value)">
-        ${[1,2,3,4,5,6,7,8,9,10,11,12].map(d => `<option value="${d}" ${Number(sh.duration) === d ? 'selected' : ''}>${d} сек</option>`).join('')}
-      </select></div>
-      <textarea maxlength="500" placeholder="Опиши этот shot. Если добавишь element, его имя @shot... вставится автоматически." oninput="updateShot(${i}, 'prompt', this.value)">${esc(sh.prompt)}</textarea>
-      <label class="filepick">+ Фото element для этого shot (выбери 2–4 JPG/PNG)
-        <input id="shotFiles_${n}" type="file" accept="image/jpeg,image/png" multiple style="display:none" onchange="handleShotFiles(${n}, this)">
-      </label>
-      <div id="shotStatus_${n}" class="upload-status"></div>
-      <div id="shotElements_${n}">${elementsForShot(n).map(el => `<div class="element-chip"><span><b>@${esc(el.name)}</b> · ${(el.element_input_urls || []).length} фото</span><button type="button" class="mini-btn danger" onclick="removeKlingElement('${esc(el.name)}')">Удалить</button></div>`).join('')}</div>
-    </div>`;
-  }).join('');
-  return `<div class="card"><div class="card-head"><div class="card-title">Multi-shot scenes</div></div>
-    <div class="card-hint" style="margin-top:0">Минимум 2 shot. Сумма должна быть 3–15 сек. Сейчас: ${total} сек. Для image element выбирай сразу 2–4 JPG/PNG; имя @element добавится в prompt автоматически.</div>
-    ${items}
-    <div class="mini-actions">
-      <button class="mini-btn primary" type="button" onclick="addShot()">+ Shot</button>
-      <button class="mini-btn" type="button" onclick="removeShot()">Удалить</button>
-    </div>
-  </div>`;
-}
-async function handleShotFiles(index, input){
-  try{
-    await attachShotElement(index, input.files || []);
-  }catch(err){
-    setUploadStatus(index, err?.message || String(err), 'bad');
-    haptic('error');
-  }finally{
-    try{ input.value = ''; }catch(_){ }
-  }
-}
+    function getKling3NewElements(){
+      if (getKling3NewGenMode() === 'multi_shot') {
+        return getKling3NewElementStore().map((el) => ({
+          name: String(el.name || '').trim(),
+          description: String(el.description || el.name || '').trim(),
+          element_input_urls: Array.isArray(el.element_input_urls) ? el.element_input_urls.slice(0,4) : [],
+          element_input_video_urls: Array.isArray(el.element_input_video_urls) ? el.element_input_video_urls.slice(0,1) : [],
+        }));
+      }
+      return [];
+    }
 
-function renderModeCard(m){
-  return `<div class="card"><div class="card-head"><div class="card-title">Режим</div></div>${renderSegment('mode', m.modes || [], state.mode, 'mode')}</div>`;
-}
-function renderQualityCard(m){
-  if (!Array.isArray(m.qualities) || !m.qualities.length) return '';
-  return `<div class="card"><div class="card-head"><div class="card-title">Качество</div></div>${renderSegment('quality', m.qualities, state.quality, 'quality')}</div>`;
-}
-function renderProviderModeCard(m){
-  if (!Array.isArray(m.providerModes) || !m.providerModes.length) return '';
-  return `<div class="card"><div class="card-head"><div class="card-title">Mode</div></div>${renderSegment('providerMode', m.providerModes, state.providerMode, 'providerMode')}</div>`;
-}
-function renderResolutionCard(m){
-  if (!Array.isArray(m.resolutions) || !m.resolutions.length) return '';
-  return `<div class="card"><div class="card-head"><div class="card-title">Разрешение</div></div>${renderSegment('resolution', m.resolutions, state.resolution, 'resolution')}</div>`;
-}
-function renderAspectCard(m){
-  if (!hasAspect(m)) return '';
-  if (state.model === 'kling25' && state.mode === 'i2v'){
-    return `<div class="card"><div class="card-head"><div class="card-title">Формат кадра</div></div><div class="card-hint" style="margin-top:0">Для Image → Video формат берётся по стартовому кадру, поэтому отдельный выбор не нужен.</div></div>`;
-  }
-  return `<div class="card"><div class="card-head"><div class="card-title">Формат кадра</div></div>${renderSegment('aspect', m.aspects, state.aspect, 'aspect')}</div>`;
-}
-function renderPromptRefsCard(){
-  return `<div class="card"><div class="card-head"><div class="card-title">Промпт и референсы</div><button class="info-btn" type="button" onclick="openSheet('prompt')">i</button></div><div class="card-hint" style="margin-top:0">${esc(nextStepInstruction())}</div></div>`;
-}
-function syncFormState(el, src){
-  if (!el || !src || el.nodeType !== 1) return;
-  const tag = el.tagName;
-  if (tag === 'INPUT'){
-    if (el.type === 'checkbox' || el.type === 'radio') el.checked = src.hasAttribute('checked');
-    else el.value = src.getAttribute('value') || '';
-    el.disabled = src.hasAttribute('disabled');
-  }
-  if (tag === 'TEXTAREA') el.value = src.value || src.textContent || '';
-  if (tag === 'SELECT'){
-    el.value = src.value || src.getAttribute('value') || el.value;
-    Array.from(el.options).forEach(opt => {
-      const srcOpt = Array.from(src.options || []).find(x => x.value === opt.value);
-      opt.selected = !!srcOpt?.selected;
+    function validateKling3NewElements(elements){
+      for (const el of (elements || [])){
+        const imgs = el.element_input_urls || [];
+        const vids = el.element_input_video_urls || [];
+        if (vids.length) continue;
+        if (imgs.length > 0 && (imgs.length < 2 || imgs.length > 4)){
+          throw new Error(`Element @${el.name}: для image element нужно 2–4 фото. Либо добавь 2–4 фото, либо используй 1 видео.`);
+        }
+      }
+    }
+
+    function setKling3NewUploadStatus(i, text, cls=''){
+      const el = qs(`#k3n_shot_${i}_status`) || qs(`#k3n_el_${i}_status`);
+      if (!el) return;
+      el.className = `upload-status ${cls}`.trim();
+      el.textContent = text || '';
+    }
+
+    async function uploadKling3NewOneFile(file, slot){
+      const type = String(file?.type || '').toLowerCase();
+      const name = String(file?.name || '').toLowerCase();
+      if (type.startsWith('image/') && !(['image/jpeg', 'image/jpg', 'image/png'].includes(type) || /\.(jpe?g|png)$/.test(name))) {
+        throw new Error('Для image element доступны только JPG/PNG. WEBP не отправляем в KIE.');
+      }
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('telegram_user_id', String(getTelegramUserId() || 0));
+      fd.append('slot', slot || 'element');
+      const res = await fetch('/api/kling3-kie/upload-reference', { method:'POST', body: fd });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.detail || data.message || `Upload failed: ${res.status}`);
+      return data.public_url || data.url;
+    }
+
+    async function uploadKling3NewElementFiles(){
+      if (!(getProvider() === 'kling' && getKlingVersion() === '3_0_new')) return;
+      if (getKling3NewGenMode() === 'multi_shot') return;
+      for (let i=1; i<=3; i++){
+        const name = (qs(`#k3n_el_${i}_name`)?.value || '').trim().replace(/^@+/, '');
+        const imgInput = qs(`#k3n_el_${i}_images`);
+        const videoInput = qs(`#k3n_el_${i}_video`);
+        if (!imgInput && !videoInput) continue;
+        const imageFiles = Array.from(imgInput?.files || []).slice(0,4);
+        const videoFiles = Array.from(videoInput?.files || []).slice(0,1);
+        if (!imageFiles.length && !videoFiles.length) continue;
+        if (!name){
+          throw new Error(`Element ${i}: сначала укажи name без @`);
+        }
+        setKling3NewUploadStatus(i, `Загружаю файлы элемента ${i}...`);
+        const imageUrls = [];
+        for (const file of imageFiles){
+          imageUrls.push(await uploadKling3NewOneFile(file, `element_${i}_image`));
+        }
+        const videoUrls = [];
+        for (const file of videoFiles){
+          videoUrls.push(await uploadKling3NewOneFile(file, `element_${i}_video`));
+        }
+        imgInput.dataset.urls = JSON.stringify(imageUrls);
+        videoInput.dataset.urls = JSON.stringify(videoUrls);
+        const count = imageUrls.length + videoUrls.length;
+        setKling3NewUploadStatus(i, `Готово: загружено ${count} файл(ов), ссылки добавлены автоматически.`, 'good');
+      }
+    }
+
+    function renderKling3NewEditors(){
+      const shotWrap = qs('#kling3NewShotsWrap');
+      const shotFields = qs('#kling3NewShotsFields');
+      const elementWrap = qs('#kling3NewElementsWrap');
+      const durationWrap = qs('#kling3NewDurationWrap');
+      const isMulti = getKling3NewGenMode() === 'multi_shot';
+      if (durationWrap) durationWrap.style.display = isMulti ? 'none' : 'block';
+      if (shotWrap) shotWrap.style.display = isMulti ? 'block' : 'none';
+      if (elementWrap) elementWrap.style.display = 'none';
+      if (!shotFields || !isMulti) return;
+
+      const store = getK3NShotStore();
+      const shotCount = getK3NShotCount();
+      shotFields.innerHTML = `
+        <div style="display:flex; gap:8px; align-items:center; justify-content:space-between; margin-bottom:10px; flex-wrap:wrap;">
+          <div class="hint">Показываем ${shotCount} shot. Минимум 2, максимум 5.</div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            ${shotCount < 5 ? '<button type="button" class="mini" id="k3n_add_shot_btn">+ Добавить shot</button>' : ''}
+            ${shotCount > 2 ? '<button type="button" class="mini" id="k3n_remove_shot_btn">− Удалить shot</button>' : ''}
+          </div>
+        </div>
+        ${Array.from({length:shotCount}, (_,idx) => {
+          const n = idx + 1;
+          const saved = store[idx] || { prompt:'', duration:'3' };
+          return `<div class="card" style="box-shadow:none;">
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:6px;"><b>Shot ${n}</b><span class="hint">Сейчас доступны только image elements (мин. 2 фото, макс. 4 фото)</span></div>
+            <div>Duration</div>
+            <select id="k3n_shot_${n}_duration">${Array.from({length:12},(_,i)=>`<option value="${i+1}" ${String(saved.duration || '3')===String(i+1)?'selected':''}>${i+1} sec</option>`).join('')}</select>
+            <div class="field-title">Prompt</div>
+            <textarea id="k3n_shot_${n}_prompt" rows="3" placeholder="Camera move, action, @element_name...">${String(saved.prompt || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</textarea>
+            <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;">
+              <label class="filepick" style="margin:0; cursor:pointer;">+ Фото element (2–4)
+                <input id="k3n_shot_${n}_images" type="file" accept="image/jpeg,image/png" multiple style="display:none;">
+              </label>
+            </div>
+            <div id="k3n_shot_${n}_status" class="upload-status"></div>
+            <div id="k3n_shot_${n}_elements" style="margin-top:6px;"></div>
+          </div>`;
+        }).join('')}`;
+
+      const addBtn = qs('#k3n_add_shot_btn');
+      const removeBtn = qs('#k3n_remove_shot_btn');
+      if (addBtn) addBtn.addEventListener('click', addK3NShot);
+      if (removeBtn) removeBtn.addEventListener('click', removeLastK3NShot);
+
+      for (let i=1; i<=shotCount; i++){
+        const promptEl = qs(`#k3n_shot_${i}_prompt`);
+        const durationEl = qs(`#k3n_shot_${i}_duration`);
+        if (promptEl) promptEl.addEventListener('input', () => { getK3NShotStore()[i-1].prompt = promptEl.value || ''; updateCostUI(); });
+        if (durationEl) durationEl.addEventListener('change', () => { getK3NShotStore()[i-1].duration = String(durationEl.value || '3'); updateCostUI(); });
+        const img = qs(`#k3n_shot_${i}_images`);
+        if (img) img.addEventListener('change', async (e) => {
+          try{
+            const files = Array.from(e.target.files || []).slice(0,4);
+            if (!files.length) return;
+            setKling3NewUploadStatus(i, 'Загружаю image element...');
+            const item = await attachK3NShotElement(i, files, 'image');
+            const count = (item?.element_input_urls || []).length;
+            setKling3NewUploadStatus(i, count >= 2 ? `Готово: @${item.name} содержит ${count}/4 фото.` : `Фото добавлено: @${item.name} содержит ${count}/4. Для запуска нужно минимум 2 фото.`, count >= 2 ? 'good' : '');
+          }catch(err){
+            setKling3NewUploadStatus(i, err?.message || String(err), 'bad');
+          }finally{
+            try{ e.target.value = ''; }catch(_){ }
+          }
+        });
+        renderK3NShotElements(i);
+      }
+    }
+
+
+
+    // Veo getters
+    function getVeoModel(){ return qs('input[name="veo_model"]:checked')?.value || "fast"; } // fast|pro|fast_relax
+    function getVeoFlow(){ return qs('input[name="veo_flow"]:checked')?.value || "text"; }   // text|image
+
+    // Grok getters
+    function getGrokModel(){ return qs('input[name="grok_model"]:checked')?.value || "grok-imagine-video"; }
+    function isGrok15(){ return getGrokModel() === "grok-imagine-video-1.5"; }
+    function getGrokFlow(){ return isGrok15() ? "image" : (qs('input[name="grok_flow"]:checked')?.value || "text"); }
+    function getGrokProviderMode(){ return isGrok15() ? "normal" : (qs('#grok_mode')?.value || "normal"); }
+    function setSelectOptions(selectEl, options, preferredValue){
+      if (!selectEl) return;
+      const current = preferredValue || selectEl.value;
+      selectEl.innerHTML = options.map(([value, label]) => `<option value="${value}">${label}</option>`).join('');
+      const values = options.map(([value]) => String(value));
+      selectEl.value = values.includes(String(current)) ? String(current) : String(options[0]?.[0] || '');
+    }
+    function updateGrokUI(){
+      const newModel = isGrok15();
+      const textRadio = qs('#grok_flow_text');
+      const imageRadio = qs('#grok_flow_image');
+      const textLabel = qs('#grokFlowTextLabel');
+      const modeSelect = qs('#grok_mode');
+      const durationSelect = qs('#grok_duration');
+      const aspectSelect = qs('#grok_aspect');
+      const hint = qs('#grok_hint');
+      if (newModel){
+        if (imageRadio) imageRadio.checked = true;
+        if (textRadio) textRadio.disabled = true;
+        if (textLabel) textLabel.style.display = 'none';
+        if (modeSelect) modeSelect.style.display = 'none';
+        setSelectOptions(durationSelect, [['5','5 секунд'], ['10','10 секунд'], ['15','15 секунд']], durationSelect?.value || '5');
+        setSelectOptions(aspectSelect, [['auto','auto'], ['1:1','1:1'], ['16:9','16:9'], ['9:16','9:16'], ['4:3','4:3'], ['3:4','3:4'], ['3:2','3:2'], ['2:3','2:3']], aspectSelect?.value || '16:9');
+        if (hint) hint.textContent = 'Grok 1.5 Preview: Image → Video, native audio, 480p / 720p, длительности 5 / 10 / 15 сек.';
+      } else {
+        if (textRadio) textRadio.disabled = false;
+        if (textLabel) textLabel.style.display = '';
+        if (modeSelect) modeSelect.style.display = '';
+        setSelectOptions(durationSelect, [['6','6 секунд'], ['12','12 секунд'], ['18','18 секунд'], ['24','24 секунды'], ['30','30 секунд']], durationSelect?.value || '6');
+        const oldAspect = ['2:3', '3:2', '1:1', '16:9', '9:16'].includes(String(aspectSelect?.value || '')) ? aspectSelect.value : '16:9';
+        setSelectOptions(aspectSelect, [['2:3','2:3'], ['3:2','3:2'], ['1:1','1:1'], ['16:9','16:9'], ['9:16','9:16']], oldAspect);
+        if (hint) hint.textContent = 'Grok Mode = Fun / Normal / Spicy, resolution = 480p / 720p, длительности 6 / 12 / 18 / 24 / 30 сек.';
+      }
+    }
+
+    // Google Omni Flash getters
+    function getOmniFlow(){ return qs('input[name="omni_flow"]:checked')?.value || "text"; }
+    function updateOmniUI(){
+      const flow = getOmniFlow();
+      const isVideoEdit = flow === 'video_edit';
+      const durationSelect = qs('#omni_duration');
+      const hint = qs('#omni_hint');
+      if (durationSelect) durationSelect.style.display = isVideoEdit ? 'none' : '';
+      if (hint) hint.textContent = isVideoEdit
+        ? 'Video Edit: исходное видео до 60 сек. Цена фиксированная: 720p/1080p — 20 ток., 4K — 30 ток. Длительность результата определяет модель.'
+        : 'Длительности только 6 / 8 / 10 сек. 4 секунды отключены. Цена сейчас считается по нашей внутренней сетке.';
+    }
+
+    // Seedance getters
+    function getSeedanceVariant(){ return "kie"; }
+    function getSeedancePreviewModel(){ return qs('input[name="seedance_model"]:checked')?.value || "preview"; }
+    function getSeedanceKieModel(){ return qs('input[name="seedance_kie_model"]:checked')?.value || "seedance-kie-480p"; }
+    function getSeedanceKieFlow(){ return qs('input[name="seedance_kie_flow"]:checked')?.value || "text"; }
+
+    function updateSeedanceUI(){
+      const seedTypeCard = qs('#seedanceTypeCard');
+      const seedKieRadio = qs('#seed_variant_kie');
+      const seedPreviewRadio = qs('#seed_variant_preview');
+      const previewModelWrap = qs('#seedancePreviewModelWrap');
+      const kieModelWrap = qs('#seedanceKieModelWrap');
+      const previewFlowCard = qs('#seedancePreviewFlowCard');
+      const kieFlowCard = qs('#seedanceKieFlowCard');
+      const aspectHint = qs('#seedanceAspectHint');
+      const aspectSelect = qs('#seedance_aspect');
+
+      // Preview intentionally hidden from UI: default Seedance path is the regular Seedance 2.0 branch.
+      if (seedTypeCard) {
+        seedTypeCard.style.display = 'none';
+        seedTypeCard.hidden = true;
+        seedTypeCard.setAttribute('aria-hidden', 'true');
+      }
+      if (seedKieRadio) seedKieRadio.checked = true;
+      if (seedPreviewRadio) seedPreviewRadio.checked = false;
+
+      if (previewModelWrap) previewModelWrap.style.display = 'none';
+      if (kieModelWrap) kieModelWrap.style.display = 'block';
+      if (previewFlowCard) previewFlowCard.style.display = 'none';
+      if (kieFlowCard) kieFlowCard.style.display = 'block';
+
+      if (aspectSelect && ['4:3','3:4'].includes(aspectSelect.value)){
+        aspectSelect.value = '16:9';
+      }
+      if (aspectHint) aspectHint.textContent = 'Для обычного Seedance 2.0 доступны форматы 16:9 / 9:16 / 1:1, как на сайте.';
+    }
+
+    function setFlowLabelText(labelEl, name, desc){
+      if (!labelEl) return;
+      const nameEl = labelEl.querySelector('.name');
+      const descEl = labelEl.querySelector('.desc');
+      if (nameEl) nameEl.textContent = name;
+      if (descEl) descEl.textContent = desc;
+    }
+
+    function setLegacyKlingQualityLabels({ motion3 = false } = {}){
+      const stdName = qs('label[for="mode_std"] .name');
+      const stdDesc = qs('label[for="mode_std"] .desc');
+      const proName = qs('label[for="mode_pro"] .name');
+      const proDesc = qs('label[for="mode_pro"] .desc');
+      if (motion3){
+        if (stdName) stdName.textContent = '720p';
+        if (stdDesc) stdDesc.textContent = '2 токена / сек';
+        if (proName) proName.textContent = '1080p';
+        if (proDesc) proDesc.textContent = '3 токена / сек';
+      } else {
+        if (stdName) stdName.textContent = 'Standard';
+        if (stdDesc) stdDesc.textContent = 'Быстрее / дешевле';
+        if (proName) proName.textContent = 'Pro';
+        if (proDesc) proDesc.textContent = 'Лучше качество';
+      }
+    }
+
+    function updateKlingUI(){
+      let flow = getFlow();
+      const version = getKlingVersion();
+
+      const durCard = qs('#durationCard');
+      const kling3Options = qs('#kling3Options');
+      const kling3NewOptions = qs('#kling3NewOptions');
+      const flowCard = qs('#klingFlowCard');
+      const legacyModeCard = qs('#klingLegacyModeCard');
+      const aspectCard = qs('#kling25AspectCard');
+      const flowMotionLabel = qs('#flowMotionLabel');
+      const flowI2VLabel = qs('#flowI2VLabel');
+      const flowT2VLabel = qs('#flowT2VLabel');
+      const flowHint = qs('#klingFlowHint');
+      const durationHint = qs('#durationHint');
+
+      if (version === '1_6'){
+        if (flowT2VLabel) flowT2VLabel.style.display = 'none';
+        if (flowMotionLabel) flowMotionLabel.style.display = 'flex';
+        if (flowI2VLabel) flowI2VLabel.style.display = 'flex';
+        setFlowLabelText(flowMotionLabel, '2.6', 'Motion Control');
+        setFlowLabelText(flowI2VLabel, '3.0', ' 720p / 1080p');
+        if (!['motion','i2v'].includes(flow)){
+          const el = qs('#flow_motion');
+          if (el) el.checked = true;
+          flow = 'motion';
+        }
+        if (durCard) durCard.style.display = 'none';
+        if (durationHint) durationHint.textContent = 'Длительность берётся из референс-видео.';
+        if (aspectCard) aspectCard.style.display = 'none';
+        if (flowCard) flowCard.style.display = 'block';
+        if (legacyModeCard) legacyModeCard.style.display = 'block';
+        setLegacyKlingQualityLabels({ motion3: flow === 'i2v' });
+        if (kling3Options) kling3Options.style.display = 'none';
+        if (kling3NewOptions) kling3NewOptions.style.display = 'none';
+        if (flowHint) flowHint.textContent = (flow === 'i2v')
+          ? 'Kling 3.0 Motion Control: фото персонажа + видео движения 3–30 сек. Качество: 720p или 1080p.'
+          : 'Kling 2.6 Motion Control: фото персонажа + видео движения 3–30 сек.';
+        return;
+      }
+
+      if (version === '2_5'){
+        setLegacyKlingQualityLabels({ motion3: false });
+        if (flowMotionLabel) flowMotionLabel.style.display = 'none';
+        if (flowI2VLabel) flowI2VLabel.style.display = 'flex';
+        if (flowT2VLabel) flowT2VLabel.style.display = 'flex';
+        setFlowLabelText(flowI2VLabel, 'Image → Video', 'Стартовое фото');
+        setFlowLabelText(flowT2VLabel, 'Text → Video', 'Только промпт');
+        if (!['t2v','i2v'].includes(flow)){
+          const el = qs('#flow_t2v');
+          if (el) el.checked = true;
+          flow = 't2v';
+        }
+        if (durCard) durCard.style.display = 'block';
+        if (durationHint) durationHint.textContent = 'Kling 2.5: длительность применяется и для Text → Video, и для Image → Video.';
+        if (aspectCard) aspectCard.style.display = (flow === 't2v') ? 'block' : 'none';
+        if (flowCard) flowCard.style.display = 'block';
+        if (legacyModeCard) legacyModeCard.style.display = 'none';
+        if (kling3Options) kling3Options.style.display = 'none';
+        if (kling3NewOptions) kling3NewOptions.style.display = 'none';
+        if (flowHint) flowHint.textContent = 'Kling 2.5 Turbo Pro: Text → Video по одному промпту или Image → Video по стартовому фото.';
+        return;
+      }
+
+      if (durCard) durCard.style.display = 'none';
+      if (aspectCard) aspectCard.style.display = 'none';
+      if (flowCard) flowCard.style.display = 'none';
+      if (legacyModeCard) legacyModeCard.style.display = 'none';
+      setLegacyKlingQualityLabels({ motion3: false });
+      if (version === '3_0_new'){
+        if (kling3Options) kling3Options.style.display = 'none';
+        if (kling3NewOptions) kling3NewOptions.style.display = 'block';
+        renderKling3NewEditors();
+        return;
+      }
+      if (kling3NewOptions) kling3NewOptions.style.display = 'none';
+      if (kling3Options) kling3Options.style.display = 'none';
+    }
+
+    function updateTokenRateHint(){
+      const version = getKlingVersion();
+      const el = qs('#tokenRateHint');
+      if (!el) return;
+
+      if (version === '3_0_new'){
+        el.innerHTML = 'Kling 3.0 - New / KIE: Standard 1/1.5 ток/сек, Pro 1.5/2 ток/сек, 4K 5/6 ток/сек. Multi-shot: сумма шотов 3–15 сек.';
+        return;
+      }
+
+      if (version === '2_5'){
+        el.innerHTML = 'Kling 2.5 Turbo Pro — <b>1 сек = 1 токен (≈9 ₽)</b>. Режим один, без переключателя Standard / Pro.';
+        return;
+      }
+
+      const flow = getFlow();
+      const mode = getMode();
+      if (flow === 'i2v'){
+        el.innerHTML = mode === 'pro'
+          ? 'Kling 3.0 Motion Control KIE: 720p — 2 ток/сек<br>1080p — <b>3 ток/сек</b>'
+          : 'Kling 3.0 Motion Control KIE: 720p — <b>2 ток/сек</b><br>1080p — 3 ток/сек';
+      } else if (mode === 'pro'){
+        el.innerHTML = 'Kling 2.6 Motion Control: Standard — 1 ток/сек<br>Pro — <b>2 ток/сек</b>';
+      } else {
+        el.innerHTML = 'Kling 2.6 Motion Control: Standard — <b>1 ток/сек</b><br>Pro — 2 ток/сек';
+      }
+    }
+
+    function updateVeoPriceHint(){
+      const model = getVeoModel();
+      const el = qs('#veoPriceHint');
+      if (!el) return;
+
+      if (model === 'fast_relax'){
+        el.innerHTML = 'Veo 3.1 Fast Relax: <b>4 токена за генерацию</b>. Длительность фиксирована: 8 сек. 720p или 1080p. Отдельного переключателя звука нет; видео может прийти с фоновым аудио.';
+      } else if (model === 'pro'){
+        el.innerHTML = 'Veo 3.1: без звука <b>2 токена 1сек</b>, со звуком <b>3 токена 1сек</b>. Режим 1080p.';
+      } else {
+        el.innerHTML = 'Fast: без звука <b>1 токен 1сек</b>, со звуком <b>2 токена 1сек</b>. 720p фикс.';
+      }
+    }
+
+    function getVeoAdvancedAvailability(){
+      const model = getVeoModel();
+      const isPro = (model === 'pro');
+      const isRelax = (model === 'fast_relax');
+      const flow = getVeoFlow();
+      const duration = isRelax ? 8 : parseInt((qs('#veo_duration')?.value || "8"), 10);
+      const aspect = (qs('#veo_aspect')?.value || "16:9");
+
+      const canUseAdvanced = (isPro || isRelax) && flow === 'image';
+      const canUseLastFrame = canUseAdvanced;
+      const canUseRefs = isPro && flow === 'image' && aspect === '16:9' && duration === 8;
+
+      return { model, isPro, isRelax, flow, duration, aspect, canUseAdvanced, canUseLastFrame, canUseRefs };
+    }
+
+    function setVeoAdvancedEnabled(){
+      const lf = qs('#veo_use_last_frame');
+      const refs = qs('#veo_use_refs');
+      const note = qs('#veoProOnlyNote');
+      const advHint = qs('#veoAdvHint');
+      const advDetails = qs('#veoAdvDetails');
+      const durationSelect = qs('#veo_duration');
+      const resolutionSelect = qs('#veo_resolution');
+      const audioToggle = qs('#veo_audio');
+      const audioWrap = qs('#veoAudioToggle');
+      const state = getVeoAdvancedAvailability();
+
+      if (durationSelect) {
+        durationSelect.value = state.isRelax ? '8' : (durationSelect.value || '8');
+        durationSelect.disabled = !!state.isRelax;
+      }
+      if (resolutionSelect) {
+        resolutionSelect.style.display = state.isRelax ? '' : 'none';
+        resolutionSelect.disabled = !state.isRelax;
+      }
+      if (audioWrap) {
+        audioWrap.style.display = state.isRelax ? 'none' : '';
+      }
+      if (audioToggle) {
+        if (state.isRelax) audioToggle.checked = false;
+        audioToggle.disabled = !!state.isRelax;
+      }
+
+      if (lf) lf.disabled = !state.canUseLastFrame;
+      if (refs) refs.disabled = !state.canUseRefs;
+
+      if (!state.canUseLastFrame && lf) lf.checked = false;
+      if (!state.canUseRefs && refs) refs.checked = false;
+
+      if (lf && refs){
+        if (refs.checked) lf.checked = false;
+        if (lf.checked) refs.checked = false;
+      }
+
+      if (!state.isPro && !state.isRelax){
+        if (note) note.style.display = 'block';
+        if (note) note.textContent = 'Доступно только в Veo 3.1 / Veo 3.1 Fast Relax.';
+        if (advHint) advHint.textContent = 'Last frame доступен в Image → Video для Veo 3.1 и Veo 3.1 Fast Relax.';
+        if (advDetails) advDetails.open = false;
+        return;
+      }
+
+      if (state.flow !== 'image'){
+        if (note) note.style.display = 'block';
+        if (note) note.textContent = 'Эти опции работают только в режиме Image → Video.';
+        if (advHint) advHint.textContent = state.isRelax ? 'Для Text → Video доступны prompt, 8 сек, качество и формат.' : 'Для Text → Video доступны только промпт, длительность, формат и звук.';
+        return;
+      }
+
+      if (state.isRelax){
+        if (note) note.style.display = 'none';
+        if (advHint) advHint.textContent = 'Для Veo 3.1 Fast Relax доступен опциональный last frame. Reference images здесь не используются.';
+        return;
+      }
+
+      if (!state.canUseRefs){
+        if (note) note.style.display = 'block';
+        if (note) note.textContent = 'Reference images: только 16:9 и 8 секунд. Last frame можно использовать отдельно.';
+        if (advHint) advHint.textContent = 'Refs официально поддерживаются только в Veo 3.1 Pro + Image → Video + 16:9 + 8 сек. Если включены refs, last frame не используется.';
+        return;
+      }
+
+      if (note) note.style.display = 'none';
+      if (advHint) advHint.textContent = 'Last frame и refs доступны. Refs: до 3 изображений. Если включены refs, last frame автоматически выключается.';
+    }
+
+
+    function updateProviderUI(){
+      const provider = getProvider();
+      const klingBlock = qs('#klingBlock');
+      const veoBlock = qs('#veoBlock');
+      const grokBlock = qs('#grokBlock');
+      const seedanceBlock = qs('#seedanceBlock');
+      const omniFlashBlock = qs('#omniFlashBlock');
+      const soraBlock = qs('#soraBlock');
+
+      if (klingBlock) klingBlock.style.display = (provider === 'kling') ? 'block' : 'none';
+      if (veoBlock) veoBlock.style.display   = (provider === 'veo')   ? 'block' : 'none';
+      if (grokBlock) grokBlock.style.display = (provider === 'grok') ? 'block' : 'none';
+      if (seedanceBlock) seedanceBlock.style.display = (provider === 'seedance') ? 'block' : 'none';
+      if (omniFlashBlock) omniFlashBlock.style.display = (provider === 'google') ? 'block' : 'none';
+      if (soraBlock) soraBlock.style.display = (provider === 'sora') ? 'block' : 'none';
+
+      if (provider === 'kling'){
+        updateKlingUI();
+      } else if (provider === 'veo') {
+        setVeoAdvancedEnabled();
+      } else if (provider === 'seedance') {
+        updateSeedanceUI();
+      } else if (provider === 'grok') {
+        updateGrokUI();
+      } else if (provider === 'google') {
+        updateOmniUI();
+      }
+      updateCostUI();
+    }
+
+    // Events
+    qsa('input[name="provider"]').forEach(el => el.addEventListener('change', () => { updateProviderUI(); updateCostUI(); }));
+    qsa('input[name="flow"]').forEach(el => el.addEventListener('change', () => { updateKlingUI(); updateCostUI(); }));
+    qsa('input[name="mode"]').forEach(el => el.addEventListener('change', () => { updateTokenRateHint(); updateCostUI(); }));
+    qsa('input[name="kling_version"]').forEach(el => el.addEventListener('change', () => { updateKlingUI(); updateTokenRateHint(); updateCostUI(); }));
+    qsa('input[name="kling3_new_gen_mode"]').forEach(el => el.addEventListener('change', () => { renderKling3NewEditors(); updateCostUI(); }));
+    qsa('input[name="kling3_new_quality"]').forEach(el => el.addEventListener('change', () => { updateCostUI(); }));
+    qsa('input[name="seedance_variant"]').forEach(el => el.addEventListener('change', () => { updateSeedanceUI(); updateCostUI(); }));
+    qsa('input[name="seedance_model"]').forEach(el => el.addEventListener('change', () => { updateCostUI(); }));
+    qsa('input[name="seedance_kie_model"]').forEach(el => el.addEventListener('change', () => { updateCostUI(); }));
+    qsa('input[name="seedance_flow"]').forEach(el => el.addEventListener('change', () => { updateCostUI(); }));
+    qsa('input[name="seedance_kie_flow"]').forEach(el => el.addEventListener('change', () => { updateCostUI(); }));
+qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () => {
+      updateVeoPriceHint();
+      setVeoAdvancedEnabled();
+      updateCostUI();
+    }));
+    qsa('input[name="veo_flow"]').forEach(el => el.addEventListener('change', () => {
+      setVeoAdvancedEnabled();
+      updateCostUI();
+    }));
+    qsa('input[name="grok_model"]').forEach(el => el.addEventListener('change', () => { updateGrokUI(); updateCostUI(); }));
+    qsa('input[name="grok_flow"]').forEach(el => el.addEventListener('change', () => { updateGrokUI(); updateCostUI(); }));
+    qsa('input[name="omni_flow"]').forEach(el => el.addEventListener('change', () => { updateOmniUI(); updateCostUI(); }));
+    ['#veo_duration', '#veo_resolution', '#veo_aspect', '#omni_duration', '#omni_resolution', '#omni_aspect'].forEach(sel => {
+      const el = qs(sel);
+      if (el) el.addEventListener('change', () => {
+        setVeoAdvancedEnabled();
+        updateCostUI();
+      });
     });
-  }
-}
-function morphNode(current, next){
-  if (!current || !next) return;
-  if (current.nodeType !== next.nodeType || current.nodeName !== next.nodeName){
-    current.replaceWith(next.cloneNode(true));
-    return;
-  }
-  if (current.nodeType === Node.TEXT_NODE){
-    if (current.nodeValue !== next.nodeValue) current.nodeValue = next.nodeValue;
-    return;
-  }
-  if (current.nodeType !== Node.ELEMENT_NODE) return;
+    const veoLastFrameToggle = qs('#veo_use_last_frame');
+    const veoRefsToggle = qs('#veo_use_refs');
+    if (veoLastFrameToggle) veoLastFrameToggle.addEventListener('change', () => {
+      if (veoLastFrameToggle.checked && veoRefsToggle) veoRefsToggle.checked = false;
+      setVeoAdvancedEnabled();
+      updateCostUI();
+    });
+    if (veoRefsToggle) veoRefsToggle.addEventListener('change', () => {
+      if (veoRefsToggle.checked && veoLastFrameToggle) veoLastFrameToggle.checked = false;
+      setVeoAdvancedEnabled();
+      updateCostUI();
+    });
 
-  Array.from(current.attributes).forEach(attr => {
-    if (!next.hasAttribute(attr.name)) current.removeAttribute(attr.name);
-  });
-  Array.from(next.attributes).forEach(attr => {
-    if (current.getAttribute(attr.name) !== attr.value) current.setAttribute(attr.name, attr.value);
-  });
-  syncFormState(current, next);
+    // Cost UI bindings (covers selects / toggles not listed above)
+    qsa('select, input[type=\"checkbox\"], input[type=\"radio\"]').forEach(el => {
+      el.addEventListener('change', () => { try{ updateCostUI(); }catch(e){} });
+    });
 
-  const currentChildren = Array.from(current.childNodes);
-  const nextChildren = Array.from(next.childNodes);
-  const max = Math.max(currentChildren.length, nextChildren.length);
-  for (let i = 0; i < max; i++){
-    const cur = currentChildren[i];
-    const nxt = nextChildren[i];
-    if (!cur && nxt){ current.appendChild(nxt.cloneNode(true)); continue; }
-    if (cur && !nxt){ cur.remove(); continue; }
-    morphNode(cur, nxt);
-  }
-}
-function setSlotHtml(id, html){
-  const el = $(id);
-  if (!el) return;
-  const next = (html || '').trim();
-  if (el.getAttribute('data-last-html') === next) return;
+    // Init
+    updateProviderUI();
+    updateKlingUI();
+    updateTokenRateHint();
+    updateVeoPriceHint();
+    setVeoAdvancedEnabled();
+    updateGrokUI();
+    updateCostUI();
 
-  const tpl = document.createElement('template');
-  tpl.innerHTML = next;
-  const currentChildren = Array.from(el.childNodes);
-  const nextChildren = Array.from(tpl.content.childNodes);
-  const max = Math.max(currentChildren.length, nextChildren.length);
+    // Telegram init (safe)
+    const tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
+    // Mark desktop environments (Telegram Desktop often has a narrow viewport, so we can't rely on min-width media queries)
+    try{
+      const p = (tg && tg.platform) ? String(tg.platform).toLowerCase() : "";
+      const isPointerFine = window.matchMedia && window.matchMedia('(pointer: fine)').matches;
+      const isDesktopPlatform = (p === 'tdesktop' || p === 'macos' || p === 'windows' || p === 'web' || p === 'weba' || p === 'webk' || p === 'webz');
+      if (isPointerFine || isDesktopPlatform){
+        document.documentElement.classList.add('is-desktop');
+      }
+    }catch(e){}
 
-  for (let i = 0; i < max; i++){
-    const cur = currentChildren[i];
-    const nxt = nextChildren[i];
-    if (!cur && nxt){ el.appendChild(nxt.cloneNode(true)); continue; }
-    if (cur && !nxt){ cur.remove(); continue; }
-    morphNode(cur, nxt);
-  }
-  el.setAttribute('data-last-html', next);
-}
-function refreshModeDependentParams(){
-  const m = getModel();
-  normalizeAdvanced();
-  const screen = $('screen2');
-  if (screen) screen.classList.add('no-anim', 'mode-refreshing');
-
-  setSlotHtml('aspectSlot', renderAspectCard(m));
-  setSlotHtml('durationSlot', renderDurationSegment(m));
-  setSlotHtml('togglesSlot', renderToggles(m));
-  setSlotHtml('shotsSlot', renderShotsCard());
-  setSlotHtml('promptRefsSlot', renderPromptRefsCard());
-  refreshDurationLabels();
-
-  if (screen){
-    screen.classList.add('no-anim');
-    requestAnimationFrame(() => screen.classList.remove('mode-refreshing'));
-  }
-}
-function renderParams(){
-  const m = getModel();
-  normalizeAdvanced();
-  const screen = $('screen2');
-  if (screen) screen.classList.add('no-anim');
-  const html = [
-    `<div id="modeSlot">${renderModeCard(m)}</div>`,
-    `<div id="qualitySlot">${renderQualityCard(m)}</div>`,
-    `<div id="providerModeSlot">${renderProviderModeCard(m)}</div>`,
-    `<div id="resolutionSlot">${renderResolutionCard(m)}</div>`,
-    `<div id="aspectSlot">${renderAspectCard(m)}</div>`,
-    `<div id="durationSlot">${renderDurationSegment(m)}</div>`,
-    `<div id="togglesSlot">${renderToggles(m)}</div>`,
-    `<div id="shotsSlot">${renderShotsCard()}</div>`,
-    `<div id="promptRefsSlot">${renderPromptRefsCard()}</div>`
-  ].join('');
-
-  $('paramsRoot').innerHTML = html;
-}
-
-/* ============================================================
-   ЦЕНЫ / ИТОГ
-============================================================ */
-function priceLabelForDuration(m, d){
-  const c = calcTokenCostFor(m, d);
-  return c.known ? `${c.tokens} ток.` : c.note;
-}
-
-function calcTokenCostFor(m, durationOverride){
-  const d = Number(durationOverride ?? state.duration ?? 0);
-
-  if (m.priceKind === 'seedance'){
-    const maps = {
-      'seedance-kie-480p': {5:6, 10:12, 15:18},
-      'seedance-kie-720p': {5:12, 10:24, 15:33},
-      'seedance-kie-1080p': {5:28, 10:55, 15:80}
-    };
-    return { known:true, tokens:(maps[m.id]?.[d] || maps[m.id]?.[5] || 0), note:'' };
-  }
-
-  if (m.priceKind === 'sora'){
-    const map = {4:5, 8:10, 12:15};
-    return { known:true, tokens:map[d] || 5, note:'' };
-  }
-
-  if (m.priceKind === 'omni'){
-    if (state.mode === 'video_edit' && durationOverride == null){
-      return { known:true, tokens: state.resolution === '4k' ? 30 : 20, note:'фикс' };
+    if (tg){
+      try{
+        tg.ready();
+        tg.expand();
+      }catch(e){}
     }
-    const res = state.resolution || '1080p';
-    const map = {
-      '720p': {6:8, 8:10, 10:12},
-      '1080p': {6:8, 8:10, 10:12},
-      '4k': {6:16, 8:18, 10:20}
-    };
-    return { known:true, tokens:(map[res]?.[d] || 10), note:'' };
-  }
 
-  if (m.priceKind === 'grok'){
-    const res = state.resolution || '480p';
-    const map = {
-      '480p': {6:1, 12:2, 18:2, 24:3, 30:3},
-      '720p': {6:2, 12:3, 18:4, 24:5, 30:6}
-    };
-    return { known:true, tokens:(map[res]?.[d] || 1), note:'' };
-  }
 
-  if (m.priceKind === 'grok15'){
-    const res = state.resolution || '480p';
-    const map = {
-      '480p': {5:4, 10:8, 15:11},
-      '720p': {5:7, 10:13, 15:19}
-    };
-    return { known:true, tokens:(map[res]?.[d] || 4), note:'' };
-  }
-
-  if (m.priceKind === 'kling25'){
-    return { known:true, tokens:d || 5, note:'' };
-  }
-
-  if (m.priceKind === 'kling3new'){
-    let seconds = d || 5;
-    if (isKling3MultiShot()) seconds = getShotSeconds() || 5;
-    const table = { std: { off:1, on:1.5 }, pro: { off:1.5, on:2 }, '4K': { off:5, on:6 } };
-    const rate = table[state.quality]?.[state.audio ? 'on' : 'off'] || 1;
-    return { known:true, tokens:Math.max(1, Math.ceil(seconds * rate)), note:'' };
-  }
-
-  if (m.priceKind === 'kling_motion'){
-    const rate = state.mode === 'i2v'
-      ? (state.quality === 'pro' ? 3 : 2)
-      : (state.quality === 'pro' ? 2 : 1);
-    return { known:false, tokens:null, note:`по референс-видео · ${rate} ток/сек` };
-  }
-
-  if (m.priceKind === 'veo'){
-    if (m.veoModel === 'fast_relax') return { known:true, tokens:4, note:'' };
-    const rate = m.veoModel === 'fast' ? (state.audio ? 2 : 1) : (state.audio ? 3 : 2);
-    return { known:true, tokens:(rate * (d || 8)), note:'' };
-  }
-
-  return { known:false, tokens:null, note:'зависит от настроек' };
-}
-
-function calcTokenCost(){ return calcTokenCostFor(getModel()); }
-function priceText(){
-  const c = calcTokenCost();
-  return c.known ? `${c.tokens} ${pluralizeToken(c.tokens)}` : c.note;
-}
-
-function getModeLabel(){
-  const m = getModel();
-  const x = (m.modes || []).find(v => v.id === state.mode);
-  return x?.label || state.mode || '—';
-}
-function renderSummary(){
-  const m = getModel();
-  $('sumModel').textContent = m.name;
-  $('sumMode').textContent = getModeLabel();
-  $('sumAspect').textContent = (state.model === 'kling25' && state.mode === 'i2v') ? 'по стартовому кадру' : (hasAspect(m) ? state.aspect : '—');
-  $('sumDuration').textContent = isKling3MultiShot() ? `${getShotSeconds()} сек (shots)` : (state.model === 'gemini-omni-video' && state.mode === 'video_edit' ? 'Video Edit' : (state.duration ? state.duration + ' сек' : 'по референсу'));
-  $('sumPrice').textContent = priceText();
-
-  const pp = $('sumPrompt');
-  pp.textContent = nextStepInstruction();
-  pp.classList.add('empty');
-
-  if (DEBUG){
-    $('debug').classList.add('show');
-    $('debug').textContent = 'DEBUG payload:\n' + JSON.stringify(buildPayload(), null, 2);
-  }
-}
-
-/* ============================================================
-   НАВИГАЦИЯ
-============================================================ */
-const STEP_SUBS = ['Выберите модель', 'Настройте параметры', 'Проверьте и запустите'];
-function showStep(n){
-  state.step = n;
-  for (let i = 1; i <= 3; i++){
-    $('screen' + i).classList.toggle('visible', i === n);
-    $('stepDot' + i).className = 'step' + (i < n ? ' done' : i === n ? ' active' : '');
-    $('stepLbl' + i).className = i === n ? 'active' : '';
-    if (i < 3) $('line' + i).className = 'step-line' + (i < n ? ' done' : '');
-  }
-  $('stepDot1').textContent = state.step > 1 ? '✓' : '1';
-  $('stepDot2').textContent = state.step > 2 ? '✓' : '2';
-  $('headerSub').textContent = STEP_SUBS[n - 1];
-  updateModelContext();
-  if (n === 2) renderParams();
-  if (n === 3) renderSummary();
-  $('btnBack').style.display = n > 1 ? 'flex' : 'none';
-  updateMainButton();
-  window.scrollTo({ top: 0, behavior: 'smooth' });
-}
-
-function updateMainButton(){
-  const text = state.step === 3 ? `Сохранить · ${priceText()}` : 'Далее';
-  $('btnNext').textContent = text;
-  $('btnNext').disabled = state.uploading > 0;
-  if (!inTelegram) return;
-  tg.MainButton.setText(state.uploading > 0 ? 'Загружаю refs...' : text);
-  if (state.uploading > 0) tg.MainButton.disable(); else tg.MainButton.enable();
-  tg.MainButton.show();
-  if (state.step > 1) tg.BackButton.show();
-  else tg.BackButton.hide();
-}
-
-function validateBeforeNext(){
-  if (state.uploading > 0){ showToast('Дождись загрузки refs'); haptic('error'); return false; }
-  if (state.step !== 3) return true;
-  if (isKling3MultiShot()){
-    ensureShots();
-    const filled = state.shots.filter(s => String(s.prompt || '').trim()).length;
-    const total = getShotSeconds();
-    if (filled < 2){ showToast('Для Multi-shot заполни минимум 2 shot'); haptic('error'); return false; }
-    if (total < 3 || total > 15){ showToast('Сумма shot должна быть 3–15 сек'); haptic('error'); return false; }
-    for (const el of getKling3NewElements()){
-      const imgs = el.element_input_urls || [];
-      const vids = el.element_input_video_urls || [];
-      if (!vids.length && imgs.length && (imgs.length < 2 || imgs.length > 4)){ showToast(`Element @${el.name}: нужно 2–4 фото`); haptic('error'); return false; }
+    function pluralizeToken(n){
+      const n10 = n % 10, n100 = n % 100;
+      if (n10 === 1 && n100 !== 11) return 'токен';
+      if (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14)) return 'токена';
+      return 'токенов';
     }
-  }
-  return true;
-}
-function goNext(){
-  haptic('light');
-  if (state.step < 3) showStep(state.step + 1);
-  else if (validateBeforeNext()) save();
-}
-function goBack(){
-  haptic('light');
-  if (state.step > 1) showStep(state.step - 1);
-}
 
-/* ============================================================
-   PAYLOAD — сохраняем совместимость с текущим ботом
-============================================================ */
-function buildPayload(){
-  const m = getModel();
-  let payload;
+    function calcTokenCost(){
+      const provider = getProvider();
 
-  if (state.provider === 'kling'){
-    if (m.id === 'kling_motion'){
-      payload = {
-        type:'kling_settings',
-        provider:'kling',
-        kling_version:'1_6',
-        flow:state.mode,
-        mode:state.quality,
-        motion_version: state.mode === 'i2v' ? '3_0' : '2_6'
-      };
-    } else if (m.id === 'kling25'){
-      payload = {
-        type:'kling_settings',
-        provider:'kling',
-        kling_version:'2_5',
-        flow:state.mode,
-        duration:Number(state.duration || 5),
-        model_slug:'kwaivgi/kling-v2.5-turbo-pro'
-      };
-      if (state.mode === 't2v') payload.aspect_ratio = state.aspect || '16:9';
-    } else {
-      const shots = isKling3MultiShot()
-        ? state.shots.filter(s => String(s.prompt || '').trim()).map(s => ({ prompt:String(s.prompt || '').trim(), duration:Number(s.duration || 3) }))
-        : [];
-      payload = {
-        type:'kling3_kie_settings',
-        provider:'kling',
-        kling_version:'3_0_new',
-        model:'kling-3.0-new',
-        mode:state.quality,
-        resolution:state.quality,
-        enable_audio:!!state.audio,
-        duration:isKling3MultiShot() ? Math.max(3, Math.min(15, getShotSeconds() || 5)) : Number(state.duration || 5),
-        gen_mode:state.mode,
-        aspect_ratio:state.aspect || '16:9',
-        multi_shots:shots,
-        kling_elements:getKling3NewElements()
-      };
+      if (provider === 'seedance'){
+        const variant = getSeedanceVariant();
+        const seconds = parseInt((qs('#seedance_duration')?.value || "5"), 10);
+
+        if (variant === 'kie'){
+          const model = getSeedanceKieModel();
+          const priceMap = model === 'seedance-kie-1080p'
+            ? {5: 28, 10: 55, 15: 80}
+            : (model === 'seedance-kie-720p' || model === 'seedance-kie')
+              ? {5: 12, 10: 24, 15: 33}
+              : {5: 6, 10: 12, 15: 18};
+          const tokens = priceMap[seconds] || priceMap[5];
+          return { known:true, tokens, note:'' };
+        }
+
+        const previewModel = getSeedancePreviewModel();
+        const priceMap = previewModel === 'fast' ? {5: 6, 10: 12, 15: 18} : {5: 12, 10: 24, 15: 33};
+        const tokens = priceMap[seconds] || priceMap[5];
+        return { known:true, tokens, note:'' };
+      }
+
+      if (provider === 'sora'){
+        const seconds = parseInt((qs('#sora_duration')?.value || "4"), 10);
+        const map = {4:5, 8:10, 12:15};
+        const tokens = map[seconds] || 5;
+        return { known:true, tokens, note:'' };
+      }
+
+      if (provider === 'grok'){
+        const seconds = parseInt((qs('#grok_duration')?.value || (isGrok15() ? "5" : "6")), 10);
+        const resolution = String(qs('#grok_resolution')?.value || '480p').trim().toLowerCase() === '720p' ? '720p' : '480p';
+        const priceMap = isGrok15() ? {
+          '480p': {5:4, 10:8, 15:11},
+          '720p': {5:7, 10:13, 15:19},
+        } : {
+          '480p': {6:1, 12:2, 18:2, 24:3, 30:3},
+          '720p': {6:2, 12:3, 18:4, 24:5, 30:6},
+        };
+        const tokens = (priceMap[resolution] && priceMap[resolution][seconds]) ? priceMap[resolution][seconds] : (isGrok15() ? 1 : 1);
+        return { known:true, tokens, note:'' };
+      }
+
+      if (provider === 'google'){
+        const flow = getOmniFlow();
+        const seconds = parseInt((qs('#omni_duration')?.value || "8"), 10);
+        const resolution = (qs('#omni_resolution')?.value || '1080p');
+        if (flow === 'video_edit') {
+          const tokens = resolution === '4k' ? 30 : 20;
+          return { known:true, tokens, note:'фикс за Video Edit до 60 сек' };
+        }
+        const map = {
+          '720p': {6:8, 8:10, 10:12},
+          '1080p': {6:8, 8:10, 10:12},
+          '4k': {6:16, 8:18, 10:20}
+        };
+        const tokens = (map[resolution] && map[resolution][seconds]) ? map[resolution][seconds] : 10;
+        return { known:true, tokens, note:'' };
+      }
+
+      // KLING
+      if (provider === 'kling'){
+        const kling_version = getKlingVersion();
+
+        // Motion Control container: 2.6 or 3.0 KIE. Duration depends on reference video.
+        if (kling_version === '1_6'){
+          const flow = getFlow();
+          const mode = getMode();
+          if (flow === 'i2v'){
+            const rate = (mode === 'pro') ? 3 : 2;
+            return { known:false, tokens:null, note:`по длительности референс-видео • ${mode === 'pro' ? '1080p' : '720p'} = ${rate} ток/сек` };
+          }
+          const rate = (mode === 'pro') ? 2 : 1;
+          return { known:false, tokens:null, note:`по длительности референс-видео • 2.6 = ${rate} ток/сек` };
+        }
+
+        if (kling_version === '2_5'){
+          const seconds = parseInt((qs('#duration')?.value || '5'), 10);
+          return { known:true, tokens: seconds, note:'' };
+        }
+
+        if (kling_version === '3_0_new'){
+          const quality = getKling3NewQuality();
+          const enable_audio = getKling3NewAudio();
+          let seconds = getKling3NewDuration();
+          if (getKling3NewGenMode() === 'multi_shot'){
+            const shots = getKling3NewShots();
+            seconds = shots.reduce((sum, sh) => sum + (parseInt(sh.duration, 10) || 3), 0) || 5;
+          }
+          const table = { std: { off:1, on:1.5 }, pro: { off:1.5, on:2 }, '4K': { off:5, on:6 } };
+          const rate = table[quality]?.[enable_audio ? 'on' : 'off'] || 1;
+          return { known:true, tokens: Math.max(1, Math.ceil(seconds * rate)), note:'' };
+        }
+
+        return { known:false, tokens:null, note:'выбери доступную версию Kling' };
+      }
+
+      // VEO
+      const model = getVeoModel(); // fast|pro|fast_relax
+      if (model === 'fast_relax'){
+        return { known:true, tokens:4, note:'8 сек · 720p/1080p · звук без ручного переключателя' };
+      }
+      const seconds = parseInt((qs('#veo_duration')?.value || "8"), 10);
+      const audio = !!qs('#veo_audio')?.checked;
+
+      let rate = 1;
+      if (model === 'fast'){
+        rate = audio ? 2 : 1;
+      } else {
+        rate = audio ? 3 : 2;
+      }
+      const tokens = rate * seconds;
+      return { known:true, tokens, note:'' };
     }
-  } else if (state.provider === 'grok'){
-    payload = {
-      type:'grok_settings',
-      provider:'grok',
-      model:m.id,
-      flow:m.id === 'grok-imagine-video-1.5' ? 'image' : state.mode,
-      provider_mode:m.id === 'grok-imagine-video-1.5' ? 'normal' : state.providerMode,
-      duration:Number(state.duration || (m.id === 'grok-imagine-video-1.5' ? 5 : 6)),
-      resolution:state.resolution || '480p',
-      aspect_ratio:state.aspect || '16:9'
-    };
-  } else if (state.provider === 'google'){
-    payload = {
-      type:'omni_flash_settings',
-      provider:'google',
-      model:'gemini-omni-video',
-      flow:state.mode,
-      duration:state.mode === 'video_edit' ? undefined : Number(state.duration || 8),
-      resolution:state.resolution || '1080p',
-      aspect_ratio:state.aspect || '16:9'
-    };
-    if (payload.duration === undefined) delete payload.duration;
-  } else if (state.provider === 'seedance'){
-    payload = {
-      type:'seedance_settings',
-      provider:'seedance_kie',
-      seedance_variant:'kie',
-      seedance_model:m.id,
-      flow:state.mode,
-      duration:Number(state.duration || 5),
-      aspect_ratio:state.aspect || '16:9'
-    };
-  } else if (state.provider === 'sora'){
-    payload = {
-      type:'sora_settings',
-      provider:'sora',
-      model:'sora-2',
-      duration:Number(state.duration || 4),
-      aspect_ratio:state.aspect || '16:9'
-    };
-  } else {
-    const isRelax = m.veoModel === 'fast_relax';
-    const isPro = m.veoModel === 'pro';
-    const duration = isRelax ? 8 : Number(state.duration || 8);
-    const refsAllowed = isPro && state.mode === 'image' && state.aspect === '16:9' && duration === 8;
-    const lastFrameAllowed = (isPro || isRelax) && state.mode === 'image';
-    const useRefs = refsAllowed && !!state.useRefs;
-    const useLastFrame = lastFrameAllowed && !useRefs && !!state.useLastFrame;
-    payload = {
-      type:'veo_settings',
-      provider:'veo',
-      veo_model:m.veoModel || 'fast',
-      flow:state.mode,
-      duration,
-      aspect_ratio:state.aspect || '16:9',
-      use_last_frame:useLastFrame,
-      use_reference_images:isRelax ? false : useRefs,
-      resolution:isRelax ? (state.resolution || '1080p') : (isPro ? '1080p' : '720p')
-    };
-    if (!isRelax) payload.generate_audio = !!state.audio;
-  }
 
-  return payload;
-}
+    function updateCostUI(){
+      const btn = qs('#saveBtn');
+      if (!btn) return;
 
-function save(){
-  const payload = buildPayload();
-  haptic('success');
-  if (DEBUG) console.log('PAYLOAD:', payload);
-  if (inTelegram){
-    try{ tg.sendData(JSON.stringify(payload)); }catch(err){ showToast('Ошибка отправки настроек'); return; }
-    setTimeout(() => { try{ tg.close(); }catch(e){} }, 150);
-  } else {
-    console.log('PAYLOAD:', payload);
-    showToast('Сохранено: payload в консоли');
-  }
-}
+      const c = calcTokenCost();
+      if (c.known){
+        const n = c.tokens || 0;
+        btn.textContent = `Сохранить • спишется ${n} ${pluralizeToken(n)}`;
+      } else {
+        btn.textContent = `Сохранить • списание ${c.note || 'зависит от длительности'}`;
+      }
+    }
 
-/* ============================================================
-   BOTTOM SHEET / TOAST
-============================================================ */
-const SHEETS = {
-  models: `
-    <h3>Как выбрать модель</h3>
-    <p><b>Seedance</b> — основной доступный вариант: Text, Image и Omni Reference.</p>
-    <p><b>Kling</b> — Motion Control, Kling 2.5 и Kling 3.0 - New.</p>
-    <p><b>Veo</b> — Fast, Pro и Fast Relax.</p>
-    <p><b>Grok / Google / Sora</b> — отдельные режимы генерации видео.</p>
-  `,
-};
-function buildPromptSheet(){
-  const m = getModel();
-  const modeLabel = getModeLabel();
-  const title = `${esc(m.name)} · ${esc(modeLabel)}`;
-  const instruction = esc(nextStepInstruction());
-  let extra = '';
+    function showDebug(payload){
+      if (!DEBUG) return;
+      if (!debugEl) return;
+      debugEl.classList.add('show');
+      debugEl.textContent = 'DEBUG payload:\n' + JSON.stringify(payload, null, 2);
+    }
 
-  if (state.provider === 'seedance') {
-    if (state.mode === 'text') extra = 'Референсы не нужны: после сохранения бот сразу ждёт текстовый prompt.';
-    else if (state.mode === 'image') extra = 'Можно отправить 1 или 2 фото. Если фото два — второе используется как финальный кадр.';
-    else extra = 'Можно отправлять image / video / audio refs. После refs нажми «✅ Готово», затем отправь prompt.';
-  } else if (state.provider === 'kling') {
-    if (state.model === 'kling_motion') extra = 'Сначала нужен аватар/фото, затем видео движения. Длина и цена зависят от reference-video.';
-    else if (state.model === 'kling25') extra = state.mode === 'i2v' ? 'Формат кадра берётся из стартового изображения.' : 'Для Text → Video нужен только prompt.';
-    else if (state.mode === 'multi_shot') extra = 'Shot prompts и image elements заполняются прямо здесь, в WebApp. В Telegram останется только отправить «СТАРТ» или общий стартовый кадр.';
-    else if (state.mode === 'image_to_video') extra = 'Первое фото — стартовый кадр. Второе фото можно отправить как финальный кадр.';
-    else extra = 'Для Text → Video бот после сохранения попросит prompt.';
-  } else if (state.provider === 'veo') {
-    if (state.mode === 'image') {
-      if (state.useRefs) extra = 'Сейчас включены Reference images: отправь стартовое фото и refs.';
-      else if (state.useLastFrame) extra = 'Сейчас включён Last frame: отправь стартовый и финальный кадр.';
-      else extra = 'Нужно одно стартовое изображение и prompt.';
-    } else extra = 'Для Text → Video нужен только prompt.';
-  } else if (state.provider === 'grok') {
-    extra = state.mode === 'image' ? 'Сначала отправь фото, потом prompt.' : 'После сохранения бот попросит prompt.';
-  } else if (state.provider === 'google') {
-    if (state.mode === 'image') extra = 'Можно отправить до 7 фото-референсов.';
-    else if (state.mode === 'video_edit') extra = 'Нужно отправить исходное видео до 60 секунд, затем refs по желанию и prompt.';
-    else extra = 'Для Text → Video нужен prompt.';
-  } else if (state.provider === 'sora') {
-    extra = 'Для Sora 2 доступен только Text → Video: после сохранения отправь prompt.';
-  }
+    function showToast(){
+      if (!toastEl) return;
+      toastEl.classList.add('show');
+      setTimeout(() => toastEl.classList.remove('show'), 6000);
+    }
 
-  return `
-    <h3>${title}</h3>
-    <p>${instruction}</p>
-    ${extra ? `<p><b>Важно:</b> ${esc(extra)}</p>` : ''}
-    <p>Эта подсказка меняется под выбранную модель, режим и включённые опции.</p>
-  `;
-}
-function openSheet(key){
-  haptic('light');
-  $('sheetContent').innerHTML = key === 'prompt' ? buildPromptSheet() : (SHEETS[key] || '');
-  $('sheetOverlay').classList.add('open');
-  $('sheet').classList.add('open');
-}
-function closeSheet(){
-  $('sheetOverlay').classList.remove('open');
-  $('sheet').classList.remove('open');
-}
-let toastTimer;
-function showToast(text){
-  const t = $('toast');
-  t.textContent = text;
-  t.classList.add('show');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('show'), 2400);
-}
+    const saveBtn = qs('#saveBtn');
+    if (saveBtn){
+      saveBtn.addEventListener('click', async (e) => {
+        e.preventDefault();
 
-/* ============================================================
-   СТАРТ
-============================================================ */
-renderProviders();
-renderModels();
-showStep(1);
-</script>
+        const provider = getProvider();
+        let payload = null;
+
+        if (provider === 'kling'){
+          const kling_version = getKlingVersion();
+
+          if (kling_version === '1_6'){
+            const flow = getFlow();
+            const mode = getMode();
+            payload = {
+              type: "kling_settings",
+              provider: "kling",
+              kling_version,
+              flow,
+              mode,
+              motion_version: flow === 'i2v' ? '3_0' : '2_6'
+            };
+          } else if (kling_version === '2_5') {
+            const flow = getFlow();
+            const duration = parseInt((qs('#duration')?.value || "5"), 10);
+            payload = {
+              type: "kling_settings",
+              provider: "kling",
+              kling_version,
+              flow,
+              duration,
+              model_slug: "kwaivgi/kling-v2.5-turbo-pro"
+            };
+            if (flow === 't2v'){
+              payload.aspect_ratio = getKling25Aspect();
+            }
+          } else if (kling_version === '3_0_new') {
+            try{
+              saveBtn.disabled = true;
+              saveBtn.textContent = 'Загружаю refs...';
+              await uploadKling3NewElementFiles();
+            }catch(err){
+              alert('Не удалось загрузить element/ref файлы: ' + (err?.message || err));
+              saveBtn.disabled = false;
+              updateCostUI();
+              return;
+            }
+            const gen_mode = getKling3NewGenMode();
+            const shots = getKling3NewShots();
+            const totalShotDuration = shots.reduce((sum, sh) => sum + (parseInt(sh.duration, 10) || 3), 0);
+            const klingElements = getKling3NewElements();
+            try{
+              validateKling3NewElements(klingElements);
+            }catch(err){
+              alert(err?.message || err);
+              saveBtn.disabled = false;
+              updateCostUI();
+              return;
+            }
+            payload = {
+              type: "kling3_kie_settings",
+              provider: "kling",
+              kling_version,
+              model: "kling-3.0-new",
+              mode: getKling3NewQuality(),
+              resolution: getKling3NewQuality(),
+              enable_audio: getKling3NewAudio(),
+              duration: gen_mode === 'multi_shot' ? Math.max(3, Math.min(15, totalShotDuration || 5)) : getKling3NewDuration(),
+              gen_mode,
+              aspect_ratio: getKling3NewAspect(),
+              multi_shots: gen_mode === 'multi_shot' ? shots : [],
+              kling_elements: klingElements
+            };
+          } else {
+            alert('Старый Kling/PiAPI Kling 3.0 отключён. Выбери Kling 3.0 - New.');
+            updateCostUI();
+            return;
+          }
+
+        } else if (provider === 'grok'){
+          const model = getGrokModel();
+          const flow = getGrokFlow();
+          const duration = parseInt((qs('#grok_duration')?.value || (model === 'grok-imagine-video-1.5' ? "5" : "6")), 10);
+          const resolution = (qs('#grok_resolution')?.value || '480p');
+          const aspect_ratio = (qs('#grok_aspect')?.value || '16:9');
+
+          payload = {
+            type: "grok_settings",
+            provider: "grok",
+            model,
+            flow,
+            provider_mode: getGrokProviderMode(),
+            duration,
+            resolution,
+            aspect_ratio
+          };
+        } else if (provider === 'google'){
+          payload = {
+            type: "omni_flash_settings",
+            provider: "google",
+            model: "gemini-omni-video",
+            flow: getOmniFlow(),
+            duration: parseInt((qs('#omni_duration')?.value || "8"), 10),
+            resolution: (qs('#omni_resolution')?.value || '1080p'),
+            aspect_ratio: (qs('#omni_aspect')?.value || '16:9')
+          };
+        } else if (provider === 'seedance'){
+          const variant = getSeedanceVariant();
+          const duration = parseInt((qs('#seedance_duration')?.value || "5"), 10);
+          const aspect_ratio = (qs('#seedance_aspect')?.value || "16:9");
+
+          if (variant === 'kie'){
+            payload = {
+              type: "seedance_settings",
+              provider: "seedance_kie",
+              seedance_variant: "kie",
+              seedance_model: getSeedanceKieModel(),
+              flow: getSeedanceKieFlow(),
+              duration,
+              aspect_ratio
+            };
+          } else {
+            const seedance_model = getSeedancePreviewModel();
+            const flow = (qs('input[name="seedance_flow"]:checked')?.value || 'text');
+
+            payload = {
+              type: "seedance_settings",
+              provider: "seedance",
+              seedance_variant: "preview",
+              seedance_model,
+              flow,
+              duration,
+              aspect_ratio
+            };
+          }
+        } else if (provider === 'sora') {
+          const duration = parseInt((qs('#sora_duration')?.value || "4"), 10);
+          const aspect_ratio = (qs('#sora_aspect')?.value || "16:9");
+
+          payload = {
+            type: "sora_settings",
+            provider: "sora",
+            model: "sora-2",
+            duration,
+            aspect_ratio
+          };
+        } else {
+          const veo_model = getVeoModel(); // fast|pro|fast_relax
+          const flow = getVeoFlow();       // text|image
+          const isRelax = (veo_model === 'fast_relax');
+          const duration = isRelax ? 8 : parseInt((qs('#veo_duration')?.value || "8"), 10);
+          const aspect_ratio = (qs('#veo_aspect')?.value || "16:9");
+          const generate_audio = !!qs('#veo_audio')?.checked;
+
+          const isPro = (veo_model === 'pro');
+          const veoFlowIsImage = (flow === 'image');
+          const refsAllowed = isPro && veoFlowIsImage && aspect_ratio === '16:9' && duration === 8;
+          const lastFrameAllowed = (isPro || isRelax) && veoFlowIsImage;
+          const use_refs = refsAllowed && !!qs('#veo_use_refs')?.checked;
+          const use_last_frame = lastFrameAllowed && !use_refs && !!qs('#veo_use_last_frame')?.checked;
+          const relaxResolution = (qs('#veo_resolution')?.value || '1080p');
+
+          payload = {
+            type: "veo_settings",
+            provider: "veo",
+            veo_model,
+            flow,
+            duration,
+            aspect_ratio,
+            use_last_frame,
+            use_reference_images: isRelax ? false : use_refs,
+            resolution: isRelax ? relaxResolution : (isPro ? '1080p' : '720p')
+          };
+          if (!isRelax) {
+            payload.generate_audio = generate_audio;
+          }
+        }
+
+        showDebug(payload);
+
+        if (tg){
+          try{ tg.sendData(JSON.stringify(payload)); }catch(err){}
+          setTimeout(() => {
+            try{ tg.close(); }catch(err){}
+            showToast();
+          }, 150);
+        } else {
+          showToast();
+          saveBtn.disabled = false;
+          updateCostUI();
+        }
+      });
+    }
+  </script>
 </body>
 </html>
