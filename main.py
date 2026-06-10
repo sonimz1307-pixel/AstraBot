@@ -4071,7 +4071,8 @@ def _ai_chat_mode_inline_kb(fable_thinking: bool = False, *, selected_model: Any
             {"text": "💬 Claude Opus 4.7", "callback_data": "aichat:model:opus"},
         ],
         [
-            {"text": f"💬 {KIE_CLAUDE_FABLE_DISPLAY_NAME} · 2 токена", "callback_data": "aichat:model:fable"},
+            {"text": f"💬 {KIE_CLAUDE_FABLE_DISPLAY_NAME}", "callback_data": "aichat:model:fable"},
+            {"text": "💬 ChatGPT", "callback_data": "aichat:model:openai"},
         ],
     ]
     if _ai_chat_model_key_from_value(selected_model) == "claude_fable":
@@ -4080,9 +4081,6 @@ def _ai_chat_mode_inline_kb(fable_thinking: bool = False, *, selected_model: Any
             {"text": f"{thinking_label} (+{KIE_CLAUDE_FABLE_THINKING_EXTRA_TOKENS} ток.)", "callback_data": "aichat:fable_thinking:toggle"},
         ])
     rows.extend([
-        [
-            {"text": "💬 ChatGPT", "callback_data": "aichat:model:openai"},
-        ],
         [
             {"text": "🪄 Промт", "callback_data": "aichat:mode:prompt"},
             {"text": "🆕 New Chat", "callback_data": "aichat:new_chat"},
