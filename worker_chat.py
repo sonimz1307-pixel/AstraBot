@@ -28,14 +28,21 @@ from chat_memory_redis import (
 )
 from kie_claude_chat import (
     KIE_CLAUDE_MODEL_ID,
+    KIE_CLAUDE_FABLE_MODEL_ID,
+    KIE_CLAUDE_FABLE_MAX_TOKENS,
     is_kie_claude_model,
     kie_claude_answer,
     kie_claude_display_name,
+    kie_claude_history_messages_for_model,
+    kie_claude_is_fable_model,
+    kie_claude_max_tokens_for_model,
+    kie_claude_summary_chars_for_model,
     normalize_kie_claude_model,
 )
 from queue_redis import dequeue_job, get_redis
 from app.services.partner_program import apply_topup_event, bind_referral
 from app.services.free_usage_events import log_free_usage_event_async
+from billing_db import add_tokens
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}" if TELEGRAM_BOT_TOKEN else ""
@@ -43,8 +50,10 @@ TG_FILE = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}" if TELEGRAM_B
 
 TG_CHAT_OPENAI_QUEUE_NAME = (os.getenv("TG_CHAT_OPENAI_QUEUE_NAME", "tg_chat_openai") or "tg_chat_openai").strip() or "tg_chat_openai"
 TG_CHAT_CLAUDE_QUEUE_NAME = (os.getenv("TG_CHAT_CLAUDE_QUEUE_NAME", "tg_chat_claude") or "tg_chat_claude").strip() or "tg_chat_claude"
+TG_CHAT_FABLE_QUEUE_NAME = (os.getenv("TG_CHAT_FABLE_QUEUE_NAME", "tg_chat_fable") or "tg_chat_fable").strip() or "tg_chat_fable"
 WORKSPACE_CHAT_OPENAI_QUEUE_NAME = (os.getenv("WORKSPACE_CHAT_OPENAI_QUEUE_NAME", "workspace_chat_openai") or "workspace_chat_openai").strip() or "workspace_chat_openai"
 WORKSPACE_CHAT_CLAUDE_QUEUE_NAME = (os.getenv("WORKSPACE_CHAT_CLAUDE_QUEUE_NAME", "workspace_chat_claude") or "workspace_chat_claude").strip() or "workspace_chat_claude"
+WORKSPACE_CHAT_FABLE_QUEUE_NAME = (os.getenv("WORKSPACE_CHAT_FABLE_QUEUE_NAME", "workspace_chat_fable") or "workspace_chat_fable").strip() or "workspace_chat_fable"
 PARTNER_EVENTS_QUEUE_NAME = (os.getenv("PARTNER_EVENTS_QUEUE_NAME", "partner_events") or "partner_events").strip() or "partner_events"
 ADMIN_IDS = set(
     int(x)
@@ -54,8 +63,10 @@ ADMIN_IDS = set(
 
 TG_CHAT_OPENAI_CONCURRENCY = int(os.getenv("TG_CHAT_OPENAI_CONCURRENCY", "3") or "3")
 TG_CHAT_CLAUDE_CONCURRENCY = int(os.getenv("TG_CHAT_CLAUDE_CONCURRENCY", "2") or "2")
+TG_CHAT_FABLE_CONCURRENCY = int(os.getenv("TG_CHAT_FABLE_CONCURRENCY", "3") or "3")
 WORKSPACE_CHAT_OPENAI_CONCURRENCY = int(os.getenv("WORKSPACE_CHAT_OPENAI_CONCURRENCY", "3") or "3")
 WORKSPACE_CHAT_CLAUDE_CONCURRENCY = int(os.getenv("WORKSPACE_CHAT_CLAUDE_CONCURRENCY", "2") or "2")
+WORKSPACE_CHAT_FABLE_CONCURRENCY = int(os.getenv("WORKSPACE_CHAT_FABLE_CONCURRENCY", "3") or "3")
 
 AI_CHAT_FILE_MAX_BYTES = int(os.getenv("AI_CHAT_FILE_MAX_BYTES", str(10 * 1024 * 1024)) or str(10 * 1024 * 1024))
 AI_CHAT_FILE_TEXT_MAX_CHARS = int(os.getenv("AI_CHAT_FILE_TEXT_MAX_CHARS", "50000") or "50000")
@@ -76,8 +87,10 @@ DEFAULT_TG_SYSTEM_PROMPT = (
 
 sem_tg_openai = asyncio.Semaphore(max(1, TG_CHAT_OPENAI_CONCURRENCY))
 sem_tg_claude = asyncio.Semaphore(max(1, TG_CHAT_CLAUDE_CONCURRENCY))
+sem_tg_fable = asyncio.Semaphore(max(1, TG_CHAT_FABLE_CONCURRENCY))
 sem_workspace_openai = asyncio.Semaphore(max(1, WORKSPACE_CHAT_OPENAI_CONCURRENCY))
 sem_workspace_claude = asyncio.Semaphore(max(1, WORKSPACE_CHAT_CLAUDE_CONCURRENCY))
+sem_workspace_fable = asyncio.Semaphore(max(1, WORKSPACE_CHAT_FABLE_CONCURRENCY))
 
 
 def _job_kind(job: Dict[str, Any]) -> str:
@@ -88,6 +101,11 @@ def _job_model_key(job: Dict[str, Any]) -> str:
     model_key = str(job.get("model_key") or "").strip().lower()
     if model_key in {"openai", "chatgpt", "gpt"}:
         return "openai"
+    if model_key in {"fable", "claude_fable", "claude-fable", "claude-fable-5"}:
+        return "claude_fable"
+    model_actual = normalize_kie_claude_model(job.get("model") or job.get("model_actual") or "")
+    if kie_claude_is_fable_model(model_actual):
+        return "claude_fable"
     return "claude"
 
 
@@ -95,8 +113,16 @@ def _sem_for_job(job: Dict[str, Any]) -> asyncio.Semaphore:
     kind = _job_kind(job)
     model_key = _job_model_key(job)
     if kind == "tg_ai_chat":
-        return sem_tg_openai if model_key == "openai" else sem_tg_claude
-    return sem_workspace_openai if model_key == "openai" else sem_workspace_claude
+        if model_key == "openai":
+            return sem_tg_openai
+        if model_key == "claude_fable":
+            return sem_tg_fable
+        return sem_tg_claude
+    if model_key == "openai":
+        return sem_workspace_openai
+    if model_key == "claude_fable":
+        return sem_workspace_fable
+    return sem_workspace_claude
 
 
 async def tg_send_chat_action(chat_id: int, action: str = "typing") -> None:
@@ -304,10 +330,51 @@ async def _redis_lock(lock_name: str):
             pass
 
 
-async def _prepare_tg_file_context(job: Dict[str, Any], incoming_text: str) -> tuple[str, str]:
+
+
+def _job_charge_tokens(job: Dict[str, Any]) -> int:
+    try:
+        return max(0, int(job.get("charge_tokens") or 0))
+    except Exception:
+        return 0
+
+
+def _job_charge_ref_id(job: Dict[str, Any]) -> str:
+    return str(job.get("charge_ref_id") or "").strip()
+
+
+async def _refund_paid_chat_job(job: Dict[str, Any], *, stage: str, error: str = "") -> None:
+    charge_tokens = _job_charge_tokens(job)
+    charge_ref_id = _job_charge_ref_id(job)
+    if charge_tokens <= 0 or not charge_ref_id:
+        return
+    try:
+        user_id_raw = str(job.get("user_id") or "").strip()
+        user_id = int(user_id_raw) if user_id_raw.isdigit() else int(job.get("telegram_user_id") or 0)
+        if user_id <= 0:
+            return
+        reason = str(job.get("refund_reason") or "claude_fable_chat_refund").strip() or "claude_fable_chat_refund"
+        await asyncio.to_thread(
+            lambda: add_tokens(
+                user_id,
+                charge_tokens,
+                reason=reason,
+                ref_id=charge_ref_id,
+                meta={
+                    "stage": stage,
+                    "error": str(error or "")[:500],
+                    "job_id": str(job.get("job_id") or ""),
+                    "model": str(job.get("model") or job.get("model_actual") or KIE_CLAUDE_FABLE_MODEL_ID),
+                },
+            )
+        )
+    except Exception as exc:
+        print(f"[chat_worker] paid chat refund failed job={job.get('job_id')}: {exc}", flush=True)
+
+async def _prepare_tg_file_context(job: Dict[str, Any], incoming_text: str) -> tuple[str, str, List[bytes]]:
     file_meta = job.get("file") if isinstance(job.get("file"), dict) else None
     if not file_meta:
-        return incoming_text, incoming_text
+        return incoming_text, incoming_text, []
 
     user_id = int(job.get("user_id") or 0)
     filename = str(file_meta.get("filename") or "file").strip() or "file"
@@ -335,6 +402,15 @@ async def _prepare_tg_file_context(job: Dict[str, Any], incoming_text: str) -> t
         # Storage must not break the chat answer; Redis still only contains Telegram file_id.
         print(f"[chat_worker] tg attachment storage upload failed job={job.get('job_id')}: {exc}", flush=True)
 
+    is_image = str(file_meta.get("kind") or "").strip().lower() == "image" or mime_type.lower().startswith("image/")
+    if is_image:
+        user_text = incoming_text or "Опиши изображение и ответь по нему кратко и полезно."
+        file_context = f"Пользователь приложил изображение: {filename} · {max(1, round(len(raw) / 1024))} KB"
+        if storage_ref.get("storage_path"):
+            file_context += f"\nStorage: {storage_ref.get('storage_bucket')}/{storage_ref.get('storage_path')}"
+        memory_user = user_text + f"\n🖼 Изображение: {filename} ({max(1, round(len(raw) / 1024))} KB)"
+        return f"{user_text}\n\n{file_context}", memory_user, [raw]
+
     kind, extracted, notice = extract_file_text(raw, filename, mime_type)
     extracted = (extracted or "")[:AI_CHAT_FILE_TEXT_MAX_CHARS]
 
@@ -350,7 +426,7 @@ async def _prepare_tg_file_context(job: Dict[str, Any], incoming_text: str) -> t
         file_context += "\n\nТекст из файла извлечь не удалось. Ответь пользователю честно и попроси прислать текстовый/PDF/DOCX файл, если нужен анализ содержимого."
 
     memory_user = user_text + f"\n📎 Файл: {filename} ({kind}, {max(1, round(len(raw) / 1024))} KB)"
-    return f"{user_text}\n\n{file_context}", memory_user
+    return f"{user_text}\n\n{file_context}", memory_user, []
 
 
 async def process_tg_ai_chat_job(job: Dict[str, Any]) -> None:
@@ -370,7 +446,7 @@ async def process_tg_ai_chat_job(job: Dict[str, Any]) -> None:
     typing_task = asyncio.create_task(_typing_heartbeat(chat_id, stop))
     try:
         async with _redis_lock(f"tgchat:{chat_id}:{user_id}"):
-            user_payload, memory_user = await _prepare_tg_file_context(job, incoming_text)
+            user_payload, memory_user, image_bytes_list = await _prepare_tg_file_context(job, incoming_text)
             memory = await maybe_summarize_tg_chat_memory(chat_id, user_id)
             history = (memory.get("hist") or [])[-AI_CHAT_HISTORY_MAX:]
             summary = str(memory.get("summary") or "")
@@ -384,17 +460,23 @@ async def process_tg_ai_chat_job(job: Dict[str, Any]) -> None:
                     temperature=0.4,
                     max_tokens=1500,
                     model=model_actual or str(os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini") or "gpt-4o-mini"),
+                    image_bytes_list=image_bytes_list or None,
                 )
             else:
                 model_actual = normalize_kie_claude_model(model_actual) or KIE_CLAUDE_MODEL_ID
+                history_limit = kie_claude_history_messages_for_model(model_actual)
+                summary_limit = kie_claude_summary_chars_for_model(model_actual)
+                max_tokens = kie_claude_max_tokens_for_model(model_actual)
                 answer = await kie_claude_answer(
                     user_text=user_payload,
                     system_prompt=system_prompt,
-                    history=history,
-                    summary=summary,
-                    max_tokens=1500,
-                    thinking=True,
+                    history=history[-history_limit:],
+                    summary=summary[:summary_limit],
+                    max_tokens=max_tokens,
+                    thinking=bool(job.get("thinking", False if kie_claude_is_fable_model(model_actual) else True)),
+                    image_bytes_list=image_bytes_list or None,
                     model=model_actual,
+                    raise_on_error=kie_claude_is_fable_model(model_actual) and _job_charge_tokens(job) > 0,
                 )
             await add_tg_chat_turn(chat_id, user_id, user_text=memory_user, assistant_text=answer)
 
@@ -419,6 +501,7 @@ async def process_tg_ai_chat_job(job: Dict[str, Any]) -> None:
         )
         print(f"[chat_worker] completed tg job={job.get('job_id')} model={model_key}", flush=True)
     except Exception as exc:
+        await _refund_paid_chat_job(job, stage="tg_worker_exception", error=str(exc))
         await tg_delete_message(chat_id, status_message_id)
         await tg_send_message(chat_id, f"❌ Чат временно не ответил: {exc}", reply_markup=reply_markup)
         print(f"[chat_worker] failed tg job={job.get('job_id')}: {exc}", flush=True)
@@ -492,15 +575,19 @@ async def process_workspace_ai_chat_job(job: Dict[str, Any]) -> None:
             image_bytes_list = _decode_image_bytes_list(job.get("image_bytes_b64"))
 
         if is_kie_claude_model(model_actual) and mode == "chat":
+            history_limit = kie_claude_history_messages_for_model(model_actual)
+            summary_limit = kie_claude_summary_chars_for_model(model_actual)
+            max_tokens = kie_claude_max_tokens_for_model(model_actual)
             answer = await kie_claude_answer(
                 user_text=user_text,
                 system_prompt=system_prompt,
-                history=history,
-                summary=summary,
-                max_tokens=1500,
-                thinking=True,
+                history=history[-history_limit:],
+                summary=summary[:summary_limit],
+                max_tokens=max_tokens,
+                thinking=bool(job.get("thinking", False if kie_claude_is_fable_model(model_actual) else True)),
                 image_bytes_list=image_bytes_list or None,
                 model=model_actual,
+                raise_on_error=kie_claude_is_fable_model(model_actual) and _job_charge_tokens(job) > 0,
             )
         else:
             answer = await openai_chat_answer(
@@ -547,6 +634,7 @@ async def process_workspace_ai_chat_job(job: Dict[str, Any]) -> None:
         )
         print(f"[chat_worker] completed workspace job={job_id} model={model_actual}", flush=True)
     except Exception as exc:
+        await _refund_paid_chat_job(job, stage="workspace_worker_exception", error=str(exc))
         await set_chat_job_status(job_id, status="failed", ok=False, error=str(exc))
         print(f"[chat_worker] failed workspace job={job_id}: {exc}", flush=True)
 
@@ -630,29 +718,50 @@ async def _handle(job: Dict[str, Any]) -> None:
         print(f"[chat_worker] skipped unsupported kind={kind} job={job.get('job_id')}", flush=True)
 
 
-async def main() -> None:
-    queues = [
-        TG_CHAT_CLAUDE_QUEUE_NAME,
-        TG_CHAT_OPENAI_QUEUE_NAME,
-        WORKSPACE_CHAT_CLAUDE_QUEUE_NAME,
-        WORKSPACE_CHAT_OPENAI_QUEUE_NAME,
-        PARTNER_EVENTS_QUEUE_NAME,
-    ]
-    print(
-        "[chat_worker] started "
-        f"queues={queues} tg_openai={TG_CHAT_OPENAI_CONCURRENCY} tg_claude={TG_CHAT_CLAUDE_CONCURRENCY} "
-        f"workspace_openai={WORKSPACE_CHAT_OPENAI_CONCURRENCY} workspace_claude={WORKSPACE_CHAT_CLAUDE_CONCURRENCY}",
-        flush=True,
-    )
+def _unique_queue_names(values: List[str]) -> List[str]:
+    out: List[str] = []
+    for value in values:
+        clean = str(value or "").strip()
+        if clean and clean not in out:
+            out.append(clean)
+    return out
+
+
+async def _queue_loop(queue_name: str) -> None:
+    """Listen to one Redis queue independently.
+
+    BLPOP with multiple keys is priority-ordered, so a busy normal-chat queue can
+    starve queues listed later. One loop per queue keeps Fable truly parallel
+    with regular chat while semaphores still enforce per-model concurrency.
+    """
     tasks: set[asyncio.Task] = set()
     while True:
-        job = await dequeue_job(timeout_sec=10, queue_names=queues)
         done = {task for task in tasks if task.done()}
         tasks -= done
+        job = await dequeue_job(timeout_sec=10, queue_name=queue_name)
         if not job:
             continue
         task = asyncio.create_task(_handle(job))
         tasks.add(task)
+
+
+async def main() -> None:
+    queues = _unique_queue_names([
+        TG_CHAT_OPENAI_QUEUE_NAME,
+        TG_CHAT_CLAUDE_QUEUE_NAME,
+        WORKSPACE_CHAT_OPENAI_QUEUE_NAME,
+        WORKSPACE_CHAT_CLAUDE_QUEUE_NAME,
+        TG_CHAT_FABLE_QUEUE_NAME,
+        WORKSPACE_CHAT_FABLE_QUEUE_NAME,
+        PARTNER_EVENTS_QUEUE_NAME,
+    ])
+    print(
+        "[chat_worker] started "
+        f"queues={queues} tg_openai={TG_CHAT_OPENAI_CONCURRENCY} tg_claude={TG_CHAT_CLAUDE_CONCURRENCY} tg_fable={TG_CHAT_FABLE_CONCURRENCY} "
+        f"workspace_openai={WORKSPACE_CHAT_OPENAI_CONCURRENCY} workspace_claude={WORKSPACE_CHAT_CLAUDE_CONCURRENCY} workspace_fable={WORKSPACE_CHAT_FABLE_CONCURRENCY}",
+        flush=True,
+    )
+    await asyncio.gather(*(_queue_loop(queue_name) for queue_name in queues))
 
 
 if __name__ == "__main__":
