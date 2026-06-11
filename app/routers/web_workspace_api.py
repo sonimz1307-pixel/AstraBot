@@ -95,6 +95,7 @@ WORKSPACE_SESSION_COOKIE_SECURE = os.getenv("WORKSPACE_SESSION_COOKIE_SECURE", "
 WORKSPACE_SESSION_COOKIE_SAMESITE = os.getenv("WORKSPACE_SESSION_COOKIE_SAMESITE", "lax").strip().lower() or "lax"
 if WORKSPACE_SESSION_COOKIE_SAMESITE not in ("lax", "strict", "none"):
     WORKSPACE_SESSION_COOKIE_SAMESITE = "lax"
+WORKSPACE_SESSION_COOKIE_DOMAIN = os.getenv("WORKSPACE_SESSION_COOKIE_DOMAIN", "").strip() or None
 
 
 def _set_workspace_session_cookie(response: Response, access_token: str) -> None:
@@ -106,6 +107,7 @@ def _set_workspace_session_cookie(response: Response, access_token: str) -> None
         max_age=WORKSPACE_SESSION_TTL_SEC,
         expires=WORKSPACE_SESSION_TTL_SEC,
         path="/",
+        domain=WORKSPACE_SESSION_COOKIE_DOMAIN,
         secure=WORKSPACE_SESSION_COOKIE_SECURE,
         httponly=True,
         samesite=WORKSPACE_SESSION_COOKIE_SAMESITE,
@@ -116,6 +118,7 @@ def _clear_workspace_session_cookie(response: Response) -> None:
     response.delete_cookie(
         key=WORKSPACE_SESSION_COOKIE_NAME,
         path="/",
+        domain=WORKSPACE_SESSION_COOKIE_DOMAIN,
         secure=WORKSPACE_SESSION_COOKIE_SECURE,
         httponly=True,
         samesite=WORKSPACE_SESSION_COOKIE_SAMESITE,
