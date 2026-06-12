@@ -233,7 +233,7 @@ from kling3_kie_pricing import (
     normalize_kling3_kie_shots,
 )
 from songwriter_prompt import SONGWRITER_SYSTEM_PROMPT
-from queue_redis import enqueue_job
+from queue_redis import enqueue_job, enqueue_job_delayed
 from chat_job_store import create_chat_job_status, get_chat_job_status, set_chat_job_status
 from nano_banana import run_nano_banana
 from nano_banana_pro import handle_nano_banana_pro
@@ -290,6 +290,14 @@ WORKSPACE_MEDIA_QUEUE_NAME = (os.getenv("WORKSPACE_MEDIA_QUEUE_NAME", "workspace
 WORKSPACE_GROK15_QUEUE_NAME = (os.getenv("WORKSPACE_GROK15_QUEUE_NAME", "workspace_grok15") or "workspace_grok15").strip() or "workspace_grok15"
 KLING3_KIE_QUEUE_NAME = (os.getenv("KLING3_KIE_QUEUE_NAME", "kling3_kie") or "kling3_kie").strip() or "kling3_kie"
 WORKSPACE_VEO_RELAX_QUEUE_NAME = (os.getenv("WORKSPACE_VEO_RELAX_QUEUE_NAME", "workspace_veo_relax") or "workspace_veo_relax").strip() or "workspace_veo_relax"
+
+def _env_non_negative_int(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.getenv(name, str(default)) or str(default)))
+    except Exception:
+        return int(default)
+
+VEO_RELAX_NEXUS_DELAY_SEC = _env_non_negative_int("VEO_RELAX_NEXUS_DELAY_SEC", 1500)
 WORKSPACE_IMAGE_QUEUE_NAME = (os.getenv("WORKSPACE_IMAGE_QUEUE_NAME", "workspace_image") or "workspace_image").strip() or "workspace_image"
 WORKSPACE_CHAT_OPENAI_QUEUE_NAME = (os.getenv("WORKSPACE_CHAT_OPENAI_QUEUE_NAME", "workspace_chat_openai") or "workspace_chat_openai").strip() or "workspace_chat_openai"
 WORKSPACE_CHAT_CLAUDE_QUEUE_NAME = (os.getenv("WORKSPACE_CHAT_CLAUDE_QUEUE_NAME", "workspace_chat_claude") or "workspace_chat_claude").strip() or "workspace_chat_claude"
@@ -575,10 +583,12 @@ WORKSPACE_TOPUP_PACKS: List[Dict[str, Any]] = [
 ]
 
 
-PUBLIC_SUBSCRIPTION_PLAN_CODES = {"spark", "pulse"}
+PUBLIC_SUBSCRIPTION_PLAN_CODES = {"spark", "pulse", "nexus"}
 SEEDREAM_T2I_INCLUDED_PLAN_CODES = {"spark", "pulse", "nexus"}
 NANO_BANANA_BASIC_INCLUDED_PLAN_CODES = {"pulse", "nexus"}
 MIDJOURNEY_INCLUDED_PLAN_CODES = {"pulse", "nexus"}
+GPT_IMAGE_2_INCLUDED_PLAN_CODES = {"nexus"}
+VEO31_FAST_RELAX_INCLUDED_PLAN_CODES = {"nexus"}
 MIDJOURNEY_INCLUDED_MODELS = {"midjourney-v7", "midjourney-v8.1"}
 
 
@@ -632,6 +642,30 @@ def _workspace_has_midjourney_included(user_id: Any, model: Any = "midjourney-v7
     if str(resolution or "2K").strip().upper() == "4K":
         return False
     return _workspace_active_subscription_plan_code(user_id) in MIDJOURNEY_INCLUDED_PLAN_CODES
+
+
+def _workspace_has_gpt_image_2_kie_included(user_id: Any, resolution: str = "2K") -> bool:
+    # Nexus includes GPT Image 2.0 only in non-4K KIE modes.
+    if str(resolution or "2K").strip().upper() == "4K":
+        return False
+    return _workspace_active_subscription_plan_code(user_id) in GPT_IMAGE_2_INCLUDED_PLAN_CODES
+
+
+def _workspace_has_veo31_fast_relax_included(user_id: Any) -> bool:
+    return _workspace_active_subscription_plan_code(user_id) in VEO31_FAST_RELAX_INCLUDED_PLAN_CODES
+
+
+def _workspace_veo31_fast_relax_delay_sec(user_id: Any, cost_tokens: int = 0) -> int:
+    # Delayed real provider start is only for the free Nexus Relax run.
+    if int(cost_tokens or 0) == 0 and _workspace_has_veo31_fast_relax_included(user_id):
+        return int(VEO_RELAX_NEXUS_DELAY_SEC or 0)
+    return 0
+
+
+def _workspace_veo31_fast_relax_status_text(delay_sec: int) -> str:
+    if int(delay_sec or 0) > 0:
+        return "Генерация принята в Relax-очередь. Видео появится в рабочей зоне автоматически."
+    return "Генерация поставлена в очередь. Видео появится в рабочей зоне автоматически."
 
 
 def _workspace_find_topup_pack(tokens: Any) -> Optional[Dict[str, Any]]:
@@ -4929,6 +4963,9 @@ async def workspace_video_run(
         kling3_kie_multi_shots=kling3_kie_multi_shots,
     )
     cost_tokens = int(charge.get("tokens") or 0)
+    if provider == "veo" and model == "veo-3.1-fast-relax" and _workspace_has_veo31_fast_relax_included(uid):
+        cost_tokens = 0
+    veo_relax_delay_sec = _workspace_veo31_fast_relax_delay_sec(uid, cost_tokens) if provider == "veo" and model == "veo-3.1-fast-relax" else 0
     charge_reason = str(charge.get("charge_reason") or "")
     refund_reason = str(charge.get("refund_reason") or "workspace_video_refund")
     charge_meta = dict(charge.get("meta") or {})
@@ -5078,6 +5115,7 @@ async def workspace_video_run(
             "charge_ref_id": charge_ref_id,
             "refund_reason": refund_reason,
             "origin": "workspace",
+            "delayed_start_sec": int(veo_relax_delay_sec or 0),
         }
         if provider == "kling" and model == "kling-3.0-new":
             job["kind"] = "workspace_kling3_kie_run"
@@ -5093,7 +5131,10 @@ async def workspace_video_run(
             target_queue = KLING3_KIE_QUEUE_NAME
         else:
             target_queue = WORKSPACE_MEDIA_QUEUE_NAME
-        await enqueue_job(job, queue_name=target_queue)
+        if int(veo_relax_delay_sec or 0) > 0:
+            await enqueue_job_delayed(job, delay_sec=int(veo_relax_delay_sec or 0), queue_name=target_queue)
+        else:
+            await enqueue_job(job, queue_name=target_queue)
 
         try:
             balance_tokens = int(get_balance(uid) or 0)
@@ -5104,7 +5145,7 @@ async def workspace_video_run(
             "generation_id": generation_id,
             "task_id": generation_id,
             "status": "queued",
-            "status_text": "Генерация поставлена в очередь. Видео появится в рабочей зоне автоматически.",
+            "status_text": _workspace_veo31_fast_relax_status_text(veo_relax_delay_sec),
             "balance_tokens": balance_tokens,
             "cost_tokens": int(cost_tokens) if charged else 0,
             "source_video_upload_id": source_video_upload_id or None,
@@ -6943,6 +6984,8 @@ async def workspace_image_run(
     if provider == "seedream" and mode in {"text_to_image", "t2i"} and _workspace_has_seedream_t2i_included(uid):
         cost = 0
     if _workspace_has_nano_banana_basic_included(uid, provider, resolution):
+        cost = 0
+    if provider == "gpt_image_2_kie" and _workspace_has_gpt_image_2_kie_included(uid, resolution):
         cost = 0
     if provider == "midjourney" and _workspace_has_midjourney_included(uid, model, mj_speed_mode, resolution):
         cost = 0
