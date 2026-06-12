@@ -14,7 +14,7 @@ from io import BytesIO
 from typing import Optional, Literal, Dict, Any, Tuple, List, Union
 
 import httpx
-from queue_redis import enqueue_job
+from queue_redis import enqueue_job, enqueue_job_delayed
 from chat_file_text import extract_file_text
 from chat_memory_redis import reset_tg_chat_memory
 from kie_claude_chat import (
@@ -189,6 +189,14 @@ if UVICORN_LOGGER.level > logging.INFO:
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WORKSPACE_MEDIA_QUEUE_NAME = (os.getenv("WORKSPACE_MEDIA_QUEUE_NAME", "workspace_media") or "workspace_media").strip() or "workspace_media"
 WORKSPACE_VEO_RELAX_QUEUE_NAME = (os.getenv("WORKSPACE_VEO_RELAX_QUEUE_NAME", "workspace_veo_relax") or "workspace_veo_relax").strip() or "workspace_veo_relax"
+
+def _env_non_negative_int(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.getenv(name, str(default)) or str(default)))
+    except Exception:
+        return int(default)
+
+VEO_RELAX_NEXUS_DELAY_SEC = _env_non_negative_int("VEO_RELAX_NEXUS_DELAY_SEC", 1500)
 WORKSPACE_GROK15_QUEUE_NAME = (os.getenv("WORKSPACE_GROK15_QUEUE_NAME", "workspace_grok15") or "workspace_grok15").strip() or "workspace_grok15"
 PARTNER_EVENTS_QUEUE_NAME = (os.getenv("PARTNER_EVENTS_QUEUE_NAME", "partner_events") or "partner_events").strip() or "partner_events"
 
@@ -1052,6 +1060,36 @@ def _midjourney_user_cost(user_id: Optional[int], model: str = "midjourney-v7", 
     return int(_midjourney_cost(model, speed_mode))
 
 
+def _gpt_image_2_kie_is_included_for_user(user_id: int, resolution: str = "2K") -> bool:
+    # Nexus includes GPT Image 2.0 only in non-4K KIE modes.
+    if str(resolution or "2K").strip().upper() == "4K":
+        return False
+    return _active_subscription_plan_code_for_user(int(user_id or 0)) in GPT_IMAGE_2_INCLUDED_PLAN_CODES
+
+
+def _gpt_image_2_kie_user_cost(user_id: int, resolution: str = "2K") -> int:
+    if _gpt_image_2_kie_is_included_for_user(int(user_id or 0), resolution):
+        return 0
+    return int(gpt_image_2_kie_cost(resolution))
+
+
+def _veo31_fast_relax_is_included_for_user(user_id: int) -> bool:
+    return _active_subscription_plan_code_for_user(int(user_id or 0)) in VEO31_FAST_RELAX_INCLUDED_PLAN_CODES
+
+
+def _veo31_fast_relax_delay_sec_for_user(user_id: int, cost_tokens: int = 0) -> int:
+    # Delayed real provider start is only for the free Nexus Relax run.
+    if int(cost_tokens or 0) == 0 and _veo31_fast_relax_is_included_for_user(int(user_id or 0)):
+        return int(VEO_RELAX_NEXUS_DELAY_SEC or 0)
+    return 0
+
+
+def _veo31_fast_relax_queue_note(delay_sec: int) -> str:
+    if int(delay_sec or 0) > 0:
+        return "принят в Relax-очередь; реальный запуск начнётся автоматически, когда подойдёт слот"
+    return "поставлен в отдельную очередь"
+
+
 @app.get("/api/tg/account")
 async def tg_account_info(request: Request):
     init_data = request.headers.get("X-Telegram-Init-Data", "")
@@ -1419,10 +1457,12 @@ GPT_IMAGE2_GENERATION_COST = int(os.getenv("GPT_IMAGE2_GENERATION_COST", "1") or
 WORKSPACE_IMAGE_QUEUE_NAME = (os.getenv("WORKSPACE_IMAGE_QUEUE_NAME", "workspace_image") or "workspace_image").strip() or "workspace_image"
 MIDJOURNEY_TG_QUEUE_NAME = (os.getenv("MIDJOURNEY_TG_QUEUE_NAME", "telegram_midjourney") or "telegram_midjourney").strip() or "telegram_midjourney"
 SEEDREAM_T2I_QUEUE_NAME = os.getenv("SEEDREAM_T2I_QUEUE_NAME", "seedream_t2i").strip() or "seedream_t2i"
-PUBLIC_SUBSCRIPTION_PLAN_CODES = {"spark", "pulse"}
+PUBLIC_SUBSCRIPTION_PLAN_CODES = {"spark", "pulse", "nexus"}
 SEEDREAM_T2I_INCLUDED_PLAN_CODES = {"spark", "pulse", "nexus"}
 NANO_BANANA_BASIC_INCLUDED_PLAN_CODES = {"pulse", "nexus"}
 MIDJOURNEY_INCLUDED_PLAN_CODES = {"pulse", "nexus"}
+GPT_IMAGE_2_INCLUDED_PLAN_CODES = {"nexus"}
+VEO31_FAST_RELAX_INCLUDED_PLAN_CODES = {"nexus"}
 MIDJOURNEY_INCLUDED_MODELS = {"midjourney-v7", "midjourney-v8.1"}
 NANO_BANANA_QUEUE_NAME = os.getenv("NANO_BANANA_QUEUE_NAME", "nano_banana").strip() or "nano_banana"
 TOPAZ_VIDEO_QUEUE_NAME = os.getenv("TOPAZ_VIDEO_QUEUE_NAME", "topaz_video").strip() or "topaz_video"
@@ -3291,7 +3331,7 @@ async def _enqueue_tg_omni_flash_job(*, chat_id: int, user_id: int, mode: str, p
     return job
 
 
-async def _enqueue_tg_veo_relax_job(*, chat_id: int, user_id: int, mode: str, prompt: str, settings: dict, image_bytes: bytes | None = None, image_name: str = "start_frame.jpg", last_frame_bytes: bytes | None = None, last_frame_name: str = "last_frame.jpg", charge_tokens: int = 0, charge_ref_id: str = "") -> dict:
+async def _enqueue_tg_veo_relax_job(*, chat_id: int, user_id: int, mode: str, prompt: str, settings: dict, image_bytes: bytes | None = None, image_name: str = "start_frame.jpg", last_frame_bytes: bytes | None = None, last_frame_name: str = "last_frame.jpg", charge_tokens: int = 0, charge_ref_id: str = "", delay_sec: int = 0) -> dict:
     settings = dict(settings or {})
     normalized_mode = "image_to_video" if str(mode or "").strip().lower() in {"image", "image_to_video", "i2v", "image2video"} else "text_to_video"
     duration = normalize_veo31_fast_relax_duration(settings.get("duration") or 8)
@@ -3324,8 +3364,12 @@ async def _enqueue_tg_veo_relax_job(*, chat_id: int, user_id: int, mode: str, pr
         "charge_ref_id": str(charge_ref_id or ""),
         "refund_reason": "veo31_fast_relax_video_refund",
         "origin": "telegram",
+        "delayed_start_sec": int(delay_sec or 0),
     }
-    await enqueue_job(job, queue_name=WORKSPACE_VEO_RELAX_QUEUE_NAME)
+    if int(delay_sec or 0) > 0:
+        await enqueue_job_delayed(job, delay_sec=int(delay_sec or 0), queue_name=WORKSPACE_VEO_RELAX_QUEUE_NAME)
+    else:
+        await enqueue_job(job, queue_name=WORKSPACE_VEO_RELAX_QUEUE_NAME)
     return job
 
 
@@ -7436,7 +7480,7 @@ async def webhook(secret: str, request: Request):
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
-                    f"✅ Фото зафиксированы: {len(refs)}/16\nТеперь пришли prompt одним сообщением. Цена: {gpt_image_2_kie_cost(current_resolution)} ток.",
+                    f"✅ Фото зафиксированы: {len(refs)}/16\nТеперь пришли prompt одним сообщением. Цена: {_gpt_image_2_kie_user_cost(user_id, current_resolution)} ток.",
                     reply_markup=_gpt_image_2_kie_inline_kb("i2i", current_aspect, current_resolution, len(refs)),
                 )
                 return {"ok": True}
@@ -7491,14 +7535,14 @@ async def webhook(secret: str, request: Request):
             if mode_key == "t2i":
                 await tg_send_message(
                     chat_id,
-                    f"✅ Gpt Image 2: {current_resolution} • {gpt_image_2_kie_cost(current_resolution)} ток.\nФормат: {current_aspect}\nТеперь пришли текст для генерации.",
+                    f"✅ Gpt Image 2: {current_resolution} • {_gpt_image_2_kie_user_cost(user_id, current_resolution)} ток.\nФормат: {current_aspect}\nТеперь пришли текст для генерации.",
                     reply_markup=_gpt_image_2_kie_inline_kb("t2i", current_aspect, current_resolution, 0),
                 )
                 return {"ok": True}
 
             await tg_send_message(
                 chat_id,
-                f"✅ Gpt Image 2: {current_resolution} • {gpt_image_2_kie_cost(current_resolution)} ток.\nФормат: {current_aspect}\nФото: {refs_count}/16\nТеперь пришли фото или prompt, если фото уже загружены.",
+                f"✅ Gpt Image 2: {current_resolution} • {_gpt_image_2_kie_user_cost(user_id, current_resolution)} ток.\nФормат: {current_aspect}\nФото: {refs_count}/16\nТеперь пришли фото или prompt, если фото уже загружены.",
                 reply_markup=_gpt_image_2_kie_inline_kb("i2i", current_aspect, current_resolution, refs_count),
             )
             return {"ok": True}
@@ -7520,7 +7564,7 @@ async def webhook(secret: str, request: Request):
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
-                    f"✅ Gpt Image 2: {resolution} • {gpt_image_2_kie_cost(resolution)} ток.\nФормат: {aspect_ratio}\nТеперь пришли текст для генерации.",
+                    f"✅ Gpt Image 2: {resolution} • {_gpt_image_2_kie_user_cost(user_id, resolution)} ток.\nФормат: {aspect_ratio}\nТеперь пришли текст для генерации.",
                     reply_markup=_gpt_image_2_kie_inline_kb("t2i", aspect_ratio, resolution, 0),
                 )
                 return {"ok": True}
@@ -7545,7 +7589,7 @@ async def webhook(secret: str, request: Request):
             refs_count = len(photo_file_ids[:16] or photo_urls[:16])
             await tg_send_message(
                 chat_id,
-                f"✅ Gpt Image 2: {resolution} • {gpt_image_2_kie_cost(resolution)} ток.\nФормат: {aspect_ratio}\nФото: {refs_count}/16\nТеперь пришли фото или prompt, если фото уже загружены.",
+                f"✅ Gpt Image 2: {resolution} • {_gpt_image_2_kie_user_cost(user_id, resolution)} ток.\nФормат: {aspect_ratio}\nФото: {refs_count}/16\nТеперь пришли фото или prompt, если фото уже загружены.",
                 reply_markup=_gpt_image_2_kie_inline_kb("i2i", aspect_ratio, resolution, refs_count),
             )
             return {"ok": True}
@@ -10594,26 +10638,28 @@ async def webhook(secret: str, request: Request):
             duration = normalize_veo31_fast_relax_duration(duration)
             resolution = normalize_veo31_fast_relax_resolution(resolution)
             aspect_ratio = normalize_veo31_fast_relax_aspect_ratio(aspect_ratio)
-            cost_tokens = int(veo31_fast_relax_tokens_for_run())
+            cost_tokens = 0 if _veo31_fast_relax_is_included_for_user(user_id) else int(veo31_fast_relax_tokens_for_run())
+            delay_sec = _veo31_fast_relax_delay_sec_for_user(user_id, cost_tokens)
             try:
                 ensure_user_row(user_id)
                 bal = int(get_balance(user_id) or 0)
             except Exception:
                 bal = 0
-            if bal < cost_tokens:
+            if cost_tokens > 0 and bal < cost_tokens:
                 await tg_send_message(chat_id, f"❌ Недостаточно токенов.\nНужно: {cost_tokens}\nБаланс: {bal}", reply_markup=_topup_balance_inline_kb())
                 return {"ok": True}
-            charge_ref_id = uuid4().hex
-            try:
-                add_tokens(
-                    user_id,
-                    -cost_tokens,
-                    reason="veo31_fast_relax_video",
-                    ref_id=charge_ref_id,
-                    meta={"provider": "veo", "model": VEO31_FAST_RELAX_DISPLAY_NAME, "duration": duration, "resolution": resolution, "aspect_ratio": aspect_ratio, "flow": "t2v", "pricing": "fixed_per_video"},
-                )
-            except TypeError:
-                add_tokens(user_id, -int(cost_tokens), reason="veo31_fast_relax_video")
+            charge_ref_id = uuid4().hex if cost_tokens > 0 else ""
+            if cost_tokens > 0:
+                try:
+                    add_tokens(
+                        user_id,
+                        -cost_tokens,
+                        reason="veo31_fast_relax_video",
+                        ref_id=charge_ref_id,
+                        meta={"provider": "veo", "model": VEO31_FAST_RELAX_DISPLAY_NAME, "duration": duration, "resolution": resolution, "aspect_ratio": aspect_ratio, "flow": "t2v", "pricing": "fixed_per_video"},
+                    )
+                except TypeError:
+                    add_tokens(user_id, -int(cost_tokens), reason="veo31_fast_relax_video")
             try:
                 await _enqueue_tg_veo_relax_job(
                     chat_id=int(chat_id),
@@ -10623,13 +10669,16 @@ async def webhook(secret: str, request: Request):
                     settings={"duration": duration, "resolution": resolution, "aspect_ratio": aspect_ratio},
                     charge_tokens=cost_tokens,
                     charge_ref_id=charge_ref_id,
+                    delay_sec=delay_sec,
                 )
-                await tg_send_message(chat_id, f"⏳ {VEO31_FAST_RELAX_DISPLAY_NAME} поставлен в отдельную очередь: Text → Video • {duration} сек • {resolution} • {aspect_ratio} • {cost_tokens} ток.", reply_markup=_help_menu_for(user_id))
+                queue_note = _veo31_fast_relax_queue_note(delay_sec)
+                await tg_send_message(chat_id, f"⏳ {VEO31_FAST_RELAX_DISPLAY_NAME} {queue_note}: Text → Video • {duration} сек • {resolution} • {aspect_ratio} • {cost_tokens} ток.", reply_markup=_help_menu_for(user_id))
             except Exception as e:
-                try:
-                    add_tokens(user_id, int(cost_tokens), reason="veo31_fast_relax_video_refund", ref_id=charge_ref_id, meta={"stage": "enqueue_failed", "error": str(e)[:300]})
-                except TypeError:
-                    add_tokens(user_id, int(cost_tokens), reason="veo31_fast_relax_video_refund")
+                if int(cost_tokens or 0) > 0:
+                    try:
+                        add_tokens(user_id, int(cost_tokens), reason="veo31_fast_relax_video_refund", ref_id=charge_ref_id, meta={"stage": "enqueue_failed", "error": str(e)[:300]})
+                    except TypeError:
+                        add_tokens(user_id, int(cost_tokens), reason="veo31_fast_relax_video_refund")
                 await tg_send_message(chat_id, f"❌ Не удалось поставить {VEO31_FAST_RELAX_DISPLAY_NAME} в очередь: {e}", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
             _set_mode(chat_id, user_id, "chat")
@@ -10794,26 +10843,28 @@ async def webhook(secret: str, request: Request):
                 duration = normalize_veo31_fast_relax_duration(duration)
                 resolution = normalize_veo31_fast_relax_resolution(resolution)
                 aspect_ratio = normalize_veo31_fast_relax_aspect_ratio(aspect_ratio)
-                cost_tokens = int(veo31_fast_relax_tokens_for_run())
+                cost_tokens = 0 if _veo31_fast_relax_is_included_for_user(user_id) else int(veo31_fast_relax_tokens_for_run())
+                delay_sec = _veo31_fast_relax_delay_sec_for_user(user_id, cost_tokens)
                 try:
                     ensure_user_row(user_id)
                     bal = int(get_balance(user_id) or 0)
                 except Exception:
                     bal = 0
-                if bal < cost_tokens:
+                if cost_tokens > 0 and bal < cost_tokens:
                     await tg_send_message(chat_id, f"❌ Недостаточно токенов.\nНужно: {cost_tokens}\nБаланс: {bal}", reply_markup=_topup_balance_inline_kb())
                     return {"ok": True}
-                charge_ref_id = uuid4().hex
-                try:
-                    add_tokens(
-                        user_id,
-                        -cost_tokens,
-                        reason="veo31_fast_relax_video",
-                        ref_id=charge_ref_id,
-                        meta={"provider": "veo", "model": VEO31_FAST_RELAX_DISPLAY_NAME, "duration": duration, "resolution": resolution, "aspect_ratio": aspect_ratio, "flow": "i2v", "pricing": "fixed_per_video", "last_frame": bool(last_frame_bytes)},
-                    )
-                except TypeError:
-                    add_tokens(user_id, -int(cost_tokens), reason="veo31_fast_relax_video")
+                charge_ref_id = uuid4().hex if cost_tokens > 0 else ""
+                if cost_tokens > 0:
+                    try:
+                        add_tokens(
+                            user_id,
+                            -cost_tokens,
+                            reason="veo31_fast_relax_video",
+                            ref_id=charge_ref_id,
+                            meta={"provider": "veo", "model": VEO31_FAST_RELAX_DISPLAY_NAME, "duration": duration, "resolution": resolution, "aspect_ratio": aspect_ratio, "flow": "i2v", "pricing": "fixed_per_video", "last_frame": bool(last_frame_bytes)},
+                        )
+                    except TypeError:
+                        add_tokens(user_id, -int(cost_tokens), reason="veo31_fast_relax_video")
                 try:
                     await _enqueue_tg_veo_relax_job(
                         chat_id=int(chat_id),
@@ -10827,14 +10878,17 @@ async def webhook(secret: str, request: Request):
                         last_frame_name="last_frame.jpg",
                         charge_tokens=cost_tokens,
                         charge_ref_id=charge_ref_id,
+                        delay_sec=delay_sec,
                     )
                     frame_note = "первый + последний кадр" if last_frame_bytes else "первый кадр"
-                    await tg_send_message(chat_id, f"⏳ {VEO31_FAST_RELAX_DISPLAY_NAME} поставлен в отдельную очередь: Image → Video • {frame_note} • {duration} сек • {resolution} • {aspect_ratio} • {cost_tokens} ток.", reply_markup=_help_menu_for(user_id))
+                    queue_note = _veo31_fast_relax_queue_note(delay_sec)
+                    await tg_send_message(chat_id, f"⏳ {VEO31_FAST_RELAX_DISPLAY_NAME} {queue_note}: Image → Video • {frame_note} • {duration} сек • {resolution} • {aspect_ratio} • {cost_tokens} ток.", reply_markup=_help_menu_for(user_id))
                 except Exception as e:
-                    try:
-                        add_tokens(user_id, int(cost_tokens), reason="veo31_fast_relax_video_refund", ref_id=charge_ref_id, meta={"stage": "enqueue_failed", "error": str(e)[:300]})
-                    except TypeError:
-                        add_tokens(user_id, int(cost_tokens), reason="veo31_fast_relax_video_refund")
+                    if int(cost_tokens or 0) > 0:
+                        try:
+                            add_tokens(user_id, int(cost_tokens), reason="veo31_fast_relax_video_refund", ref_id=charge_ref_id, meta={"stage": "enqueue_failed", "error": str(e)[:300]})
+                        except TypeError:
+                            add_tokens(user_id, int(cost_tokens), reason="veo31_fast_relax_video_refund")
                     await tg_send_message(chat_id, f"❌ Не удалось поставить {VEO31_FAST_RELAX_DISPLAY_NAME} в очередь: {e}", reply_markup=_main_menu_for(user_id))
                     return {"ok": True}
                 _set_mode(chat_id, user_id, "chat")
@@ -11356,9 +11410,9 @@ async def webhook(secret: str, request: Request):
             current_aspect = str(gi2k.get("aspect_ratio") or "16:9")
             current_resolution = str(gi2k.get("resolution") or "2K")
             if count_refs >= 16:
-                msg = f"Фото принято 16/16 ✅\nGpt Image 2: {current_resolution} • {gpt_image_2_kie_cost(current_resolution)} ток.\nФормат: {current_aspect}\nТеперь напиши prompt одним сообщением."
+                msg = f"Фото принято 16/16 ✅\nGpt Image 2: {current_resolution} • {_gpt_image_2_kie_user_cost(user_id, current_resolution)} ток.\nФормат: {current_aspect}\nТеперь напиши prompt одним сообщением."
             else:
-                msg = f"Фото принято {count_refs}/16 ✅\nGpt Image 2: {current_resolution} • {gpt_image_2_kie_cost(current_resolution)} ток.\nФормат: {current_aspect}\nМожешь отправить ещё фото или сразу написать prompt."
+                msg = f"Фото принято {count_refs}/16 ✅\nGpt Image 2: {current_resolution} • {_gpt_image_2_kie_user_cost(user_id, current_resolution)} ток.\nФормат: {current_aspect}\nМожешь отправить ещё фото или сразу написать prompt."
             await tg_send_message(
                 chat_id,
                 msg,
@@ -12787,9 +12841,9 @@ async def webhook(secret: str, request: Request):
                 current_aspect = str(gi2k.get("aspect_ratio") or "16:9")
                 current_resolution = str(gi2k.get("resolution") or "2K")
                 if count_refs >= 16:
-                    msg = f"Файл-фото принято 16/16 ✅\nGpt Image 2: {current_resolution} • {gpt_image_2_kie_cost(current_resolution)} ток.\nФормат: {current_aspect}\nТеперь напиши prompt одним сообщением."
+                    msg = f"Файл-фото принято 16/16 ✅\nGpt Image 2: {current_resolution} • {_gpt_image_2_kie_user_cost(user_id, current_resolution)} ток.\nФормат: {current_aspect}\nТеперь напиши prompt одним сообщением."
                 else:
-                    msg = f"Файл-фото принято {count_refs}/16 ✅\nGpt Image 2: {current_resolution} • {gpt_image_2_kie_cost(current_resolution)} ток.\nФормат: {current_aspect}\nМожешь отправить ещё фото или сразу написать prompt."
+                    msg = f"Файл-фото принято {count_refs}/16 ✅\nGpt Image 2: {current_resolution} • {_gpt_image_2_kie_user_cost(user_id, current_resolution)} ток.\nФормат: {current_aspect}\nМожешь отправить ещё фото или сразу написать prompt."
                 await tg_send_message(
                     chat_id,
                     msg,
@@ -14294,7 +14348,7 @@ async def webhook(secret: str, request: Request):
                 return {"ok": True}
 
             resolution, aspect_ratio = _gpt_image_2_kie_options(gi2k.get("resolution") or "2K", gi2k.get("aspect_ratio") or "16:9")
-            cost_tokens = int(gpt_image_2_kie_cost(resolution))
+            cost_tokens = _gpt_image_2_kie_user_cost(user_id, resolution)
             try:
                 ensure_user_row(user_id)
                 bal = int(get_balance(user_id) or 0)
@@ -14308,17 +14362,18 @@ async def webhook(secret: str, request: Request):
                 )
                 return {"ok": True}
 
-            charge_ref_id = uuid4().hex
+            charge_ref_id = uuid4().hex if cost_tokens > 0 else ""
             charged = False
             try:
-                add_tokens(
-                    user_id,
-                    -cost_tokens,
-                    reason="gpt_image_2",
-                    ref_id=charge_ref_id,
-                    meta={"mode": "text_to_image", "provider": "gpt_image_2_kie", "resolution": resolution, "aspect_ratio": aspect_ratio, "cost_tokens": cost_tokens},
-                )
-                charged = True
+                if cost_tokens > 0:
+                    add_tokens(
+                        user_id,
+                        -cost_tokens,
+                        reason="gpt_image_2",
+                        ref_id=charge_ref_id,
+                        meta={"mode": "text_to_image", "provider": "gpt_image_2_kie", "resolution": resolution, "aspect_ratio": aspect_ratio, "cost_tokens": cost_tokens},
+                    )
+                    charged = True
                 await enqueue_job({
                     "job_id": uuid4().hex,
                     "kind": "telegram_gpt_image_2_kie_run",
@@ -14370,7 +14425,7 @@ async def webhook(secret: str, request: Request):
                 return {"ok": True}
 
             resolution, aspect_ratio = _gpt_image_2_kie_options(gi2k.get("resolution") or "2K", gi2k.get("aspect_ratio") or "16:9")
-            cost_tokens = int(gpt_image_2_kie_cost(resolution))
+            cost_tokens = _gpt_image_2_kie_user_cost(user_id, resolution)
             try:
                 ensure_user_row(user_id)
                 bal = int(get_balance(user_id) or 0)
@@ -14384,17 +14439,18 @@ async def webhook(secret: str, request: Request):
                 )
                 return {"ok": True}
 
-            charge_ref_id = uuid4().hex
+            charge_ref_id = uuid4().hex if cost_tokens > 0 else ""
             charged = False
             try:
-                add_tokens(
-                    user_id,
-                    -cost_tokens,
-                    reason="gpt_image_2",
-                    ref_id=charge_ref_id,
-                    meta={"mode": "image_to_image", "provider": "gpt_image_2_kie", "resolution": resolution, "aspect_ratio": aspect_ratio, "refs": len(photo_file_ids[:16] or photo_urls[:16]), "cost_tokens": cost_tokens},
-                )
-                charged = True
+                if cost_tokens > 0:
+                    add_tokens(
+                        user_id,
+                        -cost_tokens,
+                        reason="gpt_image_2",
+                        ref_id=charge_ref_id,
+                        meta={"mode": "image_to_image", "provider": "gpt_image_2_kie", "resolution": resolution, "aspect_ratio": aspect_ratio, "refs": len(photo_file_ids[:16] or photo_urls[:16]), "cost_tokens": cost_tokens},
+                    )
+                    charged = True
                 await enqueue_job({
                     "job_id": uuid4().hex,
                     "kind": "telegram_gpt_image_2_kie_run",
