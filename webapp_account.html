@@ -2529,7 +2529,7 @@
             <li>Безлимит Veo 3.1 Fast Relax</li>
           </ul>
           <div class="tariff-preview-note">В Nabex токены не сгорают и остаются с вами.</div>
-          <button class="tariff-preview-action" type="button" disabled>Скоро</button>
+          <button class="tariff-preview-action" type="button" data-buy-plan="nexus">Подключить за 5 250 ₽</button>
         </article>
         </div>
       </div>
@@ -2632,7 +2632,7 @@
         free: { badge: "Free", action: "Базовый", disabled: true },
         spark: { badge: "Старт", action: "Подключить за 1 140 ₽", disabled: false },
         pulse: { badge: "Для изображений", action: "Подключить за 2 225 ₽", disabled: false },
-        nexus: { badge: "Максимум", action: "Скоро", disabled: true }
+        nexus: { badge: "Максимум", action: "Подключить за 5 250 ₽", disabled: false }
       };
 
       document.querySelectorAll("#tariffOverlay .tariff-preview-card[data-plan-code]").forEach((card) => {
@@ -2659,7 +2659,7 @@
         action.disabled = !!cfg.disabled;
         delete action.dataset.currentPlan;
         action.setAttribute("aria-disabled", cfg.disabled ? "true" : "false");
-        if ((code === "spark" || code === "pulse") && !cfg.disabled) {
+        if ((code === "spark" || code === "pulse" || code === "nexus") && !cfg.disabled) {
           action.dataset.buyPlan = code;
         } else {
           action.removeAttribute("data-buy-plan");
