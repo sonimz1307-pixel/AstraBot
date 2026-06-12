@@ -2201,6 +2201,25 @@
       }
     }
 
+
+    /* === Fix Telegram WebApp tariff modal vertical scroll === */
+    #tariffOverlay.show {
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      touch-action: pan-y;
+    }
+
+    #tariffOverlay .plans-sheet {
+      max-height: calc(100vh - 20px - env(safe-area-inset-bottom)) !important;
+      padding-bottom: calc(22px + env(safe-area-inset-bottom) + 72px) !important;
+    }
+
+    @supports (height: 100dvh) {
+      #tariffOverlay .plans-sheet {
+        max-height: calc(100dvh - 20px - env(safe-area-inset-bottom)) !important;
+      }
+    }
+
   </style>
 </head>
 <body>
@@ -3260,6 +3279,7 @@
       let dragging = false;
       let horizontalGesture = false;
       let pointerId = null;
+      let pointerCaptured = false;
       let resizeTimer = null;
 
       function clampIndex(index) {
@@ -3312,7 +3332,7 @@
         startX = event.clientX;
         startY = event.clientY;
         startTranslate = currentX;
-        try { viewport.setPointerCapture(pointerId); } catch (e) {}
+        pointerCaptured = false;
       });
 
       viewport.addEventListener("pointermove", (event) => {
@@ -3322,6 +3342,9 @@
 
         if (!horizontalGesture && (Math.abs(dx) > 7 || Math.abs(dy) > 7)) {
           horizontalGesture = Math.abs(dx) > Math.abs(dy) * 1.15;
+          if (horizontalGesture && !pointerCaptured) {
+            try { viewport.setPointerCapture(pointerId); pointerCaptured = true; } catch (e) {}
+          }
         }
 
         if (!horizontalGesture) return;
@@ -3332,9 +3355,12 @@
       function endPointer(event) {
         if (!dragging || event.pointerId !== pointerId) return;
         const dx = event.clientX - startX;
-        try { viewport.releasePointerCapture(pointerId); } catch (e) {}
+        if (pointerCaptured) {
+          try { viewport.releasePointerCapture(pointerId); } catch (e) {}
+        }
         dragging = false;
         pointerId = null;
+        pointerCaptured = false;
         if (horizontalGesture) {
           finishDrag(dx);
         } else {
