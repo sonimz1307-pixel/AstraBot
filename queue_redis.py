@@ -35,6 +35,11 @@ def _queue_key(queue_name: Optional[str] = None) -> str:
     return f"{_QUEUE_PREFIX}:{q}"
 
 
+def _delayed_queue_key(queue_name: Optional[str] = None) -> str:
+    q = (queue_name or _DEFAULT_QUEUE_NAME or "gen").strip() or "gen"
+    return f"{_QUEUE_PREFIX}:delayed:{q}"
+
+
 async def get_redis() -> "redis.Redis":
     """Return a shared async Redis client for this process."""
     global _REDIS_CLIENT
@@ -93,6 +98,96 @@ async def enqueue_job(job: Dict[str, Any], queue_name: Optional[str] = None) -> 
                 await asyncio.sleep(_REDIS_RECONNECT_SLEEP_SEC)
 
     raise RuntimeError(f"Redis enqueue failed after {_REDIS_ENQUEUE_ATTEMPTS} attempts: {last_exc}")
+
+
+
+async def enqueue_job_delayed(
+    job: Dict[str, Any],
+    *,
+    delay_sec: float = 0,
+    queue_name: Optional[str] = None,
+    not_before_ts: Optional[float] = None,
+) -> str:
+    """
+    Put job into a Redis sorted set and promote it to the normal list only
+    when its due timestamp is reached. This is used for Relax queues where
+    the user should see the job as accepted immediately, while the expensive
+    provider call starts later without occupying a worker concurrency slot.
+    """
+    job_id = str(job.get("job_id") or job.get("id") or "")
+    if not job_id:
+        job_id = f"job_{int(time.time() * 1000)}"
+        job["job_id"] = job_id
+
+    now = time.time()
+    try:
+        due_ts = float(not_before_ts) if not_before_ts is not None else now + max(0.0, float(delay_sec or 0))
+    except Exception:
+        due_ts = now
+    job["not_before_ts"] = due_ts
+    job["delayed_queue_name"] = (queue_name or _DEFAULT_QUEUE_NAME or "gen").strip() or "gen"
+
+    payload = json.dumps(job, ensure_ascii=False)
+    key = _delayed_queue_key(queue_name)
+    last_exc: Optional[BaseException] = None
+
+    for attempt in range(1, _REDIS_ENQUEUE_ATTEMPTS + 1):
+        try:
+            r = await get_redis()
+            await r.zadd(key, {payload: due_ts})
+            return job_id
+        except (RedisTimeoutError, RedisConnectionError) as exc:
+            last_exc = exc
+            print(
+                f"[queue_redis] Redis delayed enqueue error attempt={attempt}/{_REDIS_ENQUEUE_ATTEMPTS} "
+                f"queue={key}: {exc}",
+                flush=True,
+            )
+            await _reset_redis_client()
+            if attempt < _REDIS_ENQUEUE_ATTEMPTS:
+                await asyncio.sleep(_REDIS_RECONNECT_SLEEP_SEC)
+
+    raise RuntimeError(f"Redis delayed enqueue failed after {_REDIS_ENQUEUE_ATTEMPTS} attempts: {last_exc}")
+
+
+async def promote_due_delayed_jobs(queue_name: Optional[str] = None, *, limit: int = 50) -> int:
+    """
+    Atomically move due delayed jobs from Redis ZSET to the normal Redis list.
+    The Lua step prevents a lost job if Redis disconnects between ZREM and RPUSH.
+    Safe for multiple workers: a payload is moved only if it is removed from ZSET.
+    """
+    delayed_key = _delayed_queue_key(queue_name)
+    ready_key = _queue_key(queue_name)
+    now = time.time()
+    batch_limit = max(1, int(limit or 50))
+    script = """
+local delayed_key = KEYS[1]
+local ready_key = KEYS[2]
+local now_ts = ARGV[1]
+local batch_limit = tonumber(ARGV[2]) or 50
+local payloads = redis.call('ZRANGEBYSCORE', delayed_key, '-inf', now_ts, 'LIMIT', 0, batch_limit)
+local moved = 0
+for _, payload in ipairs(payloads) do
+    local removed = redis.call('ZREM', delayed_key, payload)
+    if removed and removed > 0 then
+        redis.call('RPUSH', ready_key, payload)
+        moved = moved + 1
+    end
+end
+return moved
+"""
+
+    try:
+        r = await get_redis()
+        moved = int(await r.eval(script, 2, delayed_key, ready_key, now, batch_limit) or 0)
+        if moved:
+            print(f"[queue_redis] promoted delayed jobs queue={queue_name or _DEFAULT_QUEUE_NAME} count={moved}", flush=True)
+        return moved
+    except (RedisTimeoutError, RedisConnectionError) as exc:
+        print(f"[queue_redis] Redis delayed promote error queue={delayed_key}: {exc}", flush=True)
+        await _reset_redis_client()
+        await asyncio.sleep(_REDIS_RECONNECT_SLEEP_SEC)
+        return 0
 
 
 async def dequeue_job(
