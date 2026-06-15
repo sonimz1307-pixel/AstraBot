@@ -1126,7 +1126,7 @@ def _fetch_admin_ledger_rows_for_stats(*, since: datetime, until: datetime, max_
 
 
 
-_PAYMENT_STATS_REASONS = {"yookassa_topup"}
+_PAYMENT_STATS_REASONS = {"yookassa_topup", "yookassa_subscription"}
 _PAYMENT_STATS_PACK_RUB_BY_TOKENS = {
     5: 60,
     20: 200,
@@ -1144,10 +1144,11 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
 
 def _fetch_admin_payment_rows_for_stats(*, since: datetime, until: datetime, max_rows: int) -> List[Dict[str, Any]]:
-    """Successful YooKassa topups only.
+    """Successful YooKassa payments only.
 
-    Failed/created-but-unpaid YooKassa payments are not written as yookassa_topup
-    ledger rows, so they are intentionally not counted here.
+    Counts both token topups (yookassa_topup) and paid subscription purchases
+    (yookassa_subscription). Failed/created-but-unpaid YooKassa payments are not
+    written as positive ledger rows, so they are intentionally not counted here.
     """
     rows: List[Dict[str, Any]] = []
     page_size = 1000
@@ -1868,6 +1869,8 @@ async def partner_admin_payments_stats(
             "raw_user_id": raw_uid,
             "provider": "yookassa",
             "reason": reason,
+            "payment_type": "subscription" if reason == "yookassa_subscription" else "topup",
+            "plan_code": str(((row.get("meta") if isinstance(row.get("meta"), dict) else {}).get("plan_code") or "")).strip().lower(),
             "amount_rub": round(amount_rub, 2),
             "tokens": max(0, tokens),
             "payment_id": _admin_payment_id(row),
@@ -1890,8 +1893,8 @@ async def partner_admin_payments_stats(
         "unique_payers": len(users),
         "tokens_sold": int(total_tokens),
         "items": items[:200],
-        "source": "bot_balance_ledger: yookassa_topup",
-        "note": "Считаются только успешные рублёвые оплаты YooKassa. Неудачные/созданные, но неоплаченные платежи не учитываются.",
+        "source": "bot_balance_ledger: yookassa_topup + yookassa_subscription",
+        "note": "Считаются успешные рублёвые оплаты YooKassa: пополнения токенов и покупки тарифов. Неудачные/созданные, но неоплаченные платежи не учитываются.",
     }
 
 @router.get("/admin/stats")
