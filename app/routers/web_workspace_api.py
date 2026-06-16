@@ -1904,6 +1904,7 @@ async def _piapi_seedance_create_task_workspace(
     aspect_ratio: Optional[str] = None,
     image_urls: Optional[List[str]] = None,
     service_mode: str = "public",
+    resolution: Optional[str] = None,
 ) -> Dict[str, Any]:
     if not PIAPI_API_KEY:
         raise RuntimeError("PIAPI_API_KEY not set")
@@ -1914,6 +1915,8 @@ async def _piapi_seedance_create_task_workspace(
         body["input"]["duration"] = int(duration)
     if aspect_ratio is not None:
         body["input"]["aspect_ratio"] = aspect_ratio
+    if resolution is not None:
+        body["input"]["resolution"] = str(resolution)
     if image_urls:
         body["input"]["image_urls"] = image_urls
     body["config"] = {"service_mode": service_mode}
@@ -2525,14 +2528,23 @@ async def _run_workspace_video_job(
                 )
 
         elif provider == "seedance":
-            task_type = "seedance-2-fast-preview" if model == "seedance-fast" else "seedance-2-preview"
-            image_urls = await _upload_reference_images_to_public_urls(user_id, reference_images[:9], "seedance") if reference_images else None
+            task_type = "seedance-2-mini"
+            mini_frame_images: List[bytes] = []
+            if start_frame:
+                mini_frame_images.append(start_frame)
+            if last_frame:
+                mini_frame_images.append(last_frame)
+            # Backward compatibility: old UI used reference_images for the hidden PiAPI branch.
+            if not mini_frame_images and reference_images:
+                mini_frame_images = list(reference_images[:2])
+            image_urls = await _upload_reference_images_to_public_urls(user_id, mini_frame_images[:2], "seedance-mini") if mini_frame_images else None
             created = await _piapi_seedance_create_task_workspace(
                 task_type=task_type,
                 prompt=prompt,
                 duration=duration,
                 aspect_ratio=aspect_ratio,
                 image_urls=image_urls if mode == "image_to_video" else None,
+                resolution="720p",
             )
             provider_task_id = ((created.get("data") or {}).get("task_id") or created.get("task_id") or "")
             if provider_task_id:
@@ -4550,15 +4562,14 @@ def _workspace_video_charge_spec(
         }
 
     if provider == "seedance":
-        # Preview = 720p grid; Fast Preview = 480p grid.
-        is_fast_preview = model == "seedance-fast"
-        preview_price_map = {5: 6, 10: 12, 15: 18} if is_fast_preview else {5: 12, 10: 24, 15: 33}
-        tokens = int(preview_price_map.get(int(duration), preview_price_map[5]))
+        # Seedance 2.0 Mini 720p through the old hidden PiAPI branch.
+        mini_price_map = {5: 9, 10: 18, 15: 27}
+        tokens = int(mini_price_map.get(int(duration), mini_price_map[5]))
         return {
             "tokens": tokens,
             "charge_reason": "seedance_video",
             "refund_reason": "seedance_video_refund",
-            "meta": {"origin": "workspace_video", "provider": provider, "model": model, "mode": mode, "duration": duration, "price_grid": "480p" if is_fast_preview else "720p"},
+            "meta": {"origin": "workspace_video", "provider": provider, "model": "seedance-mini", "mode": mode, "duration": duration, "resolution": "720p", "price_grid": "mini_720p"},
         }
 
     if provider == "sora":
@@ -4620,7 +4631,7 @@ async def workspace_video_run(
         raise HTTPException(status_code=400, detail="Missing model")
     if not mode:
         raise HTTPException(status_code=400, detail="Missing mode")
-    if not prompt and provider not in {"seedance"}:
+    if not prompt:
         raise HTTPException(status_code=400, detail="Missing prompt")
 
     supported = {"kling", "veo", "grok", "google", "seedance", "seedance_kie", "sora", "switchx", "pixverse_c1"}
@@ -4905,8 +4916,23 @@ async def workspace_video_run(
             start_frame = None
             end_frame = None
             last_frame = None
-    if provider == "seedance" and mode == "image_to_video" and not reference_images:
-        raise HTTPException(status_code=400, detail="Для Seedance Image→Video нужен хотя бы один reference image.")
+    if provider == "seedance":
+        model = "seedance-mini"
+        resolution = "720p"
+        if duration not in {5, 10, 15}:
+            raise HTTPException(status_code=400, detail="Для Seedance 2.0 Mini доступны только 5, 10 или 15 секунд.")
+        if aspect_ratio not in {"16:9", "9:16", "1:1", "4:3", "3:4"}:
+            aspect_ratio = "16:9"
+        if mode not in {"text_to_video", "image_to_video"}:
+            raise HTTPException(status_code=400, detail="Seedance 2.0 Mini поддерживает только Text→Video и Image→Video.")
+        if mode == "image_to_video":
+            total_image_refs = len(reference_images) + (1 if start_frame else 0) + (1 if last_frame else 0)
+            if total_image_refs < 1:
+                raise HTTPException(status_code=400, detail="Для Seedance 2.0 Mini Image→Video нужен первый кадр.")
+            if total_image_refs > 2:
+                raise HTTPException(status_code=400, detail="Seedance 2.0 Mini поддерживает максимум 2 изображения: first frame и optional last frame.")
+        reference_audios = []
+        reference_videos = []
     if provider == "sora":
         if mode != "text_to_video":
             raise HTTPException(status_code=400, detail="Sora в workspace сейчас поддерживает только Text→Video.")
