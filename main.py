@@ -122,12 +122,25 @@ from app.services.video_editor_service import create_workspace_upload_record, pr
 
 app = FastAPI()
 
+# CORS: production must allow only real frontends.
+# Website frontend: https://nabex.ru / https://www.nabex.ru
+# Telegram WebApp frontend: https://astrabot-tchj.onrender.com
+# Do not use a wildcard such as https://.*.onrender.com in production.
+DEFAULT_WORKSPACE_ALLOWED_ORIGINS = (
+    "https://nabex.ru,"
+    "https://www.nabex.ru,"
+    "https://astrabot-tchj.onrender.com"
+)
+
 WORKSPACE_ALLOWED_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv("WORKSPACE_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+    origin.strip().rstrip("/")
+    for origin in os.getenv("WORKSPACE_ALLOWED_ORIGINS", DEFAULT_WORKSPACE_ALLOWED_ORIGINS).split(",")
     if origin.strip()
 ]
-WORKSPACE_ALLOWED_ORIGIN_REGEX = os.getenv("WORKSPACE_ALLOWED_ORIGIN_REGEX", r"https://.*\.onrender\.com")
+
+# Empty env value must mean "no regex", not an accidentally broad regex.
+_raw_workspace_origin_regex = (os.getenv("WORKSPACE_ALLOWED_ORIGIN_REGEX") or "").strip()
+WORKSPACE_ALLOWED_ORIGIN_REGEX = _raw_workspace_origin_regex or None
 
 app.add_middleware(
     CORSMiddleware,
