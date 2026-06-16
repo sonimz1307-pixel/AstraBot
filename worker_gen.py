@@ -468,7 +468,8 @@ async def _piapi_seedance_create_task(*, task_type: str, prompt: Optional[str] =
                                      aspect_ratio: Optional[str] = None,
                                      image_urls: Optional[list[str]] = None,
                                      parent_task_id: Optional[str] = None,
-                                     service_mode: str = "public") -> dict:
+                                     service_mode: str = "public",
+                                     resolution: Optional[str] = None) -> dict:
     if not PIAPI_API_KEY:
         raise RuntimeError("PIAPI_API_KEY not set")
     if not PIAPI_BASE_URL:
@@ -480,6 +481,8 @@ async def _piapi_seedance_create_task(*, task_type: str, prompt: Optional[str] =
         body["input"]["duration"] = int(duration)
     if aspect_ratio is not None:
         body["input"]["aspect_ratio"] = aspect_ratio
+    if resolution is not None:
+        body["input"]["resolution"] = str(resolution)
     if image_urls:
         body["input"]["image_urls"] = image_urls
     if parent_task_id:
@@ -1481,9 +1484,10 @@ async def handle_job(job: Dict[str, Any]) -> None:
 
             # Preview / legacy path
             image_urls: Optional[list[str]] = None
+            piapi_image_limit = 2 if task_type == "seedance-2-mini" else 9
             if isinstance(image_file_ids, list) and image_file_ids:
                 image_urls = []
-                for fid in image_file_ids[:9]:
+                for fid in image_file_ids[:piapi_image_limit]:
                     if not isinstance(fid, str) or not fid.strip():
                         continue
                     try:
@@ -1501,6 +1505,7 @@ async def handle_job(job: Dict[str, Any]) -> None:
                 image_urls=image_urls,
                 parent_task_id=parent_task_id,
                 service_mode=service_mode,
+                resolution="720p" if task_type == "seedance-2-mini" else None,
             )
 
             if isinstance(created, dict):
@@ -1542,11 +1547,12 @@ async def handle_job(job: Dict[str, Any]) -> None:
             except Exception:
                 await tg_send_message(chat_id, f"✅ Seedance готово!\n🎬 {url}")
 
-            await tg_send_message(
-                chat_id,
-                "Продолжить сцену?",
-                reply_markup=_seedance_continue_kb(task_id),
-            )
+            if task_type != "seedance-2-mini":
+                await tg_send_message(
+                    chat_id,
+                    "Продолжить сцену?",
+                    reply_markup=_seedance_continue_kb(task_id),
+                )
 
             return
 
@@ -1581,11 +1587,12 @@ async def handle_job(job: Dict[str, Any]) -> None:
                                     await tg_send_video_from_url(chat_id, recovered_url, caption="🎬 Seedance видео")
                                 except Exception:
                                     await tg_send_message(chat_id, f"✅ Seedance готово!\n🎬 {recovered_url}")
-                                await tg_send_message(
-                                    chat_id,
-                                    "Продолжить сцену?",
-                                    reply_markup=_seedance_continue_kb(task_id),
-                                )
+                                if task_type != "seedance-2-mini":
+                                    await tg_send_message(
+                                        chat_id,
+                                        "Продолжить сцену?",
+                                        reply_markup=_seedance_continue_kb(task_id),
+                                    )
                                 recovered = True
                                 break
                         if recovered_status == "failed":
