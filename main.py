@@ -3792,7 +3792,7 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
     task_type = str(settings.get("task_type") or ("seedance-2-fast" if seedance_model == "seedance-kie-480p" else ("seedance-2" if provider_kind == "seedance_kie" else "seedance-2-preview"))).strip()
     duration = int(settings.get("duration") or 5)
     aspect_ratio = str(settings.get("aspect_ratio") or "16:9").strip()
-    max_images = int(settings.get("max_images") or (7 if provider_kind == "seedance_kie" else 9))
+    max_images = int(settings.get("max_images") or (7 if provider_kind == "seedance_kie" else 2))
     max_videos = int(settings.get("max_videos") or 0)
     max_audios = int(settings.get("max_audios") or 0)
     prompt_limit = _seedance_prompt_limit_from_settings(settings)
@@ -3858,8 +3858,8 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
             input_video_duration_sec=seedance_input_video_sec,
         ))
     else:
-        is_fast_preview = seedance_model in ("fast", "seedance-2-fast-preview") or task_type == "seedance-2-fast-preview"
-        preview_price_map = {5: 6, 10: 12, 15: 18} if is_fast_preview else {5: 12, 10: 24, 15: 33}
+        # Seedance 2.0 Mini retail grid. Legacy preview/fast settings are normalized to Mini upstream.
+        preview_price_map = {5: 9, 10: 18, 15: 27}
         cost_tokens = int(preview_price_map.get(int(duration), preview_price_map[5]))
 
     _busy_start(int(user_id), "Seedance видео")
@@ -3957,7 +3957,7 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
 def _seedance_collect_summary_text(mode: str, settings: Optional[Dict[str, Any]] = None) -> str:
     settings = settings or {}
     try:
-        max_images = int(settings.get("max_images") or (7 if str(settings.get("provider_kind") or "") == "seedance_kie" else 9))
+        max_images = int(settings.get("max_images") or (7 if str(settings.get("provider_kind") or "") == "seedance_kie" else 2))
     except Exception:
         max_images = 7
     try:
@@ -7866,8 +7866,11 @@ async def webhook(secret: str, request: Request):
 
             se = st.get("seedance_extend") or {}
             task_type = str(se.get("task_type") or "seedance-2-preview")
+            if task_type == "seedance-2-mini":
+                await tg_send_message(chat_id, "Seedance 2.0 Mini сейчас без продолжения сцены. Запусти новую генерацию.", reply_markup=_help_menu_for(user_id))
+                return {"ok": True}
 
-            # Preview = 720p grid; Fast Preview = 480p grid.
+            # Legacy PiAPI continuation pricing.
             preview_price_map = {5: 6, 10: 12, 15: 18} if task_type == "seedance-2-fast-preview" else {5: 12, 10: 24, 15: 33}
             cost_5 = int(preview_price_map[5])
             cost_10 = int(preview_price_map[10])
@@ -7902,9 +7905,9 @@ async def webhook(secret: str, request: Request):
             se["duration"] = duration
 
             seedance_settings = st.get("seedance_settings") or {}
-            task_type = str(seedance_settings.get("task_type") or "seedance-2-preview")
+            task_type = str((st.get("seedance_extend") or {}).get("task_type") or seedance_settings.get("task_type") or "seedance-2-preview")
 
-            # Preview = 720p grid; Fast Preview = 480p grid.
+            # Legacy PiAPI continuation pricing.
             preview_price_map = {5: 6, 10: 12, 15: 18} if task_type == "seedance-2-fast-preview" else {5: 12, 10: 24, 15: 33}
             cost_tokens = int(preview_price_map.get(int(duration), preview_price_map[5]))
 
@@ -8728,7 +8731,7 @@ async def webhook(secret: str, request: Request):
         
 
                 # ----- WebApp data (Seedance 2.0 / Preview settings) -----
-        # Expected preview: {type:"seedance_settings", provider:"seedance", seedance_model:"preview|fast", flow:"text|image", ...}
+        # Expected mini/PiAPI: {type:"seedance_settings", provider:"seedance", seedance_model:"mini", flow:"text|image", ...}
         # Expected regular KIE: {type:"seedance_settings", provider:"seedance_kie", seedance_model:"seedance-kie-480p|seedance-kie-720p|seedance-kie-1080p", flow:"text|image|omni", ...}
         seedance_provider_raw = str(payload.get("provider") or provider_raw or "").lower().strip()
         seedance_type_raw = str(payload.get("type") or "").lower().strip()
@@ -8743,8 +8746,8 @@ async def webhook(secret: str, request: Request):
         is_seedance = (
             seedance_type_raw in ("seedance_settings", "seedance2_settings", "seedance_2_settings")
             or seedance_provider_raw in ("seedance", "seedance2", "seedance_2", "seedance_kie", "seedance-kie")
-            or seedance_model_raw in ("preview", "fast", "seedance-2-preview", "seedance-2-fast-preview", *kie_seedance_models)
-            or seedance_task_type_raw in ("seedance-2-preview", "seedance-2-fast-preview", "seedance-2", "seedance-2-fast")
+            or seedance_model_raw in ("mini", "seedance-mini", "seedance-2-mini", "preview", "fast", "seedance-2-preview", "seedance-2-fast-preview", *kie_seedance_models)
+            or seedance_task_type_raw in ("seedance-2-mini", "seedance-2-preview", "seedance-2-fast-preview", "seedance-2", "seedance-2-fast")
         )
 
         if is_seedance:
@@ -8791,21 +8794,17 @@ async def webhook(secret: str, request: Request):
             else:
                 if aspect_ratio not in ("16:9", "9:16", "1:1", "4:3", "3:4"):
                     aspect_ratio = "16:9"
-                seedance_model = seedance_model_raw or "preview"
-                if seedance_model not in ("preview", "fast", "seedance-2-preview", "seedance-2-fast-preview"):
-                    seedance_model = "preview"
-                if seedance_model in ("seedance-2-fast-preview",):
-                    task_type = "seedance-2-fast-preview"
-                    seedance_model = "fast"
-                elif seedance_model in ("seedance-2-preview",):
-                    task_type = "seedance-2-preview"
-                    seedance_model = "preview"
-                else:
-                    task_type = "seedance-2-fast-preview" if seedance_model == "fast" else "seedance-2-preview"
-                max_images = 9
+                # The old hidden PiAPI Preview branch is now exposed only as Seedance 2.0 Mini.
+                # Legacy preview/fast values are normalized to Mini to avoid sending deprecated task types.
+                seedance_model = seedance_model_raw or "mini"
+                if seedance_model not in ("mini", "seedance-mini", "seedance-2-mini", "preview", "fast", "seedance-2-preview", "seedance-2-fast-preview"):
+                    seedance_model = "mini"
+                task_type = "seedance-2-mini"
+                seedance_model = "mini"
+                max_images = 2 if flow == "image" else 0
                 max_videos = 0
                 max_audios = 0
-                max_total_refs = 9
+                max_total_refs = 2 if flow == "image" else 0
 
             st["seedance_settings"] = {
                 "provider_kind": provider_kind,
@@ -8829,7 +8828,7 @@ async def webhook(secret: str, request: Request):
                     chat_id,
                     ("✅ Настройки Seedance 2.0 сохранены.\n\nПришли промпт одним или несколькими сообщениями. Когда всё отправишь — нажми «✅ Запустить»."
                      if provider_kind == "seedance_kie" else
-                     "✅ Настройки Seedance 2.0 Preview сохранены.\n\nПришли промпт одним или несколькими сообщениями. Когда всё отправишь — нажми «✅ Запустить»."),
+                     "✅ Настройки Seedance 2.0 Mini сохранены.\n\nПришли промпт одним или несколькими сообщениями. Когда всё отправишь — нажми «✅ Запустить»."),
                     reply_markup=_seedance_prompt_collect_kb("seedance_t2v"),
                 )
                 return {"ok": True}
@@ -8868,8 +8867,8 @@ async def webhook(secret: str, request: Request):
                 )
             else:
                 msg = (
-                    "✅ Настройки Seedance 2.0 Preview сохранены.\n\nТеперь пришли 1–9 ФОТО (референсы).\n"
-                    "Когда все фото отправишь — нажми «✅ Готово», затем пришли промпт частями и нажми «✅ Запустить»."
+                    "✅ Настройки Seedance 2.0 Mini Image → Video сохранены.\n\nТеперь пришли 1–2 ФОТО. "
+                    "Первое фото будет first frame, второе — optional last frame. После фото нажми «✅ Готово», затем пришли промпт частями и нажми «✅ Запустить»."
                 )
             await tg_send_message(chat_id, msg, reply_markup=_seedance_refs_collect_kb())
             return {"ok": True}
@@ -10139,7 +10138,7 @@ async def webhook(secret: str, request: Request):
         task_type = str(settings.get("task_type") or ("seedance-2-fast" if seedance_model == "seedance-kie-480p" else ("seedance-2" if provider_kind == "seedance_kie" else "seedance-2-preview"))).strip()
         duration = int(settings.get("duration") or 5)
         aspect_ratio = str(settings.get("aspect_ratio") or "16:9").strip()
-        max_images = int(settings.get("max_images") or (7 if provider_kind == "seedance_kie" else 9))
+        max_images = int(settings.get("max_images") or (7 if provider_kind == "seedance_kie" else 2))
         max_videos = int(settings.get("max_videos") or 0)
         max_audios = int(settings.get("max_audios") or 0)
         max_total_refs = int(settings.get("max_total_refs") or max_images)
@@ -12043,7 +12042,7 @@ async def webhook(secret: str, request: Request):
         # ---- SEEDANCE 2 Image/Omni: сбор фото-референсов ----
         if st.get("mode") in ("seedance_i2v", "seedance_omni"):
             settings = st.get("seedance_settings") or {}
-            limit = int(settings.get("max_images") or (7 if (settings.get("provider_kind") == "seedance_kie") else 9))
+            limit = int(settings.get("max_images") or (7 if (settings.get("provider_kind") == "seedance_kie") else 2))
             total_limit = int(settings.get("max_total_refs") or 12)
 
             if st.get("mode") == "seedance_omni":
