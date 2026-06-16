@@ -1120,10 +1120,10 @@
             <span class="desc">Как на сайте</span>
           </label>
 
-          <input id="seed_variant_preview" type="radio" name="seedance_variant" value="preview">
+          <input id="seed_variant_preview" type="radio" name="seedance_variant" value="mini">
           <label for="seed_variant_preview">
-            <span class="name">Seedance 2.0 Preview</span>
-            <span class="desc">Скрытый режим</span>
+            <span class="name">Seedance 2.0 Mini</span>
+            <span class="desc">720p · PiAPI</span>
           </label>
         </div>
       </div>
@@ -1131,20 +1131,14 @@
       <div class="card">
         <h3>Модель Seedance</h3>
         <div id="seedancePreviewModelWrap" style="display:none;">
-          <div class="seg" role="radiogroup" aria-label="Модель Seedance Preview">
-            <input id="seed_preview" type="radio" name="seedance_model" value="preview" checked>
-            <label for="seed_preview">
-              <span class="name">Preview 720p</span>
-              <span class="desc">12 / 24 / 33 токенов</span>
-            </label>
-
-            <input id="seed_fast" type="radio" name="seedance_model" value="fast">
-            <label for="seed_fast">
-              <span class="name">Fast 480p</span>
-              <span class="desc">6 / 12 / 18 токенов</span>
+          <div class="seg" role="radiogroup" aria-label="Модель Seedance Mini">
+            <input id="seed_mini" type="radio" name="seedance_model" value="mini" checked>
+            <label for="seed_mini">
+              <span class="name">Seedance 2.0 Mini 720p</span>
+              <span class="desc">9 / 18 / 27 токенов</span>
             </label>
           </div>
-          <div class="hint">Preview = 720p, Fast Preview = 480p.</div>
+          <div class="hint">Только 720p, Text → Video или 1–2 фото как first/last frame.</div>
         </div>
 
         <div id="seedanceKieModelWrap">
@@ -1173,7 +1167,7 @@
 
       <div id="seedancePreviewFlowCard" class="card" style="display:none;">
         <h3>Режим</h3>
-        <div class="seg" role="radiogroup" aria-label="Режим Seedance Preview">
+        <div class="seg" role="radiogroup" aria-label="Режим Seedance Mini">
           <input id="seed_flow_text" type="radio" name="seedance_flow" value="text" checked>
           <label for="seed_flow_text">
             <span class="name">Text → Video</span>
@@ -1183,10 +1177,10 @@
           <input id="seed_flow_image" type="radio" name="seedance_flow" value="image">
           <label for="seed_flow_image">
             <span class="name">Image → Video</span>
-            <span class="desc">По референсам</span>
+            <span class="desc">Первый / последний кадр</span>
           </label>
         </div>
-        <div class="hint">Для Image → Video: после сохранения пришли 1–9 фото в чат, затем промпт.</div>
+        <div class="hint">Для Image → Video: после сохранения пришли 1–2 фото. Первое — first frame, второе — optional last frame.</div>
       </div>
 
       <div id="seedanceKieFlowCard" class="card">
@@ -1725,40 +1719,39 @@
     }
 
     // Seedance getters
-    function getSeedanceVariant(){ return "kie"; }
-    function getSeedancePreviewModel(){ return qs('input[name="seedance_model"]:checked')?.value || "preview"; }
+    function getSeedanceVariant(){ return qs('input[name="seedance_variant"]:checked')?.value || "kie"; }
+    function getSeedancePreviewModel(){ return qs('input[name="seedance_model"]:checked')?.value || "mini"; }
     function getSeedanceKieModel(){ return qs('input[name="seedance_kie_model"]:checked')?.value || "seedance-kie-480p"; }
     function getSeedanceKieFlow(){ return qs('input[name="seedance_kie_flow"]:checked')?.value || "text"; }
 
     function updateSeedanceUI(){
       const seedTypeCard = qs('#seedanceTypeCard');
-      const seedKieRadio = qs('#seed_variant_kie');
-      const seedPreviewRadio = qs('#seed_variant_preview');
       const previewModelWrap = qs('#seedancePreviewModelWrap');
       const kieModelWrap = qs('#seedanceKieModelWrap');
       const previewFlowCard = qs('#seedancePreviewFlowCard');
       const kieFlowCard = qs('#seedanceKieFlowCard');
       const aspectHint = qs('#seedanceAspectHint');
       const aspectSelect = qs('#seedance_aspect');
+      const variant = getSeedanceVariant();
+      const isMini = variant === 'mini' || variant === 'preview';
 
-      // Preview intentionally hidden from UI: default Seedance path is the regular Seedance 2.0 branch.
       if (seedTypeCard) {
-        seedTypeCard.style.display = 'none';
-        seedTypeCard.hidden = true;
-        seedTypeCard.setAttribute('aria-hidden', 'true');
+        seedTypeCard.style.display = 'block';
+        seedTypeCard.hidden = false;
+        seedTypeCard.setAttribute('aria-hidden', 'false');
       }
-      if (seedKieRadio) seedKieRadio.checked = true;
-      if (seedPreviewRadio) seedPreviewRadio.checked = false;
 
-      if (previewModelWrap) previewModelWrap.style.display = 'none';
-      if (kieModelWrap) kieModelWrap.style.display = 'block';
-      if (previewFlowCard) previewFlowCard.style.display = 'none';
-      if (kieFlowCard) kieFlowCard.style.display = 'block';
+      if (previewModelWrap) previewModelWrap.style.display = isMini ? 'block' : 'none';
+      if (kieModelWrap) kieModelWrap.style.display = isMini ? 'none' : 'block';
+      if (previewFlowCard) previewFlowCard.style.display = isMini ? 'block' : 'none';
+      if (kieFlowCard) kieFlowCard.style.display = isMini ? 'none' : 'block';
 
-      if (aspectSelect && ['4:3','3:4'].includes(aspectSelect.value)){
+      if (!isMini && aspectSelect && ['4:3','3:4'].includes(aspectSelect.value)){
         aspectSelect.value = '16:9';
       }
-      if (aspectHint) aspectHint.textContent = 'Для обычного Seedance 2.0 доступны форматы 16:9 / 9:16 / 1:1, как на сайте.';
+      if (aspectHint) aspectHint.textContent = isMini
+        ? 'Seedance 2.0 Mini: 720p, Text → Video или 1–2 фото как first/last frame.'
+        : 'Для обычного Seedance 2.0 доступны форматы 16:9 / 9:16 / 1:1, как на сайте.';
     }
 
     function setFlowLabelText(labelEl, name, desc){
@@ -2129,7 +2122,7 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
         }
 
         const previewModel = getSeedancePreviewModel();
-        const priceMap = previewModel === 'fast' ? {5: 6, 10: 12, 15: 18} : {5: 12, 10: 24, 15: 33};
+        const priceMap = {5: 9, 10: 18, 15: 27};
         const tokens = priceMap[seconds] || priceMap[5];
         return { known:true, tokens, note:'' };
       }
@@ -2381,8 +2374,8 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
             payload = {
               type: "seedance_settings",
               provider: "seedance",
-              seedance_variant: "preview",
-              seedance_model,
+              seedance_variant: "mini",
+              seedance_model: "mini",
               flow,
               duration,
               aspect_ratio
