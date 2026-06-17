@@ -9,13 +9,14 @@ import traceback
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Body, HTTPException, BackgroundTasks, Header
+from fastapi import APIRouter, Body, HTTPException, BackgroundTasks, Header, Request
 
 from app.services.socials_extract import fetch_and_extract_website_data
 from app.services.market_model_builder import build_brand_model_from_yandex_items
 from app.services.apify_client import run_actor_sync_get_dataset_items, run_actor_fire_and_poll_get_dataset_items, ApifyError
 from app.services.mi_storage import create_job, insert_raw_items, get_supabase
 from app.services.mi_tasks import enqueue_task
+from app.services.admin_auth import require_admin_request
 
 router = APIRouter()
 
@@ -572,7 +573,7 @@ async def _orchestrate_full_job(
 
 
 @router.post("/run_full_job")
-async def run_full_job(payload: Dict[str, Any] = Body(...), background_tasks: BackgroundTasks = None, x_admin_token: str | None = Header(default=None, alias="X-Admin-Token")):
+async def run_full_job(request: Request, payload: Dict[str, Any] = Body(...), background_tasks: BackgroundTasks = None, x_admin_token: str | None = Header(default=None, alias="X-Admin-Token")):
     """
     v2 orchestration (ASYNC):
     - creates mi_jobs record
@@ -596,10 +597,8 @@ async def run_full_job(payload: Dict[str, Any] = Body(...), background_tasks: Ba
       "actor_input_2gis": {...}       # optional merge into 2GIS actor_input
     }
     """
-    # 🔐 ADMIN TOKEN check (blocks anonymous запуск из инкогнито)
-    expected = os.getenv("ADMIN_TOKEN")
-    if not expected or x_admin_token != expected:
-        raise HTTPException(status_code=403, detail="forbidden")
+    # 🔐 Admin access: signed httpOnly admin cookie or backward-compatible X-Admin-Token.
+    require_admin_request(request, x_admin_token)
 
     tg_user_id = payload.get("tg_user_id")
     city = (payload.get("city") or "").strip()
