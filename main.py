@@ -2947,6 +2947,19 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
     elif mode == "grok_i2v":
         st["grok_i2v"] = {"step": "need_image", "image_bytes": None, "image_name": None}
 
+    elif mode == "omni_flash_t2v":
+        # Google Omni Flash Telegram flow.
+        # Keep omni_flash_settings alive; prompt handler reads duration/resolution/aspect_ratio from it.
+        st["omni_flash_t2v"] = {"step": "need_prompt"}
+
+    elif mode == "omni_flash_i2v":
+        # Do not fall into the default branch, because it clears omni_flash_settings
+        # and causes generation to use default 16:9 even after user selected 9:16.
+        st["omni_flash_i2v"] = {"step": "need_images", "images": [], "image_urls": []}
+
+    elif mode == "omni_flash_video_edit":
+        st["omni_flash_video_edit"] = {"step": "need_video", "image_urls": []}
+
 
     else:
         # chat / default
