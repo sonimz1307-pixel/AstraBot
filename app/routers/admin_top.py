@@ -6,9 +6,10 @@ import hashlib
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import APIRouter, Header, HTTPException, Body, Query
+from fastapi import APIRouter, Header, HTTPException, Body, Query, Request
 
 from db_supabase import supabase as sb
+from app.services.admin_auth import require_admin_request, audit_admin_action
 
 # Reuse existing extraction services (already used in leads.py pipeline)
 from app.services.socials_extract import fetch_and_extract_website_data
@@ -21,12 +22,8 @@ LOG = logging.getLogger("uvicorn.error")
 # -----------------------------
 # Auth
 # -----------------------------
-def _require_admin(x_admin_token: Optional[str]) -> None:
-    expected = os.getenv("ADMIN_TOKEN")
-    if not expected:
-        raise HTTPException(status_code=500, detail="ADMIN_TOKEN is not configured")
-    if not x_admin_token or x_admin_token != expected:
-        raise HTTPException(status_code=403, detail="forbidden")
+def _require_admin(request: Request, x_admin_token: Optional[str]) -> None:
+    require_admin_request(request, x_admin_token)
 
 
 # -----------------------------
@@ -231,10 +228,11 @@ def _merge_social_links(existing: Any, socials: List[Dict[str, Any]]) -> Dict[st
 # -----------------------------
 @router.get("/jobs")
 def list_jobs(
+    request: Request,
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
     limit: int = Query(default=50, ge=1, le=200),
 ):
-    _require_admin(x_admin_token)
+    _require_admin(request, x_admin_token)
     if sb is None:
         raise HTTPException(status_code=500, detail="Supabase client is not configured")
 
@@ -251,11 +249,12 @@ def list_jobs(
 @router.get("/job/{job_id}")
 def job_detail(
     job_id: str,
+    request: Request,
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
     include_raw: bool = Query(default=False),
     raw_limit: int = Query(default=200, ge=1, le=2000),
 ):
-    _require_admin(x_admin_token)
+    _require_admin(request, x_admin_token)
     if sb is None:
         raise HTTPException(status_code=500, detail="Supabase client is not configured")
 
@@ -305,6 +304,7 @@ def job_detail(
 @router.get("/job/{job_id}/places")
 def job_places(
     job_id: str,
+    request: Request,
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
     limit: int = Query(default=2000, ge=1, le=5000),
     only_selected: bool = Query(default=False),
@@ -313,7 +313,7 @@ def job_places(
     """Return competitors list for selection UI (RU WebApp).
     Joins mi_places with mi_job_places.selected (selection layer).
     """
-    _require_admin(x_admin_token)
+    _require_admin(request, x_admin_token)
     if sb is None:
         raise HTTPException(status_code=500, detail="Supabase client is not configured")
 
@@ -433,6 +433,7 @@ def job_places(
 @router.post("/job/{job_id}/places/select")
 def job_places_select(
     job_id: str,
+    request: Request,
     payload: Dict[str, Any] = Body(...),
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
 ):
@@ -442,7 +443,7 @@ def job_places_select(
     If replace=true:
       - sets all rows in this job to opposite, then applies selected to provided place_keys.
     """
-    _require_admin(x_admin_token)
+    _require_admin(request, x_admin_token)
     if sb is None:
         raise HTTPException(status_code=500, detail="Supabase client is not configured")
 
@@ -509,13 +510,14 @@ async def _enrich_selected_internal(
 @router.post("/job/{job_id}/enrich_selected")
 async def enrich_selected(
     job_id: str,
+    request: Request,
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
     max_urls_per_place: int = Body(default=5, embed=True),
     timeout_sec: float = Body(default=25.0, embed=True),
     write_raw: bool = Body(default=True, embed=True),
 ):
     """Run site/social enrichment ONLY for selected competitors (mi_job_places.selected=true)."""
-    _require_admin(x_admin_token)
+    _require_admin(request, x_admin_token)
     if sb is None:
         raise HTTPException(status_code=500, detail="Supabase client is not configured")
 
@@ -535,6 +537,7 @@ async def enrich_selected(
 
     # Reuse existing logic by calling enrich_sites with place_keys filter
     return await enrich_sites(
+        request=request,
         job_id=job_id,
         place_keys=keys,
         x_admin_token=x_admin_token,
@@ -548,17 +551,18 @@ async def enrich_selected(
 
 @router.post("/run_job")
 async def run_job(
+    request: Request,
     payload: Dict[str, Any] = Body(...),
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
 ):
-    _require_admin(x_admin_token)
+    _require_admin(request, x_admin_token)
 
     port = os.getenv("PORT", "10000")
     base_url = os.getenv("SELF_BASE_URL", f"http://127.0.0.1:{port}")
     url = f"{base_url}/api/leads/run_full_job"
 
     async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(url, json=payload)
+        r = await client.post(url, json=payload, headers={"X-Admin-Token": os.getenv("ADMIN_TOKEN", "")})
         if r.status_code >= 400:
             raise HTTPException(status_code=r.status_code, detail=r.text)
         return r.json()
@@ -566,6 +570,7 @@ async def run_job(
 
 @router.post("/enrich_sites")
 async def enrich_sites(
+    request: Request = None,
     job_id: str = Body(..., embed=True),
     place_keys: Optional[List[str]] = Body(default=None, embed=True),
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
@@ -588,7 +593,8 @@ async def enrich_sites(
         - mi_places.social_links merged
         - mi_places.tg_links/ig_links filled (canonical)
     """
-    _require_admin(x_admin_token)
+    if request is not None:
+        _require_admin(request, x_admin_token)
     if sb is None:
         raise HTTPException(status_code=500, detail="Supabase client is not configured")
 
