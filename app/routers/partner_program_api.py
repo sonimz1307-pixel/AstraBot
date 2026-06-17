@@ -11,7 +11,7 @@ except Exception:  # pragma: no cover
     ZoneInfo = None
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from app.services.workspace_auth import get_current_workspace_user
@@ -27,6 +27,7 @@ from app.services.partner_program import (
     serialize_payout,
 )
 from queue_redis import enqueue_job
+from app.services.admin_auth import require_admin_request, audit_admin_action
 
 from billing_db import add_tokens, get_balance, ledger_ref_exists
 from db_supabase import supabase
@@ -67,12 +68,8 @@ def _uid_from_user(user: Dict[str, Any]) -> int:
     return uid
 
 
-def _require_admin(x_admin_token: Optional[str]) -> None:
-    expected = (os.getenv("ADMIN_TOKEN") or "").strip()
-    if not expected:
-        raise HTTPException(status_code=500, detail="ADMIN_TOKEN is not configured")
-    if not x_admin_token or x_admin_token.strip() != expected:
-        raise HTTPException(status_code=403, detail="forbidden")
+def _require_admin(request: Request, x_admin_token: Optional[str]) -> None:
+    require_admin_request(request, x_admin_token)
 
 
 async def _notify_payout_created(payout: Optional[Dict[str, Any]]) -> None:
@@ -144,11 +141,12 @@ async def partner_create_payout(payload: PayoutCreatePayload, user: Dict[str, An
 
 @router.get("/admin/payouts")
 async def partner_admin_payouts(
+    request: Request,
     status: str = Query("pending", max_length=40),
     limit: int = Query(100, ge=1, le=300),
     x_admin_token: Optional[str] = Header(None),
 ) -> Dict[str, Any]:
-    _require_admin(x_admin_token)
+    _require_admin(request, x_admin_token)
     try:
         return admin_list_payouts(status=status, limit=limit)
     except Exception as e:
@@ -157,11 +155,12 @@ async def partner_admin_payouts(
 
 @router.post("/admin/payouts/{payout_id}/paid")
 async def partner_admin_payout_paid(
+    request: Request,
     payout_id: str,
     payload: AdminPayoutActionPayload,
     x_admin_token: Optional[str] = Header(None),
 ) -> Dict[str, Any]:
-    _require_admin(x_admin_token)
+    _require_admin(request, x_admin_token)
     try:
         return admin_mark_payout_paid(
             payout_id=payout_id,
@@ -176,11 +175,12 @@ async def partner_admin_payout_paid(
 
 @router.post("/admin/payouts/{payout_id}/reject")
 async def partner_admin_payout_reject(
+    request: Request,
     payout_id: str,
     payload: AdminPayoutActionPayload,
     x_admin_token: Optional[str] = Header(None),
 ) -> Dict[str, Any]:
-    _require_admin(x_admin_token)
+    _require_admin(request, x_admin_token)
     try:
         return admin_reject_payout(
             payout_id=payout_id,
@@ -195,10 +195,11 @@ async def partner_admin_payout_reject(
 
 @router.get("/admin/partners")
 async def partner_admin_partners(
+    request: Request,
     limit: int = Query(100, ge=1, le=300),
     x_admin_token: Optional[str] = Header(None),
 ) -> Dict[str, Any]:
-    _require_admin(x_admin_token)
+    _require_admin(request, x_admin_token)
     try:
         return admin_list_partners(limit=limit)
     except Exception as e:
@@ -564,11 +565,12 @@ def _dedupe_candidates(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 @router.get("/admin/users/search")
 async def partner_admin_user_search(
+    request: Request,
     q: str = Query(..., min_length=1, max_length=120),
     limit: int = Query(20, ge=1, le=50),
     x_admin_token: Optional[str] = Header(None),
 ) -> Dict[str, Any]:
-    _require_admin(x_admin_token)
+    _require_admin(request, x_admin_token)
     query = str(q or "").strip()
     if not query:
         raise HTTPException(status_code=400, detail="Введите поисковый запрос.")
@@ -627,12 +629,13 @@ async def partner_admin_user_search(
 
 @router.get("/admin/users/{user_id}/overview")
 async def partner_admin_user_overview(
+    request: Request,
     user_id: int,
     ledger_limit: int = Query(80, ge=1, le=200),
     generation_limit: int = Query(40, ge=1, le=100),
     x_admin_token: Optional[str] = Header(None),
 ) -> Dict[str, Any]:
-    _require_admin(x_admin_token)
+    _require_admin(request, x_admin_token)
     resolved = _resolve_admin_user_ids(int(user_id))
     effective_id = int(resolved.get("effective_user_id") or user_id)
     linked_ids = [int(x) for x in (resolved.get("linked_ids") or [effective_id])]
@@ -691,9 +694,10 @@ async def partner_admin_user_overview(
 
 @router.get("/admin/subscription-plans")
 async def partner_admin_subscription_plans(
+    request: Request,
     x_admin_token: Optional[str] = Header(None),
 ) -> Dict[str, Any]:
-    _require_admin(x_admin_token)
+    _require_admin(request, x_admin_token)
     try:
         # Plans are seeded only by SQL migration. This GET endpoint must not mutate tariff rows.
         return {"ok": True, "items": list_subscription_plans(include_inactive=True)}
@@ -703,10 +707,11 @@ async def partner_admin_subscription_plans(
 
 @router.get("/admin/users/{user_id}/subscription")
 async def partner_admin_user_subscription(
+    request: Request,
     user_id: int,
     x_admin_token: Optional[str] = Header(None),
 ) -> Dict[str, Any]:
-    _require_admin(x_admin_token)
+    _require_admin(request, x_admin_token)
     resolved = _resolve_admin_user_ids(int(user_id))
     effective_id = int(resolved.get("effective_user_id") or user_id)
     return {"ok": True, "user_id": effective_id, "subscription": get_current_subscription(effective_id)}
@@ -714,11 +719,12 @@ async def partner_admin_user_subscription(
 
 @router.post("/admin/users/{user_id}/subscription/set")
 async def partner_admin_set_user_subscription(
+    request: Request,
     user_id: int,
     payload: AdminSubscriptionSetPayload,
     x_admin_token: Optional[str] = Header(None),
 ) -> Dict[str, Any]:
-    _require_admin(x_admin_token)
+    _require_admin(request, x_admin_token)
     resolved = _resolve_admin_user_ids(int(user_id))
     effective_id = int(resolved.get("effective_user_id") or user_id)
     try:
@@ -748,11 +754,12 @@ async def partner_admin_set_user_subscription(
 
 @router.post("/admin/users/{user_id}/subscription/extend")
 async def partner_admin_extend_user_subscription(
+    request: Request,
     user_id: int,
     payload: AdminSubscriptionExtendPayload,
     x_admin_token: Optional[str] = Header(None),
 ) -> Dict[str, Any]:
-    _require_admin(x_admin_token)
+    _require_admin(request, x_admin_token)
     resolved = _resolve_admin_user_ids(int(user_id))
     effective_id = int(resolved.get("effective_user_id") or user_id)
     try:
@@ -779,11 +786,12 @@ async def partner_admin_extend_user_subscription(
 
 @router.post("/admin/users/{user_id}/subscription/cancel")
 async def partner_admin_cancel_user_subscription(
+    request: Request,
     user_id: int,
     payload: AdminSubscriptionCancelPayload,
     x_admin_token: Optional[str] = Header(None),
 ) -> Dict[str, Any]:
-    _require_admin(x_admin_token)
+    _require_admin(request, x_admin_token)
     resolved = _resolve_admin_user_ids(int(user_id))
     effective_id = int(resolved.get("effective_user_id") or user_id)
     try:
@@ -809,11 +817,12 @@ async def partner_admin_cancel_user_subscription(
 
 @router.post("/admin/users/{user_id}/tokens/adjust")
 async def partner_admin_adjust_tokens(
+    request: Request,
     user_id: int,
     payload: AdminTokenAdjustPayload,
     x_admin_token: Optional[str] = Header(None),
 ) -> Dict[str, Any]:
-    _require_admin(x_admin_token)
+    _require_admin(request, x_admin_token)
     resolved = _resolve_admin_user_ids(int(user_id))
     effective_id = int(resolved.get("effective_user_id") or user_id)
     delta = int(payload.delta_tokens)
@@ -861,12 +870,13 @@ async def partner_admin_adjust_tokens(
 
 @router.post("/admin/generations/{kind}/{generation_id}/mark-failed")
 async def partner_admin_generation_mark_failed(
+    request: Request,
     kind: str,
     generation_id: str,
     payload: AdminGenerationFailPayload,
     x_admin_token: Optional[str] = Header(None),
 ) -> Dict[str, Any]:
-    _require_admin(x_admin_token)
+    _require_admin(request, x_admin_token)
     kind_key = str(kind or "").strip().lower()
     table = _ADMIN_GENERATION_TABLES.get(kind_key)
     if not table:
@@ -1592,12 +1602,13 @@ def _admin_site_row_by_any_id(site_rows: List[Dict[str, Any]]) -> tuple[Dict[int
 
 @router.get("/admin/client-growth")
 async def partner_admin_client_growth(
+    request: Request,
     period: str = Query("day", pattern="^(day|month)$"),
     date_msk: Optional[str] = Query(None, max_length=10),
     max_rows: int = Query(100000, ge=1000, le=200000),
     x_admin_token: Optional[str] = Header(None),
 ) -> Dict[str, Any]:
-    _require_admin(x_admin_token)
+    _require_admin(request, x_admin_token)
 
     period_key = str(period or "day").strip().lower()
     if period_key not in {"day", "month"}:
@@ -1831,12 +1842,13 @@ async def partner_admin_client_growth(
 
 @router.get("/admin/payments/stats")
 async def partner_admin_payments_stats(
+    request: Request,
     period: str = Query("day", pattern="^(day|month)$"),
     date_msk: Optional[str] = Query(None),
     max_rows: int = Query(20000, ge=1, le=50000),
     x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token"),
 ) -> Dict[str, Any]:
-    _require_admin(x_admin_token)
+    _require_admin(request, x_admin_token)
     period_key = str(period or "day").strip().lower()
     since, until, since_local, until_local, period_label = _admin_stats_period_bounds(period_key, date_msk=date_msk)
     rows = _fetch_admin_payment_rows_for_stats(since=since, until=until, max_rows=max_rows)
@@ -1899,12 +1911,13 @@ async def partner_admin_payments_stats(
 
 @router.get("/admin/stats")
 async def partner_admin_stats(
+    request: Request,
     period: str = Query("day", pattern="^(day|month)$"),
     date_msk: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
     max_rows: int = Query(10000, ge=100, le=50000),
     x_admin_token: Optional[str] = Header(None),
 ) -> Dict[str, Any]:
-    _require_admin(x_admin_token)
+    _require_admin(request, x_admin_token)
     period_key = str(period or "day").strip().lower()
     since, until, since_local, until_local, period_label = _admin_stats_period_bounds(period_key, date_msk=date_msk)
 
