@@ -155,6 +155,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 from app.routers.leads import router as leads_router
 from app.routers.kling3 import router as kling3_router
 from app.routers.kling3_kie import router as kling3_kie_router
+from app.routers.admin_auth import router as admin_auth_router
 from app.routers.admin_top import router as admin_top_router
 from app.routers.provider_balances_admin import router as provider_balances_admin_router
 from app.routers.prompts import router as prompts_router
@@ -173,6 +174,7 @@ from app.services.legnext_midjourney import (
 app.include_router(leads_router, prefix="/api/leads", tags=["leads"])
 app.include_router(kling3_router, prefix="/api/kling3", tags=["kling3"])
 app.include_router(kling3_kie_router, prefix="/api/kling3-kie", tags=["kling3-kie"])
+app.include_router(admin_auth_router)
 app.include_router(admin_top_router, prefix="/api/admin", tags=["admin"])
 app.include_router(provider_balances_admin_router, prefix="/api/admin", tags=["admin-balances"])
 app.include_router(prompts_router, prefix="/api/prompts", tags=["prompts"])
