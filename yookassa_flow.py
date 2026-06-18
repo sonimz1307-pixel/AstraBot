@@ -41,6 +41,27 @@ def _tax_system_code() -> int:
     return code
 
 
+async def fetch_yookassa_payment(payment_id: str) -> Dict[str, Any]:
+    """Fetch current payment object directly from YooKassa API. Used by webhook handler before any financial action."""
+    _require_creds()
+    pid = str(payment_id or "").strip()
+    if not pid:
+        raise ValueError("payment_id is required")
+
+    headers = {"Authorization": _basic_auth_header(YOOKASSA_SHOP_ID, YOOKASSA_SECRET_KEY)}
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.get(f"{YOOKASSA_API_BASE}/payments/{pid}", headers=headers)
+        try:
+            j = r.json()
+        except Exception:
+            j = {}
+        if r.status_code >= 300:
+            raise RuntimeError(f"YooKassa fetch payment failed: {r.status_code} {str(j)[:300]}")
+        if not isinstance(j, dict):
+            raise RuntimeError("YooKassa fetch payment: bad JSON")
+        return j
+
+
 async def create_yookassa_payment(
     *,
     amount_rub: int,
@@ -119,13 +140,13 @@ async def create_yookassa_payment(
     }
 
     print("YOOKASSA_FLOW_VERSION =", YOOKASSA_FLOW_VERSION)
-    print("YOOKASSA REQUEST BODY (short) =", {
+    print("YOOKASSA REQUEST BODY (safe) =", {
         "amount": body.get("amount"),
-        "confirmation": body.get("confirmation"),
         "capture": body.get("capture"),
-        "description": body.get("description"),
-        "receipt": body.get("receipt"),
-        "metadata": body.get("metadata"),
+        "description_len": len(str(body.get("description") or "")),
+        "has_confirmation": bool(body.get("confirmation")),
+        "has_receipt": bool(body.get("receipt")),
+        "has_metadata": bool(body.get("metadata")),
     })
 
     async with httpx.AsyncClient(timeout=20) as client:
