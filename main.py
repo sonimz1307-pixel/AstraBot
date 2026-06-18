@@ -9170,7 +9170,7 @@ async def webhook(secret: str, request: Request):
                 st["omni_flash_video_edit"] = {"step": "need_video", "image_urls": []}
                 await tg_send_message(
                     chat_id,
-                    f"✅ Настройки Google Omni Flash сохранены: Video Edit • до {KIE_OMNI_VIDEO_EDIT_MAX_DURATION_SEC} сек • {resolution} • {aspect_ratio}\n\nТеперь пришли исходное видео MP4/MOV. После видео можно добавить до 5 фото-референсов или сразу прислать промпт.",
+                    f"✅ Настройки Google Omni Flash сохранены: Video Edit • {resolution} • {aspect_ratio}\n\nТеперь пришли исходное видео MP4/MOV. После видео можно добавить до 5 фото-референсов или сразу прислать промпт.",
                     reply_markup=_help_menu_for(user_id),
                 )
             else:
