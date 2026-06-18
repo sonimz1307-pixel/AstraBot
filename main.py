@@ -78,7 +78,7 @@ from topaz_pricing import (
     calc_video_retail_tokens,
     get_video_preset_settings,
 )
-from yookassa_flow import create_yookassa_payment
+from yookassa_flow import create_yookassa_payment, fetch_yookassa_payment
 from subscriptions_db import get_current_subscription, get_subscription_plan, set_user_subscription, extend_user_subscription
 from kling3_pricing import calculate_kling3_price
 from kling3_telegram_handler import handle_kling3_wait_prompt
@@ -1488,8 +1488,13 @@ YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "").strip()
 YOOKASSA_RETURN_URL = os.getenv("YOOKASSA_RETURN_URL", WEBAPP_MUSIC_URL).strip()
 # Optional: explicit webhook URL (if empty, you can set it in YooKassa cabinet; if set, it will be passed to create-payment)
 YOOKASSA_WEBHOOK_URL = os.getenv("YOOKASSA_WEBHOOK_URL", "").strip()
-# Optional: simple protection for /yookassa/webhook (send as header 'Authorization: Bearer <token>' or 'X-Webhook-Token')
-YOOKASSA_WEBHOOK_TOKEN = os.getenv("YOOKASSA_WEBHOOK_TOKEN", "").strip()
+# Optional webhook secret. Phase-1 safe mode: the secret is NOT enforced unless
+# YOOKASSA_WEBHOOK_REQUIRE_SECRET=1, so existing YooKassa cabinet URL keeps working.
+YOOKASSA_WEBHOOK_SECRET = (
+    os.getenv("YOOKASSA_WEBHOOK_TOKEN", "").strip()
+    or os.getenv("YOOKASSA_WEBHOOK_SECRET", "").strip()
+)
+YOOKASSA_WEBHOOK_REQUIRE_SECRET = os.getenv("YOOKASSA_WEBHOOK_REQUIRE_SECRET", "").strip().lower() in ("1", "true", "yes", "y", "on")
 
 def _yookassa_enabled() -> bool:
     return bool(YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY)
@@ -6526,50 +6531,54 @@ async def sunoapi_callback(req: Request):
 async def yookassa_webhook(request: Request):
     """
     YooKassa payment notifications.
-    Expected event: payment.succeeded (we also accept generic objects with status=succeeded).
+    Phase-1 safe hardening:
+    - keeps the current webhook URLs unchanged;
+    - does not require a secret unless YOOKASSA_WEBHOOK_REQUIRE_SECRET=1;
+    - verifies payment_id through YooKassa API before any tokens/subscription are granted;
+    - avoids logging full webhook payload / receipt / customer data.
     """
-    # Optional simple token check (recommended)
-    if YOOKASSA_WEBHOOK_TOKEN:
+    if YOOKASSA_WEBHOOK_REQUIRE_SECRET:
         auth = (request.headers.get("authorization") or "").strip()
-        token = (request.headers.get("x-webhook-token") or "").strip()
+        header_token = (request.headers.get("x-webhook-token") or "").strip()
+        query_token = (request.query_params.get("token") or request.query_params.get("secret") or "").strip()
+        expected = str(YOOKASSA_WEBHOOK_SECRET or "").strip()
         ok = False
-        if auth.lower().startswith("bearer "):
-            ok = auth.split(" ", 1)[1].strip() == YOOKASSA_WEBHOOK_TOKEN
-        if token and token == YOOKASSA_WEBHOOK_TOKEN:
-            ok = True
+        if expected:
+            if auth.lower().startswith("bearer "):
+                ok = hmac.compare_digest(auth.split(" ", 1)[1].strip(), expected)
+            if header_token and hmac.compare_digest(header_token, expected):
+                ok = True
+            if query_token and hmac.compare_digest(query_token, expected):
+                ok = True
         if not ok:
             return Response(status_code=401, content="unauthorized")
 
     try:
         payload = await request.json()
     except Exception:
-        payload = {}
+        return Response(status_code=400, content="bad json")
 
-    event = (payload.get("event") or payload.get("type") or "").strip()
+    event = (payload.get("event") or payload.get("type") or "").strip() if isinstance(payload, dict) else ""
     obj = payload.get("object") if isinstance(payload, dict) else None
     if not isinstance(obj, dict):
         return {"ok": True}
 
-    status = (obj.get("status") or "").strip()
     payment_id = (obj.get("id") or "").strip()
-
-    # We process only succeeded payments
-    if status != "succeeded" and event != "payment.succeeded":
+    if not payment_id:
         return {"ok": True}
 
-    if not payment_id:
+    # We process only successful payment notifications. The final status is still rechecked below via YooKassa API.
+    webhook_status = (obj.get("status") or "").strip()
+    if webhook_status != "succeeded" and event != "payment.succeeded":
         return {"ok": True}
 
     _yk_cleanup_processed()
     if payment_id in _YK_PROCESSED:
         return {"ok": True}
     if payment_id in _YK_PROCESSING:
-        # Duplicate webhook while the first copy is still running in this process.
-        # The first handler will return success or 500 and YooKassa can retry if needed.
         return {"ok": True}
     _YK_PROCESSING[payment_id] = time.time()
 
-    md = obj.get("metadata") or {}
     uid = 0
     tokens = 0
     payment_type = ""
@@ -6581,6 +6590,40 @@ async def yookassa_webhook(request: Request):
     plan: Optional[Dict[str, Any]] = None
 
     try:
+        verified = await fetch_yookassa_payment(payment_id)
+        verified_id = (verified.get("id") or "").strip()
+        status = (verified.get("status") or "").strip()
+        paid = bool(verified.get("paid"))
+
+        if verified_id != payment_id:
+            raise RuntimeError("YooKassa payment id mismatch")
+
+        # Do not trust the webhook body for money/status. Use only the object fetched from YooKassa.
+        if status != "succeeded" or not paid:
+            _yk_mark_processed(payment_id)
+            return {"ok": True}
+
+        amount_obj = verified.get("amount") if isinstance(verified, dict) else {}
+        if not isinstance(amount_obj, dict):
+            amount_obj = {}
+        currency = str(amount_obj.get("currency") or "").strip().upper()
+        if currency and currency != "RUB":
+            if ADMIN_IDS:
+                try:
+                    await tg_send_message(next(iter(ADMIN_IDS)), f"⚠️ YooKassa webhook: currency mismatch. payment_id={payment_id} currency={currency}")
+                except Exception:
+                    pass
+            _yk_mark_processed(payment_id)
+            return {"ok": True}
+        try:
+            amount_rub = float(amount_obj.get("value") or 0)
+        except Exception:
+            amount_rub = 0.0
+
+        md = verified.get("metadata") or {}
+        if not isinstance(md, dict):
+            md = {}
+
         try:
             uid = int(md.get("user_id") or 0)
             tokens = int(md.get("tokens") or 0)
@@ -6593,23 +6636,16 @@ async def yookassa_webhook(request: Request):
         is_subscription_payment = payment_type == "subscription" or plan_code in PUBLIC_SUBSCRIPTION_PLAN_CODES
         reason = "yookassa_subscription" if is_subscription_payment else "yookassa_topup"
 
-        # If metadata missing, do nothing (to avoid giving tokens to wrong user).
-        # Mark this invalid YooKassa payment as handled so it does not spam retries forever.
+        # If metadata is missing, do nothing and do not leak payload/customer data to logs.
         if uid <= 0 or tokens <= 0:
             if ADMIN_IDS:
                 try:
                     admin_id = next(iter(ADMIN_IDS))
-                    await tg_send_message(admin_id, f"⚠️ YooKassa webhook: no metadata user_id/tokens. payment_id={payment_id} payload={json.dumps(payload)[:1500]}")
+                    await tg_send_message(admin_id, f"⚠️ YooKassa webhook: missing metadata user_id/tokens. payment_id={payment_id}")
                 except Exception:
                     pass
             _yk_mark_processed(payment_id)
             return {"ok": True}
-
-        amount_obj = obj.get("amount") or {}
-        try:
-            amount_rub = float(amount_obj.get("value") or md.get("amount_rub") or 0)
-        except Exception:
-            amount_rub = 0.0
 
         tokens_already_granted = False
         try:
@@ -6653,7 +6689,7 @@ async def yookassa_webhook(request: Request):
                     source="yookassa",
                     payment_id=payment_id,
                     comment=f"YooKassa subscription payment {payment_id}",
-                    meta={"payment_id": payment_id, "amount_rub": amount_rub, "tokens_granted": tokens, "metadata": md},
+                    meta={"payment_id": payment_id, "amount_rub": amount_rub, "tokens_granted": tokens},
                 )
 
         if not tokens_already_granted:
@@ -6670,7 +6706,6 @@ async def yookassa_webhook(request: Request):
                     "provider": "yookassa",
                     "payment_type": payment_type or ("subscription" if is_subscription_payment else "topup"),
                     "plan_code": plan_code if is_subscription_payment else "",
-                    "metadata": md,
                 },
             )
 
@@ -6695,7 +6730,7 @@ async def yookassa_webhook(request: Request):
             amount_rub=amount_rub,
             tokens=tokens,
             provider="yookassa",
-            meta={"event": event, "status": status, "metadata": md, "payment_type": payment_type or ("subscription" if is_subscription_payment else "topup")},
+            meta={"event": event, "status": "succeeded", "payment_type": payment_type or ("subscription" if is_subscription_payment else "topup")},
         )
     except Exception as e:
         if ADMIN_IDS:
