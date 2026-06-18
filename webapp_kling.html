@@ -1051,7 +1051,7 @@
           <input id="omni_flow_video_edit" type="radio" name="omni_flow" value="video_edit">
           <label for="omni_flow_video_edit">
             <span class="name">Video Edit</span>
-            <span class="desc">Видео до 60 сек + промпт</span>
+            <span class="desc">Видео + промпт</span>
           </label>
         </div>
       </div>
@@ -1714,7 +1714,7 @@
       const hint = qs('#omni_hint');
       if (durationSelect) durationSelect.style.display = isVideoEdit ? 'none' : '';
       if (hint) hint.textContent = isVideoEdit
-        ? 'Video Edit: исходное видео до 60 сек. Цена фиксированная: 720p/1080p — 20 ток., 4K — 30 ток. Длительность результата определяет модель.'
+        ? 'Video Edit:Цена фиксированная: 720p/1080p — 20 ток., 4K — 30 ток. Длительность результата до 10сек.'
         : 'Длительности только 6 / 8 / 10 сек. 4 секунды отключены. Цена сейчас считается по нашей внутренней сетке.';
     }
 
