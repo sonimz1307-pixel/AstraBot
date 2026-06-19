@@ -129,9 +129,6 @@ def normalize_gpt_image_2_kie_options(
 ) -> Tuple[str, str]:
     normalized_resolution = normalize_gpt_image_2_kie_resolution(resolution, default=default_resolution)
     normalized_aspect = normalize_gpt_image_2_kie_aspect_ratio(aspect_ratio, default=default_aspect)
-    # KIE docs: 1:1 cannot be converted to 4K. Keep the request creatable.
-    if normalized_resolution == "4K" and normalized_aspect == "1:1":
-        normalized_aspect = default_aspect
     return normalized_resolution, normalized_aspect
 
 
