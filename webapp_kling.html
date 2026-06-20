@@ -623,7 +623,7 @@
     <div id="klingBlock" style="display:none;">
       <div class="card">
         <h3>Kling — версия</h3>
-        <div class="seg cols3" role="radiogroup" aria-label="Версия Kling">
+        <div class="seg cols4" role="radiogroup" aria-label="Версия Kling">
           <input id="kling_v16" type="radio" name="kling_version" value="1_6" checked>
           <label for="kling_v16">
             <span class="name">Motion Control</span>
@@ -634,6 +634,12 @@
           <label for="kling_v25">
             <span class="name">2.5 Turbo Pro</span>
             <span class="desc">Text / Image → Video</span>
+          </label>
+
+          <input id="kling_v30_turbo" type="radio" name="kling_version" value="3_0_turbo">
+          <label for="kling_v30_turbo">
+            <span class="name">3.0 Turbo</span>
+            <span class="desc">720p / 1080p</span>
           </label>
 
           <input id="kling_v30_new" type="radio" name="kling_version" value="3_0_new">
@@ -736,6 +742,37 @@
 
         <div class="hint">Эти настройки применяются только если выбран Kling PRO 3.0.</div>
       </div>
+      <div class="card" id="kling3TurboOptions" style="display:none;">
+        <h3>Kling 3.0 Turbo — KIE</h3>
+        <div class="seg" role="radiogroup" aria-label="Kling 3.0 Turbo mode">
+          <input id="k3t_mode_text" type="radio" name="kling3_turbo_gen_mode" value="text_to_video" checked>
+          <label for="k3t_mode_text"><span class="name">Text</span><span class="desc">только prompt</span></label>
+          <input id="k3t_mode_image" type="radio" name="kling3_turbo_gen_mode" value="image_to_video">
+          <label for="k3t_mode_image"><span class="name">Image</span><span class="desc">start frame</span></label>
+        </div>
+
+        <div style="margin-top:14px;"><label class="badge" style="display:inline-block;margin-bottom:8px;">Разрешение</label></div>
+        <div class="seg" role="radiogroup" aria-label="Kling 3.0 Turbo resolution">
+          <input id="k3t_res_720" type="radio" name="kling3_turbo_resolution" value="720p" checked>
+          <label for="k3t_res_720"><span class="name">720p</span><span class="desc">6 / 11 / 17 ток.</span></label>
+          <input id="k3t_res_1080" type="radio" name="kling3_turbo_resolution" value="1080p">
+          <label for="k3t_res_1080"><span class="name">1080p</span><span class="desc">7 / 14 / 21 ток.</span></label>
+        </div>
+
+        <div class="row" style="margin-top:12px;">
+          <div style="flex:1; min-width: 160px;">
+            <label class="badge" style="display:inline-block;margin-bottom:8px;">Формат Text → Video</label>
+            <select id="kling3_turbo_aspect"><option value="16:9">16:9</option><option value="9:16">9:16</option><option value="1:1">1:1</option></select>
+          </div>
+          <div style="flex:1; min-width: 160px;">
+            <label class="badge" style="display:inline-block;margin-bottom:8px;">Длительность</label>
+            <select id="kling3_turbo_duration"><option value="5" selected>5</option><option value="10">10</option><option value="15">15</option></select>
+          </div>
+        </div>
+
+        <div class="hint">Text → пришли prompt. Image → сначала пришли стартовое фото, затем prompt. 4K, audio и end frame в Turbo не включаем. Цены: 720p — 6/11/17 ток.; 1080p — 7/14/21 ток. за 5/10/15 сек.</div>
+      </div>
+
       <div class="card" id="kling3NewOptions" style="display:none;">
         <h3>Kling 3.0 - New — KIE</h3>
         <div class="seg cols3" role="radiogroup" aria-label="Kling 3.0 New mode">
@@ -1260,6 +1297,10 @@
     function getKling3Aspect(){ return qs('#kling3_aspect')?.value || "16:9"; }
     function getKling3PreferMultiShots(){ return !!qs('#kling3_multishot')?.checked; }
     function getKling25Aspect(){ return qs('#kling25_aspect')?.value || "16:9"; }
+    function getKling3TurboGenMode(){ return qs('input[name="kling3_turbo_gen_mode"]:checked')?.value || "text_to_video"; }
+    function getKling3TurboResolution(){ return qs('input[name="kling3_turbo_resolution"]:checked')?.value || "720p"; }
+    function getKling3TurboAspect(){ return qs('#kling3_turbo_aspect')?.value || "16:9"; }
+    function getKling3TurboDuration(){ return parseInt((qs('#kling3_turbo_duration')?.value || "5"), 10); }
     function getKling3NewGenMode(){ return qs('input[name="kling3_new_gen_mode"]:checked')?.value || "text_to_video"; }
     function getKling3NewQuality(){ return qs('input[name="kling3_new_quality"]:checked')?.value || "std"; }
     function getKling3NewAspect(){ return qs('#kling3_new_aspect')?.value || "16:9"; }
@@ -1786,6 +1827,7 @@
 
       const durCard = qs('#durationCard');
       const kling3Options = qs('#kling3Options');
+      const kling3TurboOptions = qs('#kling3TurboOptions');
       const kling3NewOptions = qs('#kling3NewOptions');
       const flowCard = qs('#klingFlowCard');
       const legacyModeCard = qs('#klingLegacyModeCard');
@@ -1814,6 +1856,7 @@
         if (legacyModeCard) legacyModeCard.style.display = 'block';
         setLegacyKlingQualityLabels({ motion3: flow === 'i2v' });
         if (kling3Options) kling3Options.style.display = 'none';
+        if (kling3TurboOptions) kling3TurboOptions.style.display = 'none';
         if (kling3NewOptions) kling3NewOptions.style.display = 'none';
         if (flowHint) flowHint.textContent = (flow === 'i2v')
           ? 'Kling 3.0 Motion Control: фото персонажа + видео движения 3–30 сек. Качество: 720p или 1080p.'
@@ -1839,6 +1882,7 @@
         if (flowCard) flowCard.style.display = 'block';
         if (legacyModeCard) legacyModeCard.style.display = 'none';
         if (kling3Options) kling3Options.style.display = 'none';
+        if (kling3TurboOptions) kling3TurboOptions.style.display = 'none';
         if (kling3NewOptions) kling3NewOptions.style.display = 'none';
         if (flowHint) flowHint.textContent = 'Kling 2.5 Turbo Pro: Text → Video по одному промпту или Image → Video по стартовому фото.';
         return;
@@ -1849,13 +1893,21 @@
       if (flowCard) flowCard.style.display = 'none';
       if (legacyModeCard) legacyModeCard.style.display = 'none';
       setLegacyKlingQualityLabels({ motion3: false });
+      if (version === '3_0_turbo'){
+        if (kling3Options) kling3Options.style.display = 'none';
+        if (kling3NewOptions) kling3NewOptions.style.display = 'none';
+        if (kling3TurboOptions) kling3TurboOptions.style.display = 'block';
+        return;
+      }
       if (version === '3_0_new'){
         if (kling3Options) kling3Options.style.display = 'none';
+        if (kling3TurboOptions) kling3TurboOptions.style.display = 'none';
         if (kling3NewOptions) kling3NewOptions.style.display = 'block';
         renderKling3NewEditors();
         return;
       }
       if (kling3NewOptions) kling3NewOptions.style.display = 'none';
+      if (kling3TurboOptions) kling3TurboOptions.style.display = 'none';
       if (kling3Options) kling3Options.style.display = 'none';
     }
 
@@ -1863,6 +1915,11 @@
       const version = getKlingVersion();
       const el = qs('#tokenRateHint');
       if (!el) return;
+
+      if (version === '3_0_turbo'){
+        el.innerHTML = 'Kling 3.0 Turbo / KIE: 720p — <b>6 / 11 / 17 ток.</b>, 1080p — <b>7 / 14 / 21 ток.</b> за 5 / 10 / 15 сек.';
+        return;
+      }
 
       if (version === '3_0_new'){
         el.innerHTML = 'Kling 3.0 - New / KIE: Standard 1/1.5 ток/сек, Pro 1.5/2 ток/сек, 4K 5/6 ток/сек. Multi-shot: сумма шотов 3–15 сек.';
@@ -2023,6 +2080,8 @@
     qsa('input[name="flow"]').forEach(el => el.addEventListener('change', () => { updateKlingUI(); updateCostUI(); }));
     qsa('input[name="mode"]').forEach(el => el.addEventListener('change', () => { updateTokenRateHint(); updateCostUI(); }));
     qsa('input[name="kling_version"]').forEach(el => el.addEventListener('change', () => { updateKlingUI(); updateTokenRateHint(); updateCostUI(); }));
+    qsa('input[name="kling3_turbo_gen_mode"]').forEach(el => el.addEventListener('change', () => { updateCostUI(); }));
+    qsa('input[name="kling3_turbo_resolution"]').forEach(el => el.addEventListener('change', () => { updateCostUI(); }));
     qsa('input[name="kling3_new_gen_mode"]').forEach(el => el.addEventListener('change', () => { renderKling3NewEditors(); updateCostUI(); }));
     qsa('input[name="kling3_new_quality"]').forEach(el => el.addEventListener('change', () => { updateCostUI(); }));
     qsa('input[name="seedance_variant"]').forEach(el => el.addEventListener('change', () => { updateSeedanceUI(); updateCostUI(); }));
@@ -2186,6 +2245,14 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
           return { known:true, tokens: seconds, note:'' };
         }
 
+        if (kling_version === '3_0_turbo'){
+          const resolution = getKling3TurboResolution() === '1080p' ? '1080p' : '720p';
+          const rawSeconds = getKling3TurboDuration();
+          const seconds = rawSeconds <= 5 ? 5 : (rawSeconds <= 10 ? 10 : 15);
+          const table = { '720p': {5:6, 10:11, 15:17}, '1080p': {5:7, 10:14, 15:21} };
+          return { known:true, tokens: table[resolution][seconds] || table['720p'][5], note:'' };
+        }
+
         if (kling_version === '3_0_new'){
           const quality = getKling3NewQuality();
           const enable_audio = getKling3NewAudio();
@@ -2282,6 +2349,17 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
             if (flow === 't2v'){
               payload.aspect_ratio = getKling25Aspect();
             }
+          } else if (kling_version === '3_0_turbo') {
+            payload = {
+              type: "kling3_turbo_settings",
+              provider: "kling",
+              kling_version,
+              model: "kling-3.0-turbo",
+              gen_mode: getKling3TurboGenMode(),
+              resolution: getKling3TurboResolution(),
+              duration: getKling3TurboDuration(),
+              aspect_ratio: getKling3TurboAspect()
+            };
           } else if (kling_version === '3_0_new') {
             try{
               saveBtn.disabled = true;
