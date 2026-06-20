@@ -83,6 +83,14 @@ from subscriptions_db import get_current_subscription, get_subscription_plan, se
 from kling3_pricing import calculate_kling3_price
 from kling3_telegram_handler import handle_kling3_wait_prompt
 from kling3_kie_telegram_handler import handle_kling3_kie_wait_prompt
+from kling3_turbo_telegram_handler import handle_kling3_turbo_wait_prompt
+from kling3_turbo_kie import (
+    calculate_kling3_turbo_price,
+    normalize_kling3_turbo_aspect_ratio,
+    normalize_kling3_turbo_duration,
+    normalize_kling3_turbo_mode,
+    normalize_kling3_turbo_resolution,
+)
 from grok_video_replicate import (
     GROK15_MODEL,
     GROK_LEGACY_MODEL,
@@ -2963,6 +2971,9 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
     elif mode == "omni_flash_video_edit":
         st["omni_flash_video_edit"] = {"step": "need_video", "image_urls": []}
 
+    elif mode == "kling3_turbo_wait_prompt":
+        prev = st.get("kling3_turbo_settings") if isinstance(st.get("kling3_turbo_settings"), dict) else {}
+        st["kling3_turbo_settings"] = prev or {"gen_mode": "text_to_video", "resolution": "720p", "duration": 5, "aspect_ratio": "16:9"}
 
     else:
         # chat / default
@@ -2990,6 +3001,7 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
         st.pop("omni_flash_settings", None)
         st.pop("grok_t2v", None)
         st.pop("grok_i2v", None)
+        st.pop("kling3_turbo_settings", None)
         st.pop("ai_chat_mode", None)
         st.pop("ai_chat_model", None)
         st.pop("ai_prompt", None)
@@ -9368,6 +9380,45 @@ async def webhook(secret: str, request: Request):
             )
             return {"ok": True}
 
+        # ----- Kling 3.0 Turbo (KIE) -----
+        if str(payload.get("type") or "").lower().strip() == "kling3_turbo_settings":
+            gen_mode = normalize_kling3_turbo_mode(payload.get("gen_mode") or payload.get("mode_type") or payload.get("flow") or "text_to_video")
+            resolution = normalize_kling3_turbo_resolution(payload.get("resolution") or "720p")
+            duration = normalize_kling3_turbo_duration(payload.get("duration") or 5)
+            aspect_ratio = normalize_kling3_turbo_aspect_ratio(payload.get("aspect_ratio") or "16:9")
+            tokens = int(calculate_kling3_turbo_price(resolution, duration))
+
+            prev = st.get("kling3_turbo_settings") or {}
+            st["kling3_turbo_settings"] = {
+                "gen_mode": gen_mode,
+                "resolution": resolution,
+                "duration": duration,
+                "aspect_ratio": aspect_ratio,
+                "start_image_bytes": prev.get("start_image_bytes"),
+                "start_image_url": prev.get("start_image_url"),
+            }
+            st["ts"] = _now()
+            _set_mode(chat_id, user_id, "kling3_turbo_wait_prompt")
+
+            if gen_mode == "image_to_video":
+                next_block = "Дальше:\n• Пришли стартовое фото\n• Затем пришли текстовый prompt"
+                mode_label = "Image → Video"
+            else:
+                next_block = "Дальше:\n• Пришли текстовый prompt"
+                mode_label = "Text → Video"
+
+            await tg_send_message(
+                chat_id,
+                "✅ Kling 3.0 Turbo настройки сохранены.\n"
+                f"Режим: {mode_label}\n"
+                f"Качество: {resolution} • {duration} сек\n"
+                f"Формат: {aspect_ratio if gen_mode == 'text_to_video' else 'по стартовому кадру'}\n"
+                f"Цена: {tokens} ток.\n\n"
+                f"{next_block}",
+                reply_markup=_help_menu_for(user_id),
+            )
+            return {"ok": True}
+
         # ----- Legacy Kling PRO 3.0 / PiAPI disabled -----
         if str(payload.get("type") or "").lower().strip() == "kling3_settings":
             st.pop("kling3_settings", None)
@@ -9995,6 +10046,24 @@ async def webhook(secret: str, request: Request):
     handled = False
 
     if incoming_text:
+
+        handled = await handle_kling3_turbo_wait_prompt(
+            chat_id=chat_id,
+            user_id=user_id,
+            incoming_text=incoming_text,
+            st=st,
+            deps={
+                "tg_send_message": tg_send_message,
+                "_main_menu_for": _main_menu_for,
+                "_is_nav_or_menu_text": _is_nav_or_menu_text,
+                "_set_mode": _set_mode,
+                "_now": _now,
+                "sb_clear_user_state": sb_clear_user_state,
+                "queue_name": WORKSPACE_MEDIA_QUEUE_NAME,
+            },
+        )
+        if handled:
+            return {"ok": True}
 
         handled = await handle_kling3_kie_wait_prompt(
             chat_id=chat_id,
@@ -11987,6 +12056,29 @@ async def webhook(secret: str, request: Request):
                 return {"ok": True}
 
             await tg_send_message(chat_id, "Фото уже собраны ✅ Теперь жду промпт текстом.", reply_markup=_help_menu_for(user_id))
+            return {"ok": True}
+
+        # ---- KLING 3.0 Turbo: приём стартового кадра через фото ----
+        if st.get("mode") == "kling3_turbo_wait_prompt":
+            kt = st.get("kling3_turbo_settings") or {}
+            gen_mode = normalize_kling3_turbo_mode(kt.get("gen_mode") or "text_to_video")
+
+            if gen_mode != "image_to_video":
+                await tg_send_message(
+                    chat_id,
+                    "Для Kling 3.0 Turbo в режиме Text→Video фото не нужно. Пришли текстовый prompt.",
+                    reply_markup=_help_menu_for(user_id),
+                )
+                return {"ok": True}
+
+            if not kt.get("start_image_bytes") and not kt.get("start_image_url"):
+                kt["start_image_bytes"] = img_bytes
+                st["kling3_turbo_settings"] = kt
+                st["ts"] = _now()
+                await tg_send_message(chat_id, "Стартовый кадр получил ✅\nТеперь пришли prompt.", reply_markup=_help_menu_for(user_id))
+                return {"ok": True}
+
+            await tg_send_message(chat_id, "Стартовый кадр уже сохранён ✅ Теперь пришли prompt.", reply_markup=_help_menu_for(user_id))
             return {"ok": True}
 
         # ---- KLING 3.0 - New: приём общего стартового/последнего кадра через фото ----
