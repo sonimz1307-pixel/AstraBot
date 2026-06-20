@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional
 from queue_redis import dequeue_job, promote_due_delayed_jobs
 from app.services.workspace_worker_jobs import (
     process_tg_grok_video_job,
+    process_tg_kling3_turbo_video_job,
     process_tg_omni_flash_video_job,
     process_tg_veo_relax_video_job,
     process_workspace_music_job,
@@ -46,7 +47,7 @@ def _sem_for_job(job: Dict[str, Any]) -> asyncio.Semaphore:
         return veo_relax_sem
     if (kind == "tg_grok_video_run" and model == "grok-imagine-video-1.5") or (kind == "workspace_video_run" and provider == "grok" and model == "grok-imagine-video-1.5"):
         return grok15_sem
-    if kind in {"workspace_video_run", "workspace_switchx_ref_run", "tg_grok_video_run"}:
+    if kind in {"workspace_video_run", "workspace_switchx_ref_run", "tg_grok_video_run", "tg_kling3_turbo_video_run"}:
         return video_sem
     if kind == "workspace_music_run":
         return music_sem
@@ -68,6 +69,10 @@ async def _handle(job: Dict[str, Any]) -> None:
         if kind == "tg_grok_video_run":
             await process_tg_grok_video_job(job)
             print(f"[workspace_media] completed tg_grok job={job.get('job_id')}", flush=True)
+            return
+        if kind == "tg_kling3_turbo_video_run":
+            await process_tg_kling3_turbo_video_job(job)
+            print(f"[workspace_media] completed tg_kling3_turbo job={job.get('job_id')}", flush=True)
             return
         if kind == "tg_omni_flash_video_run":
             await process_tg_omni_flash_video_job(job)
