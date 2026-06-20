@@ -232,6 +232,15 @@ from kling3_kie_pricing import (
     normalize_kling3_kie_mode,
     normalize_kling3_kie_shots,
 )
+from kling3_turbo_kie import (
+    KLING3_TURBO_DISPLAY_NAME,
+    calculate_kling3_turbo_price,
+    normalize_kling3_turbo_aspect_ratio,
+    normalize_kling3_turbo_duration,
+    normalize_kling3_turbo_mode,
+    normalize_kling3_turbo_resolution,
+    run_kling3_turbo_task_and_wait,
+)
 from songwriter_prompt import SONGWRITER_SYSTEM_PROMPT
 from queue_redis import enqueue_job, enqueue_job_delayed
 from chat_job_store import create_chat_job_status, get_chat_job_status, set_chat_job_status
@@ -1825,6 +1834,8 @@ def _normalize_workspace_video_resolution(provider: str, model: str, resolution:
     value = str(resolution or "").strip().lower()
     if provider == "kling" and model == "kling-3.0-new":
         return normalize_kling3_kie_mode(resolution or "pro")
+    if provider == "kling" and model == "kling-3.0-turbo":
+        return normalize_kling3_turbo_resolution(resolution or "720p")
     if provider == "veo":
         if model == "veo-3.1-fast-relax":
             return normalize_veo31_fast_relax_resolution(value or "1080p")
@@ -2240,7 +2251,24 @@ async def _run_workspace_video_job(
         provider_video_url: Optional[str] = None
 
         if provider == "kling":
-            if model == "kling-3.0":
+            if model == "kling-3.0-turbo":
+                normalized_mode = normalize_kling3_turbo_mode(mode)
+                normalized_duration = normalize_kling3_turbo_duration(duration)
+                normalized_resolution = normalize_kling3_turbo_resolution(resolution or "720p")
+                normalized_aspect = normalize_kling3_turbo_aspect_ratio(aspect_ratio or "16:9")
+                if normalized_mode == "image_to_video" and not start_frame:
+                    raise RuntimeError("Для Kling 3.0 Turbo Image→Video нужен start frame")
+                task_id, raw_task, provider_video_url = await run_kling3_turbo_task_and_wait(
+                    prompt=prompt,
+                    duration=normalized_duration,
+                    resolution=normalized_resolution,
+                    aspect_ratio=normalized_aspect,
+                    mode=normalized_mode,
+                    image_bytes=start_frame if normalized_mode == "image_to_video" else None,
+                    request_id=generation_id,
+                )
+
+            elif model == "kling-3.0":
                 await _run_workspace_kling3_job(
                     generation_id=generation_id,
                     user_id=user_id,
@@ -2255,7 +2283,7 @@ async def _run_workspace_video_job(
                 )
                 return
 
-            if model == "motion-control":
+            elif model == "motion-control":
                 if not avatar_image or not motion_video:
                     raise RuntimeError("Для Motion Control нужны avatar_image и motion_video")
                 if mode == "motion_control_3_0":
@@ -4356,6 +4384,26 @@ def _workspace_video_charge_spec(
     duration = max(1, int(duration or 0))
 
     if provider == "kling":
+        if model == "kling-3.0-turbo":
+            normalized_mode = normalize_kling3_turbo_mode(mode)
+            normalized_resolution = normalize_kling3_turbo_resolution(resolution or "720p")
+            normalized_duration = normalize_kling3_turbo_duration(duration)
+            tokens = int(calculate_kling3_turbo_price(normalized_resolution, normalized_duration))
+            return {
+                "tokens": tokens,
+                "charge_reason": "kling3_turbo_create",
+                "refund_reason": "kling3_turbo_refund",
+                "meta": {
+                    "origin": "workspace_video",
+                    "provider": provider,
+                    "model": KLING3_TURBO_DISPLAY_NAME,
+                    "provider_model": model,
+                    "generation_mode": normalized_mode,
+                    "duration": normalized_duration,
+                    "resolution": normalized_resolution,
+                    "fixed_price_table": True,
+                },
+            }
         if model == "kling-3.0-new":
             normalized_mode = normalize_kling3_kie_mode(resolution or "pro")
             normalized_generation_mode = normalize_kling3_kie_generation_mode(mode)
@@ -4735,6 +4783,21 @@ async def workspace_video_run(
         raise HTTPException(status_code=410, detail="Старый Kling/PiAPI Kling 3.0 отключён. Используй Kling 3.0 - New.")
     if provider == "kling" and mode in {"image_to_video", "multi_shot"} and model in {"kling-1.6", "kling-2.5", "kling-3.0"} and not start_frame:
         raise HTTPException(status_code=400, detail="Для Image→Video нужен start frame.")
+    if provider == "kling" and model == "kling-3.0-turbo":
+        mode = normalize_kling3_turbo_mode(mode)
+        resolution = normalize_kling3_turbo_resolution(resolution or "720p")
+        duration = normalize_kling3_turbo_duration(duration)
+        aspect_ratio = normalize_kling3_turbo_aspect_ratio(aspect_ratio)
+        enable_audio = False
+        end_frame = None
+        last_frame = None
+        reference_images = []
+        reference_audios = []
+        reference_videos = []
+        if mode == "image_to_video" and not start_frame:
+            raise HTTPException(status_code=400, detail="Для Kling 3.0 Turbo Image→Video нужен start frame.")
+        if mode == "text_to_video":
+            start_frame = None
     if provider == "kling" and model == "kling-3.0-new":
         mode = normalize_kling3_kie_generation_mode(mode)
         resolution = normalize_kling3_kie_mode(resolution or "pro")
