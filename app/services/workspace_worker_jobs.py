@@ -43,6 +43,13 @@ from veo31_fast_relax_kie import (
     normalize_veo31_fast_relax_resolution,
     run_veo31_fast_relax,
 )
+from kling3_turbo_kie import (
+    normalize_kling3_turbo_aspect_ratio,
+    normalize_kling3_turbo_duration,
+    normalize_kling3_turbo_mode,
+    normalize_kling3_turbo_resolution,
+    run_kling3_turbo_task_and_wait,
+)
 from app.routers import web_workspace_api as ww
 from app.services.legnext_midjourney import (
     LegnextMidjourneyError,
@@ -346,6 +353,58 @@ async def process_tg_veo_relax_video_job(job: Dict[str, Any]) -> None:
                 pass
         try:
             await _tg_send_message(chat_id, f"❌ Ошибка Veo 3.1 Fast Relax: {e}")
+        except Exception:
+            pass
+
+
+async def process_tg_kling3_turbo_video_job(job: Dict[str, Any]) -> None:
+    chat_id = int(job.get("chat_id") or 0)
+    user_id = int(job.get("user_id") or 0)
+    mode = normalize_kling3_turbo_mode(job.get("mode") or "text_to_video")
+    prompt = str(job.get("prompt") or "")
+    duration = normalize_kling3_turbo_duration(job.get("duration") or 5)
+    resolution = normalize_kling3_turbo_resolution(job.get("resolution") or "720p")
+    aspect_ratio = normalize_kling3_turbo_aspect_ratio(job.get("aspect_ratio") or "16:9")
+    start_frame_url = str(job.get("start_frame_url") or "").strip()
+    charge_tokens = int(job.get("charge_tokens") or 0)
+    charge_ref_id = str(job.get("charge_ref_id") or "")
+    refund_reason = str(job.get("refund_reason") or "kling3_turbo_refund")
+
+    if not chat_id or not user_id:
+        raise RuntimeError("tg_kling3_turbo_video_run job missing chat_id/user_id")
+
+    try:
+        if mode == "image_to_video" and not start_frame_url:
+            raise RuntimeError("Для Kling 3.0 Turbo Image → Video нужен start frame")
+
+        _task_id, _raw_task, video_url = await run_kling3_turbo_task_and_wait(
+            prompt=prompt,
+            duration=duration,
+            resolution=resolution,
+            aspect_ratio=aspect_ratio,
+            mode=mode,
+            image_url=start_frame_url if mode == "image_to_video" else None,
+            request_id=str(job.get("job_id") or charge_ref_id or ""),
+        )
+        if not video_url:
+            raise RuntimeError("Kling 3.0 Turbo did not return video url")
+        await _tg_send_video_url(chat_id, video_url, caption="✅ Kling 3.0 Turbo готов")
+    except Exception as e:
+        if charge_tokens > 0:
+            try:
+                add_tokens(
+                    int(user_id),
+                    int(charge_tokens),
+                    reason=refund_reason,
+                    ref_id=charge_ref_id or None,
+                    meta={"origin": "tg_kling3_turbo_video", "error": str(e)[:300]},
+                )
+            except TypeError:
+                add_tokens(int(user_id), int(charge_tokens), reason=refund_reason)
+            except Exception:
+                pass
+        try:
+            await _tg_send_message(chat_id, f"❌ Ошибка Kling 3.0 Turbo: {e}")
         except Exception:
             pass
 
