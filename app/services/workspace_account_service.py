@@ -180,6 +180,16 @@ def get_workspace_account_by_google_sub(google_sub: str) -> Optional[Dict[str, A
     return _select_one("workspace_accounts", google_sub=value)
 
 
+def get_workspace_account_by_max_user_id(max_user_id: int) -> Optional[Dict[str, Any]]:
+    try:
+        value = int(max_user_id or 0)
+    except Exception:
+        value = 0
+    if value <= 0:
+        return None
+    return _select_one("workspace_accounts", max_user_id=value)
+
+
 def _sync_linked_telegram_balance(row: Dict[str, Any]) -> None:
     """Best-effort переносит старые TG-баланс и тариф на workspace account после привязки."""
     try:
@@ -235,6 +245,11 @@ def _account_payload_from_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "google_email_verified": bool(row.get("google_email_verified", False)),
         "google_name": row.get("google_name"),
         "google_picture": row.get("google_picture"),
+        "max_user_id": row.get("max_user_id"),
+        "max_username": row.get("max_username"),
+        "max_first_name": row.get("max_first_name"),
+        "max_last_name": row.get("max_last_name"),
+        "max_photo_url": row.get("max_photo_url"),
     }
 
 
@@ -248,6 +263,8 @@ def account_to_workspace_user_payload(row: Dict[str, Any]) -> Dict[str, Any]:
         payload["auth_methods"].append("email")
     if payload.get("google_sub"):
         payload["auth_methods"].append("google")
+    if payload.get("max_user_id"):
+        payload["auth_methods"].append("max")
     payload["balance_tokens"] = int(get_balance(int(payload["workspace_user_id"])) or 0)
     return payload
 
@@ -641,6 +658,200 @@ def get_or_create_workspace_account_for_google(verified: Dict[str, Any], *, curr
     ensure_user_row(int(out["id"]))
     return out
 
+
+
+def get_or_create_workspace_account_for_max(verified: Dict[str, Any], *, current_account_id: Optional[int] = None) -> Dict[str, Any]:
+    try:
+        max_user_id = int(verified.get("id") or 0)
+    except Exception:
+        max_user_id = 0
+    if max_user_id <= 0:
+        raise WorkspaceAccountError("MAX account id is missing")
+
+    sb = _require_supabase()
+    existing_by_max = get_workspace_account_by_max_user_id(max_user_id)
+
+    if current_account_id is not None:
+        row = get_workspace_account_by_id(int(current_account_id))
+        if not row:
+            raise WorkspaceAccountNotFound("Аккаунт не найден")
+        if existing_by_max and int(existing_by_max.get("id") or 0) != int(current_account_id):
+            return _merge_existing_max_account_into_current_account(
+                max_account=existing_by_max,
+                target_account=row,
+                verified=verified,
+            )
+    else:
+        row = existing_by_max
+
+    payload = {
+        "max_user_id": max_user_id,
+        "max_username": verified.get("username"),
+        "max_first_name": verified.get("first_name"),
+        "max_last_name": verified.get("last_name"),
+        "max_photo_url": verified.get("photo_url"),
+        "max_linked_at": _now_iso(),
+        "updated_at": _now_iso(),
+        "last_login_at": _now_iso(),
+    }
+
+    # MAX can create a standalone site account. Fill common profile fields only
+    # when they are empty, so email/Google/Telegram profile data is not overwritten.
+    if not row or not row.get("username"):
+        payload["username"] = verified.get("username")
+    if not row or not row.get("first_name"):
+        payload["first_name"] = verified.get("first_name")
+    if not row or not row.get("last_name"):
+        payload["last_name"] = verified.get("last_name")
+    if not row or not row.get("photo_url"):
+        payload["photo_url"] = verified.get("photo_url")
+    if not row or not row.get("language_code"):
+        payload["language_code"] = verified.get("language_code")
+
+    if row:
+        current_max = row.get("max_user_id")
+        if current_max not in (None, "") and int(current_max) != max_user_id:
+            raise WorkspaceAccountError("К этому аккаунту уже привязан другой MAX.")
+        res = sb.table("workspace_accounts").update(payload).eq("id", int(row["id"])).execute()
+        out = (getattr(res, "data", None) or [None])[0] or get_workspace_account_by_id(int(row["id"]))
+    else:
+        res = sb.table("workspace_accounts").insert(payload).execute()
+        out = (getattr(res, "data", None) or [None])[0] or get_workspace_account_by_max_user_id(max_user_id)
+
+    if not out:
+        raise WorkspaceAccountError("Не удалось создать или обновить MAX-аккаунт")
+
+    ensure_user_row(int(out["id"]))
+    return out
+
+
+
+
+def _is_safe_standalone_max_account(row: Dict[str, Any]) -> bool:
+    """Return True only for a temporary account that was created by MAX login alone."""
+    if not row:
+        return False
+    if row.get("telegram_user_id") not in (None, ""):
+        return False
+    if row.get("email") not in (None, ""):
+        return False
+    if row.get("google_sub") not in (None, ""):
+        return False
+    if row.get("password_hash") not in (None, ""):
+        return False
+    return row.get("max_user_id") not in (None, "")
+
+def _merge_existing_max_account_into_current_account(
+    *,
+    max_account: Dict[str, Any],
+    target_account: Dict[str, Any],
+    verified: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Сценарий: пользователь случайно вошёл через MAX и получил отдельный workspace-аккаунт,
+    затем вошёл в свой старый аккаунт и нажал «Привязать MAX».
+    Целевым оставляем текущий аккаунт сайта, MAX-связку переносим на него,
+    баланс/тариф временного MAX-аккаунта объединяем в текущий.
+    """
+    sb = _require_supabase()
+    max_user_id = int(verified.get("id") or 0)
+    source_id = int(max_account.get("id") or 0)
+    target_id = int(target_account.get("id") or 0)
+    if max_user_id <= 0 or source_id <= 0 or target_id <= 0:
+        raise WorkspaceAccountError("Не удалось определить аккаунты для привязки MAX.")
+    if source_id == target_id:
+        return target_account
+
+    if not _is_safe_standalone_max_account(max_account):
+        raise WorkspaceAccountError(
+            "Этот MAX уже привязан к другому полноценному аккаунту. "
+            "Автоматически переносить такую связку небезопасно — обратись в поддержку."
+        )
+
+    current_target_max = target_account.get("max_user_id")
+    if current_target_max not in (None, "") and int(current_target_max) != max_user_id:
+        raise WorkspaceAccountError("К этому аккаунту уже привязан другой MAX.")
+
+    # Сначала освобождаем unique max_user_id на старой строке. Старую строку не удаляем:
+    # на неё могут ссылаться истории генераций, ledger и другие таблицы.
+    clear_payload = {
+        "max_user_id": None,
+        "max_username": None,
+        "max_first_name": None,
+        "max_last_name": None,
+        "max_photo_url": None,
+        "max_linked_at": None,
+        "updated_at": _now_iso(),
+    }
+    restore_payload = {
+        "max_user_id": max_account.get("max_user_id"),
+        "max_username": max_account.get("max_username"),
+        "max_first_name": max_account.get("max_first_name"),
+        "max_last_name": max_account.get("max_last_name"),
+        "max_photo_url": max_account.get("max_photo_url"),
+        "max_linked_at": max_account.get("max_linked_at"),
+        "updated_at": _now_iso(),
+    }
+    try:
+        sb.table("workspace_accounts").update(clear_payload).eq("id", source_id).execute()
+    except Exception as exc:
+        raise WorkspaceAccountError(f"Не удалось подготовить MAX-аккаунт к привязке: {exc}")
+
+    payload = {
+        "max_user_id": max_user_id,
+        "max_username": verified.get("username"),
+        "max_first_name": verified.get("first_name"),
+        "max_last_name": verified.get("last_name"),
+        "max_photo_url": verified.get("photo_url"),
+        "max_linked_at": _now_iso(),
+        "updated_at": _now_iso(),
+        "last_login_at": _now_iso(),
+    }
+    if verified.get("username") and not target_account.get("username"):
+        payload["username"] = verified.get("username")
+    if verified.get("first_name") and not target_account.get("first_name"):
+        payload["first_name"] = verified.get("first_name")
+    if verified.get("last_name") and not target_account.get("last_name"):
+        payload["last_name"] = verified.get("last_name")
+    if verified.get("photo_url") and not target_account.get("photo_url"):
+        payload["photo_url"] = verified.get("photo_url")
+    if verified.get("language_code") and not target_account.get("language_code"):
+        payload["language_code"] = verified.get("language_code")
+
+    try:
+        res = sb.table("workspace_accounts").update(payload).eq("id", target_id).execute()
+    except Exception as exc:
+        try:
+            sb.table("workspace_accounts").update(restore_payload).eq("id", source_id).execute()
+        except Exception as restore_exc:
+            try:
+                print(f"[workspace_account] failed to restore MAX account after link error: {restore_exc}")
+            except Exception:
+                pass
+        raise WorkspaceAccountError(f"Не удалось привязать MAX к текущему аккаунту: {exc}")
+
+    out = (getattr(res, "data", None) or [None])[0] or get_workspace_account_by_id(target_id)
+    if not out:
+        raise WorkspaceAccountError("Не удалось привязать MAX к текущему аккаунту.")
+
+    try:
+        merge_user_balance_records(source_user_id=source_id, target_user_id=target_id)
+    except Exception as exc:
+        try:
+            print(f"[workspace_account] MAX account balance merge skipped: {exc}")
+        except Exception:
+            pass
+
+    try:
+        merge_user_subscription_records(source_user_id=source_id, target_user_id=target_id)
+    except Exception as exc:
+        try:
+            print(f"[workspace_account] MAX account subscription merge skipped: {exc}")
+        except Exception:
+            pass
+
+    ensure_user_row(target_id)
+    return get_workspace_account_by_id(target_id) or out
 
 
 def _merge_current_account_into_existing_telegram_account(
