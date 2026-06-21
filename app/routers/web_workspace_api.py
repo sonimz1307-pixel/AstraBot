@@ -10,11 +10,12 @@ import re
 import tempfile
 import subprocess
 import shutil
+import secrets
 import wave
 import zipfile
 import asyncio
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -55,6 +56,12 @@ from app.routers.tts import ALLOWED_VOICE_IDS, ALLOWED_VOICES
 from app.services.eleven_tts import ElevenTTS
 from app.services.google_auth import GoogleAuthError, get_google_client_id, verify_google_id_token
 from app.services.telegram_webauth import TelegramWebAuthError, validate_telegram_login_data
+from app.services.max_webauth import (
+    MaxWebAuthError,
+    build_max_startapp_url,
+    get_max_bot_username,
+    validate_max_init_data,
+)
 from app.services.workspace_account_service import (
     WorkspaceAccountError,
     WorkspaceAuthFailed,
@@ -68,6 +75,7 @@ from app.services.workspace_account_service import (
     confirm_password_reset,
     ensure_workspace_account_from_claims,
     get_or_create_workspace_account_for_google,
+    get_or_create_workspace_account_for_max,
     get_or_create_workspace_account_for_telegram,
     link_telegram_to_account,
     login_with_email,
@@ -96,6 +104,20 @@ WORKSPACE_SESSION_COOKIE_SAMESITE = os.getenv("WORKSPACE_SESSION_COOKIE_SAMESITE
 if WORKSPACE_SESSION_COOKIE_SAMESITE not in ("lax", "strict", "none"):
     WORKSPACE_SESSION_COOKIE_SAMESITE = "lax"
 WORKSPACE_SESSION_COOKIE_DOMAIN = os.getenv("WORKSPACE_SESSION_COOKIE_DOMAIN", "").strip() or None
+MAX_AUTH_REQUESTS_TABLE = os.getenv("MAX_AUTH_REQUESTS_TABLE", "workspace_max_auth_requests").strip() or "workspace_max_auth_requests"
+
+
+def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
+    try:
+        value = int(os.getenv(name, str(default)) or str(default))
+    except Exception:
+        value = int(default)
+    if minimum is not None:
+        value = max(int(minimum), value)
+    return value
+
+
+MAX_AUTH_REQUEST_TTL_SEC = _env_int("MAX_AUTH_REQUEST_TTL_SEC", 300, minimum=60)
 
 
 def _set_workspace_session_cookie(response: Response, access_token: str) -> None:
@@ -2756,6 +2778,15 @@ class GoogleAuthPayload(BaseModel):
     credential: str = Field(..., min_length=40, max_length=6000)
 
 
+class MaxWebAppAuthPayload(BaseModel):
+    init_data: str = Field(..., min_length=20, max_length=12000)
+    state: Optional[str] = Field(default=None, max_length=160)
+
+
+class MaxAuthStartPayload(BaseModel):
+    intent: Optional[str] = Field(default="login", max_length=16)
+
+
 class EmailAuthStartPayload(BaseModel):
     email: str = Field(..., min_length=5, max_length=200)
     password: str = Field(..., min_length=6, max_length=200)
@@ -3579,6 +3610,157 @@ async def workspace_auth_google(payload: GoogleAuthPayload, response: Response, 
     except WorkspaceAccountError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    return _workspace_auth_payload(response, account=account)
+
+
+
+
+def _max_auth_state_valid(state: str) -> str:
+    value = str(state or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_\-]{16,160}", value):
+        raise HTTPException(status_code=400, detail="Invalid MAX auth state")
+    return value
+
+
+def _max_auth_expires_iso() -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=MAX_AUTH_REQUEST_TTL_SEC)).isoformat()
+
+
+def _max_auth_request_row(state: str) -> Optional[Dict[str, Any]]:
+    if supabase is None:
+        raise HTTPException(status_code=503, detail="Supabase disabled")
+    res = supabase.table(MAX_AUTH_REQUESTS_TABLE).select("*").eq("state", state).limit(1).execute()
+    return (getattr(res, "data", None) or [None])[0]
+
+
+def _max_auth_row_is_expired(row: Dict[str, Any]) -> bool:
+    try:
+        expires_at = datetime.fromisoformat(str(row.get("expires_at") or "").replace("Z", "+00:00"))
+        return expires_at <= datetime.now(timezone.utc)
+    except Exception:
+        return True
+
+
+@router.get("/auth/max/config")
+async def workspace_auth_max_config() -> Dict[str, Any]:
+    try:
+        username = get_max_bot_username()
+        token_configured = bool(os.getenv("MAX_BOT_TOKEN") or os.getenv("MAX_ACCESS_TOKEN"))
+        if not token_configured:
+            return {"ok": False, "enabled": False, "bot_username": username, "reason": "MAX_BOT_TOKEN is not configured"}
+        return {"ok": True, "enabled": True, "bot_username": username}
+    except MaxWebAuthError as e:
+        return {"ok": False, "enabled": False, "bot_username": "", "reason": str(e)}
+
+
+@router.post("/auth/max/start")
+async def workspace_auth_max_start(
+    payload: MaxAuthStartPayload = MaxAuthStartPayload(),
+    user: Optional[Dict[str, Any]] = Depends(get_optional_workspace_user),
+) -> Dict[str, Any]:
+    if supabase is None:
+        raise HTTPException(status_code=503, detail="Supabase disabled")
+
+    intent = str((payload.intent if payload else "login") or "login").strip().lower()
+    if intent not in {"login", "link"}:
+        intent = "login"
+
+    link_account_id = None
+    if intent == "link":
+        if not user:
+            raise HTTPException(status_code=401, detail="Сначала войди в аккаунт сайта, потом привяжи MAX.")
+        link_account_id = int(user.get("workspace_user_id") or 0)
+        if link_account_id <= 0:
+            raise HTTPException(status_code=401, detail="Не удалось определить текущий аккаунт сайта.")
+
+    try:
+        username = get_max_bot_username()
+        state = secrets.token_urlsafe(32).replace(".", "_")[:64]
+        launch_url = build_max_startapp_url(state, bot_username=username)
+    except MaxWebAuthError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    supabase.table(MAX_AUTH_REQUESTS_TABLE).insert({
+        "state": state,
+        "status": "pending",
+        "account_id": link_account_id,
+        "expires_at": _max_auth_expires_iso(),
+        "meta": {"source": "site_link" if intent == "link" else "site_login", "intent": intent},
+    }).execute()
+    return {"ok": True, "state": state, "launch_url": launch_url, "intent": intent, "expires_in": MAX_AUTH_REQUEST_TTL_SEC}
+
+
+@router.post("/auth/max/webapp")
+async def workspace_auth_max_webapp(payload: MaxWebAppAuthPayload, response: Response, user: Optional[Dict[str, Any]] = Depends(get_optional_workspace_user)) -> Dict[str, Any]:
+    try:
+        verified = validate_max_init_data(payload.init_data)
+    except MaxWebAuthError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+
+    state_value = str(payload.state or verified.get("start_param") or "").strip()
+    row = None
+    current_account_id = int(user.get("workspace_user_id") or 0) if user else None
+
+    if state_value:
+        state_value = _max_auth_state_valid(state_value)
+        row = _max_auth_request_row(state_value)
+        if not row:
+            raise HTTPException(status_code=404, detail="MAX auth request not found")
+        if row.get("consumed_at"):
+            raise HTTPException(status_code=410, detail="MAX auth request already consumed")
+        if _max_auth_row_is_expired(row):
+            raise HTTPException(status_code=410, detail="MAX auth request expired")
+        meta = row.get("meta") if isinstance(row, dict) else None
+        source = str((meta or {}).get("source") or (meta or {}).get("intent") or "").strip().lower() if isinstance(meta, dict) else ""
+        if row and source in {"site_link", "link"} and row.get("account_id"):
+            current_account_id = int(row.get("account_id") or 0)
+
+    try:
+        account = get_or_create_workspace_account_for_max(verified, current_account_id=current_account_id)
+    except WorkspaceAccountError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if state_value and row and not row.get("consumed_at") and not _max_auth_row_is_expired(row):
+        meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+        meta = {**meta, "max_username": verified.get("username")}
+        supabase.table(MAX_AUTH_REQUESTS_TABLE).update({
+            "status": "confirmed",
+            "account_id": int(account["id"]),
+            "max_user_id": int(verified["id"]),
+            "confirmed_at": _utc_now_iso(),
+            "meta": meta,
+        }).eq("state", state_value).execute()
+
+    return _workspace_auth_payload(response, account=account)
+
+
+@router.get("/auth/max/status")
+async def workspace_auth_max_status(state: str, response: Response) -> Dict[str, Any]:
+    state = _max_auth_state_valid(state)
+    row = _max_auth_request_row(state)
+    if not row:
+        raise HTTPException(status_code=404, detail="MAX auth request not found")
+    if _max_auth_row_is_expired(row):
+        raise HTTPException(status_code=410, detail="MAX auth request expired")
+    if row.get("consumed_at"):
+        raise HTTPException(status_code=410, detail="MAX auth request already consumed")
+    if str(row.get("status") or "") != "confirmed" or not row.get("account_id"):
+        return {"ok": True, "status": "pending"}
+
+    account = ensure_workspace_account_from_claims({"workspace_user_id": int(row["account_id"])})
+    supabase.table(MAX_AUTH_REQUESTS_TABLE).update({"consumed_at": _utc_now_iso(), "status": "consumed"}).eq("state", state).execute()
+    return _workspace_auth_payload(response, account=account)
+
+
+@router.post("/account/link-max")
+async def workspace_account_link_max(payload: MaxWebAppAuthPayload, response: Response, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
+    try:
+        verified = validate_max_init_data(payload.init_data)
+        account = get_or_create_workspace_account_for_max(verified, current_account_id=int(user.get("workspace_user_id") or 0))
+    except MaxWebAuthError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    except WorkspaceAccountError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return _workspace_auth_payload(response, account=account)
 
 
