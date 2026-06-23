@@ -6,7 +6,7 @@ import math
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import httpx
 
@@ -26,12 +26,13 @@ KIE_SEEDANCE_POLL_SECONDS = float(os.getenv("KIE_SEEDANCE_POLL_SECONDS", "6") or
 # User-facing ordinary Seedance 2.0 presets.
 # Preview/Fast Preview are still handled by the separate PiAPI provider and must not be routed here.
 SEEDANCE_KIE_ALLOWED_MODELS = {
+    "seedance-kie-mini",
     "seedance-kie-480p",
     "seedance-kie-720p",
     "seedance-kie-1080p",
 }
 SEEDANCE_KIE_ALLOWED_DURATIONS = (5, 10, 15)
-SEEDANCE_KIE_ALLOWED_ASPECT_RATIOS = ("16:9", "9:16", "1:1")
+SEEDANCE_KIE_ALLOWED_ASPECT_RATIOS = ("16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive")
 SEEDANCE_KIE_PROMPT_MAX_CHARS = int(os.getenv("KIE_SEEDANCE_PROMPT_MAX_CHARS", "20000") or "20000")
 SEEDANCE_KIE_MAX_IMAGE_REFS = int(os.getenv("KIE_SEEDANCE_MAX_IMAGE_REFS", "7") or "7")
 SEEDANCE_KIE_MAX_AUDIO_REFS = int(os.getenv("KIE_SEEDANCE_MAX_AUDIO_REFS", "3") or "3")
@@ -41,6 +42,7 @@ SEEDANCE_KIE_MAX_TOTAL_OMNI_REFS = int(os.getenv("KIE_SEEDANCE_MAX_TOTAL_OMNI_RE
 # Final retail prices approved for 5 / 10 / 15 seconds.
 # Do not derive these base prices from provider rates: product pricing is fixed by business rules.
 SEEDANCE_KIE_TOKEN_MAP = {
+    "seedance-kie-mini": {5: 9, 10: 18, 15: 27},
     "seedance-kie-480p": {5: 6, 10: 12, 15: 18},
     "seedance-kie-720p": {5: 12, 10: 24, 15: 33},
     "seedance-kie-1080p": {5: 28, 10: 55, 15: 80},
@@ -55,6 +57,7 @@ SEEDANCE_KIE_TOKEN_RUB = float(os.getenv("SEEDANCE_KIE_TOKEN_RUB", "8") or "8")
 SEEDANCE_KIE_VIDEO_REF_METADATA_TOLERANCE_SEC = float(os.getenv("SEEDANCE_KIE_VIDEO_REF_METADATA_TOLERANCE_SEC", "0.25") or "0.25")
 
 SEEDANCE_KIE_PROVIDER_USD_PER_SEC = {
+    "seedance-kie-mini": {"with_video": 0.125, "no_video": 0.205},
     "seedance-kie-480p": {"with_video": 0.0575, "no_video": 0.095},
     "seedance-kie-720p": {"with_video": 0.125, "no_video": 0.205},
     "seedance-kie-1080p": {"with_video": 0.31, "no_video": 0.51},
@@ -96,22 +99,26 @@ def _seedance_kie_base_tokens(model: Any, duration: Any) -> int:
 
 # Kept for old callers/imports; dynamic video-reference billing is handled by seedance_kie_tokens_for_duration(..., input_video_duration_sec=...).
 SEEDANCE_KIE_VIDEO_REFERENCE_SURCHARGE = {
+    "seedance-kie-mini": 0,
     "seedance-kie-480p": 0,
     "seedance-kie-720p": 0,
     "seedance-kie-1080p": 0,
 }
 
 SEEDANCE_KIE_MODEL_IDS = {
+    "seedance-kie-mini": "bytedance/seedance-2-mini",
     "seedance-kie-480p": "bytedance/seedance-2-fast",
     "seedance-kie-720p": "bytedance/seedance-2",
     "seedance-kie-1080p": "bytedance/seedance-2",
 }
 SEEDANCE_KIE_RESOLUTIONS = {
+    "seedance-kie-mini": "720p",
     "seedance-kie-480p": "480p",
     "seedance-kie-720p": "720p",
     "seedance-kie-1080p": "1080p",
 }
 SEEDANCE_KIE_DISPLAY_NAMES = {
+    "seedance-kie-mini": "Seedance 2.0 Mini 720p",
     "seedance-kie-480p": "Seedance 2.0 480p",
     "seedance-kie-720p": "Seedance 2.0 720p",
     "seedance-kie-1080p": "Seedance 2.0 1080p",
@@ -125,6 +132,10 @@ class SeedanceKieError(RuntimeError):
 def normalize_seedance_kie_model(value: Any, default: str = "seedance-kie-720p") -> str:
     raw = str(value or default).strip().lower().replace("_", "-")
     aliases = {
+        "mini": "seedance-kie-mini",
+        "seedance-mini": "seedance-kie-mini",
+        "seedance-2-mini": "seedance-kie-mini",
+        "seedance-kie-mini": "seedance-kie-mini",
         "480": "seedance-kie-480p",
         "480p": "seedance-kie-480p",
         "seedance-480p": "seedance-kie-480p",
@@ -461,13 +472,31 @@ async def _wait_task(client: httpx.AsyncClient, task_id: str) -> Dict[str, Any]:
         await asyncio.sleep(max(1.0, KIE_SEEDANCE_POLL_SECONDS))
 
 
-async def _run_seedance_task(*, model: str, input_payload: Dict[str, Any]) -> str:
+async def _notify_task_id(on_task_id: Optional[Callable[[str], Any]], task_id: str) -> None:
+    if not on_task_id or not task_id:
+        return
+    try:
+        result = on_task_id(task_id)
+        if hasattr(result, "__await__"):
+            await result
+    except Exception as exc:
+        # Do not fail a paid generation just because local DB/status persistence had a transient issue.
+        print(f"Seedance KIE: failed to persist task_id={task_id}: {exc}")
+
+
+async def _run_seedance_task(
+    *,
+    model: str,
+    input_payload: Dict[str, Any],
+    on_task_id: Optional[Callable[[str], Any]] = None,
+) -> str:
     timeout = httpx.Timeout(max(60.0, KIE_SEEDANCE_TIMEOUT_SECONDS + 120.0), connect=60.0)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         created = await _create_task(client, model=model, input_payload=input_payload)
         task_id = _extract_task_id(created)
         if not task_id:
             raise SeedanceKieError(f"KIE Seedance createTask did not return taskId: {created}")
+        await _notify_task_id(on_task_id, task_id)
         done = await _wait_task(client, task_id)
     data = done.get("data") if isinstance(done, dict) else None
     data = data if isinstance(data, dict) else {}
@@ -490,10 +519,17 @@ def _base_input_payload(*, prompt: str, model: str, duration: Any, aspect_ratio:
     }
 
 
-async def run_seedance_kie_text_to_video(*, model: Any, prompt: str, duration: Any, aspect_ratio: Any = "16:9") -> str:
+async def run_seedance_kie_text_to_video(
+    *,
+    model: Any,
+    prompt: str,
+    duration: Any,
+    aspect_ratio: Any = "16:9",
+    on_task_id: Optional[Callable[[str], Any]] = None,
+) -> str:
     normalized_model = normalize_seedance_kie_model(model)
     input_payload = _base_input_payload(prompt=prompt, model=normalized_model, duration=duration, aspect_ratio=aspect_ratio)
-    return await _run_seedance_task(model=normalized_model, input_payload=input_payload)
+    return await _run_seedance_task(model=normalized_model, input_payload=input_payload, on_task_id=on_task_id)
 
 
 async def run_seedance_kie_image_to_video(
@@ -507,6 +543,7 @@ async def run_seedance_kie_image_to_video(
     last_frame: bytes | None = None,
     reference_images: Sequence[bytes] | None = None,
     reference_audios: Sequence[bytes] | None = None,
+    on_task_id: Optional[Callable[[str], Any]] = None,
 ) -> str:
     normalized_model = normalize_seedance_kie_model(model)
     start_raw = bytes(start_frame) if start_frame else None
@@ -531,6 +568,7 @@ async def run_seedance_kie_image_to_video(
             aspect_ratio=aspect_ratio,
             reference_images=refs,
             reference_audios=audio_refs,
+            on_task_id=on_task_id,
         )
 
     frames: List[bytes] = []
@@ -551,7 +589,7 @@ async def run_seedance_kie_image_to_video(
     input_payload["first_frame_url"] = image_urls[0]
     if len(image_urls) > 1:
         input_payload["last_frame_url"] = image_urls[1]
-    return await _run_seedance_task(model=normalized_model, input_payload=input_payload)
+    return await _run_seedance_task(model=normalized_model, input_payload=input_payload, on_task_id=on_task_id)
 
 
 async def run_seedance_kie_omni_reference(
@@ -564,6 +602,7 @@ async def run_seedance_kie_omni_reference(
     reference_images: Sequence[bytes] | None = None,
     reference_videos: Sequence[bytes] | None = None,
     reference_audios: Sequence[bytes] | None = None,
+    on_task_id: Optional[Callable[[str], Any]] = None,
 ) -> str:
     normalized_model = normalize_seedance_kie_model(model)
     image_refs = [bytes(item) for item in list(reference_images or []) if item]
@@ -608,4 +647,4 @@ async def run_seedance_kie_omni_reference(
         input_payload["reference_video_urls"] = video_urls
     if audio_urls:
         input_payload["reference_audio_urls"] = audio_urls
-    return await _run_seedance_task(model=normalized_model, input_payload=input_payload)
+    return await _run_seedance_task(model=normalized_model, input_payload=input_payload, on_task_id=on_task_id)
