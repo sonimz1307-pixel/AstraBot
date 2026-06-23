@@ -1398,7 +1398,8 @@ async def handle_job(job: Dict[str, Any]) -> None:
         prog_task = asyncio.create_task(_progress_loop_seedance())
 
         try:
-            if provider_kind == "seedance_kie":
+            use_seedance_kie = provider_kind == "seedance_kie" or seedance_model == "seedance-kie-mini" or task_type == "seedance-2-mini"
+            if use_seedance_kie:
                 job_mode = str(job.get("mode") or "").strip().lower()
                 video_file_ids = job.get("video_file_ids") or []
                 audio_file_ids = job.get("audio_file_ids") or []
@@ -1430,7 +1431,16 @@ async def handle_job(job: Dict[str, Any]) -> None:
                             reference_audios.append(_normalize_seedance_kie_audio_ref(b))
 
                 if not seedance_model:
-                    seedance_model = "seedance-kie-480p" if task_type == "seedance-2-fast" else "seedance-kie-720p"
+                    if task_type == "seedance-2-mini":
+                        seedance_model = "seedance-kie-mini"
+                    else:
+                        seedance_model = "seedance-kie-480p" if task_type == "seedance-2-fast" else "seedance-kie-720p"
+
+                def _remember_seedance_kie_task_id(created_task_id: str) -> None:
+                    nonlocal task_id
+                    task_id_text = str(created_task_id or "").strip()
+                    if task_id_text:
+                        task_id = task_id_text
 
                 if job_mode == "omni_reference" or reference_videos or reference_audios:
                     url = await run_seedance_kie_omni_reference(
@@ -1439,6 +1449,7 @@ async def handle_job(job: Dict[str, Any]) -> None:
                         prompt=prompt,
                         duration=duration,
                         aspect_ratio=aspect_ratio,
+                        on_task_id=_remember_seedance_kie_task_id,
                         reference_images=reference_images,
                         reference_videos=reference_videos,
                         reference_audios=reference_audios,
@@ -1451,6 +1462,7 @@ async def handle_job(job: Dict[str, Any]) -> None:
                         prompt=prompt,
                         duration=duration,
                         aspect_ratio=aspect_ratio,
+                        on_task_id=_remember_seedance_kie_task_id,
                         start_frame=reference_images[0],
                         last_frame=reference_images[1] if len(reference_images) > 1 else None,
                         reference_images=None,
@@ -1462,6 +1474,7 @@ async def handle_job(job: Dict[str, Any]) -> None:
                         prompt=prompt,
                         duration=duration,
                         aspect_ratio=aspect_ratio,
+                        on_task_id=_remember_seedance_kie_task_id,
                     )
 
                 stop.set()
@@ -1565,7 +1578,7 @@ async def handle_job(job: Dict[str, Any]) -> None:
 
             recovered = False
             recovery_error = None
-            if provider_kind != "seedance_kie" and task_id:
+            if (not use_seedance_kie) and task_id:
                 print(f"Seedance: exception after task creation, trying recovery task_id={task_id}: {e}")
                 for _ in range(max(0, SEEDANCE_RECOVERY_CHECKS)):
                     try:
