@@ -1160,7 +1160,7 @@
           <input id="seed_variant_preview" type="radio" name="seedance_variant" value="mini">
           <label for="seed_variant_preview">
             <span class="name">Seedance 2.0 Mini</span>
-            <span class="desc">720p · PiAPI</span>
+            <span class="desc">720p · KIE</span>
           </label>
         </div>
       </div>
@@ -1175,7 +1175,7 @@
               <span class="desc">9 / 18 / 27 токенов</span>
             </label>
           </div>
-          <div class="hint">Только 720p, Text → Video или 1–2 фото как first/last frame.</div>
+          <div class="hint">720p, Text → Video, Image → Video или Omni Reference.</div>
         </div>
 
         <div id="seedanceKieModelWrap">
@@ -1216,8 +1216,15 @@
             <span class="name">Image → Video</span>
             <span class="desc">Первый / последний кадр</span>
           </label>
+
+          <input id="seed_flow_omni" type="radio" name="seedance_flow" value="omni">
+          <label for="seed_flow_omni">
+            <span class="name">Omni Reference</span>
+            <span class="desc">Фото + видео + аудио refs</span>
+          </label>
         </div>
-        <div class="hint">Для Image → Video: после сохранения пришли 1–2 фото. Первое — first frame, второе — optional last frame.</div>
+        <div class="hint">Text → Video, Image → Video и Omni Reference работают через KIE Mini. В Omni можно отправить image/video/audio refs.</div>
+        <div class="hint">После сохранения: Text → Video — сразу отправь промпт; Image → Video — пришли 1–2 фото, нажми «Готово», затем промпт; Omni Reference — пришли refs, нажми «Готово», затем промпт.</div>
       </div>
 
       <div id="seedanceKieFlowCard" class="card">
@@ -1791,7 +1798,7 @@
         aspectSelect.value = '16:9';
       }
       if (aspectHint) aspectHint.textContent = isMini
-        ? 'Seedance 2.0 Mini: 720p, Text → Video или 1–2 фото как first/last frame.'
+        ? 'Seedance 2.0 Mini: 720p, Text → Video, Image → Video или Omni Reference.'
         : 'Для обычного Seedance 2.0 доступны форматы 16:9 / 9:16 / 1:1, как на сайте.';
     }
 
