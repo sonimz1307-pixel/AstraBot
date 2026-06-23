@@ -1871,6 +1871,8 @@ def _normalize_workspace_video_resolution(provider: str, model: str, resolution:
     if provider == "seedance_kie":
         normalized_model = normalize_seedance_kie_model(model)
         return seedance_kie_resolution(normalized_model)
+    if provider == "seedance":
+        return seedance_kie_resolution("seedance-kie-mini")
     if provider == "pixverse_c1":
         return normalize_pixverse_c1_quality(value or "720p")
     if value in {"720", "720p"}:
@@ -2272,6 +2274,20 @@ async def _run_workspace_video_job(
         provider_mode = normalize_grok_provider_mode(provider_mode or "normal")
         provider_video_url: Optional[str] = None
 
+        def _persist_seedance_kie_task_id(task_id: str) -> None:
+            task_id_text = str(task_id or "").strip()
+            if not task_id_text:
+                return
+            _update_workspace_generation(
+                generation_id,
+                {
+                    "task_id": task_id_text,
+                    "status": "processing",
+                    "error_code": None,
+                    "error_message": None,
+                },
+            )
+
         if provider == "kling":
             if model == "kling-3.0-turbo":
                 normalized_mode = normalize_kling3_turbo_mode(mode)
@@ -2553,6 +2569,7 @@ async def _run_workspace_video_job(
                     prompt=prompt,
                     duration=duration,
                     aspect_ratio=aspect_ratio,
+                    on_task_id=_persist_seedance_kie_task_id,
                     start_frame=start_frame,
                     last_frame=last_frame,
                     reference_images=reference_images,
@@ -2565,6 +2582,7 @@ async def _run_workspace_video_job(
                     prompt=prompt,
                     duration=duration,
                     aspect_ratio=aspect_ratio,
+                    on_task_id=_persist_seedance_kie_task_id,
                     reference_images=reference_images,
                     reference_videos=reference_video_clips,
                     reference_audios=reference_audio_clips,
@@ -2575,39 +2593,46 @@ async def _run_workspace_video_job(
                     prompt=prompt,
                     duration=duration,
                     aspect_ratio=aspect_ratio,
+                    on_task_id=_persist_seedance_kie_task_id,
                 )
 
         elif provider == "seedance":
-            task_type = "seedance-2-mini"
-            mini_frame_images: List[bytes] = []
-            if start_frame:
-                mini_frame_images.append(start_frame)
-            if last_frame:
-                mini_frame_images.append(last_frame)
-            # Backward compatibility: old UI used reference_images for the hidden PiAPI branch.
-            if not mini_frame_images and reference_images:
-                mini_frame_images = list(reference_images[:2])
-            image_urls = await _upload_reference_images_to_public_urls(user_id, mini_frame_images[:2], "seedance-mini") if mini_frame_images else None
-            created = await _piapi_seedance_create_task_workspace(
-                task_type=task_type,
-                prompt=prompt,
-                duration=duration,
-                aspect_ratio=aspect_ratio,
-                image_urls=image_urls if mode == "image_to_video" else None,
-                resolution="720p",
-            )
-            provider_task_id = ((created.get("data") or {}).get("task_id") or created.get("task_id") or "")
-            if provider_task_id:
-                _update_workspace_generation(generation_id, {"task_id": str(provider_task_id), "status": "processing"})
-                done = await _piapi_seedance_wait_workspace(str(provider_task_id))
+            mini_model = "seedance-kie-mini"
+            if mode == "image_to_video" and not (reference_images or start_frame or last_frame):
+                raise RuntimeError("Для Seedance 2.0 Mini Image→Video нужен хотя бы один image reference")
+            if mode == "image_to_video":
+                provider_video_url = await run_seedance_kie_image_to_video(
+                    user_id=user_id,
+                    model=mini_model,
+                    prompt=prompt,
+                    duration=duration,
+                    aspect_ratio=aspect_ratio,
+                    on_task_id=_persist_seedance_kie_task_id,
+                    start_frame=start_frame,
+                    last_frame=last_frame,
+                    reference_images=reference_images,
+                    reference_audios=reference_audio_clips,
+                )
+            elif mode == "omni_reference":
+                provider_video_url = await run_seedance_kie_omni_reference(
+                    user_id=user_id,
+                    model=mini_model,
+                    prompt=prompt,
+                    duration=duration,
+                    aspect_ratio=aspect_ratio,
+                    on_task_id=_persist_seedance_kie_task_id,
+                    reference_images=reference_images,
+                    reference_videos=reference_video_clips,
+                    reference_audios=reference_audio_clips,
+                )
             else:
-                done = created
-            status = _seedance_status_lower_workspace(done)
-            if status == "failed":
-                raise RuntimeError(str(((done.get("data") or {}).get("error") or {}).get("message") or "Seedance task failed"))
-            provider_video_url = _seedance_extract_output_url_workspace(done)
-            if not provider_video_url:
-                raise RuntimeError("Seedance output video url missing")
+                provider_video_url = await run_seedance_kie_text_to_video(
+                    model=mini_model,
+                    prompt=prompt,
+                    duration=duration,
+                    aspect_ratio=aspect_ratio,
+                    on_task_id=_persist_seedance_kie_task_id,
+                )
 
         elif provider == "sora":
             created = await _sora_create_video_workspace(
@@ -4792,14 +4817,35 @@ def _workspace_video_charge_spec(
         }
 
     if provider == "seedance":
-        # Seedance 2.0 Mini 720p through the old hidden PiAPI branch.
-        mini_price_map = {5: 9, 10: 18, 15: 27}
-        tokens = int(mini_price_map.get(int(duration), mini_price_map[5]))
+        # Seedance 2.0 Mini stays a separate UI model, but now runs through KIE mini backend.
+        normalized_model = "seedance-kie-mini"
+        normalized_mode = normalize_seedance_kie_mode(mode)
+        normalized_duration = normalize_seedance_kie_duration(duration)
+        input_video_sec = float(seedance_video_reference_duration_sec or 0.0) if normalized_mode == "omni_reference" and has_seedance_video_reference else 0.0
+        breakdown = seedance_kie_pricing_breakdown(normalized_model, normalized_duration, input_video_duration_sec=input_video_sec)
+        tokens = int(breakdown.get("tokens") or 0)
         return {
             "tokens": tokens,
             "charge_reason": "seedance_video",
             "refund_reason": "seedance_video_refund",
-            "meta": {"origin": "workspace_video", "provider": provider, "model": "seedance-mini", "mode": mode, "duration": duration, "resolution": "720p", "price_grid": "mini_720p"},
+            "meta": {
+                "origin": "workspace_video",
+                "provider": provider,
+                "model": "seedance-mini",
+                "backend_model": normalized_model,
+                "backend_provider": "kie",
+                "mode": normalized_mode,
+                "duration": normalized_duration,
+                "resolution": seedance_kie_resolution(normalized_model),
+                "price_grid": "mini_720p",
+                "has_video_reference": bool(has_seedance_video_reference),
+                "input_video_seconds": int(breakdown.get("input_video_seconds") or 0),
+                "billable_seconds": int(breakdown.get("billable_seconds") or normalized_duration),
+                "provider_rate_usd_per_sec": breakdown.get("provider_rate_usd_per_sec"),
+                "provider_cost_usd": breakdown.get("provider_cost_usd"),
+                "usd_rub": breakdown.get("usd_rub"),
+                "token_rub": breakdown.get("token_rub"),
+            },
         }
 
     if provider == "sora":
@@ -5166,18 +5212,43 @@ async def workspace_video_run(
         resolution = "720p"
         if duration not in {5, 10, 15}:
             raise HTTPException(status_code=400, detail="Для Seedance 2.0 Mini доступны только 5, 10 или 15 секунд.")
-        if aspect_ratio not in {"16:9", "9:16", "1:1", "4:3", "3:4"}:
+        if aspect_ratio not in {"16:9", "9:16", "1:1"}:
             aspect_ratio = "16:9"
-        if mode not in {"text_to_video", "image_to_video"}:
-            raise HTTPException(status_code=400, detail="Seedance 2.0 Mini поддерживает только Text→Video и Image→Video.")
+        if mode not in {"text_to_video", "image_to_video", "omni_reference"}:
+            raise HTTPException(status_code=400, detail="Seedance 2.0 Mini поддерживает Text→Video, Image→Video и Omni Reference.")
         if mode == "image_to_video":
             total_image_refs = len(reference_images) + (1 if start_frame else 0) + (1 if last_frame else 0)
             if total_image_refs < 1:
                 raise HTTPException(status_code=400, detail="Для Seedance 2.0 Mini Image→Video нужен первый кадр.")
             if total_image_refs > 2:
                 raise HTTPException(status_code=400, detail="Seedance 2.0 Mini поддерживает максимум 2 изображения: first frame и optional last frame.")
-        reference_audios = []
-        reference_videos = []
+            if len(reference_audios) > 0 or len(reference_videos) > 0:
+                raise HTTPException(status_code=400, detail="Audio/video refs нельзя смешивать с Image→Video. Для них используй Omni Reference.")
+            reference_audios = []
+            reference_videos = []
+        elif mode == "omni_reference":
+            total_refs = len(reference_images) + len(reference_videos) + len(reference_audios)
+            if total_refs < 1:
+                raise HTTPException(status_code=400, detail="Для Seedance 2.0 Mini Omni Reference нужен хотя бы один reference.")
+            if total_refs > 12:
+                raise HTTPException(status_code=400, detail="Для Seedance 2.0 Mini Omni Reference доступно максимум 12 refs суммарно.")
+            if len(reference_images) > 7:
+                raise HTTPException(status_code=400, detail="Для Seedance 2.0 Mini доступно максимум 7 image references.")
+            if len(reference_audios) > 3:
+                raise HTTPException(status_code=400, detail="Для Seedance 2.0 Mini доступно максимум 3 audio references.")
+            if len(reference_videos) > 3:
+                raise HTTPException(status_code=400, detail="Для Seedance 2.0 Mini доступно максимум 3 video references.")
+            if reference_audios and not (reference_images or reference_videos):
+                raise HTTPException(status_code=400, detail="Для Seedance 2.0 Mini Omni Reference audio-only не поддерживается: нужен хотя бы один image или video reference.")
+            if reference_video_total_duration_sec > SEEDANCE_VIDEO_TOTAL_MAX_DURATION_SEC:
+                raise HTTPException(status_code=400, detail="Для Seedance 2.0 Mini суммарная длина всех video references должна быть не больше 15.4 секунды.")
+            start_frame = None
+            end_frame = None
+            last_frame = None
+        else:
+            reference_images = []
+            reference_audios = []
+            reference_videos = []
     if provider == "sora":
         if mode != "text_to_video":
             raise HTTPException(status_code=400, detail="Sora в workspace сейчас поддерживает только Text→Video.")
