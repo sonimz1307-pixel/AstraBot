@@ -3747,10 +3747,20 @@ def _seedance_prompt_back_kb() -> dict:
     return _seedance_prompt_collect_kb("seedance_omni")
 
 
-def _seedance_prompt_limit_from_settings(settings: Optional[Dict[str, Any]]) -> int:
+def _seedance_uses_kie_backend(settings: Optional[Dict[str, Any]]) -> bool:
     settings = settings or {}
-    provider_kind = str(settings.get("provider_kind") or "seedance").strip() or "seedance"
-    return 20000 if provider_kind == "seedance_kie" else 4000
+    provider_kind = str(settings.get("provider_kind") or "seedance").strip().lower()
+    seedance_model = str(settings.get("seedance_model") or "").strip().lower()
+    task_type = str(settings.get("task_type") or "").strip().lower()
+    return (
+        provider_kind == "seedance_kie"
+        or seedance_model in {"seedance-kie-mini", "seedance-2-mini", "seedance-mini", "mini"}
+        or task_type == "seedance-2-mini"
+    )
+
+
+def _seedance_prompt_limit_from_settings(settings: Optional[Dict[str, Any]]) -> int:
+    return 20000 if _seedance_uses_kie_backend(settings) else 4000
 
 
 def _seedance_prompt_state_key(st: Dict[str, Any]) -> str:
@@ -3820,9 +3830,12 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
     provider_kind = str(settings.get("provider_kind") or "seedance").strip() or "seedance"
     seedance_model = str(settings.get("seedance_model") or ("seedance-kie-480p" if provider_kind == "seedance_kie" else "preview")).strip()
     task_type = str(settings.get("task_type") or ("seedance-2-fast" if seedance_model == "seedance-kie-480p" else ("seedance-2" if provider_kind == "seedance_kie" else "seedance-2-preview"))).strip()
+    if seedance_model.lower() in {"seedance-kie-mini", "seedance-2-mini", "seedance-mini", "mini"} or task_type.lower() == "seedance-2-mini":
+        seedance_model = "seedance-kie-mini"
+        task_type = "seedance-2-mini"
     duration = int(settings.get("duration") or 5)
     aspect_ratio = str(settings.get("aspect_ratio") or "16:9").strip()
-    max_images = int(settings.get("max_images") or (7 if provider_kind == "seedance_kie" else 2))
+    max_images = int(settings.get("max_images") or (7 if _seedance_uses_kie_backend(settings) else 2))
     max_videos = int(settings.get("max_videos") or 0)
     max_audios = int(settings.get("max_audios") or 0)
     prompt_limit = _seedance_prompt_limit_from_settings(settings)
@@ -3872,7 +3885,7 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
         )
         return {"ok": True}
 
-    if provider_kind == "seedance_kie":
+    if _seedance_uses_kie_backend(settings):
         seedance_input_video_sec = 0.0
         if mode_now == "seedance_omni":
             so_price = st.get("seedance_omni") or {}
@@ -3888,7 +3901,7 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
             input_video_duration_sec=seedance_input_video_sec,
         ))
     else:
-        # Seedance 2.0 Mini retail grid. Legacy preview/fast settings are normalized to Mini upstream.
+        # Legacy fallback only. Seedance 2.0 Mini is normalized to KIE upstream.
         preview_price_map = {5: 9, 10: 18, 15: 27}
         cost_tokens = int(preview_price_map.get(int(duration), preview_price_map[5]))
 
@@ -3952,7 +3965,7 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
         else:
             job["mode"] = "text_to_video"
 
-        if provider_kind != "seedance_kie":
+        if not _seedance_uses_kie_backend(settings):
             se = st.get("seedance_extend") or {}
             se["task_type"] = task_type
             st["seedance_extend"] = se
@@ -8791,7 +8804,7 @@ async def webhook(secret: str, request: Request):
         
 
                 # ----- WebApp data (Seedance 2.0 / Preview settings) -----
-        # Expected mini/PiAPI: {type:"seedance_settings", provider:"seedance", seedance_model:"mini", flow:"text|image", ...}
+        # Expected mini: {type:"seedance_settings", provider:"seedance", seedance_model:"mini", flow:"text|image|omni", ...}
         # Expected regular KIE: {type:"seedance_settings", provider:"seedance_kie", seedance_model:"seedance-kie-480p|seedance-kie-720p|seedance-kie-1080p", flow:"text|image|omni", ...}
         seedance_provider_raw = str(payload.get("provider") or provider_raw or "").lower().strip()
         seedance_type_raw = str(payload.get("type") or "").lower().strip()
@@ -8823,8 +8836,6 @@ async def webhook(secret: str, request: Request):
             flow = str(payload.get("flow") or payload.get("gen_mode") or payload.get("mode") or "text").lower().strip()
             if flow not in ("text", "image", "omni"):
                 flow = "text"
-            if provider_kind != "seedance_kie" and flow == "omni":
-                flow = "image"
 
             try:
                 duration = int(payload.get("duration") or 5)
@@ -8852,19 +8863,21 @@ async def webhook(secret: str, request: Request):
                 max_audios = 3
                 max_total_refs = 12
             else:
-                if aspect_ratio not in ("16:9", "9:16", "1:1", "4:3", "3:4"):
+                if aspect_ratio not in ("16:9", "9:16", "1:1"):
                     aspect_ratio = "16:9"
-                # The old hidden PiAPI Preview branch is now exposed only as Seedance 2.0 Mini.
-                # Legacy preview/fast values are normalized to Mini to avoid sending deprecated task types.
-                seedance_model = seedance_model_raw or "mini"
-                if seedance_model not in ("mini", "seedance-mini", "seedance-2-mini", "preview", "fast", "seedance-2-preview", "seedance-2-fast-preview"):
-                    seedance_model = "mini"
+                # Seedance 2.0 Mini stays a separate UI model, but now runs through KIE mini backend.
+                seedance_model = "seedance-kie-mini"
                 task_type = "seedance-2-mini"
-                seedance_model = "mini"
-                max_images = 2 if flow == "image" else 0
-                max_videos = 0
-                max_audios = 0
-                max_total_refs = 2 if flow == "image" else 0
+                if flow == "omni":
+                    max_images = 7
+                    max_videos = 3
+                    max_audios = 3
+                    max_total_refs = 12
+                else:
+                    max_images = 2 if flow == "image" else 0
+                    max_videos = 0
+                    max_audios = 0
+                    max_total_refs = 2 if flow == "image" else 0
 
             st["seedance_settings"] = {
                 "provider_kind": provider_kind,
@@ -8893,7 +8906,7 @@ async def webhook(secret: str, request: Request):
                 )
                 return {"ok": True}
 
-            if flow == "omni" and provider_kind == "seedance_kie":
+            if flow == "omni":
                 _set_mode(chat_id, user_id, "seedance_omni")
                 st["seedance_omni"] = {
                     "step": "collect_refs",
@@ -8906,9 +8919,11 @@ async def webhook(secret: str, request: Request):
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
-                    "✅ Настройки Seedance 2.0 Omni сохранены.\n\n"
-                    "Теперь пришли референсы: можно только фото, либо фото/видео/аудио вместе.\n"
-                    "Аудио можно файлом или голосовым сообщением — я конвертирую в MP3. Audio-only нельзя. Когда закончишь — нажми «✅ Готово».",
+                    ("✅ Настройки Seedance 2.0 Omni сохранены.\n\n"
+                     if provider_kind == "seedance_kie" else
+                     "✅ Настройки Seedance 2.0 Mini Omni сохранены.\n\n")
+                    + "Теперь пришли референсы: можно только фото, либо фото/видео/аудио вместе.\n"
+                    + "Аудио можно файлом или голосовым сообщением — я конвертирую в MP3. Audio-only нельзя. Когда закончишь — нажми «✅ Готово».",
                     reply_markup=_seedance_refs_collect_kb(),
                 )
                 return {"ok": True}
@@ -10253,9 +10268,12 @@ async def webhook(secret: str, request: Request):
         provider_kind = str(settings.get("provider_kind") or "seedance").strip() or "seedance"
         seedance_model = str(settings.get("seedance_model") or ("seedance-kie-480p" if provider_kind == "seedance_kie" else "preview")).strip()
         task_type = str(settings.get("task_type") or ("seedance-2-fast" if seedance_model == "seedance-kie-480p" else ("seedance-2" if provider_kind == "seedance_kie" else "seedance-2-preview"))).strip()
+        if seedance_model.lower() in {"seedance-kie-mini", "seedance-2-mini", "seedance-mini", "mini"} or task_type.lower() == "seedance-2-mini":
+            seedance_model = "seedance-kie-mini"
+            task_type = "seedance-2-mini"
         duration = int(settings.get("duration") or 5)
         aspect_ratio = str(settings.get("aspect_ratio") or "16:9").strip()
-        max_images = int(settings.get("max_images") or (7 if provider_kind == "seedance_kie" else 2))
+        max_images = int(settings.get("max_images") or (7 if _seedance_uses_kie_backend(settings) else 2))
         max_videos = int(settings.get("max_videos") or 0)
         max_audios = int(settings.get("max_audios") or 0)
         max_total_refs = int(settings.get("max_total_refs") or max_images)
@@ -12182,7 +12200,7 @@ async def webhook(secret: str, request: Request):
         # ---- SEEDANCE 2 Image/Omni: сбор фото-референсов ----
         if st.get("mode") in ("seedance_i2v", "seedance_omni"):
             settings = st.get("seedance_settings") or {}
-            limit = int(settings.get("max_images") or (7 if (settings.get("provider_kind") == "seedance_kie") else 2))
+            limit = int(settings.get("max_images") or (7 if _seedance_uses_kie_backend(settings) else 2))
             total_limit = int(settings.get("max_total_refs") or 12)
 
             if st.get("mode") == "seedance_omni":
