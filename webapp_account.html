@@ -2313,7 +2313,7 @@
           </div>
         </div>
         <div class="stat-box">
-          <div class="stat-label">Доход за май</div>
+          <div class="stat-label">Доступно к выводу</div>
           <div class="stat-value"><span id="refMonthIncome">0 ₽</span></div>
         </div>
         <div class="stat-box">
@@ -2579,6 +2579,7 @@
       botRef: "",
       contactEmail: "",
       subscription: null,
+      partnerBalance: null,
       topupUrl: "https://nabex.ru/tariffs.html",
       topupWebAppUrl: "",
       siteUrl: "https://nabex.ru",
@@ -2686,6 +2687,13 @@
       });
     }
 
+    function formatRubValue(value) {
+      const n = Number(value || 0);
+      if (!Number.isFinite(n)) return "0 ₽";
+      const rounded = Math.round(n * 100) / 100;
+      return rounded.toLocaleString("ru-RU", { maximumFractionDigits: rounded % 1 ? 2 : 0 }) + " ₽";
+    }
+
     function renderAccount() {
       const balance = Number(state.balance);
       balanceValue.textContent = Number.isFinite(balance) ? String(Math.trunc(balance)) : "0";
@@ -2695,6 +2703,13 @@
       refCode.textContent = state.refCode || "—";
       siteRefText.textContent = state.siteRef || "Ссылка недоступна";
       botRefText.textContent = state.botRef || "Ссылка недоступна";
+      const partner = state.partnerBalance || {};
+      const available = Number(partner.available_balance_rub || 0);
+      const earned = Number(partner.earned_total_rub || 0);
+      const refMonthIncomeEl = document.getElementById("refMonthIncome");
+      const refTotalIncomeEl = document.getElementById("refTotalIncome");
+      if (refMonthIncomeEl) refMonthIncomeEl.textContent = formatRubValue(available);
+      if (refTotalIncomeEl) refTotalIncomeEl.textContent = formatRubValue(earned);
     }
 
     function openSheet(sheet) {
@@ -3150,6 +3165,7 @@
         state.topupWebAppUrl = data.topup_webapp_url || state.topupWebAppUrl;
         state.contactEmail = data.contact_email || state.contactEmail || "";
         state.subscription = data.subscription || state.subscription;
+        state.partnerBalance = data.partner_balance || data.partnerBalance || state.partnerBalance || null;
         if (topupEmailInput && state.contactEmail) topupEmailInput.value = state.contactEmail;
         state.siteUrl = data.site_url || state.siteUrl;
         state.supportUrl = data.support_url || state.supportUrl;
