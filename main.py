@@ -959,6 +959,56 @@ def _tg_account_ref_links_for(user_id: int) -> Tuple[str, str, str]:
     return ref_code, site_ref, bot_ref
 
 
+def _money_rub_for_tg(value: Any) -> float:
+    try:
+        return round(float(value or 0), 2)
+    except Exception:
+        return 0.0
+
+
+def _tg_partner_balance_for(user_id: int) -> Dict[str, Any]:
+    """Return partner balance for Telegram WebApp account response.
+
+    Website partner cabinet already reads partner_balances. Telegram account
+    response used to expose only ref links, so the WebApp showed 0 ₽ even when
+    partner_balances had available/earned amounts.
+    """
+    empty = {
+        "available_balance_rub": 0.0,
+        "earned_total_rub": 0.0,
+        "pending_payout_balance_rub": 0.0,
+        "paid_total_rub": 0.0,
+    }
+    try:
+        partner_user_id = _resolve_partner_referred_user_id(int(user_id))
+        if partner_user_id <= 0 or sb is None:
+            return empty
+        res = (
+            sb.table("partner_balances")
+            .select("partner_user_id,earned_total_rub,available_balance_rub,pending_payout_balance_rub,paid_total_rub,updated_at")
+            .eq("partner_user_id", partner_user_id)
+            .limit(1)
+            .execute()
+        )
+        row = (getattr(res, "data", None) or [None])[0] or {}
+        if not row:
+            return empty
+        return {
+            "partner_user_id": int(row.get("partner_user_id") or partner_user_id),
+            "available_balance_rub": _money_rub_for_tg(row.get("available_balance_rub")),
+            "earned_total_rub": _money_rub_for_tg(row.get("earned_total_rub")),
+            "pending_payout_balance_rub": _money_rub_for_tg(row.get("pending_payout_balance_rub")),
+            "paid_total_rub": _money_rub_for_tg(row.get("paid_total_rub")),
+            "updated_at": row.get("updated_at"),
+        }
+    except Exception as exc:
+        try:
+            print(f"[webapp_account] partner balance unavailable for user_id={user_id}: {exc}", flush=True)
+        except Exception:
+            pass
+        return empty
+
+
 
 def _tg_user_id_from_request(request: Request, payload: Optional[Dict[str, Any]] = None) -> int:
     """Resolve Telegram user_id from verified WebApp initData, then fallback query/body uid."""
@@ -1152,6 +1202,7 @@ async def tg_account_info(request: Request):
             "policy_url": f"{NABEX_PUBLIC_SITE_URL}/privacy.html",
             "contact_email": "",
             "subscription": _subscription_public_payload_for_tg(0),
+            "partner_balance": _tg_partner_balance_for(0),
         }
 
     balance = 0
@@ -1165,6 +1216,7 @@ async def tg_account_info(request: Request):
             pass
 
     ref_code, site_ref, bot_ref = _tg_account_ref_links_for(user_id)
+    partner_balance = _tg_partner_balance_for(user_id)
     contact_email = ""
     try:
         contact_email = sb_get_user_email(user_id)
@@ -1188,6 +1240,7 @@ async def tg_account_info(request: Request):
         "policy_url": f"{NABEX_PUBLIC_SITE_URL}/privacy.html",
         "contact_email": contact_email,
         "subscription": _subscription_public_payload_for_tg(user_id),
+        "partner_balance": partner_balance,
     }
 
 
