@@ -153,6 +153,51 @@ def _prompt_limit_exception(exc: FreePlanLimitError) -> HTTPException:
     return HTTPException(status_code=402, detail=free_limit_http_detail(exc))
 
 
+def _public_catalog_access() -> Dict[str, Any]:
+    """Public catalog payload.
+
+    Categories, groups, and cards must be visible without authorization.
+    Full prompt text is still protected by /item and free_prompt_opens logic.
+    """
+    return {
+        "authenticated": False,
+        "is_admin": False,
+        "is_free_plan": True,
+        "is_paid_plan": False,
+        "plan_code": "guest",
+        "prompt_limit": {
+            "allowed": False,
+            "feature": "prompt_open",
+            "limit": FREE_PROMPT_LIFETIME_LIMIT,
+            "used": 0,
+            "remaining": 0,
+            "already_opened": False,
+            "plan_code": "guest",
+            "is_paid_plan": False,
+            "reason": "auth_required_for_full_prompt",
+        },
+    }
+
+
+def _optional_catalog_access(
+    uid: Optional[str] = None,
+    x_uid: Optional[str] = None,
+    x_tg_initdata: Optional[str] = None,
+    x_admin_token: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return real access when auth is valid, otherwise keep catalog public.
+
+    This prevents /categories, /groups, and /items from returning 401 in Telegram
+    WebApp when initData is absent/stale. Opening the full prompt is still
+    checked by _require_catalog_access() in /item.
+    """
+    try:
+        _, _, access = _require_catalog_access(uid, x_uid, x_tg_initdata, x_admin_token)
+        return access
+    except HTTPException:
+        return _public_catalog_access()
+
+
 @router.get("/categories")
 def categories(
     uid: Optional[str] = Query(default=None),
@@ -160,7 +205,7 @@ def categories(
     x_tg_initdata: Optional[str] = Header(default=None, alias="X-TG-INITDATA"),
     x_admin_token: Optional[str] = Header(default=None, alias="X-ADMIN-TOKEN"),
 ) -> Dict[str, Any]:
-    _, _, access = _require_catalog_access(uid, x_uid, x_tg_initdata, x_admin_token)
+    access = _optional_catalog_access(uid, x_uid, x_tg_initdata, x_admin_token)
     if supabase is None:
         return _err("Supabase disabled (env/client not ready)")
     try:
@@ -184,7 +229,7 @@ def groups(
     x_tg_initdata: Optional[str] = Header(default=None, alias="X-TG-INITDATA"),
     x_admin_token: Optional[str] = Header(default=None, alias="X-ADMIN-TOKEN"),
 ) -> Dict[str, Any]:
-    _, _, access = _require_catalog_access(uid, x_uid, x_tg_initdata, x_admin_token)
+    access = _optional_catalog_access(uid, x_uid, x_tg_initdata, x_admin_token)
     if supabase is None:
         return _err("Supabase disabled (env/client not ready)")
     try:
@@ -220,7 +265,7 @@ def items(
     x_tg_initdata: Optional[str] = Header(default=None, alias="X-TG-INITDATA"),
     x_admin_token: Optional[str] = Header(default=None, alias="X-ADMIN-TOKEN"),
 ) -> Dict[str, Any]:
-    _, _, access = _require_catalog_access(uid, x_uid, x_tg_initdata, x_admin_token)
+    access = _optional_catalog_access(uid, x_uid, x_tg_initdata, x_admin_token)
     if supabase is None:
         return _err("Supabase disabled (env/client not ready)")
     try:
