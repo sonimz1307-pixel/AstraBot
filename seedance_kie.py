@@ -42,7 +42,7 @@ SEEDANCE_KIE_MAX_TOTAL_OMNI_REFS = int(os.getenv("KIE_SEEDANCE_MAX_TOTAL_OMNI_RE
 # Final retail prices approved for 5 / 10 / 15 seconds.
 # Do not derive these base prices from provider rates: product pricing is fixed by business rules.
 SEEDANCE_KIE_TOKEN_MAP = {
-    "seedance-kie-mini": {5: 9, 10: 18, 15: 27},
+    "seedance-kie-mini": {5: 8, 10: 13, 15: 18},
     "seedance-kie-480p": {5: 6, 10: 12, 15: 18},
     "seedance-kie-720p": {5: 12, 10: 24, 15: 33},
     "seedance-kie-1080p": {5: 28, 10: 55, 15: 80},
@@ -57,7 +57,7 @@ SEEDANCE_KIE_TOKEN_RUB = float(os.getenv("SEEDANCE_KIE_TOKEN_RUB", "8") or "8")
 SEEDANCE_KIE_VIDEO_REF_METADATA_TOLERANCE_SEC = float(os.getenv("SEEDANCE_KIE_VIDEO_REF_METADATA_TOLERANCE_SEC", "0.25") or "0.25")
 
 SEEDANCE_KIE_PROVIDER_USD_PER_SEC = {
-    "seedance-kie-mini": {"with_video": 0.125, "no_video": 0.205},
+    "seedance-kie-mini": {"with_video": 0.0625, "no_video": 0.1025},
     "seedance-kie-480p": {"with_video": 0.0575, "no_video": 0.095},
     "seedance-kie-720p": {"with_video": 0.125, "no_video": 0.205},
     "seedance-kie-1080p": {"with_video": 0.31, "no_video": 0.51},
