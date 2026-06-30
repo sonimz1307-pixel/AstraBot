@@ -6920,13 +6920,17 @@ async def internal_midjourney_register(request: Request):
     _midjourney_cache_session(chat_id, user_id, token, session, persist=True)
     return {"ok": True, "token": token}
 
-@app.post("/webhook/{secret}")
-async def webhook(secret: str, request: Request):
-    if secret != WEBHOOK_SECRET:
-        return Response(status_code=403)
+async def process_telegram_update(update: Dict[str, Any]):
+    """Process one Telegram update.
+
+    This function contains the old Telegram webhook logic.
+    Keeping it separate lets a lightweight tg_webhook.py enqueue updates
+    without changing the existing bot behaviour.
+    """
+    if not isinstance(update, dict):
+        return {"ok": True}
 
     _cleanup_state()
-    update = await request.json()
 
     # --- Inline button callbacks (e.g., download 2K) ---
     callback_query = update.get("callback_query")
@@ -15287,3 +15291,12 @@ async def webhook(secret: str, request: Request):
         return {"ok": True}
 
     return {"ok": True}
+
+
+@app.post("/webhook/{secret}")
+async def webhook(secret: str, request: Request):
+    if secret != WEBHOOK_SECRET:
+        return Response(status_code=403)
+
+    update = await request.json()
+    return await process_telegram_update(update)
