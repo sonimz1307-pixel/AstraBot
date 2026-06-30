@@ -7,6 +7,7 @@ from app.services.workspace_worker_jobs import (
     process_tg_grok_video_job,
     process_tg_kling3_turbo_video_job,
     process_tg_omni_flash_video_job,
+    process_tg_tts_job,
     process_tg_veo_relax_video_job,
     process_workspace_music_job,
     process_workspace_switchx_ref_job,
@@ -17,10 +18,12 @@ from app.services.workspace_worker_jobs import (
 WORKSPACE_MEDIA_QUEUE_NAME = (os.getenv("WORKSPACE_MEDIA_QUEUE_NAME", "workspace_media") or "workspace_media").strip() or "workspace_media"
 WORKSPACE_VEO_RELAX_QUEUE_NAME = (os.getenv("WORKSPACE_VEO_RELAX_QUEUE_NAME", "workspace_veo_relax") or "workspace_veo_relax").strip() or "workspace_veo_relax"
 WORKSPACE_GROK15_QUEUE_NAME = (os.getenv("WORKSPACE_GROK15_QUEUE_NAME", "workspace_grok15") or "workspace_grok15").strip() or "workspace_grok15"
+TG_TTS_QUEUE_NAME = (os.getenv("TG_TTS_QUEUE_NAME", "workspace_tg_tts") or "workspace_tg_tts").strip() or "workspace_tg_tts"
 VIDEO_CONCURRENCY = int(os.getenv("WORKSPACE_VIDEO_CONCURRENCY", "3"))
 OMNI_CONCURRENCY = int(os.getenv("WORKSPACE_OMNI_CONCURRENCY", "3"))
 MUSIC_CONCURRENCY = int(os.getenv("WORKSPACE_MUSIC_CONCURRENCY", "2"))
 TTS_CONCURRENCY = int(os.getenv("WORKSPACE_TTS_CONCURRENCY", "4"))
+TG_TTS_CONCURRENCY = int(os.getenv("TG_TTS_CONCURRENCY", "2"))
 VEO_RELAX_CONCURRENCY = int(os.getenv("WORKSPACE_VEO_RELAX_CONCURRENCY", "2"))
 GROK15_CONCURRENCY = int(os.getenv("WORKSPACE_GROK15_CONCURRENCY", "2"))
 DELAYED_PROMOTE_BATCH_SIZE = max(1, int(os.getenv("WORKSPACE_DELAYED_PROMOTE_BATCH_SIZE", "50") or "50"))
@@ -31,6 +34,7 @@ veo_relax_sem = asyncio.Semaphore(VEO_RELAX_CONCURRENCY)
 grok15_sem = asyncio.Semaphore(GROK15_CONCURRENCY)
 music_sem = asyncio.Semaphore(MUSIC_CONCURRENCY)
 tts_sem = asyncio.Semaphore(TTS_CONCURRENCY)
+tg_tts_sem = asyncio.Semaphore(TG_TTS_CONCURRENCY)
 
 
 def _job_kind(job: Dict[str, Any]) -> str:
@@ -51,6 +55,8 @@ def _sem_for_job(job: Dict[str, Any]) -> asyncio.Semaphore:
         return video_sem
     if kind == "workspace_music_run":
         return music_sem
+    if kind == "tg_tts_run":
+        return tg_tts_sem
     return tts_sem
 
 
@@ -85,6 +91,10 @@ async def _handle(job: Dict[str, Any]) -> None:
         if kind == "workspace_music_run":
             await process_workspace_music_job(job)
             print(f"[workspace_media] completed music job={job.get('job_id')}", flush=True)
+            return
+        if kind == "tg_tts_run":
+            await process_tg_tts_job(job)
+            print(f"[workspace_media] completed tg_tts job={job.get('job_id')}", flush=True)
             return
         if kind == "workspace_tts_run":
             await process_workspace_tts_job(job)
@@ -130,9 +140,10 @@ async def main() -> None:
         f"media_queue={WORKSPACE_MEDIA_QUEUE_NAME} "
         f"veo_relax_queue={WORKSPACE_VEO_RELAX_QUEUE_NAME} "
         f"grok15_queue={WORKSPACE_GROK15_QUEUE_NAME} "
+        f"tg_tts_queue={TG_TTS_QUEUE_NAME} "
         f"video={VIDEO_CONCURRENCY} omni={OMNI_CONCURRENCY} "
         f"veo_relax={VEO_RELAX_CONCURRENCY} grok15={GROK15_CONCURRENCY} "
-        f"music={MUSIC_CONCURRENCY} tts={TTS_CONCURRENCY}",
+        f"music={MUSIC_CONCURRENCY} tts={TTS_CONCURRENCY} tg_tts={TG_TTS_CONCURRENCY}",
         flush=True,
     )
     media_promotes_delayed = WORKSPACE_VEO_RELAX_QUEUE_NAME == WORKSPACE_MEDIA_QUEUE_NAME
@@ -153,6 +164,14 @@ async def main() -> None:
         print(
             "[workspace_media] WARNING: WORKSPACE_GROK15_QUEUE_NAME overlaps another queue; "
             "Grok 1.5 jobs will not have a fully separate Redis queue.",
+            flush=True,
+        )
+    if TG_TTS_QUEUE_NAME not in {WORKSPACE_MEDIA_QUEUE_NAME, WORKSPACE_VEO_RELAX_QUEUE_NAME, WORKSPACE_GROK15_QUEUE_NAME}:
+        consumers.append(asyncio.create_task(_consume_queue(TG_TTS_QUEUE_NAME, "tg_tts")))
+    else:
+        print(
+            "[workspace_media] WARNING: TG_TTS_QUEUE_NAME overlaps another queue; "
+            "Telegram TTS jobs will share an existing Redis queue.",
             flush=True,
         )
     await asyncio.gather(*consumers)
