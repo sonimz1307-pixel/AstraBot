@@ -1533,6 +1533,7 @@ GPT_IMAGE2_GENERATION_COST = int(os.getenv("GPT_IMAGE2_GENERATION_COST", "1") or
 WORKSPACE_IMAGE_QUEUE_NAME = (os.getenv("WORKSPACE_IMAGE_QUEUE_NAME", "workspace_image") or "workspace_image").strip() or "workspace_image"
 MIDJOURNEY_TG_QUEUE_NAME = (os.getenv("MIDJOURNEY_TG_QUEUE_NAME", "telegram_midjourney") or "telegram_midjourney").strip() or "telegram_midjourney"
 SEEDREAM_T2I_QUEUE_NAME = os.getenv("SEEDREAM_T2I_QUEUE_NAME", "seedream_t2i").strip() or "seedream_t2i"
+TG_TTS_QUEUE_NAME = (os.getenv("TG_TTS_QUEUE_NAME", "workspace_tg_tts") or "workspace_tg_tts").strip() or "workspace_tg_tts"
 PUBLIC_SUBSCRIPTION_PLAN_CODES = {"spark", "pulse", "nexus"}
 SEEDREAM_T2I_INCLUDED_PLAN_CODES = {"spark", "pulse", "nexus"}
 NANO_BANANA_BASIC_INCLUDED_PLAN_CODES = {"pulse", "nexus"}
@@ -15200,37 +15201,44 @@ async def process_telegram_update(update: Dict[str, Any]):
                 st["ts"] = _now()
                 return {"ok": True}
 
-            await tg_send_message(chat_id, f"🔊 Озвучиваю ({voice_name})…", reply_markup=None)
-
+            job_id = f"tg_tts:{user_id}:{uuid4().hex}"
             try:
-                mp3_bytes = await elevenlabs_tts_mp3_bytes(
-                    text=user_text,
-                    voice_id=voice_id,
-                    model_id="eleven_multilingual_v2",
+                await enqueue_job(
+                    {
+                        "job_id": job_id,
+                        "kind": "tg_tts_run",
+                        "type": "tg_tts",
+                        "chat_id": int(chat_id),
+                        "user_id": int(user_id),
+                        "text": user_text,
+                        "voice_id": voice_id,
+                        "voice_name": voice_name,
+                        "model_id": "eleven_multilingual_v2",
+                        "free_tts_consumed": True,
+                        "main_menu_reply_markup": _main_menu_for(user_id),
+                        "help_menu_reply_markup": _help_menu_for(user_id),
+                    },
+                    queue_name=TG_TTS_QUEUE_NAME,
                 )
-
-                await tg_send_audio_bytes(
-                    chat_id,
-                    mp3_bytes,
-                    filename="tts.mp3",
-                    caption=f"✅ Озвучка — {voice_name}",
-                    reply_markup=_main_menu_for(user_id),
-                )
-
-                st["mode"] = "idle"
-                st["tts"] = {}
-                st["ts"] = _now()
-                return {"ok": True}
-
             except Exception as e:
                 release_free_usage(user_id, FEATURE_TTS)
                 await tg_send_message(
                     chat_id,
-                    f"❌ Не получилось озвучить: {e}",
+                    f"❌ Не удалось поставить озвучку в очередь: {e}",
                     reply_markup=_help_menu_for(user_id),
                 )
                 st["ts"] = _now()
                 return {"ok": True}
+
+            await tg_send_message(
+                chat_id,
+                f"✅ Озвучка принята в очередь ({voice_name}). Пришлю аудио, как будет готово.",
+                reply_markup=None,
+            )
+            st["mode"] = "idle"
+            st["tts"] = {}
+            st["ts"] = _now()
+            return {"ok": True}
                 
         # CHAT: обычный текстовый ответ (с памятью только для режима ИИ-чата)
         if st.get("mode") == "chat":
