@@ -11,6 +11,7 @@ from nano_banana_2_piapi import handle_nano_banana_2
 from nano_banana_pro_new_kie import handle_nano_banana_pro_new
 from gpt_image_2_kie import handle_gpt_image_2_kie
 from billing_db import add_tokens
+from free_plan_limits import FEATURE_TTS, release_free_usage
 from grok_video_replicate import (
     GROK_LEGACY_MODEL,
     GrokVideoError,
@@ -97,8 +98,49 @@ async def _tg_post(method: str, *, json_payload: Optional[Dict[str, Any]] = None
         raise RuntimeError(f"Telegram {method} error: {payload}")
 
 
-async def _tg_send_message(chat_id: int, text: str) -> None:
-    await _tg_post("sendMessage", json_payload={"chat_id": int(chat_id), "text": str(text or "")})
+async def _tg_send_message(chat_id: int, text: str, reply_markup: Optional[Dict[str, Any]] = None) -> None:
+    payload: Dict[str, Any] = {"chat_id": int(chat_id), "text": str(text or "")}
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    await _tg_post("sendMessage", json_payload=payload)
+
+
+async def _tg_send_audio_bytes(
+    chat_id: int,
+    audio_bytes: bytes,
+    *,
+    filename: str = "tts.mp3",
+    caption: Optional[str] = None,
+    reply_markup: Optional[Dict[str, Any]] = None,
+) -> None:
+    if not audio_bytes:
+        raise RuntimeError("Empty audio bytes for sendAudio")
+    data: Dict[str, str] = {"chat_id": str(int(chat_id))}
+    if caption:
+        data["caption"] = str(caption)
+    if reply_markup is not None:
+        data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+    files = {"audio": (filename, audio_bytes, "audio/mpeg")}
+    async with httpx.AsyncClient(timeout=240.0) as client:
+        resp = await client.post(_telegram_method_url("sendAudio"), data=data, files=files)
+    try:
+        payload = resp.json()
+    except Exception:
+        payload = {}
+    if resp.status_code >= 400 or (isinstance(payload, dict) and not payload.get("ok", False)):
+        detail = (payload.get("description") if isinstance(payload, dict) else "") or resp.text[:800]
+        # Fallback: send as document when Telegram refuses the audio metadata.
+        data_doc = dict(data)
+        files_doc = {"document": (filename, audio_bytes, "audio/mpeg")}
+        async with httpx.AsyncClient(timeout=240.0) as client:
+            doc_resp = await client.post(_telegram_method_url("sendDocument"), data=data_doc, files=files_doc)
+        try:
+            doc_payload = doc_resp.json()
+        except Exception:
+            doc_payload = {}
+        if doc_resp.status_code >= 400 or (isinstance(doc_payload, dict) and not doc_payload.get("ok", False)):
+            doc_detail = (doc_payload.get("description") if isinstance(doc_payload, dict) else "") or doc_resp.text[:800]
+            raise RuntimeError(f"Telegram sendAudio failed: {detail}; sendDocument failed: {doc_detail}")
 
 
 async def _tg_send_video_url(chat_id: int, video_url: str, caption: Optional[str] = None) -> None:
@@ -584,6 +626,61 @@ async def process_tg_omni_flash_video_job(job: Dict[str, Any]) -> None:
                 pass
         try:
             await _tg_send_message(chat_id, f"❌ Ошибка Google Omni Flash: {e}")
+        except Exception:
+            pass
+
+
+async def process_tg_tts_job(job: Dict[str, Any]) -> None:
+    chat_id = int(job.get("chat_id") or 0)
+    user_id = int(job.get("user_id") or 0)
+    user_text = str(job.get("text") or "").strip()
+    voice_id = str(job.get("voice_id") or "").strip()
+    voice_name = str(job.get("voice_name") or "голос").strip() or "голос"
+    model_id = str(job.get("model_id") or "eleven_multilingual_v2").strip() or "eleven_multilingual_v2"
+    main_menu_reply_markup = job.get("main_menu_reply_markup") if isinstance(job.get("main_menu_reply_markup"), dict) else None
+    help_menu_reply_markup = job.get("help_menu_reply_markup") if isinstance(job.get("help_menu_reply_markup"), dict) else main_menu_reply_markup
+    free_tts_consumed = bool(job.get("free_tts_consumed"))
+
+    if not chat_id or not user_id:
+        raise RuntimeError("tg_tts_run job missing chat_id/user_id")
+    if not user_text:
+        raise RuntimeError("tg_tts_run job missing text")
+    if not voice_id:
+        raise RuntimeError("tg_tts_run job missing voice_id")
+
+    try:
+        await _tg_send_message(chat_id, f"🔊 Озвучиваю ({voice_name})…")
+        tts = ww._get_tts()
+        audio_bytes = await tts.tts(
+            text=user_text,
+            voice_id=voice_id,
+            model_id=model_id,
+            output_format="mp3_44100_128",
+            language_code=None,
+            voice_settings={
+                "stability": 0.5,
+                "similarity_boost": 0.75,
+            },
+        )
+        await _tg_send_audio_bytes(
+            chat_id,
+            audio_bytes,
+            filename="tts.mp3",
+            caption=f"✅ Озвучка — {voice_name}",
+            reply_markup=main_menu_reply_markup,
+        )
+    except Exception as e:
+        if free_tts_consumed:
+            try:
+                release_free_usage(user_id, FEATURE_TTS)
+            except Exception as release_err:
+                print(f"[workspace_media] tg_tts release_free_usage failed job={job.get('job_id')}: {release_err}", flush=True)
+        try:
+            await _tg_send_message(
+                chat_id,
+                f"❌ Не получилось озвучить: {str(e)[:800]}",
+                reply_markup=help_menu_reply_markup,
+            )
         except Exception:
             pass
 
