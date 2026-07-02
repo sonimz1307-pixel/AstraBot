@@ -46,7 +46,7 @@ DEFAULT_SUBSCRIPTION_PLANS: List[Dict[str, Any]] = [
             "benefits": [
                 "Всё из Spark",
                 "Seedream 4.5 Text-to-Image бесплатно",
-                "Nano Banana basic безлимит",
+                "Nano Banana basic + Nano Banana 2 Lite безлимит",
                 "Midjourney V7/V8.1 без Turbo/4K безлимит",
                 "250 токенов",
             ],
@@ -64,7 +64,7 @@ DEFAULT_SUBSCRIPTION_PLANS: List[Dict[str, Any]] = [
             "benefits": [
                 "Всё из Pulse",
                 "Seedream 4.5 Text-to-Image бесплатно",
-                "Nano Banana basic безлимит",
+                "Nano Banana basic + Nano Banana 2 Lite безлимит",
                 "Midjourney V7/V8.1 без Turbo/4K безлимит",
                 "620 токенов",
             ],
