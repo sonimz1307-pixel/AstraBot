@@ -269,6 +269,7 @@ from chat_job_store import create_chat_job_status, get_chat_job_status, set_chat
 from nano_banana import run_nano_banana
 from nano_banana_pro import handle_nano_banana_pro
 from nano_banana_pro_new_kie import handle_nano_banana_pro_new, normalize_nano_banana_pro_new_aspect_ratio, normalize_nano_banana_pro_new_resolution
+from nano_banana_2_lite_kie import handle_nano_banana_2_lite, normalize_nano_banana_2_lite_aspect_ratio
 from gpt_image_2_kie import (
     KIE_GPT_IMAGE_2_MAX_INPUT_MB,
     gpt_image_2_kie_cost,
@@ -330,6 +331,7 @@ def _env_non_negative_int(name: str, default: int) -> int:
 
 VEO_RELAX_NEXUS_DELAY_SEC = _env_non_negative_int("VEO_RELAX_NEXUS_DELAY_SEC", 1500)
 WORKSPACE_IMAGE_QUEUE_NAME = (os.getenv("WORKSPACE_IMAGE_QUEUE_NAME", "workspace_image") or "workspace_image").strip() or "workspace_image"
+WORKSPACE_NB2LITE_QUEUE_NAME = (os.getenv("WORKSPACE_NB2LITE_QUEUE_NAME", "workspace_nb2lite") or "workspace_nb2lite").strip() or "workspace_nb2lite"
 WORKSPACE_CHAT_OPENAI_QUEUE_NAME = (os.getenv("WORKSPACE_CHAT_OPENAI_QUEUE_NAME", "workspace_chat_openai") or "workspace_chat_openai").strip() or "workspace_chat_openai"
 WORKSPACE_CHAT_CLAUDE_QUEUE_NAME = (os.getenv("WORKSPACE_CHAT_CLAUDE_QUEUE_NAME", "workspace_chat_claude") or "workspace_chat_claude").strip() or "workspace_chat_claude"
 WORKSPACE_CHAT_FABLE_QUEUE_NAME = (os.getenv("WORKSPACE_CHAT_FABLE_QUEUE_NAME", "workspace_chat_fable") or "workspace_chat_fable").strip() or "workspace_chat_fable"
@@ -656,7 +658,7 @@ def _workspace_active_subscription_plan_code(user_id: Any) -> str:
 
 def _workspace_has_nano_banana_basic_included(user_id: Any, provider: str, resolution: str = "2K") -> bool:
     provider_key = str(provider or "").strip().lower()
-    if provider_key != "nano_banana":
+    if provider_key not in {"nano_banana", "nano_banana_2_lite"}:
         return False
     if str(resolution or "2K").strip().upper() == "4K":
         return False
@@ -3533,6 +3535,8 @@ def _workspace_image_cost(provider: str, mode: str, preset_slug: str = "", resol
 
     if provider_key == "nano_banana":
         return 1
+    if provider_key == "nano_banana_2_lite":
+        return 1
     if provider_key == "nano_banana_2":
         return 2 if resolution_key == "4K" else 1
     if provider_key == "nano_banana_pro":
@@ -3570,6 +3574,8 @@ def _workspace_image_charge_reason(provider: str, mode: str, action_type: str = 
 
     if provider_key == "nano_banana":
         return "nano_banana"
+    if provider_key == "nano_banana_2_lite":
+        return "nano_banana_2_lite"
     if provider_key == "nano_banana_2":
         return "nano_banana_2"
     if provider_key == "nano_banana_pro":
@@ -4047,6 +4053,13 @@ async def workspace_subscription_create(payload: WorkspaceSubscriptionCreatePayl
 
 @router.post("/chat")
 async def workspace_chat(request: Request, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
+    # Legacy synchronous fallback is intentionally kept alive for old cached frontends
+    # and external clients that still call /api/workspace/chat directly.
+    # The current web frontend should still prefer /chat/async, which uses worker_chat.py.
+    return await _workspace_chat_sync_legacy_body(request, user)
+
+
+async def _workspace_chat_sync_legacy_body(request: Request, user: Dict[str, Any]) -> Dict[str, Any]:
     content_type = (request.headers.get("content-type") or "").lower()
     files: List[UploadFile] = []
 
@@ -6144,6 +6157,41 @@ def _workspace_nano_banana_pro_new_aspect_ratio(value: Any, default: str = "16:9
     return normalize_nano_banana_pro_new_aspect_ratio(value, default=default)
 
 
+def _workspace_nano_banana_2_lite_aspect_ratio(value: Any, default: str = "auto") -> str:
+    return normalize_nano_banana_2_lite_aspect_ratio(value, default=default)
+
+
+async def _workspace_run_nano_banana_2_lite_site(
+    *,
+    user_id: int,
+    prompt: str,
+    source_image_bytes: Optional[bytes] = None,
+    source_filename: Optional[str] = None,
+    source_image_urls: Optional[list[str]] = None,
+    aspect_ratio: Any = "auto",
+    require_source_image: bool = False,
+) -> tuple[bytes, str]:
+    normalized_urls = [str(url or "").strip() for url in (source_image_urls or []) if str(url or "").strip()]
+    normalized_aspect = _workspace_nano_banana_2_lite_aspect_ratio(aspect_ratio, default="auto")
+    if not normalized_urls and source_image_bytes:
+        normalized_urls = [
+            _upload_workspace_input_image(
+                user_id,
+                source_image_bytes,
+                filename=source_filename,
+                slot="nano_banana_2_lite_source",
+            )
+        ]
+    if require_source_image and not normalized_urls:
+        raise RuntimeError("Nano Banana 2 Lite Image→Image requires at least one reference image URL.")
+    return await handle_nano_banana_2_lite(
+        prompt,
+        source_image_urls=normalized_urls[:10],
+        aspect_ratio=normalized_aspect,
+        require_source_image=bool(require_source_image),
+    )
+
+
 async def _workspace_run_nano_banana_pro_new_site(
     *,
     user_id: int,
@@ -7178,7 +7226,7 @@ async def workspace_image_run(
     if provider != "topaz_photo" and not prompt:
         raise HTTPException(status_code=400, detail="Missing prompt")
 
-    supported = {"nano_banana", "nano_banana_2", "nano_banana_pro", "nano_banana_pro_new", "seedream", "posters", "photosession", "two_images", "text_to_image", "gpt_image_2", "gpt_image_2_kie", "topaz_photo", "midjourney"}
+    supported = {"nano_banana", "nano_banana_2_lite", "nano_banana_2", "nano_banana_pro", "nano_banana_pro_new", "seedream", "posters", "photosession", "two_images", "text_to_image", "gpt_image_2", "gpt_image_2_kie", "topaz_photo", "midjourney"}
     if provider not in supported:
         raise HTTPException(status_code=400, detail=f"Provider {provider} is not supported in /image/run")
 
@@ -7188,8 +7236,8 @@ async def workspace_image_run(
     source_upload = source_uploads_raw[0] if source_uploads_raw else None
     source_image: Optional[bytes] = None
 
-    if provider in {"nano_banana_pro_new", "gpt_image_2", "gpt_image_2_kie"}:
-        source_limit = 8 if provider == "nano_banana_pro_new" else (16 if provider == "gpt_image_2_kie" else 4)
+    if provider in {"nano_banana_2_lite", "nano_banana_pro_new", "gpt_image_2", "gpt_image_2_kie"}:
+        source_limit = 10 if provider == "nano_banana_2_lite" else (8 if provider == "nano_banana_pro_new" else (16 if provider == "gpt_image_2_kie" else 4))
         if provider == "gpt_image_2_kie" and len(source_uploads_raw) > source_limit:
             raise HTTPException(status_code=400, detail=f"Для Gpt Image 2 можно загрузить максимум {source_limit} reference images.")
         for index, upload in enumerate(source_uploads_raw[:source_limit], start=1):
@@ -7229,6 +7277,8 @@ async def workspace_image_run(
 
     if provider == "nano_banana" and not source_image:
         raise HTTPException(status_code=400, detail="Для Nano Banana нужен source image.")
+    if provider == "nano_banana_2_lite" and mode == "image_to_image" and not source_image_uploads:
+        raise HTTPException(status_code=400, detail="Для Nano Banana 2 Lite Image→Image нужен хотя бы 1 reference image.")
     if provider == "nano_banana_2" and mode == "image_to_image" and not source_image:
         raise HTTPException(status_code=400, detail="Для Nano Banana 2 Image→Image нужен source image.")
     if provider == "nano_banana_pro" and mode == "image_to_image" and not source_image:
@@ -7269,6 +7319,8 @@ async def workspace_image_run(
 
     if provider in {"nano_banana_2", "nano_banana_pro", "nano_banana_pro_new", "text_to_image", "seedream"} and mode in {"text_to_image", "t2i"} and aspect_ratio == "match_input_image":
         aspect_ratio = "9:16" if provider == "seedream" else "16:9"
+    if provider == "nano_banana_2_lite" and aspect_ratio == "match_input_image":
+        aspect_ratio = "auto"
     if provider == "gpt_image_2_kie":
         resolution, aspect_ratio = _workspace_gpt_image_2_kie_options(resolution, aspect_ratio)
 
@@ -7374,8 +7426,8 @@ async def workspace_image_run(
             charged = True
 
         source_image_urls = []
-        if provider in {"nano_banana_pro_new", "gpt_image_2", "gpt_image_2_kie"}:
-            source_limit = 8 if provider == "nano_banana_pro_new" else (16 if provider == "gpt_image_2_kie" else 4)
+        if provider in {"nano_banana_2_lite", "nano_banana_pro_new", "gpt_image_2", "gpt_image_2_kie"}:
+            source_limit = 10 if provider == "nano_banana_2_lite" else (8 if provider == "nano_banana_pro_new" else (16 if provider == "gpt_image_2_kie" else 4))
             for index, (_upload_obj, raw_bytes, upload_name) in enumerate(source_image_uploads[:source_limit], start=1):
                 source_image_urls.append(_upload_workspace_input_image(uid, raw_bytes, filename=upload_name, slot=f"workspace_image_source_{index}"))
         source_image_url = source_image_urls[0] if source_image_urls else (_upload_workspace_input_image(uid, source_image, filename=getattr(source_upload, "filename", None), slot="workspace_image_source") if source_image else None)
@@ -7419,7 +7471,7 @@ async def workspace_image_run(
                 "refund_reason": f"{reason}_refund" if reason else "workspace_image_refund",
                 "origin": "workspace_image",
             },
-            queue_name=WORKSPACE_IMAGE_QUEUE_NAME,
+            queue_name=(WORKSPACE_NB2LITE_QUEUE_NAME if provider == "nano_banana_2_lite" else WORKSPACE_IMAGE_QUEUE_NAME),
         )
 
         try:
