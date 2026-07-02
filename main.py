@@ -63,6 +63,7 @@ from free_plan_limits import (
 )
 from nano_banana import run_nano_banana
 from nano_banana_pro_new_kie import nano_banana_pro_new_cost
+from nano_banana_2_lite_kie import nano_banana_2_lite_cost, normalize_nano_banana_2_lite_aspect_ratio
 from gpt_image_2_kie import (
     KIE_GPT_IMAGE_2_MAX_INPUT_MB,
     KIE_GPT_IMAGE_2_MAX_INPUT_BYTES,
@@ -1103,7 +1104,7 @@ def _active_subscription_plan_code_for_user(user_id: int) -> str:
 
 def _nano_banana_basic_is_included_for_user(user_id: int, provider: str = "nano_banana", resolution: str = "2K") -> bool:
     provider_key = str(provider or "").strip().lower()
-    if provider_key != "nano_banana":
+    if provider_key not in {"nano_banana", "nano_banana_2_lite"}:
         return False
     if str(resolution or "2K").strip().upper() == "4K":
         return False
@@ -1532,6 +1533,7 @@ TOPAZ_PHOTO_QUEUE_NAME = os.getenv("TOPAZ_PHOTO_QUEUE_NAME", "topaz_photo").stri
 GPT_IMAGE2_QUEUE_NAME = os.getenv("GPT_IMAGE2_QUEUE_NAME", "gpt_image2").strip() or "gpt_image2"
 GPT_IMAGE2_GENERATION_COST = int(os.getenv("GPT_IMAGE2_GENERATION_COST", "1") or "1")
 WORKSPACE_IMAGE_QUEUE_NAME = (os.getenv("WORKSPACE_IMAGE_QUEUE_NAME", "workspace_image") or "workspace_image").strip() or "workspace_image"
+WORKSPACE_NB2LITE_QUEUE_NAME = (os.getenv("WORKSPACE_NB2LITE_QUEUE_NAME", "workspace_nb2lite") or "workspace_nb2lite").strip() or "workspace_nb2lite"
 MIDJOURNEY_TG_QUEUE_NAME = (os.getenv("MIDJOURNEY_TG_QUEUE_NAME", "telegram_midjourney") or "telegram_midjourney").strip() or "telegram_midjourney"
 SEEDREAM_T2I_QUEUE_NAME = os.getenv("SEEDREAM_T2I_QUEUE_NAME", "seedream_t2i").strip() or "seedream_t2i"
 TG_TTS_QUEUE_NAME = (os.getenv("TG_TTS_QUEUE_NAME", "workspace_tg_tts") or "workspace_tg_tts").strip() or "workspace_tg_tts"
@@ -1877,6 +1879,21 @@ def _nano_banana_2_aspect_inline_kb(current: str = "9:16") -> dict:
         text = f"✅ {value}" if value == current else value
         row.append({"text": text, "callback_data": f"nb2:aspect:{value}"})
     return {"inline_keyboard": [row]}
+
+
+def _nano_banana_2_lite_inline_kb(current: str = "auto", refs_count: int = 0) -> dict:
+    current = normalize_nano_banana_2_lite_aspect_ratio(current, default="auto")
+    values = ("auto", "1:1", "4:5", "9:16", "16:9", "21:9")
+    aspect_row = []
+    for value in values:
+        label = "Auto" if value == "auto" else value
+        text = f"✅ {label}" if value == current else label
+        aspect_row.append({"text": text, "callback_data": f"nb2l:aspect:{value}"})
+
+    action_row = [{"text": f"✅ Готово ({refs_count}/10)" if refs_count else "✅ Готово", "callback_data": "nb2l:done"}]
+    if refs_count:
+        action_row.append({"text": "🗑 Очистить фото", "callback_data": "nb2l:clear"})
+    return {"inline_keyboard": [aspect_row, action_row]}
 
 
 def _seedream_aspect_inline_kb(mode_key: str, current: str = "9:16") -> dict:
@@ -2978,6 +2995,15 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
             "aspect_ratio": "9:16",
         }
 
+    elif mode == "nano_banana_2_lite":
+        st["nano_banana_2_lite"] = {
+            "step": "need_photo",
+            "photo_bytes": None,
+            "photo_file_id": None,
+            "photo_file_ids": [],
+            "aspect_ratio": "auto",
+        }
+
     elif mode == "nano_banana_2":
         st["nano_banana_2"] = {
             "step": "need_photo",
@@ -3044,6 +3070,7 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
         st.pop("nano_banana", None)
         st.pop("nano_banana_pro", None)
         st.pop("nano_banana_pro_new", None)
+        st.pop("nano_banana_2_lite", None)
         st.pop("nano_banana_2", None)
         st.pop("topaz_photo", None)
         st.pop("topaz_video", None)
@@ -4088,8 +4115,9 @@ def _photo_future_menu_keyboard() -> dict:
     return {
         "keyboard": [
             [{"text": "Gpt Image 2"}, {"text": "Midjourney"}],
-            [{"text": "🍌 Nano Banana"}, {"text": "🍌 Nano Banana 2"}],
-            [{"text": "🍌 Nano Banana Pro - NEW"}, {"text": "Seedream"}],
+            [{"text": "🍌 Nano Banana 2 Lite"}, {"text": "🍌 Nano Banana 2"}],
+            [{"text": "🍌 Nano Banana"}, {"text": "🍌 Nano Banana Pro - NEW"}],
+            [{"text": "Seedream"}],
             [{"text": "Нейро фотосессии"}, {"text": "Апскейл"}],
             [{"text": "⬅️ Назад"}],
         ],
@@ -4222,7 +4250,7 @@ def _ai_chat_mode_inline_kb(fable_thinking: bool = False, *, selected_model: Any
     """
     rows = [
         [
-            {"text": "💬 Claude Sonnet", "callback_data": "aichat:model:claude"},
+            {"text": f"💬 {KIE_CLAUDE_DISPLAY_NAME}", "callback_data": "aichat:model:claude"},
             {"text": "💬 Claude Opus 4.7", "callback_data": "aichat:model:opus"},
         ],
         [
@@ -5167,7 +5195,7 @@ DEFAULT_TEXT_SYSTEM_PROMPT = (
 )
 
 CLAUDE_TEXT_SYSTEM_PROMPT = (
-    "Ты Claude Sonnet 4.6 внутри AstraBot. Отвечай на русском, кратко и по делу. "
+    "Ты Claude Sonnet 5 внутри AstraBot. Отвечай на русском, кратко и по делу. "
     "Рассуждение включено, но не раскрывай внутренние рассуждения — сразу давай готовый ответ. "
     "Интернет выключен. Если нужны актуальные данные, честно скажи, что без интернета их нельзя проверить. "
     "Файлы анализируй только по тексту, который передал backend. Не используй LaTeX/TeX."
@@ -7480,6 +7508,68 @@ async def process_telegram_update(update: Dict[str, Any]):
             )
             return {"ok": True}
 
+        if chat_id and user_id and data.startswith("nb2l:aspect:"):
+            aspect_ratio = normalize_nano_banana_2_lite_aspect_ratio(data.split(":", 2)[2].strip(), default="auto")
+            st = _ensure_state(chat_id, user_id)
+            nb2l = st.get("nano_banana_2_lite") or {
+                "step": "need_photo",
+                "photo_bytes": None,
+                "photo_file_id": None,
+                "photo_file_ids": [],
+                "aspect_ratio": "auto",
+            }
+            nb2l["aspect_ratio"] = aspect_ratio
+            st["nano_banana_2_lite"] = nb2l
+            st["ts"] = _now()
+            refs_count = len([x for x in (nb2l.get("photo_file_ids") or []) if str(x or "").strip()])
+            await tg_send_message(
+                chat_id,
+                f"✅ Формат Nano Banana 2 Lite: {aspect_ratio}\nФото: {refs_count}/10\nТеперь пришли фото или сразу напиши текст.\n{_nano_banana_basic_cost_hint_for_user(user_id, 'nano_banana_2_lite', '1K')}",
+                reply_markup=_nano_banana_2_lite_inline_kb(aspect_ratio, refs_count),
+            )
+            return {"ok": True}
+
+        if chat_id and user_id and data == "nb2l:done":
+            st = _ensure_state(chat_id, user_id)
+            nb2l = st.get("nano_banana_2_lite") or {}
+            refs = [x for x in (nb2l.get("photo_file_ids") or []) if str(x or "").strip()]
+            current_aspect = normalize_nano_banana_2_lite_aspect_ratio(nb2l.get("aspect_ratio") or "auto", default="auto")
+            if not refs:
+                await tg_send_message(
+                    chat_id,
+                    "Сначала пришли хотя бы одно фото или сразу текст для генерации без фото.",
+                    reply_markup=_nano_banana_2_lite_inline_kb(current_aspect, 0),
+                )
+                return {"ok": True}
+            nb2l["step"] = "need_prompt"
+            st["nano_banana_2_lite"] = nb2l
+            st["ts"] = _now()
+            await tg_send_message(
+                chat_id,
+                f"✅ Фото зафиксированы: {len(refs)}/10\nТеперь пришли prompt одним сообщением. {_nano_banana_basic_cost_hint_for_user(user_id, 'nano_banana_2_lite', '1K')}",
+                reply_markup=_nano_banana_2_lite_inline_kb(current_aspect, len(refs)),
+            )
+            return {"ok": True}
+
+        if chat_id and user_id and data == "nb2l:clear":
+            st = _ensure_state(chat_id, user_id)
+            nb2l = st.get("nano_banana_2_lite") or {}
+            current_aspect = normalize_nano_banana_2_lite_aspect_ratio(nb2l.get("aspect_ratio") or "auto", default="auto")
+            st["nano_banana_2_lite"] = {
+                "step": "need_photo",
+                "photo_bytes": None,
+                "photo_file_id": None,
+                "photo_file_ids": [],
+                "aspect_ratio": current_aspect,
+            }
+            st["ts"] = _now()
+            await tg_send_message(
+                chat_id,
+                "🗑 Фото очищены. Можешь прислать новые фото, до 10 штук, или сразу текст для генерации без фото.",
+                reply_markup=_nano_banana_2_lite_inline_kb(current_aspect, 0),
+            )
+            return {"ok": True}
+
         if chat_id and user_id and data.startswith("nb2:aspect:"):
             aspect_ratio = data.split(":", 2)[2].strip()
             if aspect_ratio not in ("1:1", "4:5", "9:16", "16:9"):
@@ -7740,7 +7830,7 @@ async def process_telegram_update(update: Dict[str, Any]):
                     st["ai_chat_mode"] = "menu"
                     msg = (
                         "✅ New Chat создан. История очищена.\n\n"
-                        "Выбери модель чата: Claude Sonnet, Claude Opus 4.7, Claude Fable 5 или ChatGPT."
+                        "Выбери модель чата: Claude Sonnet 5, Claude Opus 4.7, Claude Fable 5 или ChatGPT."
                     )
                 st["ts"] = _now()
                 await tg_send_message(chat_id, msg, reply_markup=_ai_chat_mode_inline_kb(_tg_fable_thinking_enabled(st), selected_model=model))
@@ -8274,7 +8364,7 @@ async def process_telegram_update(update: Dict[str, Any]):
         if st.get("ai_chat_mode") != "chat":
             await tg_send_message(
                 chat_id,
-                "Голосовое получил, но сначала выбери модель чата: Claude Sonnet, Claude Opus 4.7, Claude Fable 5 или ChatGPT.",
+                "Голосовое получил, но сначала выбери модель чата: Claude Sonnet 5, Claude Opus 4.7, Claude Fable 5 или ChatGPT.",
                 reply_markup=_ai_chat_mode_inline_kb(),
             )
             return {"ok": True}
@@ -8483,7 +8573,7 @@ async def process_telegram_update(update: Dict[str, Any]):
         if st.get("ai_chat_mode") != "chat":
             await tg_send_message(
                 chat_id,
-                "Файл получил, но сначала выбери модель чата: Claude Sonnet, Claude Opus 4.7, Claude Fable 5 или ChatGPT.",
+                "Файл получил, но сначала выбери модель чата: Claude Sonnet 5, Claude Opus 4.7, Claude Fable 5 или ChatGPT.",
                 reply_markup=_ai_chat_mode_inline_kb(),
             )
             return {"ok": True}
@@ -9993,7 +10083,7 @@ async def process_telegram_update(update: Dict[str, Any]):
     if st.get("mode") == "chat" and st.get("ai_chat_mode") == "menu" and incoming_text and not _is_nav_or_menu_text(incoming_text):
         await tg_send_message(
             chat_id,
-            "Сначала выбери модель чата: Claude Sonnet, Claude Opus 4.7, Claude Fable 5 или ChatGPT. Либо выбери 🪄 Промт.",
+            "Сначала выбери модель чата: Claude Sonnet 5, Claude Opus 4.7, Claude Fable 5 или ChatGPT. Либо выбери 🪄 Промт.",
             reply_markup=_ai_chat_mode_inline_kb(),
         )
         return {"ok": True}
@@ -11141,6 +11231,26 @@ async def process_telegram_update(update: Dict[str, Any]):
         )
         return {"ok": True}
         
+    if incoming_text in ("🍌 Nano Banana 2 Lite", "Nano Banana 2 Lite"):
+        _set_mode(chat_id, user_id, "nano_banana_2_lite")
+        await tg_send_message(
+            chat_id,
+            "🍌 Nano Banana 2 Lite — быстрый 1K режим через KIE.\n\n"
+            "Вариант A (фото→фото):\n"
+            "• Можно добавить до 10 фото-референсов.\n"
+            "• Когда закончил — нажми «Готово» или просто отправь prompt текстом.\n\n"
+            "Вариант B (текст→картинка):\n"
+            "• Просто пришли текст без фото — сгенерирую картинку.\n\n"
+            f"{_nano_banana_basic_cost_hint_for_user(user_id, 'nano_banana_2_lite', '1K')}",
+            reply_markup=_photo_future_menu_keyboard(),
+        )
+        await tg_send_message(
+            chat_id,
+            "Выбери формат Nano Banana 2 Lite:",
+            reply_markup=_nano_banana_2_lite_inline_kb("auto", 0),
+        )
+        return {"ok": True}
+
     if incoming_text in ("🍌 Nano Banana 2", "Nano Banana 2"):
         _set_mode(chat_id, user_id, "nano_banana_2")
         await tg_send_message(
@@ -11796,6 +11906,34 @@ async def process_telegram_update(update: Dict[str, Any]):
                     reply_markup=_photo_future_menu_keyboard(),
                 )
                 return {"ok": True}
+
+        # ---- NANO BANANA 2 LITE (KIE): ждём reference images ----
+        if st.get("mode") == "nano_banana_2_lite":
+            nb2l = st.get("nano_banana_2_lite") or {}
+            photo_ids = [str(item or "").strip() for item in (nb2l.get("photo_file_ids") or []) if str(item or "").strip()]
+            if len(photo_ids) >= 10:
+                current_aspect = normalize_nano_banana_2_lite_aspect_ratio(nb2l.get("aspect_ratio") or "auto", default="auto")
+                await tg_send_message(
+                    chat_id,
+                    "Уже загружено 10/10 фото. Нажми «Готово», очисти фото или сразу отправь prompt текстом.",
+                    reply_markup=_nano_banana_2_lite_inline_kb(current_aspect, len(photo_ids)),
+                )
+                return {"ok": True}
+
+            photo_ids.append(str(file_id))
+            nb2l["photo_bytes"] = img_bytes
+            nb2l["photo_file_id"] = str(file_id)
+            nb2l["photo_file_ids"] = photo_ids[:10]
+            nb2l["aspect_ratio"] = normalize_nano_banana_2_lite_aspect_ratio(nb2l.get("aspect_ratio") or "auto", default="auto")
+            nb2l["step"] = "collect_refs"
+            st["nano_banana_2_lite"] = nb2l
+            st["ts"] = _now()
+            await tg_send_message(
+                chat_id,
+                f"Фото #{len(photo_ids)} из 10 принял ✅\nФормат: {nb2l.get('aspect_ratio') or 'auto'}\n\nМожешь прислать ещё фото, нажать «Готово» или сразу отправить prompt текстом.\n{_nano_banana_basic_cost_hint_for_user(user_id, 'nano_banana_2_lite', '1K')}",
+                reply_markup=_nano_banana_2_lite_inline_kb(nb2l.get("aspect_ratio") or "auto", len(photo_ids)),
+            )
+            return {"ok": True}
 
         # ---- NANO BANANA PRO - NEW (KIE): ждём фото ----
         if st.get("mode") == "nano_banana_pro_new":
@@ -12487,7 +12625,7 @@ async def process_telegram_update(update: Dict[str, Any]):
             if st.get("ai_chat_mode") != "chat":
                 await tg_send_message(
                     chat_id,
-                    "Фото получил, но сначала выбери модель чата: Claude Sonnet, Claude Opus 4.7, Claude Fable 5 или ChatGPT.",
+                    "Фото получил, но сначала выбери модель чата: Claude Sonnet 5, Claude Opus 4.7, Claude Fable 5 или ChatGPT.",
                     reply_markup=_ai_chat_mode_inline_kb(),
                 )
                 return {"ok": True}
@@ -13051,7 +13189,7 @@ async def process_telegram_update(update: Dict[str, Any]):
                 )
                 return {"ok": True}
 
-        elif st.get("mode") in {"gpt_image_2_i2i", "gpt_image_2_kie_i2i", "nano_banana", "nano_banana_2", "nano_banana_pro", "nano_banana_pro_new", "topaz_photo", "kling_i2v", "two_photos", "photosession", "poster"}:
+        elif st.get("mode") in {"gpt_image_2_i2i", "gpt_image_2_kie_i2i", "nano_banana", "nano_banana_2_lite", "nano_banana_2", "nano_banana_pro", "nano_banana_pro_new", "topaz_photo", "kling_i2v", "two_photos", "photosession", "poster"}:
             if st.get("mode") == "gpt_image_2_kie_i2i":
                 await tg_send_message(chat_id, f"Это не похоже на подходящее изображение. Для Gpt Image 2 пришли JPG/PNG/WebP до {KIE_GPT_IMAGE_2_MAX_INPUT_MB} МБ.", reply_markup=_main_menu_for(user_id))
             else:
@@ -13108,6 +13246,34 @@ async def process_telegram_update(update: Dict[str, Any]):
                     reply_markup=_photo_future_menu_keyboard(),
                 )
                 return {"ok": True}
+
+        # ---- NANO BANANA 2 LITE (KIE): ждём reference images ----
+        if st.get("mode") == "nano_banana_2_lite":
+            nb2l = st.get("nano_banana_2_lite") or {}
+            photo_ids = [str(item or "").strip() for item in (nb2l.get("photo_file_ids") or []) if str(item or "").strip()]
+            if len(photo_ids) >= 10:
+                current_aspect = normalize_nano_banana_2_lite_aspect_ratio(nb2l.get("aspect_ratio") or "auto", default="auto")
+                await tg_send_message(
+                    chat_id,
+                    "Уже загружено 10/10 фото. Нажми «Готово», очисти фото или сразу отправь prompt текстом.",
+                    reply_markup=_nano_banana_2_lite_inline_kb(current_aspect, len(photo_ids)),
+                )
+                return {"ok": True}
+
+            photo_ids.append(str(file_id))
+            nb2l["photo_bytes"] = img_bytes
+            nb2l["photo_file_id"] = str(file_id)
+            nb2l["photo_file_ids"] = photo_ids[:10]
+            nb2l["aspect_ratio"] = normalize_nano_banana_2_lite_aspect_ratio(nb2l.get("aspect_ratio") or "auto", default="auto")
+            nb2l["step"] = "collect_refs"
+            st["nano_banana_2_lite"] = nb2l
+            st["ts"] = _now()
+            await tg_send_message(
+                chat_id,
+                f"Фото #{len(photo_ids)} из 10 принял ✅\nФормат: {nb2l.get('aspect_ratio') or 'auto'}\n\nМожешь прислать ещё фото, нажать «Готово» или сразу отправить prompt текстом.\n{_nano_banana_basic_cost_hint_for_user(user_id, 'nano_banana_2_lite', '1K')}",
+                reply_markup=_nano_banana_2_lite_inline_kb(nb2l.get("aspect_ratio") or "auto", len(photo_ids)),
+            )
+            return {"ok": True}
 
         # ---- NANO BANANA PRO - NEW (KIE): ждём фото ----
         if st.get("mode") == "nano_banana_pro_new":
@@ -13291,7 +13457,7 @@ async def process_telegram_update(update: Dict[str, Any]):
                 if st.get("ai_chat_mode") != "chat":
                     await tg_send_message(
                         chat_id,
-                        "Фото получил, но сначала выбери модель чата: Claude Sonnet, Claude Opus 4.7, Claude Fable 5 или ChatGPT.",
+                        "Фото получил, но сначала выбери модель чата: Claude Sonnet 5, Claude Opus 4.7, Claude Fable 5 или ChatGPT.",
                         reply_markup=_ai_chat_mode_inline_kb(),
                     )
                     return {"ok": True}
@@ -13348,7 +13514,7 @@ async def process_telegram_update(update: Dict[str, Any]):
             nav_text = (incoming_text or "").strip()
             if nav_text in ("⬅ Назад", "Назад") or nav_text.startswith("/"):
                 pass
-            elif nav_text in ("Фото будущего", "📸 Фото будущего", "Фото/Афиши", "Нейро фотосессии", "2 фото", "Картинка+Картинка", "Seedream", "Seedream 4.5", "Апскейл", "🍌 Nano Banana", "🍌 Nano Banana 2", "🍌 Nano Banana Pro", "🍌 Nano Banana Pro - NEW", "Текст→Картинка", "🖼 Апскейл фото", "🎬 Апскейл видео", "🧠 ИИ (чат)", "ИИ (чат)", "🧠 ИИ чат"):
+            elif nav_text in ("Фото будущего", "📸 Фото будущего", "Фото/Афиши", "Нейро фотосессии", "2 фото", "Картинка+Картинка", "Seedream", "Seedream 4.5", "Апскейл", "🍌 Nano Banana", "🍌 Nano Banana 2 Lite", "🍌 Nano Banana 2", "🍌 Nano Banana Pro", "🍌 Nano Banana Pro - NEW", "Текст→Картинка", "🖼 Апскейл фото", "🎬 Апскейл видео", "🧠 ИИ (чат)", "ИИ (чат)", "🧠 ИИ чат"):
                 pass
             else:
                 nb = st.get("nano_banana") or {}
@@ -13440,6 +13606,117 @@ async def process_telegram_update(update: Dict[str, Any]):
                 st["nano_banana"] = {"step": "need_photo", "photo_bytes": None, "photo_file_id": None}
                 st["ts"] = _now()
                 return {"ok": True}
+
+        # NANO BANANA 2 LITE (KIE): текст→картинка ИЛИ фото→фото, воркер AstraBot-SiteImage
+        if st.get("mode") == "nano_banana_2_lite":
+            nb2l = st.get("nano_banana_2_lite") or {}
+            step = (nb2l.get("step") or "need_photo")
+            nav_text = (incoming_text or "").strip()
+            aspect_ratio = normalize_nano_banana_2_lite_aspect_ratio(nb2l.get("aspect_ratio") or "auto", default="auto")
+            photo_ids = [str(item or "").strip() for item in (nb2l.get("photo_file_ids") or []) if str(item or "").strip()][:10]
+            if not photo_ids and str(nb2l.get("photo_file_id") or "").strip():
+                photo_ids = [str(nb2l.get("photo_file_id") or "").strip()]
+            has_refs = bool(photo_ids)
+
+            if step != "need_prompt" and not has_refs:
+                if (not nav_text) or _is_nav_or_menu_text(nav_text):
+                    await tg_send_message(
+                        chat_id,
+                        "🍌 Nano Banana 2 Lite:\n"
+                        "• Пришли фото (для редактирования)\n"
+                        "ИЛИ\n"
+                        "• Пришли текст (для генерации картинки без фото).\n\n"
+                        f"Формат: {aspect_ratio}\n{_nano_banana_basic_cost_hint_for_user(user_id, 'nano_banana_2_lite', '1K')}",
+                        reply_markup=_photo_future_menu_keyboard(),
+                    )
+                    return {"ok": True}
+
+            user_prompt = nav_text
+            if has_refs and not user_prompt:
+                await tg_send_message(
+                    chat_id,
+                    "Напиши prompt одним сообщением: что изменить, добавить, убрать или какой результат нужен.",
+                    reply_markup=_nano_banana_2_lite_inline_kb(aspect_ratio, len(photo_ids)),
+                )
+                return {"ok": True}
+
+            cost = nano_banana_2_lite_cost()
+            if _nano_banana_basic_is_included_for_user(user_id, "nano_banana_2_lite", "1K"):
+                cost = 0
+
+            ensure_user_row(user_id)
+            try:
+                bal = float(get_balance(user_id) or 0)
+            except Exception:
+                bal = 0
+
+            if cost > 0 and bal < cost:
+                await tg_send_message(
+                    chat_id,
+                    f"Недостаточно токенов 😕\nНужно: {cost} токен(а) для Nano Banana 2 Lite.",
+                    reply_markup=_topup_packs_kb(),
+                )
+                return {"ok": True}
+
+            charged = False
+            ref_id = uuid4().hex if cost > 0 else ""
+            job_id = uuid4().hex
+            try:
+                if cost > 0:
+                    try:
+                        add_tokens(user_id, -int(cost), reason="nano_banana_2_lite", ref_id=ref_id, meta={"origin": "telegram", "provider": "nano_banana_2_lite"})
+                    except TypeError:
+                        add_tokens(user_id, -int(cost), reason="nano_banana_2_lite")
+                    charged = True
+
+                await tg_send_message(
+                    chat_id,
+                    f"🍌 Nano Banana 2 Lite (1K) — запускаю…\nФормат: {aspect_ratio}",
+                    reply_markup=_photo_future_menu_keyboard(),
+                )
+
+                await enqueue_job({
+                    "job_id": job_id,
+                    "kind": "telegram_nano_banana_2_lite_run",
+                    "type": "nano_banana_2_lite",
+                    "chat_id": int(chat_id),
+                    "user_id": int(user_id),
+                    "prompt": user_prompt,
+                    "photo_file_id": str(photo_ids[0]) if photo_ids else "",
+                    "photo_file_ids": photo_ids[:10],
+                    "aspect_ratio": aspect_ratio,
+                    "charge_tokens": int(cost if charged else 0),
+                    "charge_ref_id": ref_id,
+                    "refund_reason": "nano_banana_2_lite_refund",
+                }, queue_name=WORKSPACE_NB2LITE_QUEUE_NAME)
+            except Exception as e:
+                if charged:
+                    try:
+                        try:
+                            add_tokens(user_id, int(cost), reason="nano_banana_2_lite_refund", ref_id=ref_id or uuid4().hex, meta={"stage": "queue_failed", "error": str(e)[:300]})
+                        except TypeError:
+                            add_tokens(user_id, int(cost), reason="nano_banana_2_lite_refund")
+                    except Exception:
+                        pass
+                try:
+                    await tg_send_message(
+                        chat_id,
+                        f"❌ Не удалось запустить Nano Banana 2 Lite: {e}" + ("\nТокены возвращены." if charged else ""),
+                        reply_markup=_photo_future_menu_keyboard(),
+                    )
+                except Exception:
+                    pass
+                return {"ok": True}
+
+            st["nano_banana_2_lite"] = {
+                "step": "need_photo",
+                "photo_bytes": None,
+                "photo_file_id": None,
+                "photo_file_ids": [],
+                "aspect_ratio": aspect_ratio,
+            }
+            st["ts"] = _now()
+            return {"ok": True}
 
         # NANO BANANA 2 (PiAPI): текст→картинка ИЛИ фото→фото
         if st.get("mode") == "nano_banana_2":
@@ -15168,7 +15445,7 @@ async def process_telegram_update(update: Dict[str, Any]):
             if st.get("ai_chat_mode") != "chat":
                 await tg_send_message(
                     chat_id,
-                    "Сначала выбери модель чата: Claude Sonnet, Claude Opus 4.7, Claude Fable 5 или ChatGPT. Либо выбери 🪄 Промт.",
+                    "Сначала выбери модель чата: Claude Sonnet 5, Claude Opus 4.7, Claude Fable 5 или ChatGPT. Либо выбери 🪄 Промт.",
                     reply_markup=_ai_chat_mode_inline_kb(),
                 )
                 return {"ok": True}
