@@ -1289,6 +1289,8 @@ def _admin_ai_label_from_free_event(row: Dict[str, Any]) -> str:
     service_low = service.lower()
     if "claude-opus-4-7" in joined or "opus 4.7" in joined or service_low == "claude opus 4.7":
         return "Claude Opus 4.7"
+    if "claude-sonnet-5" in joined or "sonnet 5" in joined or service_low == "claude sonnet 5":
+        return "Claude Sonnet 5"
     if "claude-sonnet-4-6" in joined or "sonnet 4.6" in joined or service_low == "claude sonnet 4.6":
         return "Claude Sonnet 4.6"
     if "claude" in joined:
