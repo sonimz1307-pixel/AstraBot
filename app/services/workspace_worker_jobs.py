@@ -9,6 +9,7 @@ import httpx
 
 from nano_banana_2_piapi import handle_nano_banana_2
 from nano_banana_pro_new_kie import handle_nano_banana_pro_new
+from nano_banana_2_lite_kie import handle_nano_banana_2_lite
 from gpt_image_2_kie import handle_gpt_image_2_kie
 from billing_db import add_tokens
 from free_plan_limits import FEATURE_TTS, release_free_usage
@@ -825,7 +826,7 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
     charge_ref_id = str(job.get("charge_ref_id") or "")
 
     source_image_urls = [str(item or "").strip() for item in (job.get("source_image_urls") or []) if str(item or "").strip()]
-    source_image = None if (provider in {"nano_banana_pro_new", "gpt_image_2", "gpt_image_2_kie"} and source_image_urls) else await _download_optional_bytes(job.get("source_image_url"))
+    source_image = None if (provider in {"nano_banana_2_lite", "nano_banana_pro_new", "gpt_image_2", "gpt_image_2_kie"} and source_image_urls) else await _download_optional_bytes(job.get("source_image_url"))
     base_image = await _download_optional_bytes(job.get("base_image_url"))
 
     ww._update_workspace_image_generation(
@@ -1021,6 +1022,16 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
                 resolution=resolution,
                 aspect_ratio=aspect_ratio,
                 safety_level=safety_level,
+            )
+        elif provider == "nano_banana_2_lite":
+            out_bytes, ext = await ww._workspace_run_nano_banana_2_lite_site(
+                user_id=user_id,
+                prompt=run_prompt,
+                source_image_bytes=source_image,
+                source_filename=job.get("source_filename"),
+                source_image_urls=source_image_urls,
+                aspect_ratio=aspect_ratio,
+                require_source_image=(mode == "image_to_image"),
             )
         elif provider == "nano_banana_pro_new":
             out_bytes, ext = await ww._workspace_run_nano_banana_pro_new_site(
