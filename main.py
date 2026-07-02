@@ -354,6 +354,7 @@ CHAT_WORKER_ENABLED = (os.getenv("CHAT_WORKER_ENABLED", "1") or "1").strip().low
 TG_CHAT_OPENAI_QUEUE_NAME = (os.getenv("TG_CHAT_OPENAI_QUEUE_NAME", "tg_chat_openai") or "tg_chat_openai").strip() or "tg_chat_openai"
 TG_CHAT_CLAUDE_QUEUE_NAME = (os.getenv("TG_CHAT_CLAUDE_QUEUE_NAME", "tg_chat_claude") or "tg_chat_claude").strip() or "tg_chat_claude"
 TG_CHAT_FABLE_QUEUE_NAME = (os.getenv("TG_CHAT_FABLE_QUEUE_NAME", "tg_chat_fable") or "tg_chat_fable").strip() or "tg_chat_fable"
+TG_STT_QUEUE_NAME = (os.getenv("TG_STT_QUEUE_NAME", "redactor_tg_stt") or "redactor_tg_stt").strip() or "redactor_tg_stt"
 
 BALANCE_BANNER_PATH = os.getenv("BALANCE_BANNER_PATH", "").strip()
 
@@ -5071,109 +5072,8 @@ async def tg_download_file_bytes(file_path: str) -> bytes:
     return r.content
 
 
-async def _ffmpeg_convert_audio_to_mp3(audio_bytes: bytes) -> bytes:
-    """Convert Telegram voice/video-note audio to a compact MP3 for OpenAI STT."""
-    if not audio_bytes:
-        raise RuntimeError("Пустой аудиофайл.")
-
-    proc = await asyncio.create_subprocess_exec(
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-i",
-        "pipe:0",
-        "-vn",
-        "-ac",
-        "1",
-        "-ar",
-        "16000",
-        "-b:a",
-        "48k",
-        "-f",
-        "mp3",
-        "pipe:1",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(audio_bytes), timeout=45)
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        raise RuntimeError("ffmpeg не успел подготовить голосовое сообщение.")
-
-    if proc.returncode != 0 or not stdout:
-        err = (stderr or b"").decode("utf-8", "ignore")[:700]
-        raise RuntimeError(f"ffmpeg не смог подготовить голосовое сообщение: {err or 'unknown error'}")
-    return stdout
-
-
-async def openai_transcribe_audio_bytes(
-    audio_bytes: bytes,
-    *,
-    filename: str = "voice.mp3",
-    mime_type: str = "audio/mpeg",
-) -> str:
-    """Speech-to-text for Telegram AI chat voice messages."""
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY не задан в переменных окружения.")
-    if not audio_bytes:
-        raise RuntimeError("Пустой аудиофайл.")
-
-    data = {
-        "model": OPENAI_TRANSCRIBE_MODEL,
-        "response_format": "json",
-    }
-    if AI_CHAT_VOICE_LANGUAGE:
-        data["language"] = AI_CHAT_VOICE_LANGUAGE
-
-    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
-    files = {"file": (filename, audio_bytes, mime_type)}
-
-    async with httpx.AsyncClient(timeout=120) as client:
-        r = await client.post(
-            "https://api.openai.com/v1/audio/transcriptions",
-            headers=headers,
-            data=data,
-            files=files,
-        )
-
-    if r.status_code >= 300:
-        raise RuntimeError(f"OpenAI STT error {r.status_code}: {r.text[:1200]}")
-
-    try:
-        payload = r.json()
-    except Exception:
-        payload = {}
-    text = str((payload or {}).get("text") or "").strip()
-    if not text:
-        raise RuntimeError("OpenAI STT вернул пустой текст.")
-    return text
-
-
-async def transcribe_tg_voice_to_text(file_id: str) -> str:
-    """Download Telegram voice by file_id, convert it, and return recognized text."""
-    file_path = await tg_get_file_path(file_id)
-    raw_audio = await tg_download_file_bytes(file_path)
-    if len(raw_audio) > AI_CHAT_VOICE_MAX_BYTES:
-        mb = max(1, AI_CHAT_VOICE_MAX_BYTES // (1024 * 1024))
-        raise RuntimeError(f"Голосовое слишком большое. Лимит: до {mb} МБ.")
-
-    try:
-        mp3_audio = await _ffmpeg_convert_audio_to_mp3(raw_audio)
-        return await openai_transcribe_audio_bytes(mp3_audio, filename="voice.mp3", mime_type="audio/mpeg")
-    except Exception as convert_error:
-        # Fallback: try original Telegram file. Useful if ffmpeg is temporarily unavailable.
-        try:
-            return await openai_transcribe_audio_bytes(raw_audio, filename="voice.ogg", mime_type="audio/ogg")
-        except Exception:
-            raise convert_error
-
-
+# STT / распознавание Telegram voice вынесено в worker_redactor.py.
+# main.py больше не скачивает голосовые, не запускает ffmpeg и не ждёт OpenAI STT.
 def tg_build_file_url(file_path: str) -> str:
     """Public URL for Telegram file (for services that can fetch by URL)."""
     return f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
@@ -8405,24 +8305,16 @@ async def process_telegram_update(update: Dict[str, Any]):
         except Exception:
             pass
 
-        try:
-            recognized_text = await transcribe_tg_voice_to_text(file_id)
-        except Exception as e:
-            await tg_send_message(
-                chat_id,
-                f"❌ Не смог распознать голосовое: {e}",
-                reply_markup=_main_menu_for(user_id),
-            )
-            return {"ok": True}
-
-        if not recognized_text:
-            await tg_send_message(chat_id, "❌ Не смог распознать текст в голосовом.", reply_markup=_main_menu_for(user_id))
-            return {"ok": True}
-
         model_key = _ai_chat_model_key(st)
+        is_fable = _is_fable_chat_model_key(model_key)
+        thinking = _tg_fable_thinking_enabled(st) if is_fable else True
         charge_ref_id = ""
         charge_tokens = 0
-        if _is_fable_chat_model_key(model_key):
+        free_chat_consumed = False
+
+        # Резервируем оплату/Free-лимит до постановки STT в очередь.
+        # Если STT или постановка chat-job упадёт, worker_redactor.py сделает refund/release.
+        if is_fable:
             charge_tokens = _tg_fable_chat_cost_tokens(st, has_files=False)
             charge_ref_id = await _tg_charge_fable_chat_or_notify(chat_id=chat_id, user_id=user_id, st=st, has_files=False)
             if not charge_ref_id:
@@ -8432,27 +8324,58 @@ async def process_telegram_update(update: Dict[str, Any]):
             if not await _tg_consume_free_chat_or_notify(chat_id, user_id):
                 st["ts"] = _now()
                 return {"ok": True}
+            free_chat_consumed = True
 
-        queued = await _enqueue_tg_ai_chat_job(
-            chat_id=chat_id,
-            user_id=user_id,
-            text=recognized_text,
-            model_key=model_key,
-            thinking=_tg_fable_thinking_enabled(st) if _is_fable_chat_model_key(model_key) else True,
-            charge_tokens=charge_tokens,
-            charge_ref_id=charge_ref_id,
-        )
-        if queued:
+        st["ts"] = _now()
+        try:
+            await enqueue_job(
+                {
+                    "job_id": f"tg_stt:{user_id}:{message_id or int(_now() * 1000)}:{uuid4().hex}",
+                    "kind": "tg_stt_voice",
+                    "chat_id": int(chat_id),
+                    "user_id": int(user_id),
+                    "file_id": file_id,
+                    "duration": int(duration or 0),
+                    "size_bytes": int(size_bytes or 0),
+                    "original_message_id": int(message_id or 0),
+                    "original_update_id": update.get("update_id"),
+                    "model_key": model_key,
+                    "model": _ai_chat_model_actual(model_key),
+                    "system_prompt": _ai_chat_system_prompt(model_key),
+                    "thinking": bool(thinking),
+                    "charge_tokens": int(charge_tokens or 0),
+                    "charge_ref_id": str(charge_ref_id or ""),
+                    "refund_reason": "claude_fable_chat_refund" if is_fable else "",
+                    "free_chat_consumed": bool(free_chat_consumed),
+                    "reply_markup": _ai_chat_mode_inline_kb(bool(thinking) if is_fable else False, selected_model=model_key),
+                    "received_ts": _now(),
+                    "source": "main.py:voice_chat",
+                },
+                queue_name=TG_STT_QUEUE_NAME,
+            )
+        except Exception as e:
+            if charge_ref_id:
+                try:
+                    add_tokens(user_id, int(charge_tokens), reason="claude_fable_chat_refund", ref_id=charge_ref_id, meta={"stage": "stt_enqueue_failed", "source": "telegram_voice", "error": str(e)[:300]})
+                except Exception:
+                    pass
+            elif free_chat_consumed:
+                try:
+                    release_free_usage(user_id, FEATURE_CHAT)
+                except Exception:
+                    pass
+            await tg_send_message(
+                chat_id,
+                f"❌ Не удалось поставить голосовое в очередь распознавания. Проверь REDIS_URL и worker_redactor.py.\n{e}",
+                reply_markup=_main_menu_for(user_id),
+            )
             return {"ok": True}
 
-        if charge_ref_id:
-            try:
-                add_tokens(user_id, int(charge_tokens), reason="claude_fable_chat_refund", ref_id=charge_ref_id, meta={"stage": "enqueue_failed", "source": "telegram"})
-            except Exception:
-                pass
-        else:
-            release_free_usage(user_id, FEATURE_CHAT)
-        await tg_send_message(chat_id, "❌ Не удалось поставить чат в очередь. Проверь REDIS_URL и worker_chat.py.", reply_markup=_main_menu_for(user_id))
+        await tg_send_message(
+            chat_id,
+            "🎙 Голосовое принято. Распознаю текст и передам его в ИИ-чат.",
+            reply_markup=_main_menu_for(user_id),
+        )
         return {"ok": True}
 
     # ---------------- Audio (message.audio) для Seedance Omni ----------------
