@@ -11,6 +11,7 @@ import httpx
 
 from billing_db import add_tokens
 from gpt_image_2_kie import handle_gpt_image_2_kie
+from nano_banana_2_lite_kie import handle_nano_banana_2_lite
 from kling_flow import upload_bytes_to_supabase
 from queue_redis import dequeue_job
 from app.services.legnext_midjourney import (
@@ -25,6 +26,10 @@ from app.services.workspace_worker_jobs import process_workspace_image_job
 WORKSPACE_IMAGE_QUEUE_NAME = (os.getenv("WORKSPACE_IMAGE_QUEUE_NAME", "workspace_image") or "workspace_image").strip() or "workspace_image"
 WORKSPACE_IMAGE_CONCURRENCY = int(os.getenv("WORKSPACE_IMAGE_CONCURRENCY", "3") or "3")
 image_sem = asyncio.Semaphore(WORKSPACE_IMAGE_CONCURRENCY)
+
+WORKSPACE_NB2LITE_QUEUE_NAME = (os.getenv("WORKSPACE_NB2LITE_QUEUE_NAME", "workspace_nb2lite") or "workspace_nb2lite").strip() or "workspace_nb2lite"
+WORKSPACE_NB2LITE_CONCURRENCY = int(os.getenv("WORKSPACE_NB2LITE_CONCURRENCY", "2") or "2")
+nb2lite_sem = asyncio.Semaphore(WORKSPACE_NB2LITE_CONCURRENCY)
 
 MIDJOURNEY_TG_QUEUE_NAME = (os.getenv("MIDJOURNEY_TG_QUEUE_NAME", "telegram_midjourney") or "telegram_midjourney").strip() or "telegram_midjourney"
 MIDJOURNEY_TG_CONCURRENCY = int(os.getenv("MIDJOURNEY_TG_CONCURRENCY", "1") or "1")
@@ -205,7 +210,13 @@ async def register_dl2k_slot(chat_id: int, user_id: int, image_bytes: bytes) -> 
 def _download_keyboard(token: Optional[str], resolution: str) -> Optional[dict]:
     if not token:
         return None
-    label = "⬇️ Скачать оригинал 4К" if str(resolution).upper() == "4K" else "⬇️ Скачать оригинал 2К"
+    res = str(resolution or "").strip().upper()
+    if res == "4K":
+        label = "⬇️ Скачать оригинал 4К"
+    elif res == "1K":
+        label = "⬇️ Скачать оригинал 1К"
+    else:
+        label = "⬇️ Скачать оригинал 2К"
     return {"inline_keyboard": [[{"text": label, "callback_data": f"dl2k:{token}"}]]}
 
 
@@ -217,6 +228,89 @@ async def _download_bytes(url: str, *, timeout: float = 180.0) -> bytes:
         r = await client.get(safe_url)
         r.raise_for_status()
         return r.content
+
+
+def _safe_public_provider_url(raw: Any) -> str:
+    value = str(raw or "").strip()
+    if not value:
+        return ""
+    if not (value.startswith("http://") or value.startswith("https://")):
+        return ""
+    # Never pass Telegram bot-file URLs to external providers: they contain TELEGRAM_BOT_TOKEN.
+    if "/file/bot" in value:
+        return ""
+    return value
+
+
+async def _telegram_file_path(file_id: str) -> str:
+    clean_file_id = str(file_id or "").strip()
+    if not clean_file_id:
+        raise RuntimeError("empty Telegram file_id")
+    if not TG_API or not TELEGRAM_BOT_TOKEN:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.get(f"{TG_API}/getFile", params={"file_id": clean_file_id})
+    try:
+        payload = r.json()
+    except Exception:
+        payload = {}
+    if r.status_code >= 400 or not (isinstance(payload, dict) and payload.get("ok")):
+        detail = payload.get("description") if isinstance(payload, dict) else None
+        detail = detail or (r.text[:300] if getattr(r, "text", None) else "") or f"HTTP {r.status_code}"
+        raise RuntimeError(f"Telegram getFile failed: {detail}")
+    file_path = str(((payload.get("result") or {}) if isinstance(payload, dict) else {}).get("file_path") or "").strip()
+    if not file_path:
+        raise RuntimeError("Telegram getFile returned empty file_path")
+    return file_path
+
+
+async def _download_telegram_file_bytes(file_id: str) -> bytes:
+    file_path = await _telegram_file_path(file_id)
+    # This tokenized URL is used only internally for download, never sent to KIE.
+    url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
+    return await _download_bytes(url, timeout=180.0)
+
+
+def _upload_nano_banana_2_lite_tg_ref(*, user_id: int, payload: bytes, idx: int) -> str:
+    if not payload:
+        raise RuntimeError("empty Nano Banana 2 Lite reference image")
+    ext = _detect_image_ext_from_bytes(payload, fallback="jpg")
+    if ext == "jpeg":
+        ext = "jpg"
+    path = f"workspace_refs/{int(user_id)}/nano_banana_2_lite/{int(time.time())}_{uuid4().hex[:12]}_ref_{idx}.{ext}"
+    return str(upload_bytes_to_supabase(path, payload, _image_mime_type(ext)) or "").strip()
+
+
+async def _prepare_nano_banana_2_lite_reference_urls(
+    *,
+    user_id: int,
+    photo_urls: List[str],
+    photo_file_ids: List[str],
+    max_refs: int = 10,
+) -> List[str]:
+    urls: List[str] = []
+    seen = set()
+
+    def _add_url(raw: Any) -> None:
+        value = _safe_public_provider_url(raw)
+        if not value or value in seen or len(urls) >= max_refs:
+            return
+        seen.add(value)
+        urls.append(value)
+
+    for raw in photo_urls or []:
+        _add_url(raw)
+
+    for idx, file_id in enumerate(photo_file_ids or [], start=1):
+        if len(urls) >= max_refs:
+            break
+        clean_file_id = str(file_id or "").strip()
+        if not clean_file_id:
+            continue
+        payload = await _download_telegram_file_bytes(clean_file_id)
+        _add_url(_upload_nano_banana_2_lite_tg_ref(user_id=user_id, payload=payload, idx=idx))
+
+    return urls[:max_refs]
 
 
 async def _wait_for_midjourney_job(job_id: str, *, poll_interval_sec: float = 3.0, timeout_sec: float = 900.0) -> Dict[str, Any]:
@@ -521,6 +615,105 @@ async def process_telegram_midjourney_job(job: Dict[str, Any]) -> None:
         await tg_send_message(chat_id, text)
 
 
+async def process_telegram_nano_banana_2_lite_job(job: Dict[str, Any]) -> None:
+    chat_id = int(job.get("chat_id") or 0)
+    user_id = int(job.get("user_id") or 0)
+    prompt = str(job.get("prompt") or "").strip()
+    aspect_ratio = str(job.get("aspect_ratio") or "auto").strip() or "auto"
+    photo_file_ids = [str(item or "").strip() for item in (job.get("photo_file_ids") or []) if str(item or "").strip()]
+    photo_urls = [str(item or "").strip() for item in (job.get("photo_urls") or []) if str(item or "").strip()]
+    charge_tokens = int(job.get("charge_tokens") or 0)
+    charge_ref_id = str(job.get("charge_ref_id") or "").strip() or None
+    refund_reason = str(job.get("refund_reason") or "nano_banana_2_lite_refund").strip() or "nano_banana_2_lite_refund"
+
+    status_msg_id = await tg_send_message(chat_id, f"⏳ Nano Banana 2 Lite: задача в обработке…\nКачество: 1K\nФормат: {aspect_ratio}")
+    stop = asyncio.Event()
+
+    async def _progress_loop() -> None:
+        if not status_msg_id:
+            return
+        seq = _parse_progress_seq()
+        i = 0
+        while not stop.is_set():
+            pct = seq[min(i, len(seq) - 1)]
+            i += 1
+            try:
+                await tg_edit_message_text(chat_id, status_msg_id, f"⏳ Nano Banana 2 Lite: обработка… {pct}%\nКачество: 1K\nФормат: {aspect_ratio}")
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=PROGRESS_STEP_SEC)
+            except asyncio.TimeoutError:
+                continue
+
+    progress_task = asyncio.create_task(_progress_loop())
+
+    try:
+        ref_urls = await _prepare_nano_banana_2_lite_reference_urls(
+            user_id=user_id,
+            photo_urls=photo_urls[:10],
+            photo_file_ids=photo_file_ids[:10],
+            max_refs=10,
+        )
+        out_bytes, ext = await handle_nano_banana_2_lite(
+            prompt,
+            source_image_urls=ref_urls,
+            aspect_ratio=aspect_ratio,
+            require_source_image=bool(photo_urls or photo_file_ids),
+        )
+        stop.set()
+        try:
+            await progress_task
+        except Exception:
+            pass
+        if status_msg_id:
+            try:
+                await tg_edit_message_text(chat_id, status_msg_id, "✅ Nano Banana 2 Lite: готово. Отправляю файл…")
+            except Exception:
+                pass
+
+        token = await register_dl2k_slot(chat_id, user_id, out_bytes)
+        reply_markup = _download_keyboard(token, "1K")
+        await tg_send_photo_bytes(
+            chat_id,
+            out_bytes,
+            caption="✅ Готово (Nano Banana 2 Lite • 1K)",
+            reply_markup=reply_markup,
+            filename=f"nano_banana_2_lite.{ext or 'jpg'}",
+            mime_type=_image_mime_type(ext or "jpg"),
+        )
+        if status_msg_id:
+            try:
+                await tg_edit_message_text(chat_id, status_msg_id, "✅ Nano Banana 2 Lite: готово")
+            except Exception:
+                pass
+        return
+    except Exception as exc:
+        err = str(exc)[:800]
+        print(f"[workspace_image] Nano Banana 2 Lite job failed job={job.get('job_id')}: {err}", flush=True)
+        stop.set()
+        try:
+            await progress_task
+        except Exception:
+            pass
+        refund_status = ""
+        if charge_tokens and charge_ref_id and user_id:
+            try:
+                add_tokens(user_id, int(charge_tokens), reason=refund_reason, ref_id=charge_ref_id, meta={"stage": "worker_failed", "provider": "nano_banana_2_lite", "error": err})
+                refund_status = "Токены возвращены."
+            except Exception as refund_exc:
+                print(f"[workspace_image] Nano Banana 2 Lite refund failed: {refund_exc}", flush=True)
+                refund_status = "Автовозврат токенов не удалось подтвердить. Если баланс не восстановится автоматически, напиши в поддержку."
+        text = f"❌ Nano Banana 2 Lite: ошибка генерации." + (f"\n{refund_status}" if refund_status else "") + f"\n{err}"
+        if status_msg_id:
+            try:
+                await tg_edit_message_text(chat_id, status_msg_id, text)
+                return
+            except Exception:
+                pass
+        await tg_send_message(chat_id, text)
+
+
 async def process_telegram_gpt_image_2_kie_job(job: Dict[str, Any]) -> None:
     chat_id = int(job.get("chat_id") or 0)
     user_id = int(job.get("user_id") or 0)
@@ -624,6 +817,10 @@ async def _process_workspace_image_queue_job(job: Dict[str, Any]) -> None:
         await process_workspace_image_job(job)
         print(f"[workspace_image] completed workspace image job={job.get('job_id')}", flush=True)
         return
+    if kind == "telegram_nano_banana_2_lite_run":
+        await process_telegram_nano_banana_2_lite_job(job)
+        print(f"[workspace_image] completed telegram Nano Banana 2 Lite job={job.get('job_id')}", flush=True)
+        return
     if kind == "telegram_gpt_image_2_kie_run":
         await process_telegram_gpt_image_2_kie_job(job)
         print(f"[workspace_image] completed telegram Gpt Image 2 job={job.get('job_id')}", flush=True)
@@ -700,15 +897,26 @@ async def _consume_queue(
 async def main() -> None:
     if MIDJOURNEY_TG_QUEUE_NAME == WORKSPACE_IMAGE_QUEUE_NAME:
         raise RuntimeError("MIDJOURNEY_TG_QUEUE_NAME must be different from WORKSPACE_IMAGE_QUEUE_NAME")
+    if WORKSPACE_NB2LITE_QUEUE_NAME == MIDJOURNEY_TG_QUEUE_NAME:
+        raise RuntimeError("WORKSPACE_NB2LITE_QUEUE_NAME must be different from MIDJOURNEY_TG_QUEUE_NAME")
+
+    same_image_queue = WORKSPACE_NB2LITE_QUEUE_NAME == WORKSPACE_IMAGE_QUEUE_NAME
+    if same_image_queue:
+        print(
+            "[workspace_image] WARNING: WORKSPACE_NB2LITE_QUEUE_NAME equals WORKSPACE_IMAGE_QUEUE_NAME; "
+            "Nano Banana 2 Lite will share the common image queue.",
+            flush=True,
+        )
 
     print(
         f"[workspace_image] worker started "
         f"workspace_queue={WORKSPACE_IMAGE_QUEUE_NAME} image_concurrency={WORKSPACE_IMAGE_CONCURRENCY} "
+        f"nb2lite_queue={WORKSPACE_NB2LITE_QUEUE_NAME} nb2lite_concurrency={WORKSPACE_NB2LITE_CONCURRENCY} "
         f"midjourney_queue={MIDJOURNEY_TG_QUEUE_NAME} midjourney_tg_concurrency={MIDJOURNEY_TG_CONCURRENCY}",
         flush=True,
     )
 
-    await asyncio.gather(
+    consumers = [
         _consume_queue(
             queue_name=WORKSPACE_IMAGE_QUEUE_NAME,
             sem=image_sem,
@@ -721,7 +929,18 @@ async def main() -> None:
             processor=_process_midjourney_tg_queue_job,
             queue_label="midjourney_tg",
         ),
-    )
+    ]
+    if not same_image_queue:
+        consumers.append(
+            _consume_queue(
+                queue_name=WORKSPACE_NB2LITE_QUEUE_NAME,
+                sem=nb2lite_sem,
+                processor=_process_workspace_image_queue_job,
+                queue_label="nb2lite",
+            )
+        )
+
+    await asyncio.gather(*consumers)
 
 
 if __name__ == "__main__":
