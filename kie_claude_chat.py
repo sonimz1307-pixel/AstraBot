@@ -2,7 +2,7 @@
 KIE Claude Sonnet chat helper for AstraBot.
 
 Default product mode:
-- Claude Sonnet 4.6 via KIE
+- Claude Sonnet 5 via KIE
 - no internet/web search
 - thinkingFlag enabled for normal answers
 - history is supplied by caller (recommended: last 10 messages + compact summary)
@@ -16,8 +16,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
-KIE_CLAUDE_MODEL_ID = (os.getenv("KIE_CLAUDE_MODEL", "claude-sonnet-4-6") or "claude-sonnet-4-6").strip()
-KIE_CLAUDE_DISPLAY_NAME = "Claude Sonnet 4.6"
+_KIE_CLAUDE_MODEL_RAW = (os.getenv("KIE_CLAUDE_MODEL", "claude-sonnet-5") or "claude-sonnet-5").strip()
+# Treat the old Sonnet env value as a legacy alias so existing Render envs
+# do not keep the deprecated default model alive after the code update.
+KIE_CLAUDE_MODEL_ID = "claude-sonnet-5" if _KIE_CLAUDE_MODEL_RAW.lower() == "claude-sonnet-4-6" else (_KIE_CLAUDE_MODEL_RAW or "claude-sonnet-5")
+KIE_CLAUDE_DISPLAY_NAME = "Claude Sonnet 5"
 KIE_CLAUDE_OPUS_MODEL_ID = (os.getenv("KIE_CLAUDE_OPUS_MODEL", "claude-opus-4-7") or "claude-opus-4-7").strip()
 KIE_CLAUDE_OPUS_DISPLAY_NAME = "Claude Opus 4.7"
 KIE_CLAUDE_FABLE_MODEL_ID = (os.getenv("KIE_CLAUDE_FABLE_MODEL", "claude-fable-5") or "claude-fable-5").strip()
@@ -64,6 +67,13 @@ def normalize_kie_claude_model(model: Any) -> str:
 
     sonnet_aliases = {
         KIE_CLAUDE_MODEL_ID.lower(),
+        "claude-sonnet-5",
+        "claude sonnet 5",
+        "claude_sonnet_5",
+        "claude_sonnet5",
+        "sonnet-5",
+        "sonnet 5",
+        "sonnet5",
         "claude-sonnet-4-6",
         "claude sonnet 4.6",
         "sonnet-4-6",
@@ -152,7 +162,12 @@ def kie_claude_display_name(model: Any) -> str:
     return cleaned[:1].upper() + cleaned[1:]
 
 def _api_key() -> str:
-    return (os.getenv("KIE_API_KEY") or os.getenv("KIE_AI_API_KEY") or "").strip()
+    return (
+        os.getenv("KIE_API_KEY")
+        or os.getenv("KIE_API_TOKEN")
+        or os.getenv("KIE_AI_API_KEY")
+        or ""
+    ).strip()
 
 
 def _clean_text(value: Any, limit: int = 12000) -> str:
@@ -273,8 +288,8 @@ async def kie_claude_answer(
     api_key = _api_key()
     if not api_key:
         if raise_on_error:
-            raise RuntimeError("KIE_API_KEY не задан в переменных окружения.")
-        return "KIE_API_KEY не задан в переменных окружения."
+            raise RuntimeError("KIE_API_KEY / KIE_API_TOKEN не задан в переменных окружения.")
+        return "KIE_API_KEY / KIE_API_TOKEN не задан в переменных окружения."
 
     resolved_model = normalize_kie_claude_model(model) or KIE_CLAUDE_MODEL_ID
     history_limit = kie_claude_history_messages_for_model(resolved_model)
