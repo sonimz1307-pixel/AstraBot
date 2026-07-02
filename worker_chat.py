@@ -79,7 +79,7 @@ TG_LONG_ANSWER_PREVIEW_CHARS = int(os.getenv("TG_LONG_ANSWER_PREVIEW_CHARS", "40
 TG_LONG_ANSWER_SIGNED_TTL_SEC = int(os.getenv("TG_LONG_ANSWER_SIGNED_TTL_SEC", str(7 * 24 * 3600)) or str(7 * 24 * 3600))
 
 DEFAULT_TG_SYSTEM_PROMPT = (
-    "Ты Claude Sonnet 4.6 внутри AstraBot. Отвечай на русском, кратко и по делу. "
+    "Ты Claude Sonnet 5 внутри AstraBot. Отвечай на русском, кратко и по делу. "
     "Рассуждение включено, но не раскрывай внутренние рассуждения — сразу давай готовый ответ. "
     "Интернет выключен. Если нужны актуальные данные, честно скажи, что без интернета их нельзя проверить. "
     "Файлы анализируй только по тексту, который передал backend. Не используй LaTeX/TeX."
