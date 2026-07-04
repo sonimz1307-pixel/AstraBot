@@ -8,7 +8,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -43,6 +43,7 @@ from queue_redis import dequeue_job, get_redis
 from app.services.partner_program import apply_topup_event, bind_referral
 from app.services.free_usage_events import log_free_usage_event_async
 from billing_db import add_tokens
+from db_supabase import supabase as sb
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}" if TELEGRAM_BOT_TOKEN else ""
@@ -55,6 +56,7 @@ WORKSPACE_CHAT_OPENAI_QUEUE_NAME = (os.getenv("WORKSPACE_CHAT_OPENAI_QUEUE_NAME"
 WORKSPACE_CHAT_CLAUDE_QUEUE_NAME = (os.getenv("WORKSPACE_CHAT_CLAUDE_QUEUE_NAME", "workspace_chat_claude") or "workspace_chat_claude").strip() or "workspace_chat_claude"
 WORKSPACE_CHAT_FABLE_QUEUE_NAME = (os.getenv("WORKSPACE_CHAT_FABLE_QUEUE_NAME", "workspace_chat_fable") or "workspace_chat_fable").strip() or "workspace_chat_fable"
 PARTNER_EVENTS_QUEUE_NAME = (os.getenv("PARTNER_EVENTS_QUEUE_NAME", "partner_events") or "partner_events").strip() or "partner_events"
+TG_BROADCAST_QUEUE_NAME = (os.getenv("TG_BROADCAST_QUEUE_NAME", "tg_broadcast") or "tg_broadcast").strip() or "tg_broadcast"
 ADMIN_IDS = set(
     int(x)
     for x in (os.getenv("ADMIN_IDS", "") or "").replace(";", ",").split(",")
@@ -67,6 +69,10 @@ TG_CHAT_FABLE_CONCURRENCY = int(os.getenv("TG_CHAT_FABLE_CONCURRENCY", "3") or "
 WORKSPACE_CHAT_OPENAI_CONCURRENCY = int(os.getenv("WORKSPACE_CHAT_OPENAI_CONCURRENCY", "3") or "3")
 WORKSPACE_CHAT_CLAUDE_CONCURRENCY = int(os.getenv("WORKSPACE_CHAT_CLAUDE_CONCURRENCY", "2") or "2")
 WORKSPACE_CHAT_FABLE_CONCURRENCY = int(os.getenv("WORKSPACE_CHAT_FABLE_CONCURRENCY", "3") or "3")
+TG_BROADCAST_CONCURRENCY = int(os.getenv("TG_BROADCAST_CONCURRENCY", "1") or "1")
+TG_BROADCAST_BATCH_SIZE = int(os.getenv("TG_BROADCAST_BATCH_SIZE", "1000") or "1000")
+TG_BROADCAST_DELAY_SEC = float(os.getenv("TG_BROADCAST_DELAY_SEC", "0.05") or "0.05")
+TG_BROADCAST_PROGRESS_EVERY = int(os.getenv("TG_BROADCAST_PROGRESS_EVERY", "500") or "500")
 
 AI_CHAT_FILE_MAX_BYTES = int(os.getenv("AI_CHAT_FILE_MAX_BYTES", str(10 * 1024 * 1024)) or str(10 * 1024 * 1024))
 AI_CHAT_FILE_TEXT_MAX_CHARS = int(os.getenv("AI_CHAT_FILE_TEXT_MAX_CHARS", "50000") or "50000")
@@ -91,6 +97,7 @@ sem_tg_fable = asyncio.Semaphore(max(1, TG_CHAT_FABLE_CONCURRENCY))
 sem_workspace_openai = asyncio.Semaphore(max(1, WORKSPACE_CHAT_OPENAI_CONCURRENCY))
 sem_workspace_claude = asyncio.Semaphore(max(1, WORKSPACE_CHAT_CLAUDE_CONCURRENCY))
 sem_workspace_fable = asyncio.Semaphore(max(1, WORKSPACE_CHAT_FABLE_CONCURRENCY))
+sem_tg_broadcast = asyncio.Semaphore(max(1, TG_BROADCAST_CONCURRENCY))
 
 
 def _job_kind(job: Dict[str, Any]) -> str:
@@ -112,6 +119,8 @@ def _job_model_key(job: Dict[str, Any]) -> str:
 def _sem_for_job(job: Dict[str, Any]) -> asyncio.Semaphore:
     kind = _job_kind(job)
     model_key = _job_model_key(job)
+    if kind == "tg_broadcast":
+        return sem_tg_broadcast
     if kind == "tg_ai_chat":
         if model_key == "openai":
             return sem_tg_openai
@@ -639,6 +648,192 @@ async def process_workspace_ai_chat_job(job: Dict[str, Any]) -> None:
         print(f"[chat_worker] failed workspace job={job_id}: {exc}", flush=True)
 
 
+
+def _split_tg_text(text: str, limit: int = 4096) -> List[str]:
+    """Split a Telegram text message into safe chunks without changing content."""
+    raw = str(text or "")
+    if not raw:
+        return []
+    safe_limit = max(1000, min(int(limit or 4096), 4096))
+    if len(raw) <= safe_limit:
+        return [raw]
+
+    chunks: List[str] = []
+    rest = raw
+    while rest:
+        if len(rest) <= safe_limit:
+            chunks.append(rest)
+            break
+
+        cut = rest.rfind("\n", 0, safe_limit)
+        if cut < int(safe_limit * 0.6):
+            cut = rest.rfind(" ", 0, safe_limit)
+        if cut < int(safe_limit * 0.6):
+            cut = safe_limit
+
+        chunks.append(rest[:cut].rstrip())
+        rest = rest[cut:].lstrip()
+    return [chunk for chunk in chunks if chunk]
+
+
+def _fetch_broadcast_user_ids_sync() -> List[int]:
+    """Read unique Telegram user ids from Supabase bot_users."""
+    if sb is None:
+        raise RuntimeError("Supabase не настроен (sb=None)")
+
+    page_size = max(100, int(TG_BROADCAST_BATCH_SIZE or 1000))
+    start = 0
+    user_ids: List[int] = []
+    seen: set[int] = set()
+
+    while True:
+        resp = (
+            sb.table("bot_users")
+            .select("telegram_user_id")
+            .range(start, start + page_size - 1)
+            .execute()
+        )
+        rows = getattr(resp, "data", None) or []
+        if not rows:
+            break
+
+        for row in rows:
+            try:
+                raw_uid = row.get("telegram_user_id") if isinstance(row, dict) else None
+                if raw_uid is None:
+                    continue
+                uid = int(raw_uid)
+                if uid <= 0 or uid in seen:
+                    continue
+                seen.add(uid)
+                user_ids.append(uid)
+            except Exception:
+                continue
+
+        if len(rows) < page_size:
+            break
+        start += page_size
+
+    return user_ids
+
+
+async def _send_broadcast_message_to_user(client: httpx.AsyncClient, chat_id: int, text: str) -> Tuple[bool, str]:
+    """Send broadcast text to one Telegram chat and return (ok, error)."""
+    if not TG_API:
+        return False, "TELEGRAM_BOT_TOKEN is not set"
+
+    chunks = _split_tg_text(text)
+    if not chunks:
+        return False, "empty text"
+
+    for chunk_index, chunk in enumerate(chunks, start=1):
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                response = await client.post(
+                    f"{TG_API}/sendMessage",
+                    json={"chat_id": int(chat_id), "text": chunk},
+                )
+                data = response.json() if response.content else {}
+            except Exception as exc:
+                if attempts < 3:
+                    await asyncio.sleep(1.0 * attempts)
+                    continue
+                return False, f"request failed on part {chunk_index}: {exc}"
+
+            if isinstance(data, dict) and data.get("ok"):
+                break
+
+            error_code = int(data.get("error_code") or response.status_code or 0) if isinstance(data, dict) else response.status_code
+            description = str(data.get("description") or response.text or "unknown error") if isinstance(data, dict) else str(response.text or "unknown error")
+            retry_after = 0
+            if isinstance(data, dict):
+                params = data.get("parameters") if isinstance(data.get("parameters"), dict) else {}
+                try:
+                    retry_after = int(params.get("retry_after") or 0)
+                except Exception:
+                    retry_after = 0
+
+            if error_code == 429 and retry_after > 0 and attempts < 4:
+                await asyncio.sleep(float(retry_after) + 0.5)
+                continue
+
+            if attempts < 2 and error_code >= 500:
+                await asyncio.sleep(1.0)
+                continue
+
+            return False, f"telegram error {error_code}: {description}"
+
+    return True, ""
+
+
+async def process_tg_broadcast_job(job: Dict[str, Any]) -> None:
+    job_id = str(job.get("job_id") or "")
+    admin_chat_id = int(job.get("admin_chat_id") or job.get("chat_id") or 0)
+    text = str(job.get("text") or "").strip()
+
+    if admin_chat_id <= 0:
+        print(f"[tg_broadcast] skipped job={job_id}: admin_chat_id is empty", flush=True)
+        return
+    if not text:
+        await tg_send_message(admin_chat_id, "❌ Рассылка не запущена: пустой текст.")
+        return
+
+    await tg_send_message(admin_chat_id, "⏳ Начал рассылку...")
+
+    try:
+        user_ids = await asyncio.to_thread(_fetch_broadcast_user_ids_sync)
+    except Exception as exc:
+        await tg_send_message(admin_chat_id, f"❌ Не смог получить список пользователей для рассылки: {exc}")
+        print(f"[tg_broadcast] failed to fetch users job={job_id}: {exc}", flush=True)
+        return
+
+    total = len(user_ids)
+    if total <= 0:
+        await tg_send_message(admin_chat_id, "⚠️ Пользователей для рассылки нет (bot_users пуст).")
+        return
+
+    sent = 0
+    failed = 0
+    error_examples: List[str] = []
+    started_ts = time.time()
+
+    timeout = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=30.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        for idx, uid in enumerate(user_ids, start=1):
+            ok, err = await _send_broadcast_message_to_user(client, uid, text)
+            if ok:
+                sent += 1
+            else:
+                failed += 1
+                if len(error_examples) < 5:
+                    error_examples.append(f"{uid}: {err}")
+
+            if TG_BROADCAST_PROGRESS_EVERY > 0 and idx < total and idx % TG_BROADCAST_PROGRESS_EVERY == 0:
+                await tg_send_message(
+                    admin_chat_id,
+                    f"📣 Рассылка в процессе: {idx}/{total}\n✅ Отправлено: {sent}\n❌ Ошибок: {failed}",
+                )
+
+            if TG_BROADCAST_DELAY_SEC > 0:
+                await asyncio.sleep(TG_BROADCAST_DELAY_SEC)
+
+    elapsed = max(0, int(time.time() - started_ts))
+    report = (
+        "📣 Рассылка завершена.\n"
+        f"👥 Всего пользователей: {total}\n"
+        f"✅ Отправлено: {sent}\n"
+        f"❌ Ошибок: {failed}\n"
+        f"⏱ Время: {elapsed} сек."
+    )
+    if error_examples:
+        report += "\n\nПервые ошибки:\n" + "\n".join(error_examples)
+
+    await tg_send_message(admin_chat_id, report)
+    print(f"[tg_broadcast] completed job={job_id} total={total} sent={sent} failed={failed}", flush=True)
+
+
 async def _notify_admins(text: str) -> None:
     if not ADMIN_IDS:
         return
@@ -712,6 +907,9 @@ async def _handle(job: Dict[str, Any]) -> None:
         if kind == "workspace_ai_chat":
             await process_workspace_ai_chat_job(job)
             return
+        if kind == "tg_broadcast":
+            await process_tg_broadcast_job(job)
+            return
         if kind in {"partner_topup", "partner_bind_referral", "partner_payout_created"}:
             await process_partner_event(job)
             return
@@ -754,11 +952,13 @@ async def main() -> None:
         TG_CHAT_FABLE_QUEUE_NAME,
         WORKSPACE_CHAT_FABLE_QUEUE_NAME,
         PARTNER_EVENTS_QUEUE_NAME,
+        TG_BROADCAST_QUEUE_NAME,
     ])
     print(
         "[chat_worker] started "
         f"queues={queues} tg_openai={TG_CHAT_OPENAI_CONCURRENCY} tg_claude={TG_CHAT_CLAUDE_CONCURRENCY} tg_fable={TG_CHAT_FABLE_CONCURRENCY} "
-        f"workspace_openai={WORKSPACE_CHAT_OPENAI_CONCURRENCY} workspace_claude={WORKSPACE_CHAT_CLAUDE_CONCURRENCY} workspace_fable={WORKSPACE_CHAT_FABLE_CONCURRENCY}",
+        f"workspace_openai={WORKSPACE_CHAT_OPENAI_CONCURRENCY} workspace_claude={WORKSPACE_CHAT_CLAUDE_CONCURRENCY} workspace_fable={WORKSPACE_CHAT_FABLE_CONCURRENCY} "
+        f"tg_broadcast={TG_BROADCAST_CONCURRENCY}",
         flush=True,
     )
     await asyncio.gather(*(_queue_loop(queue_name) for queue_name in queues))
