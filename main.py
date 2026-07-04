@@ -223,6 +223,7 @@ def _env_non_negative_int(name: str, default: int) -> int:
 VEO_RELAX_NEXUS_DELAY_SEC = _env_non_negative_int("VEO_RELAX_NEXUS_DELAY_SEC", 1500)
 WORKSPACE_GROK15_QUEUE_NAME = (os.getenv("WORKSPACE_GROK15_QUEUE_NAME", "workspace_grok15") or "workspace_grok15").strip() or "workspace_grok15"
 PARTNER_EVENTS_QUEUE_NAME = (os.getenv("PARTNER_EVENTS_QUEUE_NAME", "partner_events") or "partner_events").strip() or "partner_events"
+TG_BROADCAST_QUEUE_NAME = (os.getenv("TG_BROADCAST_QUEUE_NAME", "tg_broadcast") or "tg_broadcast").strip() or "tg_broadcast"
 
 
 def _extract_partner_ref_from_start(text: str) -> str:
@@ -350,6 +351,26 @@ async def _enqueue_partner_topup_event(
             print(f"[partner] failed to enqueue topup event: {exc}", flush=True)
         except Exception:
             pass
+
+
+async def _enqueue_tg_broadcast_job(*, admin_chat_id: int, admin_user_id: int, text: str) -> str:
+    """Queue Telegram mass broadcast for worker_chat.py."""
+    clean_text = str(text or "").strip()
+    if not clean_text:
+        raise RuntimeError("empty broadcast text")
+
+    job_id = f"tg_broadcast_{uuid4().hex}"
+    await enqueue_job(
+        {
+            "job_id": job_id,
+            "kind": "tg_broadcast",
+            "admin_chat_id": int(admin_chat_id),
+            "admin_user_id": int(admin_user_id),
+            "text": clean_text,
+        },
+        queue_name=TG_BROADCAST_QUEUE_NAME,
+    )
+    return job_id
 
 CHAT_WORKER_ENABLED = (os.getenv("CHAT_WORKER_ENABLED", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
 TG_CHAT_OPENAI_QUEUE_NAME = (os.getenv("TG_CHAT_OPENAI_QUEUE_NAME", "tg_chat_openai") or "tg_chat_openai").strip() or "tg_chat_openai"
@@ -9806,13 +9827,25 @@ async def process_telegram_update(update: Dict[str, Any]):
         st["mode"] = ""
         st["ts"] = _now()
 
-        await tg_send_message(chat_id, "⏳ Начал рассылку...", reply_markup=_main_menu_for(user_id))
+        try:
+            job_id = await _enqueue_tg_broadcast_job(
+                admin_chat_id=chat_id,
+                admin_user_id=user_id,
+                text=text_to_send,
+            )
+        except Exception as e:
+            await tg_send_message(
+                chat_id,
+                f"❌ Не смог поставить рассылку в очередь: {e}",
+                reply_markup=_main_menu_for(user_id),
+            )
+            return {"ok": True}
 
-        async def _run_broadcast():
-            ok, fail = await _admin_broadcast_send(chat_id, text_to_send)
-            await tg_send_message(chat_id, f"📣 Рассылка завершена.\n✅ Отправлено: {ok}\n❌ Ошибок: {fail}", reply_markup=_main_menu_for(user_id))
-
-        asyncio.create_task(_run_broadcast())
+        await tg_send_message(
+            chat_id,
+            f"✅ Рассылка поставлена в очередь.\nID: {job_id}\n\nВоркер пришлёт сообщение о старте и отчёт после завершения.",
+            reply_markup=_main_menu_for(user_id),
+        )
         return {"ok": True}
     
     # ---- SUNO Music: ждём текст (описание или лирику) ----
