@@ -11,6 +11,7 @@ from nano_banana_2_piapi import handle_nano_banana_2
 from nano_banana_pro_new_kie import handle_nano_banana_pro_new
 from nano_banana_2_lite_kie import handle_nano_banana_2_lite
 from gpt_image_2_kie import handle_gpt_image_2_kie
+from seedream_5_pro_kie import handle_seedream_5_pro_kie
 from billing_db import add_tokens
 from free_plan_limits import FEATURE_TTS, release_free_usage
 from grok_video_replicate import (
@@ -826,7 +827,7 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
     charge_ref_id = str(job.get("charge_ref_id") or "")
 
     source_image_urls = [str(item or "").strip() for item in (job.get("source_image_urls") or []) if str(item or "").strip()]
-    source_image = None if (provider in {"nano_banana_2_lite", "nano_banana_pro_new", "gpt_image_2", "gpt_image_2_kie"} and source_image_urls) else await _download_optional_bytes(job.get("source_image_url"))
+    source_image = None if (provider in {"nano_banana_2_lite", "nano_banana_pro_new", "gpt_image_2", "gpt_image_2_kie", "seedream_5_pro"} and source_image_urls) else await _download_optional_bytes(job.get("source_image_url"))
     base_image = await _download_optional_bytes(job.get("base_image_url"))
 
     ww._update_workspace_image_generation(
@@ -983,6 +984,17 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
                 run_prompt,
                 mode=gpt_mode,
                 source_image_urls=source_image_urls[:16],
+                resolution=resolution,
+                aspect_ratio=aspect_ratio,
+            )
+        elif provider == "seedream_5_pro":
+            seedream_mode = str(job.get("mode") or "text_to_image").strip().lower()
+            if seedream_mode == "image_to_image" and not source_image_urls:
+                raise RuntimeError("Seedream 5.0 Pro Image→Image requires source image")
+            out_bytes, ext = await handle_seedream_5_pro_kie(
+                run_prompt,
+                mode=seedream_mode,
+                source_image_urls=source_image_urls[:10],
                 resolution=resolution,
                 aspect_ratio=aspect_ratio,
             )
