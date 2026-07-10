@@ -73,6 +73,15 @@ from gpt_image_2_kie import (
     normalize_gpt_image_2_kie_options,
     validate_gpt_image_2_kie_reference_bytes,
 )
+from seedream_5_pro_kie import (
+    KIE_SEEDREAM_5_PRO_MAX_INPUT_MB,
+    KIE_SEEDREAM_5_PRO_MAX_INPUT_BYTES,
+    seedream_5_pro_kie_cost,
+    normalize_seedream_5_pro_resolution,
+    normalize_seedream_5_pro_aspect_ratio,
+    normalize_seedream_5_pro_options,
+    validate_seedream_5_pro_reference_bytes,
+)
 from topaz_pricing import (
     get_photo_preset_tokens,
     get_photo_preset_settings,
@@ -1169,6 +1178,10 @@ def _gpt_image_2_kie_user_cost(user_id: int, resolution: str = "2K") -> int:
     return int(gpt_image_2_kie_cost(resolution))
 
 
+def _seedream_5_pro_user_cost(user_id: int, resolution: str = "2K") -> int:
+    return int(seedream_5_pro_kie_cost(resolution))
+
+
 def _veo31_fast_relax_is_included_for_user(user_id: int) -> bool:
     return _active_subscription_plan_code_for_user(int(user_id or 0)) in VEO31_FAST_RELAX_INCLUDED_PLAN_CODES
 
@@ -1555,6 +1568,7 @@ GPT_IMAGE2_QUEUE_NAME = os.getenv("GPT_IMAGE2_QUEUE_NAME", "gpt_image2").strip()
 GPT_IMAGE2_GENERATION_COST = int(os.getenv("GPT_IMAGE2_GENERATION_COST", "1") or "1")
 WORKSPACE_IMAGE_QUEUE_NAME = (os.getenv("WORKSPACE_IMAGE_QUEUE_NAME", "workspace_image") or "workspace_image").strip() or "workspace_image"
 WORKSPACE_NB2LITE_QUEUE_NAME = (os.getenv("WORKSPACE_NB2LITE_QUEUE_NAME", "workspace_nb2lite") or "workspace_nb2lite").strip() or "workspace_nb2lite"
+WORKSPACE_SEEDREAM5_QUEUE_NAME = (os.getenv("WORKSPACE_SEEDREAM5_QUEUE_NAME", "workspace_seedream5") or "workspace_seedream5").strip() or "workspace_seedream5"
 MIDJOURNEY_TG_QUEUE_NAME = (os.getenv("MIDJOURNEY_TG_QUEUE_NAME", "telegram_midjourney") or "telegram_midjourney").strip() or "telegram_midjourney"
 SEEDREAM_T2I_QUEUE_NAME = os.getenv("SEEDREAM_T2I_QUEUE_NAME", "seedream_t2i").strip() or "seedream_t2i"
 TG_TTS_QUEUE_NAME = (os.getenv("TG_TTS_QUEUE_NAME", "workspace_tg_tts") or "workspace_tg_tts").strip() or "workspace_tg_tts"
@@ -2005,6 +2019,41 @@ def _gpt_image_2_kie_inline_kb(mode_key: str, current_aspect: str = "16:9", curr
         action_row = [{"text": f"✅ Готово ({refs_count}/16)" if refs_count else "✅ Готово", "callback_data": "gi2k:done"}]
         if refs_count:
             action_row.append({"text": "🗑 Очистить фото", "callback_data": "gi2k:clear"})
+        rows.append(action_row)
+    return {"inline_keyboard": rows}
+
+
+def _seedream_5_pro_resolution(value: str = "2K") -> str:
+    return normalize_seedream_5_pro_resolution(value, default="2K")
+
+
+def _seedream_5_pro_aspect(value: str = "16:9") -> str:
+    return normalize_seedream_5_pro_aspect_ratio(value, default="16:9")
+
+
+def _seedream_5_pro_options(current_resolution: str = "2K", current_aspect: str = "16:9") -> tuple[str, str]:
+    return normalize_seedream_5_pro_options(current_resolution, current_aspect, default_resolution="2K", default_aspect="16:9")
+
+
+def _seedream_5_pro_inline_kb(mode_key: str, current_aspect: str = "16:9", current_resolution: str = "2K", refs_count: int = 0) -> dict:
+    current_resolution, current_aspect = _seedream_5_pro_options(current_resolution, current_aspect)
+    rows = []
+    res_row = []
+    for value in ("1K", "2K"):
+        label = f"{value} • 1 ток."
+        res_row.append({"text": f"✅ {label}" if value == current_resolution else label, "callback_data": f"sd5p:{mode_key}:res:{value}"})
+    rows.append(res_row)
+    aspect_values = ("1:1", "4:3", "3:4", "16:9", "9:16", "2:3", "3:2")
+    aspect_row = []
+    for index, value in enumerate(aspect_values):
+        aspect_row.append({"text": f"✅ {value}" if value == current_aspect else value, "callback_data": f"sd5p:{mode_key}:aspect:{value}"})
+        if len(aspect_row) == 4 or index == len(aspect_values) - 1:
+            rows.append(aspect_row)
+            aspect_row = []
+    if mode_key == "i2i":
+        action_row = [{"text": f"✅ Готово ({refs_count}/10)" if refs_count else "✅ Готово", "callback_data": "sd5p:done"}]
+        if refs_count:
+            action_row.append({"text": "🗑 Очистить фото", "callback_data": "sd5p:clear"})
         rows.append(action_row)
     return {"inline_keyboard": rows}
 
@@ -2978,6 +3027,12 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
     elif mode == "gpt_image_2_kie_i2i":
         st["gpt_image_2_kie_i2i"] = {"step": "need_image", "photo_file_id": None, "photo_file_ids": [], "photo_urls": [], "aspect_ratio": "16:9", "resolution": "2K"}
 
+    elif mode == "seedream_5_pro_t2i":
+        st["seedream_5_pro_t2i"] = {"step": "need_prompt", "aspect_ratio": "16:9", "resolution": "2K"}
+
+    elif mode == "seedream_5_pro_i2i":
+        st["seedream_5_pro_i2i"] = {"step": "need_image", "photo_file_id": None, "photo_file_ids": [], "photo_urls": [], "aspect_ratio": "16:9", "resolution": "2K"}
+
     elif mode == "midjourney":
         st["midjourney"] = _midjourney_default_state("midjourney-v7")
 
@@ -3086,6 +3141,8 @@ def _set_mode(chat_id: int, user_id: int, mode: str):
         st.pop("gpt_image_2_i2i", None)
         st.pop("gpt_image_2_kie_t2i", None)
         st.pop("gpt_image_2_kie_i2i", None)
+        st.pop("seedream_5_pro_t2i", None)
+        st.pop("seedream_5_pro_i2i", None)
         st.pop("midjourney", None)
         st.pop("two_photos", None)
         st.pop("nano_banana", None)
@@ -4177,9 +4234,23 @@ def _photo_gpt_image_2_kie_menu_keyboard() -> dict:
 def _photo_seedream_menu_keyboard() -> dict:
     return {
         "keyboard": [
+            [{"text": "Seedream 5.0 Pro"}],
             [{"text": "Seedream 4.5"}],
             [{"text": "Текст→Картинка"}],
             [{"text": "Картинка+Картинка"}],
+            [{"text": "⬅️ Назад"}],
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+        "selective": False,
+    }
+
+
+def _photo_seedream_5_pro_menu_keyboard() -> dict:
+    return {
+        "keyboard": [
+            [{"text": "Текст→Картинка"}],
+            [{"text": "Картинка→Картинка"}],
             [{"text": "⬅️ Назад"}],
         ],
         "resize_keyboard": True,
@@ -7614,6 +7685,94 @@ async def process_telegram_update(update: Dict[str, Any]):
             )
             return {"ok": True}
 
+        if chat_id and user_id and data.startswith("sd5p:"):
+            parts = data.split(":")
+            st = _ensure_state(chat_id, user_id)
+
+            if data == "sd5p:done":
+                sd5p = st.get("seedream_5_pro_i2i") or {}
+                refs = [x for x in (sd5p.get("photo_file_ids") or []) if str(x or "").strip()]
+                current_resolution = _seedream_5_pro_resolution(sd5p.get("resolution") or "2K")
+                current_aspect = _seedream_5_pro_aspect(sd5p.get("aspect_ratio") or "16:9")
+                if not refs:
+                    await tg_send_message(
+                        chat_id,
+                        "Сначала пришли хотя бы одно фото.",
+                        reply_markup=_seedream_5_pro_inline_kb("i2i", current_aspect, current_resolution, 0),
+                    )
+                    return {"ok": True}
+                sd5p["step"] = "need_prompt"
+                st["seedream_5_pro_i2i"] = sd5p
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    f"✅ Фото зафиксированы: {len(refs)}/10\nТеперь пришли prompt одним сообщением. Цена: {_seedream_5_pro_user_cost(user_id, current_resolution)} ток.",
+                    reply_markup=_seedream_5_pro_inline_kb("i2i", current_aspect, current_resolution, len(refs)),
+                )
+                return {"ok": True}
+
+            if data == "sd5p:clear":
+                sd5p = st.get("seedream_5_pro_i2i") or {}
+                current_resolution = _seedream_5_pro_resolution(sd5p.get("resolution") or "2K")
+                current_aspect = _seedream_5_pro_aspect(sd5p.get("aspect_ratio") or "16:9")
+                st["seedream_5_pro_i2i"] = {
+                    "step": "need_image",
+                    "photo_file_id": None,
+                    "photo_file_ids": [],
+                    "photo_urls": [],
+                    "resolution": current_resolution,
+                    "aspect_ratio": current_aspect,
+                }
+                st["ts"] = _now()
+                await tg_send_message(
+                    chat_id,
+                    "🗑 Фото очищены. Можешь прислать новые фото до 10 штук или выбрать Text→Image.",
+                    reply_markup=_seedream_5_pro_inline_kb("i2i", current_aspect, current_resolution, 0),
+                )
+                return {"ok": True}
+
+            mode_key = parts[1].strip() if len(parts) > 1 else ""
+            action = parts[2].strip() if len(parts) > 2 else ""
+            value = ":".join(parts[3:]).strip() if len(parts) > 3 else ""
+            if mode_key not in ("t2i", "i2i") or action not in ("res", "aspect"):
+                return {"ok": True}
+
+            state_key = "seedream_5_pro_t2i" if mode_key == "t2i" else "seedream_5_pro_i2i"
+            mode_name = "seedream_5_pro_t2i" if mode_key == "t2i" else "seedream_5_pro_i2i"
+            st["mode"] = mode_name
+            sd5p = st.get(state_key) or {
+                "step": "need_prompt" if mode_key == "t2i" else "need_image",
+                "photo_file_id": None,
+                "photo_file_ids": [],
+                "photo_urls": [],
+                "resolution": "2K",
+                "aspect_ratio": "16:9",
+            }
+            if action == "res":
+                sd5p["resolution"] = _seedream_5_pro_resolution(value)
+            else:
+                sd5p["aspect_ratio"] = _seedream_5_pro_aspect(value)
+            current_resolution, current_aspect = _seedream_5_pro_options(sd5p.get("resolution") or "2K", sd5p.get("aspect_ratio") or "16:9")
+            sd5p["resolution"] = current_resolution
+            sd5p["aspect_ratio"] = current_aspect
+            st[state_key] = sd5p
+            st["ts"] = _now()
+            refs_count = len([x for x in (sd5p.get("photo_file_ids") or []) if str(x or "").strip()])
+            if mode_key == "t2i":
+                await tg_send_message(
+                    chat_id,
+                    f"✅ Seedream 5.0 Pro: {current_resolution} • {_seedream_5_pro_user_cost(user_id, current_resolution)} ток.\nФормат: {current_aspect}\nТеперь пришли текст для генерации.",
+                    reply_markup=_seedream_5_pro_inline_kb("t2i", current_aspect, current_resolution, 0),
+                )
+                return {"ok": True}
+
+            await tg_send_message(
+                chat_id,
+                f"✅ Seedream 5.0 Pro: {current_resolution} • {_seedream_5_pro_user_cost(user_id, current_resolution)} ток.\nФормат: {current_aspect}\nФото: {refs_count}/10\nТеперь пришли фото или prompt, если фото уже загружены.",
+                reply_markup=_seedream_5_pro_inline_kb("i2i", current_aspect, current_resolution, refs_count),
+            )
+            return {"ok": True}
+
         if chat_id and user_id and data.startswith("gi2k:"):
             parts = data.split(":")
             st = _ensure_state(chat_id, user_id)
@@ -9736,6 +9895,11 @@ async def process_telegram_update(update: Dict[str, Any]):
 
     if incoming_text == "⬅️ Назад":
         submenu = str(st.get("photo_submenu") or "").strip().lower()
+        if submenu == "seedream_5_pro":
+            st["photo_submenu"] = "seedream"
+            st["ts"] = _now()
+            await tg_send_message(chat_id, "✨ Seedream — выбери модель/режим:", reply_markup=_photo_seedream_menu_keyboard())
+            return {"ok": True}
         if submenu in ("seedream", "upscale", "gpt_image_2", "gpt_image_2_kie"):
             st.pop("photo_submenu", None)
             st["ts"] = _now()
@@ -10076,8 +10240,18 @@ async def process_telegram_update(update: Dict[str, Any]):
         st["ts"] = _now()
         await tg_send_message(
             chat_id,
-            "✨ Seedream — выбери режим:\n• Seedream 4.5 = 1 фото + чистый промпт\n• Текст→Картинка\n• Картинка+Картинка",
+            "✨ Seedream — выбери модель/режим:\n• Seedream 5.0 Pro — Text→Image и Image→Image\n• Seedream 4.5 — старые режимы",
             reply_markup=_photo_seedream_menu_keyboard(),
+        )
+        return {"ok": True}
+
+    if incoming_text == "Seedream 5.0 Pro":
+        st["photo_submenu"] = "seedream_5_pro"
+        st["ts"] = _now()
+        await tg_send_message(
+            chat_id,
+            "✨ Seedream 5.0 Pro — 1K и 2K по 1 токену.\n• Текст→Картинка\n• Картинка→Картинка (до 10 reference images)",
+            reply_markup=_photo_seedream_5_pro_menu_keyboard(),
         )
         return {"ok": True}
 
@@ -11486,6 +11660,12 @@ async def process_telegram_update(update: Dict[str, Any]):
         return {"ok": True}
 
     if incoming_text == "Текст→Картинка":
+        if str(st.get("photo_submenu") or "").strip().lower() == "seedream_5_pro":
+            _set_mode(chat_id, user_id, "seedream_5_pro_t2i")
+            st.pop("photo_submenu", None)
+            await tg_send_message(chat_id, "Seedream 5.0 Pro • режим «Текст→Картинка».\nВыбери качество/формат и пришли prompt одним сообщением.", reply_markup=_photo_future_menu_keyboard())
+            await tg_send_message(chat_id, "Выбери качество и формат Seedream 5.0 Pro:", reply_markup=_seedream_5_pro_inline_kb("t2i", "16:9", "2K", 0))
+            return {"ok": True}
         if str(st.get("photo_submenu") or "").strip().lower() in {"gpt_image_2_kie", "gpt_image_2"}:
             _set_mode(chat_id, user_id, "gpt_image_2_kie_t2i")
             st.pop("photo_submenu", None)
@@ -11523,6 +11703,12 @@ async def process_telegram_update(update: Dict[str, Any]):
         return {"ok": True}
 
     if incoming_text == "Картинка→Картинка":
+        if str(st.get("photo_submenu") or "").strip().lower() == "seedream_5_pro":
+            _set_mode(chat_id, user_id, "seedream_5_pro_i2i")
+            st.pop("photo_submenu", None)
+            await tg_send_message(chat_id, "Seedream 5.0 Pro • режим «Картинка→Картинка».\n1) Пришли от 1 до 10 фото.\n2) Можно отправить несколько сообщений.\n3) Затем напиши prompt.", reply_markup=_photo_future_menu_keyboard())
+            await tg_send_message(chat_id, "Выбери качество и формат Seedream 5.0 Pro:", reply_markup=_seedream_5_pro_inline_kb("i2i", "16:9", "2K", 0))
+            return {"ok": True}
         if str(st.get("photo_submenu") or "").strip().lower() in {"gpt_image_2_kie", "gpt_image_2"}:
             _set_mode(chat_id, user_id, "gpt_image_2_kie_i2i")
             st.pop("photo_submenu", None)
@@ -11634,6 +11820,61 @@ async def process_telegram_update(update: Dict[str, Any]):
                 await tg_send_message(chat_id, _midjourney_settings_text(mj, user_id=user_id), reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
                 return {"ok": True}
             await tg_send_message(chat_id, "Фото получил, но сейчас Midjourney ждёт prompt или выбор reference-кнопки.", reply_markup=_midjourney_settings_kb(mj, user_id=user_id))
+            return {"ok": True}
+
+        if st.get("mode") == "seedream_5_pro_i2i":
+            sd5p = st.get("seedream_5_pro_i2i") or {}
+            photo_ids = [str(item or "").strip() for item in (sd5p.get("photo_file_ids") or []) if str(item or "").strip()]
+            photo_urls = [str(item or "").strip() for item in (sd5p.get("photo_urls") or []) if str(item or "").strip()]
+            if len(photo_ids) >= 10:
+                await tg_send_message(
+                    chat_id,
+                    "У Seedream 5.0 Pro можно использовать максимум 10 reference images. Уже набрано 10/10 ✅ Теперь просто напиши prompt.",
+                    reply_markup=_seedream_5_pro_inline_kb("i2i", str(sd5p.get("aspect_ratio") or "16:9"), str(sd5p.get("resolution") or "2K"), 10),
+                )
+                return {"ok": True}
+
+            try:
+                ext, mime = validate_seedream_5_pro_reference_bytes(
+                    img_bytes,
+                    filename=f"telegram_photo_{len(photo_ids) + 1}.jpg",
+                    content_type="image/jpeg",
+                    source_label="reference image",
+                )
+            except Exception as e:
+                await tg_send_message(chat_id, f"❌ {e}", reply_markup=_seedream_5_pro_inline_kb("i2i", str(sd5p.get("aspect_ratio") or "16:9"), str(sd5p.get("resolution") or "2K"), len(photo_ids)))
+                return {"ok": True}
+
+            photo_ids.append(str(file_id))
+            try:
+                input_path = f"seedream_5_pro_inputs/{int(user_id)}/{int(time.time())}_{uuid4().hex[:10]}_{len(photo_ids)}.{ext}"
+                uploaded_url = upload_bytes_to_supabase(input_path, img_bytes, mime)
+                if uploaded_url:
+                    photo_urls.append(str(uploaded_url).strip())
+            except Exception as e:
+                logging.exception("Seedream 5.0 Pro input upload failed")
+                await tg_send_message(chat_id, f"❌ Не удалось загрузить reference image для Seedream 5.0 Pro: {e}", reply_markup=_seedream_5_pro_inline_kb("i2i", str(sd5p.get("aspect_ratio") or "16:9"), str(sd5p.get("resolution") or "2K"), len(photo_ids)))
+                return {"ok": True}
+
+            sd5p["photo_file_ids"] = photo_ids[:10]
+            sd5p["photo_urls"] = photo_urls[:10]
+            sd5p["photo_file_id"] = str(photo_ids[0]) if photo_ids else None
+            sd5p["resolution"], sd5p["aspect_ratio"] = _seedream_5_pro_options(sd5p.get("resolution") or "2K", sd5p.get("aspect_ratio") or "16:9")
+            sd5p["step"] = "need_prompt"
+            st["seedream_5_pro_i2i"] = sd5p
+            st["ts"] = _now()
+            count_refs = len(sd5p.get("photo_file_ids") or [])
+            current_aspect = str(sd5p.get("aspect_ratio") or "16:9")
+            current_resolution = str(sd5p.get("resolution") or "2K")
+            if count_refs >= 10:
+                msg = f"Фото принято 10/10 ✅\nSeedream 5.0 Pro: {current_resolution} • {_seedream_5_pro_user_cost(user_id, current_resolution)} ток.\nФормат: {current_aspect}\nТеперь напиши prompt одним сообщением."
+            else:
+                msg = f"Фото принято {count_refs}/10 ✅\nSeedream 5.0 Pro: {current_resolution} • {_seedream_5_pro_user_cost(user_id, current_resolution)} ток.\nФормат: {current_aspect}\nМожешь отправить ещё фото или сразу написать prompt."
+            await tg_send_message(
+                chat_id,
+                msg,
+                reply_markup=_seedream_5_pro_inline_kb("i2i", current_aspect, current_resolution, count_refs),
+            )
             return {"ok": True}
 
         if st.get("mode") == "gpt_image_2_kie_i2i":
@@ -13117,6 +13358,62 @@ async def process_telegram_update(update: Dict[str, Any]):
                 return {"ok": True}
 
             # ---- Gpt Image 2: accept provider-safe reference image documents ----
+            if st.get("mode") == "seedream_5_pro_i2i":
+                sd5p = st.get("seedream_5_pro_i2i") or {}
+                photo_ids = [str(item or "").strip() for item in (sd5p.get("photo_file_ids") or []) if str(item or "").strip()]
+                photo_urls = [str(item or "").strip() for item in (sd5p.get("photo_urls") or []) if str(item or "").strip()]
+                if len(photo_ids) >= 10:
+                    await tg_send_message(
+                        chat_id,
+                        "У Seedream 5.0 Pro можно использовать максимум 10 reference images. Уже набрано 10/10 ✅ Теперь просто напиши prompt.",
+                        reply_markup=_seedream_5_pro_inline_kb("i2i", str(sd5p.get("aspect_ratio") or "16:9"), str(sd5p.get("resolution") or "2K"), 10),
+                    )
+                    return {"ok": True}
+
+                try:
+                    safe_ext, detected_mime = validate_seedream_5_pro_reference_bytes(
+                        img_bytes,
+                        filename=filename,
+                        content_type=mime,
+                        source_label="reference image",
+                    )
+                except Exception as e:
+                    await tg_send_message(chat_id, f"❌ {e}", reply_markup=_seedream_5_pro_inline_kb("i2i", str(sd5p.get("aspect_ratio") or "16:9"), str(sd5p.get("resolution") or "2K"), len(photo_ids)))
+                    return {"ok": True}
+
+                photo_ids.append(str(file_id))
+                try:
+                    input_path = f"seedream_5_pro_inputs/{int(user_id)}/{int(time.time())}_{uuid4().hex[:10]}_{len(photo_ids)}.{safe_ext}"
+                    uploaded_url = upload_bytes_to_supabase(input_path, img_bytes, detected_mime)
+                    if uploaded_url:
+                        photo_urls.append(str(uploaded_url).strip())
+                except Exception as e:
+                    logging.exception("Seedream 5.0 Pro document input upload failed")
+                    await tg_send_message(chat_id, f"❌ Не удалось загрузить reference image для Seedream 5.0 Pro: {e}", reply_markup=_seedream_5_pro_inline_kb("i2i", str(sd5p.get("aspect_ratio") or "16:9"), str(sd5p.get("resolution") or "2K"), len(photo_ids)))
+                    return {"ok": True}
+
+                sd5p["photo_file_ids"] = photo_ids[:10]
+                sd5p["photo_urls"] = photo_urls[:10]
+                sd5p["photo_file_id"] = str(photo_ids[0]) if photo_ids else None
+                sd5p["aspect_ratio"] = _seedream_5_pro_aspect(sd5p.get("aspect_ratio") or "16:9")
+                sd5p["resolution"] = _seedream_5_pro_resolution(sd5p.get("resolution") or "2K")
+                sd5p["step"] = "need_prompt"
+                st["seedream_5_pro_i2i"] = sd5p
+                st["ts"] = _now()
+                count_refs = len(sd5p.get("photo_file_ids") or [])
+                current_aspect = str(sd5p.get("aspect_ratio") or "16:9")
+                current_resolution = str(sd5p.get("resolution") or "2K")
+                if count_refs >= 10:
+                    msg = f"Файл-фото принято 10/10 ✅\nSeedream 5.0 Pro: {current_resolution} • {_seedream_5_pro_user_cost(user_id, current_resolution)} ток.\nФормат: {current_aspect}\nТеперь напиши prompt одним сообщением."
+                else:
+                    msg = f"Файл-фото принято {count_refs}/10 ✅\nSeedream 5.0 Pro: {current_resolution} • {_seedream_5_pro_user_cost(user_id, current_resolution)} ток.\nФормат: {current_aspect}\nМожешь отправить ещё фото или сразу написать prompt."
+                await tg_send_message(
+                    chat_id,
+                    msg,
+                    reply_markup=_seedream_5_pro_inline_kb("i2i", current_aspect, current_resolution, count_refs),
+                )
+                return {"ok": True}
+
             if st.get("mode") == "gpt_image_2_kie_i2i":
                 gi2k = st.get("gpt_image_2_kie_i2i") or {}
                 photo_ids = [str(item or "").strip() for item in (gi2k.get("photo_file_ids") or []) if str(item or "").strip()]
@@ -13222,9 +13519,11 @@ async def process_telegram_update(update: Dict[str, Any]):
                 )
                 return {"ok": True}
 
-        elif st.get("mode") in {"gpt_image_2_i2i", "gpt_image_2_kie_i2i", "nano_banana", "nano_banana_2_lite", "nano_banana_2", "nano_banana_pro", "nano_banana_pro_new", "topaz_photo", "kling_i2v", "two_photos", "photosession", "poster"}:
+        elif st.get("mode") in {"gpt_image_2_i2i", "gpt_image_2_kie_i2i", "seedream_5_pro_i2i", "nano_banana", "nano_banana_2_lite", "nano_banana_2", "nano_banana_pro", "nano_banana_pro_new", "topaz_photo", "kling_i2v", "two_photos", "photosession", "poster"}:
             if st.get("mode") == "gpt_image_2_kie_i2i":
                 await tg_send_message(chat_id, f"Это не похоже на подходящее изображение. Для Gpt Image 2 пришли JPG/PNG/WebP до {KIE_GPT_IMAGE_2_MAX_INPUT_MB} МБ.", reply_markup=_main_menu_for(user_id))
+            elif st.get("mode") == "seedream_5_pro_i2i":
+                await tg_send_message(chat_id, f"Это не похоже на подходящее изображение. Для Seedream 5.0 Pro пришли JPG/PNG/WebP до {KIE_SEEDREAM_5_PRO_MAX_INPUT_MB} МБ.", reply_markup=_main_menu_for(user_id))
             else:
                 await tg_send_message(chat_id, "Это не похоже на изображение. Пришли JPG/PNG/WebP/HEIC/HEIF как фото или файл.", reply_markup=_main_menu_for(user_id))
             return {"ok": True}
@@ -13547,7 +13846,7 @@ async def process_telegram_update(update: Dict[str, Any]):
             nav_text = (incoming_text or "").strip()
             if nav_text in ("⬅ Назад", "Назад") or nav_text.startswith("/"):
                 pass
-            elif nav_text in ("Фото будущего", "📸 Фото будущего", "Фото/Афиши", "Нейро фотосессии", "2 фото", "Картинка+Картинка", "Seedream", "Seedream 4.5", "Апскейл", "🍌 Nano Banana", "🍌 Nano Banana 2 Lite", "🍌 Nano Banana 2", "🍌 Nano Banana Pro", "🍌 Nano Banana Pro - NEW", "Текст→Картинка", "🖼 Апскейл фото", "🎬 Апскейл видео", "🧠 ИИ (чат)", "ИИ (чат)", "🧠 ИИ чат"):
+            elif nav_text in ("Фото будущего", "📸 Фото будущего", "Фото/Афиши", "Нейро фотосессии", "2 фото", "Картинка+Картинка", "Seedream", "Seedream 5.0 Pro", "Seedream 4.5", "Апскейл", "🍌 Nano Banana", "🍌 Nano Banana 2 Lite", "🍌 Nano Banana 2", "🍌 Nano Banana Pro", "🍌 Nano Banana Pro - NEW", "Текст→Картинка", "🖼 Апскейл фото", "🎬 Апскейл видео", "🧠 ИИ (чат)", "ИИ (чат)", "🧠 ИИ чат"):
                 pass
             else:
                 nb = st.get("nano_banana") or {}
@@ -14796,6 +15095,163 @@ async def process_telegram_update(update: Dict[str, Any]):
             }
             st.pop("gpt_image_2_i2i", None)
             st["ts"] = _now()
+
+        # Seedream 5.0 Pro: text-to-image through workspace image worker
+        if st.get("mode") == "seedream_5_pro_t2i":
+            sd5p = st.get("seedream_5_pro_t2i") or {}
+            if (sd5p.get("step") or "need_prompt") != "need_prompt":
+                sd5p["step"] = "need_prompt"
+
+            user_prompt = incoming_text.strip()
+            if not user_prompt:
+                await tg_send_message(chat_id, "Напиши описание для генерации.", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            resolution, aspect_ratio = _seedream_5_pro_options(sd5p.get("resolution") or "2K", sd5p.get("aspect_ratio") or "16:9")
+            cost_tokens = _seedream_5_pro_user_cost(user_id, resolution)
+            try:
+                ensure_user_row(user_id)
+                bal = int(get_balance(user_id) or 0)
+            except Exception:
+                bal = 0
+            if bal < cost_tokens:
+                await tg_send_message(
+                    chat_id,
+                    f"❌ Недостаточно токенов для Seedream 5.0 Pro. Нужно: {cost_tokens}, баланс: {bal}",
+                    reply_markup=_topup_packs_kb(),
+                )
+                return {"ok": True}
+
+            charge_ref_id = uuid4().hex if cost_tokens > 0 else ""
+            charged = False
+            try:
+                if cost_tokens > 0:
+                    add_tokens(
+                        user_id,
+                        -cost_tokens,
+                        reason="seedream_5_pro",
+                        ref_id=charge_ref_id,
+                        meta={"mode": "text_to_image", "provider": "seedream_5_pro", "resolution": resolution, "aspect_ratio": aspect_ratio, "cost_tokens": cost_tokens},
+                    )
+                    charged = True
+                await enqueue_job({
+                    "job_id": uuid4().hex,
+                    "kind": "telegram_seedream_5_pro_kie_run",
+                    "type": "seedream_5_pro_t2i",
+                    "chat_id": int(chat_id),
+                    "user_id": int(user_id),
+                    "prompt": user_prompt,
+                    "mode": "text_to_image",
+                    "aspect_ratio": aspect_ratio,
+                    "resolution": resolution,
+                    "charge_tokens": cost_tokens,
+                    "charge_ref_id": charge_ref_id,
+                    "refund_reason": "seedream_5_pro_refund",
+                }, queue_name=WORKSPACE_SEEDREAM5_QUEUE_NAME)
+            except Exception as e:
+                if charged:
+                    try:
+                        add_tokens(user_id, cost_tokens, reason="seedream_5_pro_refund", ref_id=charge_ref_id, meta={"stage": "enqueue_failed", "provider": "seedream_5_pro", "error": str(e)[:300]})
+                    except Exception:
+                        pass
+                await tg_send_message(chat_id, f"❌ Не удалось поставить Seedream 5.0 Pro в очередь: {e}", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            await tg_send_message(
+                chat_id,
+                f"✅ Seedream 5.0 Pro: запрос принят. Списано {cost_tokens} токен. Пришлю результат, как будет готово.",
+                reply_markup=_main_menu_for(user_id),
+            )
+            st["seedream_5_pro_t2i"] = {"step": "need_prompt", "aspect_ratio": aspect_ratio, "resolution": resolution}
+            st["ts"] = _now()
+            return {"ok": True}
+
+        # Seedream 5.0 Pro: image-to-image through workspace image worker
+        if st.get("mode") == "seedream_5_pro_i2i":
+            sd5p = st.get("seedream_5_pro_i2i") or {}
+            step = (sd5p.get("step") or "need_image")
+            photo_file_ids = [str(item or "").strip() for item in (sd5p.get("photo_file_ids") or []) if str(item or "").strip()]
+            if not photo_file_ids and str(sd5p.get("photo_file_id") or "").strip():
+                photo_file_ids = [str(sd5p.get("photo_file_id") or "").strip()]
+            photo_urls = [str(item or "").strip() for item in (sd5p.get("photo_urls") or []) if str(item or "").strip()]
+
+            if step == "need_image" or not (photo_file_ids or photo_urls):
+                await tg_send_message(chat_id, "Сначала пришли от 1 до 10 фото для Seedream 5.0 Pro → Картинка→Картинка.", reply_markup=_seedream_5_pro_inline_kb("i2i", str(sd5p.get("aspect_ratio") or "16:9"), str(sd5p.get("resolution") or "2K"), len(photo_file_ids)))
+                return {"ok": True}
+
+            user_prompt = incoming_text.strip()
+            if not user_prompt:
+                await tg_send_message(chat_id, "Напиши, что нужно изменить на фото.", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            resolution, aspect_ratio = _seedream_5_pro_options(sd5p.get("resolution") or "2K", sd5p.get("aspect_ratio") or "16:9")
+            cost_tokens = _seedream_5_pro_user_cost(user_id, resolution)
+            try:
+                ensure_user_row(user_id)
+                bal = int(get_balance(user_id) or 0)
+            except Exception:
+                bal = 0
+            if bal < cost_tokens:
+                await tg_send_message(
+                    chat_id,
+                    f"❌ Недостаточно токенов для Seedream 5.0 Pro. Нужно: {cost_tokens}, баланс: {bal}",
+                    reply_markup=_topup_packs_kb(),
+                )
+                return {"ok": True}
+
+            charge_ref_id = uuid4().hex if cost_tokens > 0 else ""
+            charged = False
+            try:
+                if cost_tokens > 0:
+                    add_tokens(
+                        user_id,
+                        -cost_tokens,
+                        reason="seedream_5_pro",
+                        ref_id=charge_ref_id,
+                        meta={"mode": "image_to_image", "provider": "seedream_5_pro", "resolution": resolution, "aspect_ratio": aspect_ratio, "refs": len(photo_file_ids[:10] or photo_urls[:10]), "cost_tokens": cost_tokens},
+                    )
+                    charged = True
+                await enqueue_job({
+                    "job_id": uuid4().hex,
+                    "kind": "telegram_seedream_5_pro_kie_run",
+                    "type": "seedream_5_pro_i2i",
+                    "chat_id": int(chat_id),
+                    "user_id": int(user_id),
+                    "prompt": user_prompt,
+                    "mode": "image_to_image",
+                    "aspect_ratio": aspect_ratio,
+                    "resolution": resolution,
+                    "photo_file_id": photo_file_ids[0] if photo_file_ids else None,
+                    "photo_file_ids": photo_file_ids[:10],
+                    "photo_urls": photo_urls[:10],
+                    "charge_tokens": cost_tokens,
+                    "charge_ref_id": charge_ref_id,
+                    "refund_reason": "seedream_5_pro_refund",
+                }, queue_name=WORKSPACE_SEEDREAM5_QUEUE_NAME)
+            except Exception as e:
+                if charged:
+                    try:
+                        add_tokens(user_id, cost_tokens, reason="seedream_5_pro_refund", ref_id=charge_ref_id, meta={"stage": "enqueue_failed", "provider": "seedream_5_pro", "error": str(e)[:300]})
+                    except Exception:
+                        pass
+                await tg_send_message(chat_id, f"❌ Не удалось поставить Seedream 5.0 Pro в очередь: {e}", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+
+            await tg_send_message(
+                chat_id,
+                f"✅ Seedream 5.0 Pro: запрос принят. Списано {cost_tokens} токен. Пришлю результат, как будет готово.",
+                reply_markup=_main_menu_for(user_id),
+            )
+            st["seedream_5_pro_i2i"] = {
+                "step": "need_image",
+                "photo_file_id": None,
+                "photo_file_ids": [],
+                "photo_urls": [],
+                "aspect_ratio": aspect_ratio,
+                "resolution": resolution,
+            }
+            st["ts"] = _now()
+            return {"ok": True}
 
         # Gpt Image 2: text-to-image through workspace image worker
         if st.get("mode") == "gpt_image_2_kie_t2i":
