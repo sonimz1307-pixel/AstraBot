@@ -278,6 +278,11 @@ from gpt_image_2_kie import (
     normalize_gpt_image_2_kie_options,
     validate_gpt_image_2_kie_reference_bytes,
 )
+from seedream_5_pro_kie import (
+    seedream_5_pro_kie_cost,
+    normalize_seedream_5_pro_options,
+    validate_seedream_5_pro_reference_bytes,
+)
 from switchx_service import SwitchXClient, SwitchXError
 from topaz_image_replicate import TopazImageParams, run_topaz_image_upscale
 from topaz_pricing import get_photo_preset_settings, get_photo_preset_tokens
@@ -332,6 +337,7 @@ def _env_non_negative_int(name: str, default: int) -> int:
 VEO_RELAX_NEXUS_DELAY_SEC = _env_non_negative_int("VEO_RELAX_NEXUS_DELAY_SEC", 1500)
 WORKSPACE_IMAGE_QUEUE_NAME = (os.getenv("WORKSPACE_IMAGE_QUEUE_NAME", "workspace_image") or "workspace_image").strip() or "workspace_image"
 WORKSPACE_NB2LITE_QUEUE_NAME = (os.getenv("WORKSPACE_NB2LITE_QUEUE_NAME", "workspace_nb2lite") or "workspace_nb2lite").strip() or "workspace_nb2lite"
+WORKSPACE_SEEDREAM5_QUEUE_NAME = (os.getenv("WORKSPACE_SEEDREAM5_QUEUE_NAME", "workspace_seedream5") or "workspace_seedream5").strip() or "workspace_seedream5"
 WORKSPACE_CHAT_OPENAI_QUEUE_NAME = (os.getenv("WORKSPACE_CHAT_OPENAI_QUEUE_NAME", "workspace_chat_openai") or "workspace_chat_openai").strip() or "workspace_chat_openai"
 WORKSPACE_CHAT_CLAUDE_QUEUE_NAME = (os.getenv("WORKSPACE_CHAT_CLAUDE_QUEUE_NAME", "workspace_chat_claude") or "workspace_chat_claude").strip() or "workspace_chat_claude"
 WORKSPACE_CHAT_FABLE_QUEUE_NAME = (os.getenv("WORKSPACE_CHAT_FABLE_QUEUE_NAME", "workspace_chat_fable") or "workspace_chat_fable").strip() or "workspace_chat_fable"
@@ -3527,6 +3533,10 @@ def _workspace_gpt_image_2_kie_options(resolution: Any, aspect_ratio: Any) -> tu
     return normalize_gpt_image_2_kie_options(resolution, aspect_ratio, default_resolution="2K", default_aspect="16:9")
 
 
+def _workspace_seedream_5_pro_options(resolution: Any, aspect_ratio: Any) -> tuple[str, str]:
+    return normalize_seedream_5_pro_options(resolution, aspect_ratio, default_resolution="2K", default_aspect="16:9")
+
+
 def _workspace_image_cost(provider: str, mode: str, preset_slug: str = "", resolution: str = "2K", speed_mode: str = "fast", action_type: str = "generate", model: Any = None) -> int:
     provider_key = str(provider or "").strip().lower()
     mode_key = str(mode or "").strip().lower()
@@ -3562,6 +3572,8 @@ def _workspace_image_cost(provider: str, mode: str, preset_slug: str = "", resol
         return 1
     if provider_key == "gpt_image_2_kie":
         return gpt_image_2_kie_cost(resolution_key)
+    if provider_key == "seedream_5_pro":
+        return seedream_5_pro_kie_cost(resolution_key)
     if provider_key == "midjourney":
         return _workspace_midjourney_action_cost(action_type, speed_mode, model=model)
 
@@ -3600,6 +3612,8 @@ def _workspace_image_charge_reason(provider: str, mode: str, action_type: str = 
         return "gpt_image_2"
     if provider_key == "gpt_image_2_kie":
         return "gpt_image_2"
+    if provider_key == "seedream_5_pro":
+        return "seedream_5_pro"
     if provider_key == "midjourney":
         return _workspace_midjourney_action_reason(action_type)
 
@@ -7226,7 +7240,7 @@ async def workspace_image_run(
     if provider != "topaz_photo" and not prompt:
         raise HTTPException(status_code=400, detail="Missing prompt")
 
-    supported = {"nano_banana", "nano_banana_2_lite", "nano_banana_2", "nano_banana_pro", "nano_banana_pro_new", "seedream", "posters", "photosession", "two_images", "text_to_image", "gpt_image_2", "gpt_image_2_kie", "topaz_photo", "midjourney"}
+    supported = {"nano_banana", "nano_banana_2_lite", "nano_banana_2", "nano_banana_pro", "nano_banana_pro_new", "seedream", "posters", "photosession", "two_images", "text_to_image", "gpt_image_2", "gpt_image_2_kie", "seedream_5_pro", "topaz_photo", "midjourney"}
     if provider not in supported:
         raise HTTPException(status_code=400, detail=f"Provider {provider} is not supported in /image/run")
 
@@ -7236,10 +7250,12 @@ async def workspace_image_run(
     source_upload = source_uploads_raw[0] if source_uploads_raw else None
     source_image: Optional[bytes] = None
 
-    if provider in {"nano_banana_2_lite", "nano_banana_pro_new", "gpt_image_2", "gpt_image_2_kie"}:
-        source_limit = 10 if provider == "nano_banana_2_lite" else (8 if provider == "nano_banana_pro_new" else (16 if provider == "gpt_image_2_kie" else 4))
+    if provider in {"nano_banana_2_lite", "nano_banana_pro_new", "gpt_image_2", "gpt_image_2_kie", "seedream_5_pro"}:
+        source_limit = 10 if provider in {"nano_banana_2_lite", "seedream_5_pro"} else (8 if provider == "nano_banana_pro_new" else (16 if provider == "gpt_image_2_kie" else 4))
         if provider == "gpt_image_2_kie" and len(source_uploads_raw) > source_limit:
             raise HTTPException(status_code=400, detail=f"Для Gpt Image 2 можно загрузить максимум {source_limit} reference images.")
+        if provider == "seedream_5_pro" and len(source_uploads_raw) > source_limit:
+            raise HTTPException(status_code=400, detail=f"Для Seedream 5.0 Pro можно загрузить максимум {source_limit} reference images.")
         for index, upload in enumerate(source_uploads_raw[:source_limit], start=1):
             raw = await _read_optional_upload_bytes(upload)
             if not raw:
@@ -7256,6 +7272,17 @@ async def workspace_image_run(
                 except Exception as e:
                     raise HTTPException(status_code=400, detail=str(e)) from e
                 upload_name = f"gpt_image2_kie_ref_{index}.{safe_ext}"
+            elif provider == "seedream_5_pro":
+                try:
+                    safe_ext, _safe_mime = validate_seedream_5_pro_reference_bytes(
+                        raw,
+                        filename=upload_name,
+                        content_type=getattr(upload, "content_type", None),
+                        source_label=f"reference image #{index}",
+                    )
+                except Exception as e:
+                    raise HTTPException(status_code=400, detail=str(e)) from e
+                upload_name = f"seedream_5_pro_ref_{index}.{safe_ext}"
             source_image_uploads.append((upload, raw, upload_name))
         if source_image_uploads:
             source_upload = source_image_uploads[0][0]
@@ -7297,6 +7324,8 @@ async def workspace_image_run(
         raise HTTPException(status_code=400, detail="Для GPT Image 2.0 Image→Image нужен хотя бы 1 source/reference image.")
     if provider == "gpt_image_2_kie" and mode == "image_to_image" and not source_image_uploads:
         raise HTTPException(status_code=400, detail="Для Gpt Image 2 Image→Image нужен хотя бы 1 reference image.")
+    if provider == "seedream_5_pro" and mode == "image_to_image" and not source_image_uploads:
+        raise HTTPException(status_code=400, detail="Для Seedream 5.0 Pro Image→Image нужен хотя бы 1 reference image.")
     if provider == "two_images" and (not source_image or not base_image):
         raise HTTPException(status_code=400, detail="Для режима Картинка + Картинка нужны base image и source image.")
     if provider == "topaz_photo" and not source_image:
@@ -7323,6 +7352,8 @@ async def workspace_image_run(
         aspect_ratio = "auto"
     if provider == "gpt_image_2_kie":
         resolution, aspect_ratio = _workspace_gpt_image_2_kie_options(resolution, aspect_ratio)
+    if provider == "seedream_5_pro":
+        resolution, aspect_ratio = _workspace_seedream_5_pro_options(resolution, aspect_ratio)
 
     try:
         mj_stylize = max(0, min(1000, int(mj_stylize_raw if mj_stylize_raw not in {None, ""} else 100)))
@@ -7426,8 +7457,8 @@ async def workspace_image_run(
             charged = True
 
         source_image_urls = []
-        if provider in {"nano_banana_2_lite", "nano_banana_pro_new", "gpt_image_2", "gpt_image_2_kie"}:
-            source_limit = 10 if provider == "nano_banana_2_lite" else (8 if provider == "nano_banana_pro_new" else (16 if provider == "gpt_image_2_kie" else 4))
+        if provider in {"nano_banana_2_lite", "nano_banana_pro_new", "gpt_image_2", "gpt_image_2_kie", "seedream_5_pro"}:
+            source_limit = 10 if provider in {"nano_banana_2_lite", "seedream_5_pro"} else (8 if provider == "nano_banana_pro_new" else (16 if provider == "gpt_image_2_kie" else 4))
             for index, (_upload_obj, raw_bytes, upload_name) in enumerate(source_image_uploads[:source_limit], start=1):
                 source_image_urls.append(_upload_workspace_input_image(uid, raw_bytes, filename=upload_name, slot=f"workspace_image_source_{index}"))
         source_image_url = source_image_urls[0] if source_image_urls else (_upload_workspace_input_image(uid, source_image, filename=getattr(source_upload, "filename", None), slot="workspace_image_source") if source_image else None)
@@ -7471,7 +7502,11 @@ async def workspace_image_run(
                 "refund_reason": f"{reason}_refund" if reason else "workspace_image_refund",
                 "origin": "workspace_image",
             },
-            queue_name=(WORKSPACE_NB2LITE_QUEUE_NAME if provider == "nano_banana_2_lite" else WORKSPACE_IMAGE_QUEUE_NAME),
+            queue_name=(
+                WORKSPACE_NB2LITE_QUEUE_NAME if provider == "nano_banana_2_lite" else (
+                    WORKSPACE_SEEDREAM5_QUEUE_NAME if provider == "seedream_5_pro" else WORKSPACE_IMAGE_QUEUE_NAME
+                )
+            ),
         )
 
         try:
