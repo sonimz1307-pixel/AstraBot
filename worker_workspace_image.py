@@ -11,6 +11,7 @@ import httpx
 
 from billing_db import add_tokens
 from gpt_image_2_kie import handle_gpt_image_2_kie
+from seedream_5_pro_kie import handle_seedream_5_pro_kie
 from nano_banana_2_lite_kie import handle_nano_banana_2_lite
 from kling_flow import upload_bytes_to_supabase
 from queue_redis import dequeue_job
@@ -30,6 +31,10 @@ image_sem = asyncio.Semaphore(WORKSPACE_IMAGE_CONCURRENCY)
 WORKSPACE_NB2LITE_QUEUE_NAME = (os.getenv("WORKSPACE_NB2LITE_QUEUE_NAME", "workspace_nb2lite") or "workspace_nb2lite").strip() or "workspace_nb2lite"
 WORKSPACE_NB2LITE_CONCURRENCY = int(os.getenv("WORKSPACE_NB2LITE_CONCURRENCY", "2") or "2")
 nb2lite_sem = asyncio.Semaphore(WORKSPACE_NB2LITE_CONCURRENCY)
+
+WORKSPACE_SEEDREAM5_QUEUE_NAME = (os.getenv("WORKSPACE_SEEDREAM5_QUEUE_NAME", "workspace_seedream5") or "workspace_seedream5").strip() or "workspace_seedream5"
+WORKSPACE_SEEDREAM5_CONCURRENCY = int(os.getenv("WORKSPACE_SEEDREAM5_CONCURRENCY", "1") or "1")
+seedream5_sem = asyncio.Semaphore(WORKSPACE_SEEDREAM5_CONCURRENCY)
 
 MIDJOURNEY_TG_QUEUE_NAME = (os.getenv("MIDJOURNEY_TG_QUEUE_NAME", "telegram_midjourney") or "telegram_midjourney").strip() or "telegram_midjourney"
 MIDJOURNEY_TG_CONCURRENCY = int(os.getenv("MIDJOURNEY_TG_CONCURRENCY", "1") or "1")
@@ -714,6 +719,103 @@ async def process_telegram_nano_banana_2_lite_job(job: Dict[str, Any]) -> None:
         await tg_send_message(chat_id, text)
 
 
+async def process_telegram_seedream_5_pro_kie_job(job: Dict[str, Any]) -> None:
+    chat_id = int(job.get("chat_id") or 0)
+    user_id = int(job.get("user_id") or 0)
+    prompt = str(job.get("prompt") or "").strip()
+    mode = str(job.get("mode") or "text_to_image").strip().lower()
+    resolution = str(job.get("resolution") or "2K").strip().upper() or "2K"
+    aspect_ratio = str(job.get("aspect_ratio") or "16:9").strip() or "16:9"
+    photo_file_ids = [str(item or "").strip() for item in (job.get("photo_file_ids") or []) if str(item or "").strip()]
+    photo_urls = [str(item or "").strip() for item in (job.get("photo_urls") or []) if str(item or "").strip()]
+    charge_tokens = int(job.get("charge_tokens") or 0)
+    charge_ref_id = str(job.get("charge_ref_id") or "").strip() or None
+    refund_reason = str(job.get("refund_reason") or "seedream_5_pro_refund").strip() or "seedream_5_pro_refund"
+
+    status_msg_id = await tg_send_message(chat_id, f"⏳ Seedream 5.0 Pro: задача в обработке…\nКачество: {resolution}\nФормат: {aspect_ratio}")
+    stop = asyncio.Event()
+
+    async def _progress_loop() -> None:
+        if not status_msg_id:
+            return
+        seq = _parse_progress_seq()
+        i = 0
+        while not stop.is_set():
+            pct = seq[min(i, len(seq) - 1)]
+            i += 1
+            try:
+                await tg_edit_message_text(chat_id, status_msg_id, f"⏳ Seedream 5.0 Pro: обработка… {pct}%\nКачество: {resolution}\nФормат: {aspect_ratio}")
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=PROGRESS_STEP_SEC)
+            except asyncio.TimeoutError:
+                continue
+
+    progress_task = asyncio.create_task(_progress_loop())
+
+    try:
+        out_bytes, ext = await handle_seedream_5_pro_kie(
+            prompt,
+            mode=mode,
+            source_image_urls=photo_urls[:10],
+            telegram_file_ids=photo_file_ids[:10],
+            resolution=resolution,
+            aspect_ratio=aspect_ratio,
+        )
+        stop.set()
+        try:
+            await progress_task
+        except Exception:
+            pass
+        if status_msg_id:
+            try:
+                await tg_edit_message_text(chat_id, status_msg_id, "✅ Seedream 5.0 Pro: готово. Отправляю файл…")
+            except Exception:
+                pass
+
+        token = await register_dl2k_slot(chat_id, user_id, out_bytes)
+        reply_markup = _download_keyboard(token, resolution)
+        await tg_send_photo_bytes(
+            chat_id,
+            out_bytes,
+            caption=f"✅ Готово (Seedream 5.0 Pro • {resolution})",
+            reply_markup=reply_markup,
+            filename=f"seedream_5_pro.{ext or 'jpg'}",
+            mime_type=_image_mime_type(ext or "jpg"),
+        )
+        if status_msg_id:
+            try:
+                await tg_edit_message_text(chat_id, status_msg_id, "✅ Seedream 5.0 Pro: готово")
+            except Exception:
+                pass
+        return
+    except Exception as exc:
+        err = str(exc)[:800]
+        print(f"[workspace_image] Seedream 5.0 Pro job failed job={job.get('job_id')}: {err}", flush=True)
+        stop.set()
+        try:
+            await progress_task
+        except Exception:
+            pass
+        refund_status = ""
+        if charge_tokens and charge_ref_id and user_id:
+            try:
+                add_tokens(user_id, int(charge_tokens), reason=refund_reason, ref_id=charge_ref_id, meta={"stage": "worker_failed", "provider": "seedream_5_pro", "error": err})
+                refund_status = "Токены возвращены."
+            except Exception as refund_exc:
+                print(f"[workspace_image] Seedream 5.0 Pro refund failed: {refund_exc}", flush=True)
+                refund_status = "Автовозврат токенов не удалось подтвердить. Если баланс не восстановится автоматически, напиши в поддержку."
+        text = f"❌ Seedream 5.0 Pro: ошибка генерации." + (f"\n{refund_status}" if refund_status else "") + f"\n{err}"
+        if status_msg_id:
+            try:
+                await tg_edit_message_text(chat_id, status_msg_id, text)
+                return
+            except Exception:
+                pass
+        await tg_send_message(chat_id, text)
+
+
 async def process_telegram_gpt_image_2_kie_job(job: Dict[str, Any]) -> None:
     chat_id = int(job.get("chat_id") or 0)
     user_id = int(job.get("user_id") or 0)
@@ -825,6 +927,10 @@ async def _process_workspace_image_queue_job(job: Dict[str, Any]) -> None:
         await process_telegram_gpt_image_2_kie_job(job)
         print(f"[workspace_image] completed telegram Gpt Image 2 job={job.get('job_id')}", flush=True)
         return
+    if kind == "telegram_seedream_5_pro_kie_run":
+        await process_telegram_seedream_5_pro_kie_job(job)
+        print(f"[workspace_image] completed telegram Seedream 5.0 Pro job={job.get('job_id')}", flush=True)
+        return
     print(f"[workspace_image] skipped unsupported workspace-image kind={kind} job={job.get('job_id')}", flush=True)
 
 
@@ -899,12 +1005,22 @@ async def main() -> None:
         raise RuntimeError("MIDJOURNEY_TG_QUEUE_NAME must be different from WORKSPACE_IMAGE_QUEUE_NAME")
     if WORKSPACE_NB2LITE_QUEUE_NAME == MIDJOURNEY_TG_QUEUE_NAME:
         raise RuntimeError("WORKSPACE_NB2LITE_QUEUE_NAME must be different from MIDJOURNEY_TG_QUEUE_NAME")
+    if WORKSPACE_SEEDREAM5_QUEUE_NAME == MIDJOURNEY_TG_QUEUE_NAME:
+        raise RuntimeError("WORKSPACE_SEEDREAM5_QUEUE_NAME must be different from MIDJOURNEY_TG_QUEUE_NAME")
 
-    same_image_queue = WORKSPACE_NB2LITE_QUEUE_NAME == WORKSPACE_IMAGE_QUEUE_NAME
-    if same_image_queue:
+    same_nb2lite_queue = WORKSPACE_NB2LITE_QUEUE_NAME == WORKSPACE_IMAGE_QUEUE_NAME
+    if same_nb2lite_queue:
         print(
             "[workspace_image] WARNING: WORKSPACE_NB2LITE_QUEUE_NAME equals WORKSPACE_IMAGE_QUEUE_NAME; "
             "Nano Banana 2 Lite will share the common image queue.",
+            flush=True,
+        )
+
+    same_seedream5_queue = WORKSPACE_SEEDREAM5_QUEUE_NAME == WORKSPACE_IMAGE_QUEUE_NAME
+    if same_seedream5_queue:
+        print(
+            "[workspace_image] WARNING: WORKSPACE_SEEDREAM5_QUEUE_NAME equals WORKSPACE_IMAGE_QUEUE_NAME; "
+            "Seedream 5.0 Pro will share the common image queue.",
             flush=True,
         )
 
@@ -912,6 +1028,7 @@ async def main() -> None:
         f"[workspace_image] worker started "
         f"workspace_queue={WORKSPACE_IMAGE_QUEUE_NAME} image_concurrency={WORKSPACE_IMAGE_CONCURRENCY} "
         f"nb2lite_queue={WORKSPACE_NB2LITE_QUEUE_NAME} nb2lite_concurrency={WORKSPACE_NB2LITE_CONCURRENCY} "
+        f"seedream5_queue={WORKSPACE_SEEDREAM5_QUEUE_NAME} seedream5_concurrency={WORKSPACE_SEEDREAM5_CONCURRENCY} "
         f"midjourney_queue={MIDJOURNEY_TG_QUEUE_NAME} midjourney_tg_concurrency={MIDJOURNEY_TG_CONCURRENCY}",
         flush=True,
     )
@@ -930,13 +1047,22 @@ async def main() -> None:
             queue_label="midjourney_tg",
         ),
     ]
-    if not same_image_queue:
+    if not same_nb2lite_queue:
         consumers.append(
             _consume_queue(
                 queue_name=WORKSPACE_NB2LITE_QUEUE_NAME,
                 sem=nb2lite_sem,
                 processor=_process_workspace_image_queue_job,
                 queue_label="nb2lite",
+            )
+        )
+    if not same_seedream5_queue:
+        consumers.append(
+            _consume_queue(
+                queue_name=WORKSPACE_SEEDREAM5_QUEUE_NAME,
+                sem=seedream5_sem,
+                processor=_process_workspace_image_queue_job,
+                queue_label="seedream5",
             )
         )
 
