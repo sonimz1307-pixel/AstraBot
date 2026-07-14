@@ -18,6 +18,11 @@ PARTNER_BOT_USERNAME = (
     or os.getenv("BOT_USERNAME")
     or ""
 ).strip().lstrip("@")
+PARTNER_TELEGRAM_LINK_BASE = (
+    os.getenv("PARTNER_TELEGRAM_LINK_BASE")
+    or os.getenv("TELEGRAM_PUBLIC_LINK_BASE")
+    or "https://telegram.me"
+).strip().rstrip("/")
 PARTNER_REF_PREFIX = (os.getenv("PARTNER_REF_PREFIX") or "NAB").strip().upper()[:8] or "NAB"
 PARTNER_MIN_PAYOUT_RUB = int(os.getenv("PARTNER_MIN_PAYOUT_RUB", "1000") or "1000")
 
@@ -166,7 +171,7 @@ def _ensure_partner_balance(partner_user_id: int) -> Dict[str, Any]:
 def _public_profile(row: Dict[str, Any]) -> Dict[str, Any]:
     code = str(row.get("ref_code") or "").strip()
     site_link = f"{PARTNER_SITE_URL}/?ref={code}" if code else ""
-    bot_link = f"https://t.me/{PARTNER_BOT_USERNAME}?start=ref_{code}" if code and PARTNER_BOT_USERNAME else ""
+    bot_link = f"{PARTNER_TELEGRAM_LINK_BASE}/{PARTNER_BOT_USERNAME}?start=ref_{code}" if code and PARTNER_BOT_USERNAME else ""
     return {
         "user_id": _int(row.get("user_id")),
         "ref_code": code,
