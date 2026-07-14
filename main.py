@@ -943,6 +943,11 @@ WEBAPP_TOPUP_URL = os.getenv("WEBAPP_TOPUP_URL", "https://astrabot-tchj.onrender
 NABEX_PUBLIC_SITE_URL = (os.getenv("NABEX_PUBLIC_SITE_URL") or os.getenv("PARTNER_SITE_URL") or os.getenv("PUBLIC_SITE_URL") or "https://nabex.ru").strip().rstrip("/")
 NABEX_SUPPORT_URL = (os.getenv("NABEX_SUPPORT_URL") or os.getenv("SUPPORT_URL") or "https://t.me/HelpNeiroAstra").strip()
 NABEX_PARTNER_BOT_USERNAME = (os.getenv("PARTNER_BOT_USERNAME") or os.getenv("TELEGRAM_BOT_USERNAME") or os.getenv("BOT_USERNAME") or "NeiroAstraBot").strip().lstrip("@")
+NABEX_PARTNER_TELEGRAM_LINK_BASE = (
+    os.getenv("PARTNER_TELEGRAM_LINK_BASE")
+    or os.getenv("TELEGRAM_PUBLIC_LINK_BASE")
+    or "https://telegram.me"
+).strip().rstrip("/")
 
 
 def _verify_telegram_webapp_init_data(init_data: str) -> Optional[dict]:
@@ -983,11 +988,11 @@ def _tg_account_ref_links_for(user_id: int) -> Tuple[str, str, str]:
 
     if ref_code:
         site_ref = f"{NABEX_PUBLIC_SITE_URL}/?ref={urllib.parse.quote(ref_code)}"
-        bot_ref = f"https://t.me/{NABEX_PARTNER_BOT_USERNAME}?start=ref_{urllib.parse.quote(ref_code)}" if NABEX_PARTNER_BOT_USERNAME else ""
+        bot_ref = f"{NABEX_PARTNER_TELEGRAM_LINK_BASE}/{NABEX_PARTNER_BOT_USERNAME}?start=ref_{urllib.parse.quote(ref_code)}" if NABEX_PARTNER_BOT_USERNAME else ""
     else:
         # Fallback: links stay usable for display even if partner tables are temporarily unavailable.
         site_ref = f"{NABEX_PUBLIC_SITE_URL}/?ref={int(user_id)}"
-        bot_ref = f"https://t.me/{NABEX_PARTNER_BOT_USERNAME}?start={int(user_id)}" if NABEX_PARTNER_BOT_USERNAME else ""
+        bot_ref = f"{NABEX_PARTNER_TELEGRAM_LINK_BASE}/{NABEX_PARTNER_BOT_USERNAME}?start={int(user_id)}" if NABEX_PARTNER_BOT_USERNAME else ""
     return ref_code, site_ref, bot_ref
 
 
