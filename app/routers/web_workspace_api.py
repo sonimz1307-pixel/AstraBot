@@ -288,12 +288,14 @@ from topaz_image_replicate import TopazImageParams, run_topaz_image_upscale
 from topaz_pricing import get_photo_preset_settings, get_photo_preset_tokens
 from yookassa_flow import create_yookassa_payment
 from app.services.legnext_midjourney import (
+    MIDJOURNEY_ALLOWED_ASPECT_RATIOS,
     LegnextMidjourneyError,
     build_midjourney_v7_prompt,
     create_midjourney_diffusion,
     create_midjourney_reroll,
     create_midjourney_variation,
     get_midjourney_job,
+    normalize_midjourney_aspect_ratio,
     normalize_midjourney_model,
     normalize_midjourney_speed_mode,
 )
@@ -7333,6 +7335,7 @@ async def workspace_image_run(
     if provider == "midjourney":
         mode = "text_to_image"
         model = normalize_midjourney_model(model or "midjourney-v7")
+        aspect_ratio = normalize_midjourney_aspect_ratio(aspect_ratio, default="1:1")
         mj_speed_mode = _workspace_speed_mode(mj_speed_mode, model=model)
         if model == "midjourney-v8.1":
             # V8.1 alpha rejects --no and --oref/--ow; do not persist or send them.
@@ -7602,7 +7605,7 @@ async def workspace_image_action(
     source_model = normalize_midjourney_model(source_row.get("model") or "midjourney-v7")
     speed_mode = _workspace_speed_mode(payload.speed_mode or source_row.get("mj_speed_mode") or "fast", model=source_model)
     prompt = str(source_row.get("prompt") or "").strip()
-    aspect_ratio = str(source_row.get("aspect_ratio") or "1:1").strip() or "1:1"
+    aspect_ratio = normalize_midjourney_aspect_ratio(source_row.get("aspect_ratio") or "1:1", default="1:1")
     negative_prompt = str(source_row.get("negative_prompt") or "").strip()
     mj_stylize = source_row.get("mj_stylize")
     mj_chaos = source_row.get("mj_chaos")
