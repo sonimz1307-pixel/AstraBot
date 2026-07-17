@@ -185,7 +185,9 @@ from app.routers.site_builder_api import router as site_builder_router
 from app.routers.partner_program_api import router as partner_program_router
 from app.services.partner_program import ensure_partner_profile
 from app.services.legnext_midjourney import (
+    MIDJOURNEY_ALLOWED_ASPECT_RATIOS,
     build_midjourney_v7_prompt,
+    normalize_midjourney_aspect_ratio,
     normalize_midjourney_model,
     normalize_midjourney_speed_mode,
 )
@@ -2109,8 +2111,7 @@ def _midjourney_state(st: Dict[str, Any], model: str = "midjourney-v7") -> dict:
         mj["chaos"] = max(0, min(100, int(mj.get("chaos") if mj.get("chaos") is not None else 0)))
     except Exception:
         mj["chaos"] = 0
-    if str(mj.get("aspect_ratio") or "").strip() not in {"1:1", "16:9", "9:16", "4:5"}:
-        mj["aspect_ratio"] = "1:1"
+    mj["aspect_ratio"] = normalize_midjourney_aspect_ratio(mj.get("aspect_ratio") or "1:1", default="1:1")
     if mj["model"] == "midjourney-v8.1":
         mj["speed_mode"] = "fast"
         mj["omni_ref_url"] = ""
@@ -2187,8 +2188,16 @@ def _midjourney_model_kb() -> dict:
 
 
 def _midjourney_aspect_kb(current: str = "1:1") -> dict:
-    values = ("1:1", "16:9", "9:16", "4:5")
-    return {"inline_keyboard": [[{"text": f"✅ {v}" if v == current else v, "callback_data": f"mj:ar:{v}"} for v in values], [{"text": "⬅️ Назад", "callback_data": "mj:settings"}]]}
+    values = tuple(MIDJOURNEY_ALLOWED_ASPECT_RATIOS)
+    rows = []
+    row = []
+    for idx, value in enumerate(values, start=1):
+        row.append({"text": f"✅ {value}" if value == current else value, "callback_data": f"mj:ar:{value}"})
+        if len(row) == 3 or idx == len(values):
+            rows.append(row)
+            row = []
+    rows.append([{"text": "⬅️ Назад", "callback_data": "mj:settings"}])
+    return {"inline_keyboard": rows}
 
 
 def _midjourney_speed_kb(model: str, current: str = "fast") -> dict:
@@ -2451,6 +2460,56 @@ async def _midjourney_load_session_from_storage(chat_id: int, user_id: int, toke
     except Exception:
         logging.exception("Midjourney session storage load failed")
         return None
+
+
+async def _midjourney_show_image_from_url(
+    *,
+    chat_id: int,
+    message_id: int,
+    image_url: str,
+    caption: Optional[str] = None,
+    reply_markup: Optional[dict] = None,
+) -> None:
+    url = str(image_url or "").strip()
+    if not url:
+        raise RuntimeError("Пустая ссылка на изображение Midjourney")
+
+    last_error: Optional[Exception] = None
+    try:
+        image_bytes = await http_download_bytes(url, timeout=180)
+    except Exception as exc:
+        image_bytes = b""
+        last_error = exc
+    else:
+        if image_bytes:
+            try:
+                if message_id > 0:
+                    await tg_edit_message_media_photo(chat_id, message_id, image_bytes, caption=caption, reply_markup=reply_markup)
+                    return
+            except Exception as exc:
+                last_error = exc
+            try:
+                await tg_send_photo_bytes(chat_id, image_bytes, caption=caption, reply_markup=reply_markup)
+                return
+            except Exception as exc:
+                last_error = exc
+
+    try:
+        if message_id > 0:
+            await tg_edit_message_media_photo_url(chat_id, message_id, url, caption=caption, reply_markup=reply_markup)
+            return
+    except Exception as exc:
+        last_error = exc
+
+    try:
+        await tg_send_photo_url(chat_id, url, caption=caption, reply_markup=reply_markup)
+        return
+    except Exception as exc:
+        last_error = exc
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Не удалось отправить изображение Midjourney")
 
 
 def _midjourney_prepare_run_prompt(mj: dict) -> str:
@@ -4912,10 +4971,20 @@ async def tg_send_photo_bytes(
     image_bytes: bytes,
     caption: Optional[str] = None,
     reply_markup: Optional[dict] = None,
-):
+) -> Optional[int]:
     if not TELEGRAM_BOT_TOKEN:
-        return
-    files = {"photo": ("image.png", image_bytes, "image/png")}
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured")
+    if not image_bytes:
+        raise RuntimeError("Empty image bytes for sendPhoto")
+
+    try:
+        ext, mime = _detect_image_type(image_bytes)
+    except Exception:
+        ext, mime = "png", "image/png"
+    ext = str(ext or "png").strip().lower().lstrip(".") or "png"
+    mime = str(mime or "image/png").strip() or "image/png"
+
+    files = {"photo": (f"image.{ext}", image_bytes, mime)}
     data = {"chat_id": str(chat_id)}
     if caption:
         data["caption"] = caption
@@ -4923,7 +4992,13 @@ async def tg_send_photo_bytes(
         data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
 
     async with httpx.AsyncClient(timeout=180) as client:
-        await client.post(f"{TELEGRAM_API_BASE}/sendPhoto", data=data, files=files)
+        response = await client.post(f"{TELEGRAM_API_BASE}/sendPhoto", data=data, files=files)
+    payload = _telegram_api_assert_ok(response, "sendPhoto")
+    try:
+        result = payload.get("result") if isinstance(payload, dict) else None
+        return int((result or {}).get("message_id") or 0) or None if isinstance(result, dict) else None
+    except Exception:
+        return None
 
 
 
@@ -6937,7 +7012,7 @@ async def internal_midjourney_register(request: Request):
         "selected_image_no": int(payload.get("selected_image_no") or 0),
         "variation_type": str(payload.get("variation_type") or "subtle").strip().lower(),
         "settings": payload.get("settings") if isinstance(payload.get("settings"), dict) else {},
-        "aspect_ratio": str(payload.get("aspect_ratio") or "1:1").strip() or "1:1",
+        "aspect_ratio": normalize_midjourney_aspect_ratio(payload.get("aspect_ratio") or "1:1", default="1:1"),
         "speed_mode": normalize_midjourney_speed_mode(payload.get("speed_mode") or "fast", model=payload.get("model") or "midjourney-v7"),
         "charge_tokens": int(payload.get("charge_tokens") or 0),
         "images": images[:4],
@@ -7036,7 +7111,8 @@ async def process_telegram_update(update: Dict[str, Any]):
 
             if len(parts) >= 3 and parts[1] == "ar":
                 value = ":".join(parts[2:]).strip()
-                if value in {"1:1", "16:9", "9:16", "4:5"}:
+                value = normalize_midjourney_aspect_ratio(value, default="")
+                if value:
                     mj["aspect_ratio"] = value
                     mj["step"] = "need_prompt"
                     st["midjourney"] = mj
@@ -7185,7 +7261,7 @@ async def process_telegram_update(update: Dict[str, Any]):
             if not session:
                 session = await _midjourney_load_session_from_storage(chat_id, user_id, token)
             if not session:
-                await tg_answer_callback_query(str(cq_id), text="Midjourney результат устарел. Сгенерируй заново.", show_alert=True)
+                await tg_send_message(chat_id, "⚠️ Midjourney результат устарел. Сгенерируй заново.")
                 return {"ok": True}
             message_id = int((msg or {}).get("message_id") or 0)
 
@@ -7196,14 +7272,21 @@ async def process_telegram_update(update: Dict[str, Any]):
                     index = 0
                 images = session.get("images") or []
                 if index >= len(images):
-                    await tg_answer_callback_query(str(cq_id), text="Такого изображения нет.", show_alert=True)
+                    await tg_send_message(chat_id, "⚠️ Такого изображения нет. Попробуй открыть сетку заново.")
                     return {"ok": True}
                 image = images[index]
                 image_url = str(image.get("url") or "").strip()
                 try:
-                    await tg_edit_message_media_photo_url(chat_id, message_id, image_url, caption=_midjourney_result_caption(session, index), reply_markup=_midjourney_image_result_kb(token, index))
-                except Exception:
-                    await tg_send_photo_url(chat_id, image_url, caption=_midjourney_result_caption(session, index), reply_markup=_midjourney_image_result_kb(token, index))
+                    await _midjourney_show_image_from_url(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        image_url=image_url,
+                        caption=_midjourney_result_caption(session, index),
+                        reply_markup=_midjourney_image_result_kb(token, index),
+                    )
+                except Exception as e:
+                    await tg_send_message(chat_id, f"❌ Не удалось открыть изображение #{index + 1}. Попробуй ещё раз или скачай оригинал.\nОшибка: {str(e)[:300]}")
+                    return {"ok": True}
                 session["active_index"] = index
                 session["ts"] = _now()
                 return {"ok": True}
@@ -7211,9 +7294,16 @@ async def process_telegram_update(update: Dict[str, Any]):
             if action == "grid":
                 grid_url = str(session.get("grid_url") or "").strip()
                 try:
-                    await tg_edit_message_media_photo_url(chat_id, message_id, grid_url, caption=_midjourney_result_caption(session, grid=True), reply_markup=_midjourney_grid_result_kb(token))
-                except Exception:
-                    await tg_send_photo_url(chat_id, grid_url, caption=_midjourney_result_caption(session, grid=True), reply_markup=_midjourney_grid_result_kb(token))
+                    await _midjourney_show_image_from_url(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        image_url=grid_url,
+                        caption=_midjourney_result_caption(session, grid=True),
+                        reply_markup=_midjourney_grid_result_kb(token),
+                    )
+                except Exception as e:
+                    await tg_send_message(chat_id, f"❌ Не удалось открыть сетку Midjourney. Попробуй ещё раз.\nОшибка: {str(e)[:300]}")
+                    return {"ok": True}
                 session["ts"] = _now()
                 return {"ok": True}
 
@@ -7224,7 +7314,7 @@ async def process_telegram_update(update: Dict[str, Any]):
                     index = 0
                 images = session.get("images") or []
                 if index >= len(images):
-                    await tg_answer_callback_query(str(cq_id), text="Оригинал не найден.", show_alert=True)
+                    await tg_send_message(chat_id, "⚠️ Оригинал не найден. Попробуй открыть сетку заново.")
                     return {"ok": True}
                 image = images[index]
                 image_url = str(image.get("url") or "").strip()
