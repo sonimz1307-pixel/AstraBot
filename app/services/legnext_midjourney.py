@@ -19,6 +19,18 @@ MIDJOURNEY_MODEL_VERSIONS = {
     "midjourney-v8.1": "8.1",
 }
 
+MIDJOURNEY_ALLOWED_ASPECT_RATIOS = (
+    "1:1",
+    "4:5",
+    "3:4",
+    "2:3",
+    "9:16",
+    "16:9",
+    "3:2",
+    "4:3",
+    "21:9",
+)
+
 
 def normalize_midjourney_model(value: Any, default: str = "midjourney-v7") -> str:
     raw = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
@@ -50,6 +62,13 @@ def normalize_midjourney_speed_mode(value: Any, default: str = "fast", model: An
     if raw == "turbo":
         return "turbo"
     return default if default in {"fast", "turbo"} else "fast"
+
+
+def normalize_midjourney_aspect_ratio(value: Any, default: str = "1:1") -> str:
+    raw = str(value or "").strip()
+    if raw in MIDJOURNEY_ALLOWED_ASPECT_RATIOS:
+        return raw
+    return default if default in MIDJOURNEY_ALLOWED_ASPECT_RATIOS else "1:1"
 
 
 def _require_api_key() -> str:
@@ -130,7 +149,7 @@ def build_midjourney_v7_prompt(
 
     image_prompts = _normalize_http_urls(image_prompt_urls or [])[:4]
     parts: List[str] = [*image_prompts, base_prompt]
-    safe_ar = str(aspect_ratio or "1:1").strip() or "1:1"
+    safe_ar = normalize_midjourney_aspect_ratio(aspect_ratio, default="1:1")
     parts.append(f"--ar {safe_ar}")
     parts.append(f"--v {model_version}")
 
