@@ -14,7 +14,12 @@ from io import BytesIO
 from typing import Optional, Literal, Dict, Any, Tuple, List, Union
 
 import httpx
-from queue_redis import enqueue_job, enqueue_job_delayed
+from queue_redis import (
+    acquire_generation_lock,
+    enqueue_job,
+    enqueue_job_delayed,
+    release_generation_lock,
+)
 from chat_file_text import extract_file_text
 from chat_memory_redis import reset_tg_chat_memory
 from kie_claude_chat import (
@@ -1574,6 +1579,9 @@ TOPAZ_PHOTO_QUEUE_NAME = os.getenv("TOPAZ_PHOTO_QUEUE_NAME", "topaz_photo").stri
 GPT_IMAGE2_QUEUE_NAME = os.getenv("GPT_IMAGE2_QUEUE_NAME", "gpt_image2").strip() or "gpt_image2"
 GPT_IMAGE2_GENERATION_COST = int(os.getenv("GPT_IMAGE2_GENERATION_COST", "1") or "1")
 WORKSPACE_IMAGE_QUEUE_NAME = (os.getenv("WORKSPACE_IMAGE_QUEUE_NAME", "workspace_image") or "workspace_image").strip() or "workspace_image"
+WORKSPACE_GPT_IMAGE2_QUEUE_NAME = (os.getenv("WORKSPACE_GPT_IMAGE2_QUEUE_NAME", "workspace_gpt_image2") or "workspace_gpt_image2").strip() or "workspace_gpt_image2"
+GPT_IMAGE_2_USER_LOCK_NAME = (os.getenv("GPT_IMAGE_2_USER_LOCK_NAME", "gpt_image_2") or "gpt_image_2").strip() or "gpt_image_2"
+GPT_IMAGE_2_USER_LOCK_TTL_SEC = max(900, int(os.getenv("GPT_IMAGE_2_USER_LOCK_TTL_SEC", "14400") or "14400"))
 WORKSPACE_NB2LITE_QUEUE_NAME = (os.getenv("WORKSPACE_NB2LITE_QUEUE_NAME", "workspace_nb2lite") or "workspace_nb2lite").strip() or "workspace_nb2lite"
 WORKSPACE_SEEDREAM5_QUEUE_NAME = (os.getenv("WORKSPACE_SEEDREAM5_QUEUE_NAME", "workspace_seedream5") or "workspace_seedream5").strip() or "workspace_seedream5"
 MIDJOURNEY_TG_QUEUE_NAME = (os.getenv("MIDJOURNEY_TG_QUEUE_NAME", "telegram_midjourney") or "telegram_midjourney").strip() or "telegram_midjourney"
@@ -15348,7 +15356,9 @@ async def process_telegram_update(update: Dict[str, Any]):
             st["ts"] = _now()
             return {"ok": True}
 
-        # Gpt Image 2: text-to-image through workspace image worker
+        # Gpt Image 2: text-to-image through a dedicated worker queue.
+        # A Redis lock is acquired before charging so one user cannot launch
+        # multiple GPT Image 2 jobs concurrently, even across several web instances.
         if st.get("mode") == "gpt_image_2_kie_t2i":
             gi2k = st.get("gpt_image_2_kie_t2i") or {}
             if (gi2k.get("step") or "need_prompt") != "need_prompt":
@@ -15374,6 +15384,30 @@ async def process_telegram_update(update: Dict[str, Any]):
                 )
                 return {"ok": True}
 
+            job_id = uuid4().hex
+            try:
+                lock_acquired = await acquire_generation_lock(
+                    user_id,
+                    job_id,
+                    lock_name=GPT_IMAGE_2_USER_LOCK_NAME,
+                    ttl_sec=GPT_IMAGE_2_USER_LOCK_TTL_SEC,
+                )
+            except Exception as lock_exc:
+                logging.exception("GPT Image 2 Redis lock acquire failed")
+                await tg_send_message(
+                    chat_id,
+                    "❌ Сейчас не удалось проверить очередь GPT Image 2. Токены не списаны. Попробуй ещё раз через минуту.",
+                    reply_markup=_main_menu_for(user_id),
+                )
+                return {"ok": True}
+            if not lock_acquired:
+                await tg_send_message(
+                    chat_id,
+                    "⏳ У тебя уже выполняется генерация GPT Image 2. Дождись результата или сообщения об ошибке — повторный запуск пока заблокирован.",
+                    reply_markup=_main_menu_for(user_id),
+                )
+                return {"ok": True}
+
             charge_ref_id = uuid4().hex if cost_tokens > 0 else ""
             charged = False
             try:
@@ -15387,7 +15421,7 @@ async def process_telegram_update(update: Dict[str, Any]):
                     )
                     charged = True
                 await enqueue_job({
-                    "job_id": uuid4().hex,
+                    "job_id": job_id,
                     "kind": "telegram_gpt_image_2_kie_run",
                     "type": "gpt_image_2_kie_t2i",
                     "chat_id": int(chat_id),
@@ -15399,26 +15433,33 @@ async def process_telegram_update(update: Dict[str, Any]):
                     "charge_tokens": cost_tokens,
                     "charge_ref_id": charge_ref_id,
                     "refund_reason": "gpt_image_2_refund",
-                }, queue_name=WORKSPACE_IMAGE_QUEUE_NAME)
+                    "generation_lock_name": GPT_IMAGE_2_USER_LOCK_NAME,
+                    "generation_lock_owner": job_id,
+                    "generation_lock_ttl_sec": GPT_IMAGE_2_USER_LOCK_TTL_SEC,
+                }, queue_name=WORKSPACE_GPT_IMAGE2_QUEUE_NAME)
             except Exception as e:
                 if charged:
                     try:
                         add_tokens(user_id, cost_tokens, reason="gpt_image_2_refund", ref_id=charge_ref_id, meta={"stage": "enqueue_failed", "provider": "gpt_image_2_kie", "error": str(e)[:300]})
                     except Exception:
                         pass
+                try:
+                    await release_generation_lock(user_id, job_id, lock_name=GPT_IMAGE_2_USER_LOCK_NAME)
+                except Exception:
+                    logging.exception("GPT Image 2 Redis lock release failed after enqueue error")
                 await tg_send_message(chat_id, f"❌ Не удалось поставить Gpt Image 2 в очередь: {e}", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
             await tg_send_message(
                 chat_id,
-                f"✅ Gpt Image 2: запрос принят. Списано {cost_tokens} токен. Пришлю результат, как будет готово.",
+                f"✅ Gpt Image 2: запрос принят. Списано {cost_tokens} токен. До завершения этой задачи повторный запуск заблокирован.",
                 reply_markup=_main_menu_for(user_id),
             )
             st["gpt_image_2_kie_t2i"] = {"step": "need_prompt", "aspect_ratio": aspect_ratio, "resolution": resolution}
             st["ts"] = _now()
             return {"ok": True}
 
-        # Gpt Image 2: image-to-image through workspace image worker
+        # Gpt Image 2: image-to-image through a dedicated worker queue.
         if st.get("mode") == "gpt_image_2_kie_i2i":
             gi2k = st.get("gpt_image_2_kie_i2i") or {}
             step = (gi2k.get("step") or "need_image")
@@ -15451,6 +15492,30 @@ async def process_telegram_update(update: Dict[str, Any]):
                 )
                 return {"ok": True}
 
+            job_id = uuid4().hex
+            try:
+                lock_acquired = await acquire_generation_lock(
+                    user_id,
+                    job_id,
+                    lock_name=GPT_IMAGE_2_USER_LOCK_NAME,
+                    ttl_sec=GPT_IMAGE_2_USER_LOCK_TTL_SEC,
+                )
+            except Exception:
+                logging.exception("GPT Image 2 Redis lock acquire failed")
+                await tg_send_message(
+                    chat_id,
+                    "❌ Сейчас не удалось проверить очередь GPT Image 2. Токены не списаны. Попробуй ещё раз через минуту.",
+                    reply_markup=_main_menu_for(user_id),
+                )
+                return {"ok": True}
+            if not lock_acquired:
+                await tg_send_message(
+                    chat_id,
+                    "⏳ У тебя уже выполняется генерация GPT Image 2. Дождись результата или сообщения об ошибке — повторный запуск пока заблокирован.",
+                    reply_markup=_main_menu_for(user_id),
+                )
+                return {"ok": True}
+
             charge_ref_id = uuid4().hex if cost_tokens > 0 else ""
             charged = False
             try:
@@ -15464,7 +15529,7 @@ async def process_telegram_update(update: Dict[str, Any]):
                     )
                     charged = True
                 await enqueue_job({
-                    "job_id": uuid4().hex,
+                    "job_id": job_id,
                     "kind": "telegram_gpt_image_2_kie_run",
                     "type": "gpt_image_2_kie_i2i",
                     "chat_id": int(chat_id),
@@ -15479,19 +15544,26 @@ async def process_telegram_update(update: Dict[str, Any]):
                     "charge_tokens": cost_tokens,
                     "charge_ref_id": charge_ref_id,
                     "refund_reason": "gpt_image_2_refund",
-                }, queue_name=WORKSPACE_IMAGE_QUEUE_NAME)
+                    "generation_lock_name": GPT_IMAGE_2_USER_LOCK_NAME,
+                    "generation_lock_owner": job_id,
+                    "generation_lock_ttl_sec": GPT_IMAGE_2_USER_LOCK_TTL_SEC,
+                }, queue_name=WORKSPACE_GPT_IMAGE2_QUEUE_NAME)
             except Exception as e:
                 if charged:
                     try:
                         add_tokens(user_id, cost_tokens, reason="gpt_image_2_refund", ref_id=charge_ref_id, meta={"stage": "enqueue_failed", "provider": "gpt_image_2_kie", "error": str(e)[:300]})
                     except Exception:
                         pass
+                try:
+                    await release_generation_lock(user_id, job_id, lock_name=GPT_IMAGE_2_USER_LOCK_NAME)
+                except Exception:
+                    logging.exception("GPT Image 2 Redis lock release failed after enqueue error")
                 await tg_send_message(chat_id, f"❌ Не удалось поставить Gpt Image 2 в очередь: {e}", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
 
             await tg_send_message(
                 chat_id,
-                f"✅ Gpt Image 2: запрос принят. Списано {cost_tokens} токен. Пришлю результат, как будет готово.",
+                f"✅ Gpt Image 2: запрос принят. Списано {cost_tokens} токен. До завершения этой задачи повторный запуск заблокирован.",
                 reply_markup=_main_menu_for(user_id),
             )
             st["gpt_image_2_kie_i2i"] = {
