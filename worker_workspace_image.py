@@ -144,6 +144,51 @@ def _upload_midjourney_tg_asset(*, user_id: int, payload: bytes, ext: str = "jpg
     return str(upload_bytes_to_supabase(path, payload, _image_mime_type(safe_ext)) or "").strip()
 
 
+def _document_reply_markup(reply_markup: Optional[dict]) -> Optional[dict]:
+    """
+    Remove only the redundant dl2k download button when an image is sent as a
+    Telegram document. A document already contains the original, uncompressed
+    file. Other inline buttons (for example Midjourney actions) are preserved.
+    """
+    if not isinstance(reply_markup, dict):
+        return reply_markup
+
+    keyboard = reply_markup.get("inline_keyboard")
+    if not isinstance(keyboard, list):
+        return reply_markup
+
+    changed = False
+    filtered_keyboard = []
+    for row in keyboard:
+        if not isinstance(row, list):
+            filtered_keyboard.append(row)
+            continue
+
+        filtered_row = []
+        for button in row:
+            callback_data = ""
+            if isinstance(button, dict):
+                callback_data = str(button.get("callback_data") or "").strip()
+            if callback_data.startswith("dl2k:"):
+                changed = True
+                continue
+            filtered_row.append(button)
+
+        if filtered_row:
+            filtered_keyboard.append(filtered_row)
+        elif row:
+            changed = True
+
+    if not changed:
+        return reply_markup
+    if not filtered_keyboard:
+        return None
+
+    result = dict(reply_markup)
+    result["inline_keyboard"] = filtered_keyboard
+    return result
+
+
 async def tg_send_document_bytes(
     chat_id: int,
     doc_bytes: bytes,
@@ -178,7 +223,7 @@ async def tg_send_photo_bytes(
     safe_mime = str(mime_type or _image_mime_type(ext)).strip() or _image_mime_type(ext)
 
     if ext != "jpg" or len(photo_bytes or b"") > 9_500_000:
-        return await tg_send_document_bytes(chat_id, photo_bytes, filename=safe_filename, caption=caption, reply_markup=reply_markup)
+        return await tg_send_document_bytes(chat_id, photo_bytes, filename=safe_filename, caption=caption, reply_markup=_document_reply_markup(reply_markup))
 
     data: Dict[str, Any] = {"chat_id": str(chat_id)}
     if caption:
@@ -191,7 +236,7 @@ async def tg_send_photo_bytes(
         return int(((payload.get("result") or {}) if isinstance(payload.get("result"), dict) else {}).get("message_id") or 0) or None
     except Exception as exc:
         print(f"[workspace_image] sendPhoto failed, fallback to document: {exc}", flush=True)
-        return await tg_send_document_bytes(chat_id, photo_bytes, filename=safe_filename, caption=caption, reply_markup=reply_markup)
+        return await tg_send_document_bytes(chat_id, photo_bytes, filename=safe_filename, caption=caption, reply_markup=_document_reply_markup(reply_markup))
 
 
 async def register_dl2k_slot(chat_id: int, user_id: int, image_bytes: bytes) -> Optional[str]:
