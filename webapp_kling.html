@@ -617,6 +617,13 @@
         </label>
       </div>
       <div class="hint">Выбери модель, настрой параметры и нажми “Сохранить”.</div>
+      <div class="toggle" style="margin-top:12px;">
+        <div class="left">
+          <div class="tname" id="rememberVideoSettingsLabel">🔓 Запоминать настройки</div>
+          <div class="tdesc" id="rememberVideoSettingsDesc">Сохраняет последние параметры отдельно для каждой видеомодели на этом устройстве.</div>
+        </div>
+        <input id="remember_video_settings" type="checkbox">
+      </div>
     </div>
 
     <!-- ===================== KLING BLOCK ===================== -->
@@ -2092,7 +2099,7 @@
     }
 
     // Events
-    qsa('input[name="provider"]').forEach(el => el.addEventListener('change', () => { updateProviderUI(); updateCostUI(); }));
+    qsa('input[name="provider"]').forEach(el => el.addEventListener('change', () => { updateProviderUI(); updateCostUI(); persistRememberedSettings(); }));
     qsa('input[name="flow"]').forEach(el => el.addEventListener('change', () => { updateKlingUI(); updateCostUI(); }));
     qsa('input[name="mode"]').forEach(el => el.addEventListener('change', () => { updateTokenRateHint(); updateCostUI(); }));
     qsa('input[name="kling_version"]').forEach(el => el.addEventListener('change', () => { updateKlingUI(); updateTokenRateHint(); updateCostUI(); }));
@@ -2139,17 +2146,8 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
 
     // Cost UI bindings (covers selects / toggles not listed above)
     qsa('select, input[type=\"checkbox\"], input[type=\"radio\"]').forEach(el => {
-      el.addEventListener('change', () => { try{ updateCostUI(); }catch(e){} });
+      el.addEventListener('change', () => { try{ updateCostUI(); persistRememberedSettings(); }catch(e){} });
     });
-
-    // Init
-    updateProviderUI();
-    updateKlingUI();
-    updateTokenRateHint();
-    updateVeoPriceHint();
-    setVeoAdvancedEnabled();
-    updateGrokUI();
-    updateCostUI();
 
     // Telegram init (safe)
     const tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
@@ -2163,13 +2161,273 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
       }
     }catch(e){}
 
-    if (tg){
+    const WEBAPP_VIDEO_LOCK_KEY = 'astrabot:tgVideoSettingsLock';
+    const WEBAPP_VIDEO_SETTINGS_KEY = 'astrabot:tgVideoRememberedSettings';
+
+    function readStorageJson(key, fallback){
       try{
-        tg.ready();
-        tg.expand();
-      }catch(e){}
+        const raw = localStorage.getItem(key);
+        if (!raw) return fallback;
+        return JSON.parse(raw);
+      }catch(e){
+        return fallback;
+      }
     }
 
+    function writeStorageJson(key, value){
+      try{
+        localStorage.setItem(key, JSON.stringify(value));
+        return true;
+      }catch(e){
+        return false;
+      }
+    }
+
+    function webappRememberToggle(){
+      return qs('#remember_video_settings');
+    }
+
+    function isWebappRememberEnabled(){
+      return !!webappRememberToggle()?.checked;
+    }
+
+    function updateRememberVideoSettingsUi(){
+      const enabled = isWebappRememberEnabled();
+      const label = qs('#rememberVideoSettingsLabel');
+      const desc = qs('#rememberVideoSettingsDesc');
+      if (label) label.textContent = enabled ? '🔒 Запоминать настройки' : '🔓 Запоминать настройки';
+      if (desc) desc.textContent = enabled
+        ? 'Замок включён: последние параметры будут восстановлены отдельно для каждой видеомодели.'
+        : 'Сохраняет последние параметры отдельно для каждой видеомодели на этом устройстве.';
+    }
+
+    function setRadioValue(name, value){
+      qsa(`input[name="${name}"]`).forEach((el) => {
+        el.checked = String(el.value) === String(value);
+      });
+    }
+
+    function setSelectValue(id, value){
+      const el = qs(`#${id}`);
+      if (!el || value === undefined || value === null || value === '') return;
+      el.value = String(value);
+    }
+
+    function getCurrentRememberedModelKey(){
+      const provider = getProvider();
+      if (provider === 'kling') return `kling::${getKlingVersion()}`;
+      if (provider === 'seedance') return getSeedanceVariant() === 'kie' ? `seedance::${getSeedanceKieModel()}` : 'seedance::seedance-mini';
+      if (provider === 'veo') return `veo::${getVeoModel()}`;
+      if (provider === 'grok') return `grok::${getGrokModel()}`;
+      if (provider === 'google') return 'google::gemini-omni-video';
+      if (provider === 'sora') return 'sora::sora-2';
+      return provider;
+    }
+
+    function captureRememberedSettings(){
+      const provider = getProvider();
+      const payload = { provider };
+      if (provider === 'kling'){
+        const version = getKlingVersion();
+        payload.kling_version = version;
+        if (version === '1_6'){
+          payload.flow = getFlow();
+          payload.mode = getMode();
+        } else if (version === '2_5') {
+          payload.flow = getFlow();
+          payload.duration = parseInt((qs('#duration')?.value || '5'), 10);
+          payload.aspect_ratio = getKling25Aspect();
+        } else if (version === '3_0_turbo') {
+          payload.gen_mode = getKling3TurboGenMode();
+          payload.resolution = getKling3TurboResolution();
+          payload.duration = getKling3TurboDuration();
+          payload.aspect_ratio = getKling3TurboAspect();
+        } else if (version === '3_0_new') {
+          payload.gen_mode = getKling3NewGenMode();
+          payload.quality = getKling3NewQuality();
+          payload.enable_audio = getKling3NewAudio();
+          payload.duration = getKling3NewDuration();
+          payload.aspect_ratio = getKling3NewAspect();
+          payload.kling3NewShots = (Array.isArray(getK3NShotStore()) ? getK3NShotStore() : []).map((shot) => ({
+            prompt: String((shot && shot.prompt) || ''),
+            duration: String((shot && shot.duration) || '3'),
+          }));
+        }
+      } else if (provider === 'seedance') {
+        payload.variant = getSeedanceVariant();
+        payload.duration = parseInt((qs('#seedance_duration')?.value || '5'), 10);
+        payload.aspect_ratio = (qs('#seedance_aspect')?.value || '16:9');
+        if (payload.variant === 'kie') {
+          payload.model = getSeedanceKieModel();
+          payload.flow = getSeedanceKieFlow();
+        } else {
+          payload.model = 'seedance-mini';
+          payload.flow = (qs('input[name="seedance_flow"]:checked')?.value || 'text');
+        }
+      } else if (provider === 'veo') {
+        payload.model = getVeoModel();
+        payload.flow = getVeoFlow();
+        payload.duration = parseInt((qs('#veo_duration')?.value || '8'), 10);
+        payload.resolution = (qs('#veo_resolution')?.value || '1080p');
+        payload.aspect_ratio = (qs('#veo_aspect')?.value || '16:9');
+        payload.generate_audio = !!qs('#veo_audio')?.checked;
+        payload.use_last_frame = !!qs('#veo_use_last_frame')?.checked;
+        payload.use_refs = !!qs('#veo_use_refs')?.checked;
+      } else if (provider === 'grok') {
+        payload.model = getGrokModel();
+        payload.flow = getGrokFlow();
+        payload.provider_mode = getGrokProviderMode();
+        payload.duration = parseInt((qs('#grok_duration')?.value || (payload.model === 'grok-imagine-video-1.5' ? '5' : '6')), 10);
+        payload.resolution = (qs('#grok_resolution')?.value || '480p');
+        payload.aspect_ratio = (qs('#grok_aspect')?.value || '16:9');
+      } else if (provider === 'google') {
+        payload.flow = getOmniFlow();
+        payload.duration = parseInt((qs('#omni_duration')?.value || '8'), 10);
+        payload.resolution = (qs('#omni_resolution')?.value || '1080p');
+        payload.aspect_ratio = (qs('#omni_aspect')?.value || '16:9');
+      } else if (provider === 'sora') {
+        payload.duration = parseInt((qs('#sora_duration')?.value || '4'), 10);
+        payload.aspect_ratio = (qs('#sora_aspect')?.value || '16:9');
+      }
+      return payload;
+    }
+
+    function persistRememberedSettings(){
+      if (!isWebappRememberEnabled()) return;
+      const store = readStorageJson(WEBAPP_VIDEO_SETTINGS_KEY, {});
+      const payload = captureRememberedSettings();
+      const key = getCurrentRememberedModelKey();
+      store[key] = payload;
+      store.__last_key = key;
+      store.__last_provider = payload.provider || getProvider();
+      writeStorageJson(WEBAPP_VIDEO_SETTINGS_KEY, store);
+      try{ localStorage.setItem(WEBAPP_VIDEO_LOCK_KEY, '1'); }catch(e){}
+    }
+
+    function applyRememberedSettings(payload){
+      if (!payload || typeof payload !== 'object') return false;
+      const provider = String(payload.provider || '');
+      if (provider) {
+        setRadioValue('provider', provider);
+        updateProviderUI();
+      }
+      if (provider === 'kling'){
+        if (payload.kling_version) {
+          setRadioValue('kling_version', payload.kling_version);
+          updateKlingUI();
+        }
+        if (payload.kling_version === '1_6') {
+          if (payload.flow) setRadioValue('flow', payload.flow);
+          if (payload.mode) setRadioValue('mode', payload.mode);
+        } else if (payload.kling_version === '2_5') {
+          if (payload.flow) setRadioValue('flow', payload.flow);
+          if (payload.duration) setSelectValue('duration', payload.duration);
+          if (payload.aspect_ratio) setSelectValue('kling25_aspect', payload.aspect_ratio);
+        } else if (payload.kling_version === '3_0_turbo') {
+          if (payload.gen_mode) setRadioValue('kling3_turbo_gen_mode', payload.gen_mode);
+          if (payload.resolution) setRadioValue('kling3_turbo_resolution', payload.resolution);
+          if (payload.duration) setSelectValue('kling3_turbo_duration', payload.duration);
+          if (payload.aspect_ratio) setSelectValue('kling3_turbo_aspect', payload.aspect_ratio);
+        } else if (payload.kling_version === '3_0_new') {
+          if (payload.gen_mode) setRadioValue('kling3_new_gen_mode', payload.gen_mode);
+          if (payload.quality) setRadioValue('kling3_new_quality', payload.quality);
+          const audio = qs('#kling3_new_audio');
+          if (audio) audio.checked = !!payload.enable_audio;
+          if (payload.duration) setSelectValue('kling3_new_duration', payload.duration);
+          if (payload.aspect_ratio) setSelectValue('kling3_new_aspect', payload.aspect_ratio);
+          if (Array.isArray(payload.kling3NewShots) && payload.kling3NewShots.length) {
+            window.__k3n_shots_store = payload.kling3NewShots.map((shot) => ({
+              prompt: String((shot && shot.prompt) || ''),
+              duration: String((shot && shot.duration) || '3'),
+            }));
+            renderKling3NewEditors();
+          }
+        }
+        updateKlingUI();
+      } else if (provider === 'seedance') {
+        if (payload.variant) {
+          setRadioValue('seedance_variant', payload.variant);
+          updateSeedanceUI();
+        }
+        if (payload.variant === 'kie') {
+          if (payload.model) setRadioValue('seedance_kie_model', payload.model);
+          if (payload.flow) setRadioValue('seedance_kie_flow', payload.flow);
+        } else {
+          if (payload.flow) setRadioValue('seedance_flow', payload.flow);
+        }
+        if (payload.duration) setSelectValue('seedance_duration', payload.duration);
+        if (payload.aspect_ratio) setSelectValue('seedance_aspect', payload.aspect_ratio);
+        updateSeedanceUI();
+      } else if (provider === 'veo') {
+        if (payload.model) setRadioValue('veo_model', payload.model);
+        if (payload.flow) setRadioValue('veo_flow', payload.flow);
+        if (payload.duration) setSelectValue('veo_duration', payload.duration);
+        if (payload.resolution) setSelectValue('veo_resolution', payload.resolution);
+        if (payload.aspect_ratio) setSelectValue('veo_aspect', payload.aspect_ratio);
+        const audio = qs('#veo_audio');
+        if (audio) audio.checked = !!payload.generate_audio;
+        const lf = qs('#veo_use_last_frame');
+        if (lf) lf.checked = !!payload.use_last_frame;
+        const refs = qs('#veo_use_refs');
+        if (refs) refs.checked = !!payload.use_refs;
+        setVeoAdvancedEnabled();
+      } else if (provider === 'grok') {
+        if (payload.model) setRadioValue('grok_model', payload.model);
+        updateGrokUI();
+        if (payload.flow) setRadioValue('grok_flow', payload.flow);
+        if (payload.provider_mode) setSelectValue('grok_mode', payload.provider_mode);
+        if (payload.duration) setSelectValue('grok_duration', payload.duration);
+        if (payload.resolution) setSelectValue('grok_resolution', payload.resolution);
+        if (payload.aspect_ratio) setSelectValue('grok_aspect', payload.aspect_ratio);
+        updateGrokUI();
+      } else if (provider === 'google') {
+        if (payload.flow) setRadioValue('omni_flow', payload.flow);
+        if (payload.duration) setSelectValue('omni_duration', payload.duration);
+        if (payload.resolution) setSelectValue('omni_resolution', payload.resolution);
+        if (payload.aspect_ratio) setSelectValue('omni_aspect', payload.aspect_ratio);
+        updateOmniUI();
+      } else if (provider === 'sora') {
+        if (payload.duration) setSelectValue('sora_duration', payload.duration);
+        if (payload.aspect_ratio) setSelectValue('sora_aspect', payload.aspect_ratio);
+      }
+      updateProviderUI();
+      updateCostUI();
+      return true;
+    }
+
+    function restoreRememberedSettings(){
+      if (!isWebappRememberEnabled()) return false;
+      const store = readStorageJson(WEBAPP_VIDEO_SETTINGS_KEY, {});
+      const lastProvider = String(store.__last_provider || '');
+      if (lastProvider) setRadioValue('provider', lastProvider);
+      updateProviderUI();
+      const key = String(store.__last_key || getCurrentRememberedModelKey() || '');
+      if (!key) return false;
+      return applyRememberedSettings(store[key]);
+    }
+
+    function initRememberedSettingsUi(){
+      const toggle = webappRememberToggle();
+      if (!toggle) return;
+      try{ toggle.checked = localStorage.getItem(WEBAPP_VIDEO_LOCK_KEY) === '1'; }catch(e){ toggle.checked = false; }
+      updateRememberVideoSettingsUi();
+      toggle.addEventListener('change', () => {
+        try{ localStorage.setItem(WEBAPP_VIDEO_LOCK_KEY, toggle.checked ? '1' : '0'); }catch(e){}
+        updateRememberVideoSettingsUi();
+        if (toggle.checked) persistRememberedSettings();
+      });
+    }
+
+    // Init
+    initRememberedSettingsUi();
+    restoreRememberedSettings();
+    updateProviderUI();
+    updateKlingUI();
+    updateTokenRateHint();
+    updateVeoPriceHint();
+    setVeoAdvancedEnabled();
+    updateGrokUI();
+    updateCostUI();
 
     function pluralizeToken(n){
       const n10 = n % 10, n100 = n % 100;
@@ -2519,6 +2777,7 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
         }
 
         showDebug(payload);
+        persistRememberedSettings();
 
         if (tg){
           try{ tg.sendData(JSON.stringify(payload)); }catch(err){}
