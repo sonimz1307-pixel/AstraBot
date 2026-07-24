@@ -218,6 +218,51 @@ async def tg_send_audio_bytes(
             raise RuntimeError(f"Telegram sendAudio failed: {r.status_code} {r.text[:500]}")
 
 
+def _document_reply_markup(reply_markup: Optional[dict]) -> Optional[dict]:
+    """
+    Remove only the redundant dl2k download button when an image is sent as a
+    Telegram document. A document already contains the original, uncompressed
+    file. Other inline buttons (for example Midjourney actions) are preserved.
+    """
+    if not isinstance(reply_markup, dict):
+        return reply_markup
+
+    keyboard = reply_markup.get("inline_keyboard")
+    if not isinstance(keyboard, list):
+        return reply_markup
+
+    changed = False
+    filtered_keyboard = []
+    for row in keyboard:
+        if not isinstance(row, list):
+            filtered_keyboard.append(row)
+            continue
+
+        filtered_row = []
+        for button in row:
+            callback_data = ""
+            if isinstance(button, dict):
+                callback_data = str(button.get("callback_data") or "").strip()
+            if callback_data.startswith("dl2k:"):
+                changed = True
+                continue
+            filtered_row.append(button)
+
+        if filtered_row:
+            filtered_keyboard.append(filtered_row)
+        elif row:
+            changed = True
+
+    if not changed:
+        return reply_markup
+    if not filtered_keyboard:
+        return None
+
+    result = dict(reply_markup)
+    result["inline_keyboard"] = filtered_keyboard
+    return result
+
+
 async def tg_send_document_bytes(
     chat_id: int,
     file_bytes: bytes,
@@ -327,7 +372,7 @@ async def tg_send_photo_bytes(
     safe_filename = str(filename or f"result.{ext}").strip() or f"result.{ext}"
     safe_mime = str(mime_type or _image_mime_type(ext)).strip() or _image_mime_type(ext)
     if ext != "jpg" or len(photo_bytes or b"") > 9_500_000:
-        return await tg_send_document_bytes(chat_id, photo_bytes, filename=safe_filename, caption=caption, reply_markup=reply_markup)
+        return await tg_send_document_bytes(chat_id, photo_bytes, filename=safe_filename, caption=caption, reply_markup=_document_reply_markup(reply_markup))
     data = {"chat_id": str(chat_id)}
     if caption:
         data["caption"] = caption
@@ -339,7 +384,7 @@ async def tg_send_photo_bytes(
         return int((payload.get("result") or {}).get("message_id") or 0) or None
     except Exception as e:
         print(f"sendPhoto failed, fallback to sendDocument: {e}")
-        return await tg_send_document_bytes(chat_id, photo_bytes, filename=safe_filename, caption=caption, reply_markup=reply_markup)
+        return await tg_send_document_bytes(chat_id, photo_bytes, filename=safe_filename, caption=caption, reply_markup=_document_reply_markup(reply_markup))
 
 
 async def _progress_loop(chat_id: int, msg_id: Optional[int], label: str, stop: asyncio.Event, step_sec: float = 3.0) -> None:
