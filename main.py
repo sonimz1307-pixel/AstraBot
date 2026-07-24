@@ -9195,7 +9195,7 @@ async def process_telegram_update(update: Dict[str, Any]):
                 duration = int(payload.get("duration") or 5)
             except Exception:
                 duration = 5
-            if duration not in (5, 10, 15):
+            if duration < 4 or duration > 15:
                 duration = 5
 
             aspect_ratio = str(payload.get("aspect_ratio") or "16:9").strip()
