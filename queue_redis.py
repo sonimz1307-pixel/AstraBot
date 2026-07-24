@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import time
 from typing import Any, Dict, Optional, Sequence
 
@@ -19,6 +20,7 @@ _REDIS_CONNECT_TIMEOUT_SEC = int(os.getenv("REDIS_CONNECT_TIMEOUT_SEC", "10") or
 _REDIS_HEALTH_CHECK_INTERVAL_SEC = int(os.getenv("REDIS_HEALTH_CHECK_INTERVAL_SEC", "30") or "30")
 _REDIS_RECONNECT_SLEEP_SEC = float(os.getenv("REDIS_RECONNECT_SLEEP_SEC", "2") or "2")
 _REDIS_ENQUEUE_ATTEMPTS = max(1, int(os.getenv("REDIS_ENQUEUE_ATTEMPTS", "3") or "3"))
+_LOCK_PREFIX = (os.getenv("REDIS_LOCK_PREFIX", "astrabot:lock") or "astrabot:lock").strip().rstrip(":") or "astrabot:lock"
 
 _REDIS_CLIENT: Optional[redis.Redis] = None
 
@@ -38,6 +40,114 @@ def _queue_key(queue_name: Optional[str] = None) -> str:
 def _delayed_queue_key(queue_name: Optional[str] = None) -> str:
     q = (queue_name or _DEFAULT_QUEUE_NAME or "gen").strip() or "gen"
     return f"{_QUEUE_PREFIX}:delayed:{q}"
+
+
+def _generation_lock_key(user_id: int, lock_name: str = "generation") -> str:
+    try:
+        uid = int(user_id)
+    except Exception as exc:
+        raise ValueError("invalid user_id for Redis generation lock") from exc
+    safe_name = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(lock_name or "generation").strip()) or "generation"
+    return f"{_LOCK_PREFIX}:{safe_name}:{uid}"
+
+
+async def acquire_generation_lock(
+    user_id: int,
+    owner_id: str,
+    *,
+    lock_name: str = "generation",
+    ttl_sec: int = 14_400,
+) -> bool:
+    """Atomically acquire a cross-process per-user generation lock.
+
+    Returns True only for the caller that created the lock. The opaque owner_id
+    is stored in Redis and is later used for safe refresh/release operations.
+    """
+    owner = str(owner_id or "").strip()
+    if not owner:
+        raise ValueError("owner_id is required for Redis generation lock")
+    key = _generation_lock_key(user_id, lock_name)
+    ttl = max(60, int(ttl_sec or 14_400))
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, _REDIS_ENQUEUE_ATTEMPTS + 1):
+        try:
+            r = await get_redis()
+            return bool(await r.set(key, owner, ex=ttl, nx=True))
+        except (RedisTimeoutError, RedisConnectionError) as exc:
+            last_exc = exc
+            print(
+                f"[queue_redis] Redis lock acquire error attempt={attempt}/{_REDIS_ENQUEUE_ATTEMPTS} "
+                f"key={key}: {exc}",
+                flush=True,
+            )
+            await _reset_redis_client()
+            if attempt < _REDIS_ENQUEUE_ATTEMPTS:
+                await asyncio.sleep(_REDIS_RECONNECT_SLEEP_SEC)
+    raise RuntimeError(f"Redis lock acquire failed after {_REDIS_ENQUEUE_ATTEMPTS} attempts: {last_exc}")
+
+
+async def refresh_generation_lock(
+    user_id: int,
+    owner_id: str,
+    *,
+    lock_name: str = "generation",
+    ttl_sec: int = 14_400,
+) -> bool:
+    """Refresh the lock TTL only when owner_id still owns the lock."""
+    owner = str(owner_id or "").strip()
+    if not owner:
+        return False
+    key = _generation_lock_key(user_id, lock_name)
+    ttl = max(60, int(ttl_sec or 14_400))
+    script = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+    return 1
+end
+return 0
+"""
+    try:
+        r = await get_redis()
+        return bool(int(await r.eval(script, 1, key, owner, ttl) or 0))
+    except (RedisTimeoutError, RedisConnectionError) as exc:
+        print(f"[queue_redis] Redis lock refresh error key={key}: {exc}", flush=True)
+        await _reset_redis_client()
+        return False
+
+
+async def release_generation_lock(
+    user_id: int,
+    owner_id: str,
+    *,
+    lock_name: str = "generation",
+) -> bool:
+    """Delete the lock only when owner_id still owns it."""
+    owner = str(owner_id or "").strip()
+    if not owner:
+        return False
+    key = _generation_lock_key(user_id, lock_name)
+    script = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, _REDIS_ENQUEUE_ATTEMPTS + 1):
+        try:
+            r = await get_redis()
+            return bool(int(await r.eval(script, 1, key, owner) or 0))
+        except (RedisTimeoutError, RedisConnectionError) as exc:
+            last_exc = exc
+            print(
+                f"[queue_redis] Redis lock release error attempt={attempt}/{_REDIS_ENQUEUE_ATTEMPTS} "
+                f"key={key}: {exc}",
+                flush=True,
+            )
+            await _reset_redis_client()
+            if attempt < _REDIS_ENQUEUE_ATTEMPTS:
+                await asyncio.sleep(_REDIS_RECONNECT_SLEEP_SEC)
+    raise RuntimeError(f"Redis lock release failed after {_REDIS_ENQUEUE_ATTEMPTS} attempts: {last_exc}")
 
 
 async def get_redis() -> "redis.Redis":
