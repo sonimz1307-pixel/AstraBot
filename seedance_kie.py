@@ -31,7 +31,7 @@ SEEDANCE_KIE_ALLOWED_MODELS = {
     "seedance-kie-720p",
     "seedance-kie-1080p",
 }
-SEEDANCE_KIE_ALLOWED_DURATIONS = (5, 10, 15)
+SEEDANCE_KIE_ALLOWED_DURATIONS = tuple(range(4, 16))
 SEEDANCE_KIE_ALLOWED_ASPECT_RATIOS = ("16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive")
 SEEDANCE_KIE_PROMPT_MAX_CHARS = int(os.getenv("KIE_SEEDANCE_PROMPT_MAX_CHARS", "20000") or "20000")
 SEEDANCE_KIE_MAX_IMAGE_REFS = int(os.getenv("KIE_SEEDANCE_MAX_IMAGE_REFS", "7") or "7")
@@ -39,13 +39,25 @@ SEEDANCE_KIE_MAX_AUDIO_REFS = int(os.getenv("KIE_SEEDANCE_MAX_AUDIO_REFS", "3") 
 SEEDANCE_KIE_MAX_VIDEO_REFS = int(os.getenv("KIE_SEEDANCE_MAX_VIDEO_REFS", "3") or "3")
 SEEDANCE_KIE_MAX_TOTAL_OMNI_REFS = int(os.getenv("KIE_SEEDANCE_MAX_TOTAL_OMNI_REFS", "12") or "12")
 
-# Final retail prices approved for 5 / 10 / 15 seconds.
+# Final retail prices approved for every whole-second duration from 4 to 15 seconds.
 # Do not derive these base prices from provider rates: product pricing is fixed by business rules.
 SEEDANCE_KIE_TOKEN_MAP = {
-    "seedance-kie-mini": {5: 8, 10: 13, 15: 18},
-    "seedance-kie-480p": {5: 6, 10: 12, 15: 18},
-    "seedance-kie-720p": {5: 12, 10: 24, 15: 33},
-    "seedance-kie-1080p": {5: 28, 10: 55, 15: 80},
+    "seedance-kie-mini": {
+        4: 7, 5: 8, 6: 9, 7: 10, 8: 11, 9: 12,
+        10: 13, 11: 14, 12: 15, 13: 16, 14: 17, 15: 18,
+    },
+    "seedance-kie-480p": {
+        4: 5, 5: 6, 6: 8, 7: 9, 8: 10, 9: 11,
+        10: 12, 11: 14, 12: 15, 13: 16, 14: 17, 15: 18,
+    },
+    "seedance-kie-720p": {
+        4: 10, 5: 12, 6: 15, 7: 17, 8: 20, 9: 22,
+        10: 24, 11: 26, 12: 28, 13: 30, 14: 32, 15: 33,
+    },
+    "seedance-kie-1080p": {
+        4: 29, 5: 36, 6: 44, 7: 51, 8: 58, 9: 65,
+        10: 72, 11: 80, 12: 87, 13: 94, 14: 101, 15: 108,
+    },
 }
 
 # KIE provider pricing for Seedance 2.0 video-input billing only.
@@ -180,11 +192,7 @@ def normalize_seedance_kie_duration(value: Any, default: int = 5) -> int:
         out = int(value)
     except Exception:
         out = int(default)
-    if out <= SEEDANCE_KIE_ALLOWED_DURATIONS[0]:
-        return SEEDANCE_KIE_ALLOWED_DURATIONS[0]
-    if out >= SEEDANCE_KIE_ALLOWED_DURATIONS[-1]:
-        return SEEDANCE_KIE_ALLOWED_DURATIONS[-1]
-    return min(SEEDANCE_KIE_ALLOWED_DURATIONS, key=lambda item: (abs(item - out), item))
+    return max(SEEDANCE_KIE_ALLOWED_DURATIONS[0], min(SEEDANCE_KIE_ALLOWED_DURATIONS[-1], out))
 
 
 def normalize_seedance_kie_aspect_ratio(value: Any, default: str = "16:9") -> str:
