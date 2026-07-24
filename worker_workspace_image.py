@@ -14,7 +14,7 @@ from gpt_image_2_kie import handle_gpt_image_2_kie
 from seedream_5_pro_kie import handle_seedream_5_pro_kie
 from nano_banana_2_lite_kie import handle_nano_banana_2_lite
 from kling_flow import upload_bytes_to_supabase
-from queue_redis import dequeue_job
+from queue_redis import dequeue_job, refresh_generation_lock, release_generation_lock
 from app.services.legnext_midjourney import (
     LegnextMidjourneyError,
     create_midjourney_diffusion,
@@ -27,6 +27,12 @@ from app.services.workspace_worker_jobs import process_workspace_image_job
 WORKSPACE_IMAGE_QUEUE_NAME = (os.getenv("WORKSPACE_IMAGE_QUEUE_NAME", "workspace_image") or "workspace_image").strip() or "workspace_image"
 WORKSPACE_IMAGE_CONCURRENCY = int(os.getenv("WORKSPACE_IMAGE_CONCURRENCY", "3") or "3")
 image_sem = asyncio.Semaphore(WORKSPACE_IMAGE_CONCURRENCY)
+
+WORKSPACE_GPT_IMAGE2_QUEUE_NAME = (os.getenv("WORKSPACE_GPT_IMAGE2_QUEUE_NAME", "workspace_gpt_image2") or "workspace_gpt_image2").strip() or "workspace_gpt_image2"
+WORKSPACE_GPT_IMAGE2_CONCURRENCY = max(1, int(os.getenv("WORKSPACE_GPT_IMAGE2_CONCURRENCY", "5") or "5"))
+gpt_image2_sem = asyncio.Semaphore(WORKSPACE_GPT_IMAGE2_CONCURRENCY)
+GPT_IMAGE_2_LOCK_REFRESH_SEC = max(30.0, float(os.getenv("GPT_IMAGE_2_LOCK_REFRESH_SEC", "60") or "60"))
+GPT_IMAGE_2_TOTAL_TIMEOUT_SEC = max(300.0, float(os.getenv("GPT_IMAGE_2_TOTAL_TIMEOUT_SEC", "1250") or "1250"))
 
 WORKSPACE_NB2LITE_QUEUE_NAME = (os.getenv("WORKSPACE_NB2LITE_QUEUE_NAME", "workspace_nb2lite") or "workspace_nb2lite").strip() or "workspace_nb2lite"
 WORKSPACE_NB2LITE_CONCURRENCY = int(os.getenv("WORKSPACE_NB2LITE_CONCURRENCY", "2") or "2")
@@ -828,43 +834,95 @@ async def process_telegram_gpt_image_2_kie_job(job: Dict[str, Any]) -> None:
     charge_tokens = int(job.get("charge_tokens") or 0)
     charge_ref_id = str(job.get("charge_ref_id") or "").strip() or None
     refund_reason = str(job.get("refund_reason") or "gpt_image_2_refund").strip() or "gpt_image_2_refund"
+    lock_name = str(job.get("generation_lock_name") or "gpt_image_2").strip() or "gpt_image_2"
+    lock_owner = str(job.get("generation_lock_owner") or job.get("job_id") or "").strip()
+    lock_ttl_sec = max(900, int(job.get("generation_lock_ttl_sec") or 14_400))
 
-    status_msg_id = await tg_send_message(chat_id, f"⏳ Gpt Image 2: задача в обработке…\nКачество: {resolution}\nФормат: {aspect_ratio}")
-    stop = asyncio.Event()
+    status_msg_id: Optional[int] = None
+    progress_stop = asyncio.Event()
+    progress_task: Optional[asyncio.Task] = None
+    lock_stop = asyncio.Event()
+    lock_task: Optional[asyncio.Task] = None
+
+    async def _lock_heartbeat() -> None:
+        if not user_id or not lock_owner:
+            return
+        while not lock_stop.is_set():
+            try:
+                await asyncio.wait_for(lock_stop.wait(), timeout=GPT_IMAGE_2_LOCK_REFRESH_SEC)
+                break
+            except asyncio.TimeoutError:
+                pass
+            try:
+                refreshed = await refresh_generation_lock(
+                    user_id,
+                    lock_owner,
+                    lock_name=lock_name,
+                    ttl_sec=lock_ttl_sec,
+                )
+                if not refreshed:
+                    print(
+                        f"[workspace_image] GPT Image 2 lock is no longer owned "
+                        f"user={user_id} job={job.get('job_id')}",
+                        flush=True,
+                    )
+            except Exception as exc:
+                # A temporary Redis problem must not cancel a provider task.
+                print(
+                    f"[workspace_image] GPT Image 2 lock heartbeat failed "
+                    f"user={user_id} job={job.get('job_id')}: {exc}",
+                    flush=True,
+                )
 
     async def _progress_loop() -> None:
         if not status_msg_id:
             return
         seq = _parse_progress_seq()
         i = 0
-        while not stop.is_set():
+        while not progress_stop.is_set():
             pct = seq[min(i, len(seq) - 1)]
             i += 1
             try:
-                await tg_edit_message_text(chat_id, status_msg_id, f"⏳ Gpt Image 2: обработка… {pct}%\nКачество: {resolution}\nФормат: {aspect_ratio}")
+                await tg_edit_message_text(
+                    chat_id,
+                    status_msg_id,
+                    f"⏳ Gpt Image 2: обработка… {pct}%\nКачество: {resolution}\nФормат: {aspect_ratio}",
+                )
             except Exception:
                 pass
             try:
-                await asyncio.wait_for(stop.wait(), timeout=PROGRESS_STEP_SEC)
+                await asyncio.wait_for(progress_stop.wait(), timeout=PROGRESS_STEP_SEC)
             except asyncio.TimeoutError:
                 continue
 
-    progress_task = asyncio.create_task(_progress_loop())
+    if user_id and lock_owner:
+        lock_task = asyncio.create_task(_lock_heartbeat())
 
     try:
-        out_bytes, ext = await handle_gpt_image_2_kie(
-            prompt,
-            mode=mode,
-            source_image_urls=photo_urls[:16],
-            telegram_file_ids=photo_file_ids[:16],
-            resolution=resolution,
-            aspect_ratio=aspect_ratio,
+        status_msg_id = await tg_send_message(
+            chat_id,
+            f"⏳ Gpt Image 2: задача в обработке…\nКачество: {resolution}\nФормат: {aspect_ratio}",
         )
-        stop.set()
-        try:
-            await progress_task
-        except Exception:
-            pass
+        progress_task = asyncio.create_task(_progress_loop())
+
+        out_bytes, ext = await asyncio.wait_for(
+            handle_gpt_image_2_kie(
+                prompt,
+                mode=mode,
+                source_image_urls=photo_urls[:16],
+                telegram_file_ids=photo_file_ids[:16],
+                resolution=resolution,
+                aspect_ratio=aspect_ratio,
+            ),
+            timeout=GPT_IMAGE_2_TOTAL_TIMEOUT_SEC,
+        )
+
+        progress_stop.set()
+        if progress_task:
+            try:
+                await progress_task
+            except Exception:
+                pass
         if status_msg_id:
             try:
                 await tg_edit_message_text(chat_id, status_msg_id, "✅ Gpt Image 2: готово. Отправляю файл…")
@@ -886,19 +944,28 @@ async def process_telegram_gpt_image_2_kie_job(job: Dict[str, Any]) -> None:
                 await tg_edit_message_text(chat_id, status_msg_id, "✅ Gpt Image 2: готово")
             except Exception:
                 pass
-        return
     except Exception as exc:
-        err = str(exc)[:800]
+        if isinstance(exc, asyncio.TimeoutError):
+            err = f"Превышено максимальное время ожидания ({int(GPT_IMAGE_2_TOTAL_TIMEOUT_SEC)} сек.)"
+        else:
+            err = str(exc)[:800]
         print(f"[workspace_image] Gpt Image 2 job failed job={job.get('job_id')}: {err}", flush=True)
-        stop.set()
-        try:
-            await progress_task
-        except Exception:
-            pass
+        progress_stop.set()
+        if progress_task:
+            try:
+                await progress_task
+            except Exception:
+                pass
         refund_status = ""
         if charge_tokens and charge_ref_id and user_id:
             try:
-                add_tokens(user_id, int(charge_tokens), reason=refund_reason, ref_id=charge_ref_id, meta={"stage": "worker_failed", "provider": "gpt_image_2_kie", "error": err})
+                add_tokens(
+                    user_id,
+                    int(charge_tokens),
+                    reason=refund_reason,
+                    ref_id=charge_ref_id,
+                    meta={"stage": "worker_failed", "provider": "gpt_image_2_kie", "error": err},
+                )
                 refund_status = "Токены возвращены."
             except Exception as refund_exc:
                 print(f"[workspace_image] Gpt Image 2 refund failed: {refund_exc}", flush=True)
@@ -907,10 +974,39 @@ async def process_telegram_gpt_image_2_kie_job(job: Dict[str, Any]) -> None:
         if status_msg_id:
             try:
                 await tg_edit_message_text(chat_id, status_msg_id, text)
-                return
             except Exception:
+                await tg_send_message(chat_id, text)
+        else:
+            await tg_send_message(chat_id, text)
+    finally:
+        progress_stop.set()
+        if progress_task and not progress_task.done():
+            progress_task.cancel()
+            try:
+                await progress_task
+            except BaseException:
                 pass
-        await tg_send_message(chat_id, text)
+
+        lock_stop.set()
+        if lock_task:
+            try:
+                await lock_task
+            except BaseException:
+                pass
+        if user_id and lock_owner:
+            try:
+                released = await release_generation_lock(user_id, lock_owner, lock_name=lock_name)
+                print(
+                    f"[workspace_image] GPT Image 2 lock release "
+                    f"user={user_id} job={job.get('job_id')} released={released}",
+                    flush=True,
+                )
+            except Exception as exc:
+                print(
+                    f"[workspace_image] GPT Image 2 lock release failed "
+                    f"user={user_id} job={job.get('job_id')}: {exc}",
+                    flush=True,
+                )
 
 
 async def _process_workspace_image_queue_job(job: Dict[str, Any]) -> None:
@@ -1007,6 +1103,16 @@ async def main() -> None:
         raise RuntimeError("WORKSPACE_NB2LITE_QUEUE_NAME must be different from MIDJOURNEY_TG_QUEUE_NAME")
     if WORKSPACE_SEEDREAM5_QUEUE_NAME == MIDJOURNEY_TG_QUEUE_NAME:
         raise RuntimeError("WORKSPACE_SEEDREAM5_QUEUE_NAME must be different from MIDJOURNEY_TG_QUEUE_NAME")
+    if WORKSPACE_GPT_IMAGE2_QUEUE_NAME == MIDJOURNEY_TG_QUEUE_NAME:
+        raise RuntimeError("WORKSPACE_GPT_IMAGE2_QUEUE_NAME must be different from MIDJOURNEY_TG_QUEUE_NAME")
+
+    same_gpt_image2_queue = WORKSPACE_GPT_IMAGE2_QUEUE_NAME == WORKSPACE_IMAGE_QUEUE_NAME
+    if same_gpt_image2_queue:
+        print(
+            "[workspace_image] WARNING: WORKSPACE_GPT_IMAGE2_QUEUE_NAME equals WORKSPACE_IMAGE_QUEUE_NAME; "
+            "GPT Image 2 will share the common image queue.",
+            flush=True,
+        )
 
     same_nb2lite_queue = WORKSPACE_NB2LITE_QUEUE_NAME == WORKSPACE_IMAGE_QUEUE_NAME
     if same_nb2lite_queue:
@@ -1027,6 +1133,7 @@ async def main() -> None:
     print(
         f"[workspace_image] worker started "
         f"workspace_queue={WORKSPACE_IMAGE_QUEUE_NAME} image_concurrency={WORKSPACE_IMAGE_CONCURRENCY} "
+        f"gpt_image2_queue={WORKSPACE_GPT_IMAGE2_QUEUE_NAME} gpt_image2_concurrency={WORKSPACE_GPT_IMAGE2_CONCURRENCY} "
         f"nb2lite_queue={WORKSPACE_NB2LITE_QUEUE_NAME} nb2lite_concurrency={WORKSPACE_NB2LITE_CONCURRENCY} "
         f"seedream5_queue={WORKSPACE_SEEDREAM5_QUEUE_NAME} seedream5_concurrency={WORKSPACE_SEEDREAM5_CONCURRENCY} "
         f"midjourney_queue={MIDJOURNEY_TG_QUEUE_NAME} midjourney_tg_concurrency={MIDJOURNEY_TG_CONCURRENCY}",
@@ -1047,6 +1154,15 @@ async def main() -> None:
             queue_label="midjourney_tg",
         ),
     ]
+    if not same_gpt_image2_queue:
+        consumers.append(
+            _consume_queue(
+                queue_name=WORKSPACE_GPT_IMAGE2_QUEUE_NAME,
+                sem=gpt_image2_sem,
+                processor=_process_workspace_image_queue_job,
+                queue_label="gpt_image2",
+            )
+        )
     if not same_nb2lite_queue:
         consumers.append(
             _consume_queue(
