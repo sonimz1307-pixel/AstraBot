@@ -295,7 +295,7 @@ async def tg_send_photo_bytes(
             photo_bytes,
             filename=safe_filename,
             caption=caption,
-            reply_markup=reply_markup,
+            reply_markup=_document_reply_markup(reply_markup),
         )
 
     data = {"chat_id": str(chat_id)}
@@ -315,8 +315,53 @@ async def tg_send_photo_bytes(
             photo_bytes,
             filename=safe_filename,
             caption=caption,
-            reply_markup=reply_markup,
+            reply_markup=_document_reply_markup(reply_markup),
         )
+
+
+def _document_reply_markup(reply_markup: Optional[dict]) -> Optional[dict]:
+    """
+    Remove only the redundant dl2k download button when an image is sent as a
+    Telegram document. A document already contains the original, uncompressed
+    file. Other inline buttons (for example Midjourney actions) are preserved.
+    """
+    if not isinstance(reply_markup, dict):
+        return reply_markup
+
+    keyboard = reply_markup.get("inline_keyboard")
+    if not isinstance(keyboard, list):
+        return reply_markup
+
+    changed = False
+    filtered_keyboard = []
+    for row in keyboard:
+        if not isinstance(row, list):
+            filtered_keyboard.append(row)
+            continue
+
+        filtered_row = []
+        for button in row:
+            callback_data = ""
+            if isinstance(button, dict):
+                callback_data = str(button.get("callback_data") or "").strip()
+            if callback_data.startswith("dl2k:"):
+                changed = True
+                continue
+            filtered_row.append(button)
+
+        if filtered_row:
+            filtered_keyboard.append(filtered_row)
+        elif row:
+            changed = True
+
+    if not changed:
+        return reply_markup
+    if not filtered_keyboard:
+        return None
+
+    result = dict(reply_markup)
+    result["inline_keyboard"] = filtered_keyboard
+    return result
 
 
 async def tg_send_document_bytes(
