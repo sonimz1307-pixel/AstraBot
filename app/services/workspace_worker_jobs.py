@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 
@@ -186,7 +186,7 @@ def _workspace_upload_url(user_id: int, upload_id: str) -> str:
     return url
 
 
-async def process_workspace_video_job(job: Dict[str, Any]) -> None:
+async def process_workspace_video_job(job: Dict[str, Any], on_provider_task_id: Optional[Callable[[str], Any]] = None) -> bool:
     generation_id = str(job.get("generation_id") or "").strip()
     user_id = int(job.get("user_id") or 0)
     if not generation_id or not user_id:
@@ -207,23 +207,37 @@ async def process_workspace_video_job(job: Dict[str, Any]) -> None:
     provider_name = str(job.get("provider") or "").strip()
     reference_image_urls_direct = [str(url or "").strip() for url in (job.get("reference_image_urls") or []) if str(url or "").strip()]
     reference_images: List[bytes] = []
-    if provider_name != "google":
-        for url in reference_image_urls_direct:
-            reference_images.append(await _download_bytes(url))
-
     reference_audio_clips: List[bytes] = []
-    for upload_id in job.get("reference_audio_upload_ids") or []:
-        target_id = str(upload_id or "").strip()
-        if not target_id:
-            continue
-        reference_audio_clips.append(await _download_bytes(_workspace_upload_url(user_id, target_id), timeout=600.0))
-
     reference_video_clips: List[bytes] = []
-    for upload_id in job.get("reference_video_upload_ids") or []:
-        target_id = str(upload_id or "").strip()
-        if not target_id:
-            continue
-        reference_video_clips.append(await _download_bytes(_workspace_upload_url(user_id, target_id), timeout=600.0))
+    reference_audio_urls_direct: List[str] = []
+    reference_video_urls_direct: List[str] = []
+
+    if provider_name == "seedance25":
+        # Seedance 2.5 refs are already persisted before the job is queued. Pass
+        # URLs through directly so this worker does not download up to hundreds
+        # of MB into RAM and then keep those bytes alive during KIE polling.
+        for upload_id in job.get("reference_audio_upload_ids") or []:
+            target_id = str(upload_id or "").strip()
+            if target_id:
+                reference_audio_urls_direct.append(_workspace_upload_url(user_id, target_id))
+        for upload_id in job.get("reference_video_upload_ids") or []:
+            target_id = str(upload_id or "").strip()
+            if target_id:
+                reference_video_urls_direct.append(_workspace_upload_url(user_id, target_id))
+    else:
+        if provider_name != "google":
+            for url in reference_image_urls_direct:
+                reference_images.append(await _download_bytes(url))
+        for upload_id in job.get("reference_audio_upload_ids") or []:
+            target_id = str(upload_id or "").strip()
+            if not target_id:
+                continue
+            reference_audio_clips.append(await _download_bytes(_workspace_upload_url(user_id, target_id), timeout=600.0))
+        for upload_id in job.get("reference_video_upload_ids") or []:
+            target_id = str(upload_id or "").strip()
+            if not target_id:
+                continue
+            reference_video_clips.append(await _download_bytes(_workspace_upload_url(user_id, target_id), timeout=600.0))
 
     print("[switchx worker job]", {
         "generation_id": generation_id,
@@ -234,7 +248,7 @@ async def process_workspace_video_job(job: Dict[str, Any]) -> None:
         "source_video_upload_id": str(job.get("source_video_upload_id") or "").strip() or None,
     }, flush=True)
 
-    await ww._run_workspace_video_job(
+    result = await ww._run_workspace_video_job(
         generation_id=generation_id,
         user_id=user_id,
         provider=provider_name,
@@ -257,13 +271,18 @@ async def process_workspace_video_job(job: Dict[str, Any]) -> None:
         reference_video_clips=reference_video_clips,
         source_video_upload_id=str(job.get("source_video_upload_id") or "").strip() or None,
         reference_image_url=str(job.get("reference_image_url") or "").strip() or None,
-        reference_image_urls_direct=reference_image_urls_direct if provider_name == "google" else None,
+        reference_image_urls_direct=reference_image_urls_direct if provider_name in {"google", "seedance25"} else None,
+        reference_audio_urls_direct=reference_audio_urls_direct if provider_name == "seedance25" else None,
+        reference_video_urls_direct=reference_video_urls_direct if provider_name == "seedance25" else None,
         switchx_alpha_mode=str(job.get("switchx_alpha_mode") or "").strip() or None,
         switchx_select_mask_url=str(job.get("switchx_select_mask_url") or "").strip() or None,
         charge_tokens=int(job.get("charge_tokens") or 0),
         charge_ref_id=str(job.get("charge_ref_id") or ""),
         refund_reason=str(job.get("refund_reason") or "workspace_video_refund"),
+        resume_task_id=str(job.get("resume_task_id") or ""),
+        provider_task_id_callback=on_provider_task_id,
     )
+    return bool(result)
 
 
 async def process_workspace_switchx_ref_job(job: Dict[str, Any]) -> None:
