@@ -84,7 +84,8 @@ from app.services.workspace_account_service import (
     start_password_reset,
 )
 from app.services.workspace_auth import WORKSPACE_SESSION_COOKIE_NAME, WORKSPACE_SESSION_TTL_SEC, create_access_token, get_current_workspace_user, get_optional_workspace_user
-from billing_db import add_tokens, ensure_user_row, get_balance, get_balance_history
+from billing_db import add_tokens, ensure_user_row, get_balance, get_balance_history, ledger_ref_exists
+from seedance25_billing import refund_seedance25_once
 from subscriptions_db import get_current_subscription, get_subscription_plan
 from free_plan_limits import (
     FEATURE_CHAT,
@@ -217,6 +218,11 @@ from gemini_omni_video import (
     normalize_gemini_omni_resolution,
     run_gemini_omni_video,
 )
+from seedance_25_kie import (
+    Seedance25TaskFailedError, Seedance25TaskPendingError,
+    normalize_seedance25_aspect_ratio, normalize_seedance25_duration, normalize_seedance25_mode, normalize_seedance25_resolution,
+    run_seedance25_omni_reference, run_seedance25_omni_reference_urls, run_seedance25_text_to_video, seedance25_pricing_breakdown,
+)
 from seedance_kie import (
     SeedanceKieError,
     normalize_seedance_kie_aspect_ratio,
@@ -264,7 +270,7 @@ from kling3_turbo_kie import (
     run_kling3_turbo_task_and_wait,
 )
 from songwriter_prompt import SONGWRITER_SYSTEM_PROMPT
-from queue_redis import enqueue_job, enqueue_job_delayed
+from queue_redis import enqueue_job, enqueue_job_delayed, enqueue_reliable_job
 from chat_job_store import create_chat_job_status, get_chat_job_status, set_chat_job_status
 from nano_banana import run_nano_banana
 from nano_banana_pro import handle_nano_banana_pro
@@ -329,6 +335,7 @@ WORKSPACE_MEDIA_QUEUE_NAME = (os.getenv("WORKSPACE_MEDIA_QUEUE_NAME", "workspace
 WORKSPACE_GROK15_QUEUE_NAME = (os.getenv("WORKSPACE_GROK15_QUEUE_NAME", "workspace_grok15") or "workspace_grok15").strip() or "workspace_grok15"
 KLING3_KIE_QUEUE_NAME = (os.getenv("KLING3_KIE_QUEUE_NAME", "kling3_kie") or "kling3_kie").strip() or "kling3_kie"
 WORKSPACE_VEO_RELAX_QUEUE_NAME = (os.getenv("WORKSPACE_VEO_RELAX_QUEUE_NAME", "workspace_veo_relax") or "workspace_veo_relax").strip() or "workspace_veo_relax"
+SEEDANCE25_QUEUE_NAME = (os.getenv("SEEDANCE25_QUEUE_NAME", "seedance25") or "seedance25").strip() or "seedance25"
 
 def _env_non_negative_int(name: str, default: int) -> int:
     try:
@@ -487,26 +494,34 @@ def _normalize_seedance_audio_bytes(raw: bytes, ext: str) -> bytes:
                     pass
 
 
-def _prepare_seedance_audio_file(upload: Any, raw: bytes) -> tuple[bytes, str, float]:
+def _prepare_seedance_audio_file(
+    upload: Any, raw: bytes, *, max_duration_sec: float = SEEDANCE_AUDIO_MAX_DURATION_SEC,
+    min_duration_sec: float = 0.0, strict_mp3_wav: bool = False, max_upload_bytes: Optional[int] = None,
+) -> tuple[bytes, str, float]:
     raw_size = len(raw or b"")
-    if raw_size > SEEDANCE_AUDIO_MAX_UPLOAD_BYTES:
+    effective_max_bytes = int(max_upload_bytes or SEEDANCE_AUDIO_MAX_UPLOAD_BYTES)
+    if raw_size > effective_max_bytes:
         raise HTTPException(
             status_code=400,
-            detail=f"Audio reference для Seedance 2.0 слишком большой. Максимум {SEEDANCE_AUDIO_MAX_UPLOAD_MB} МБ.",
+            detail=f"Audio reference для Seedance слишком большой. Максимум {max(1, effective_max_bytes // (1024 * 1024))} МБ.",
         )
     ext = _guess_seedance_audio_ext(
         filename=getattr(upload, "filename", None),
         content_type=getattr(upload, "content_type", None),
         raw=raw,
     )
+    if strict_mp3_wav and ext not in {"mp3", "wav"}:
+        raise HTTPException(status_code=400, detail="Для Seedance 2.5 audio refs доступны только MP3 или WAV.")
     if ext not in SEEDANCE_AUDIO_ALLOWED_EXTS:
-        raise HTTPException(status_code=400, detail="Для Seedance 2.0 audio refs доступны MP3/WAV/M4A/OGG/OPUS или MP4/MOV с аудиодорожкой.")
+        raise HTTPException(status_code=400, detail="Для Seedance audio refs доступны MP3/WAV/M4A/OGG/OPUS или MP4/MOV с аудиодорожкой.")
     normalized_raw = _normalize_seedance_audio_bytes(raw, ext)
     duration_sec = _probe_seedance_audio_duration_seconds(normalized_raw, "mp3")
     if duration_sec <= 0:
-        raise HTTPException(status_code=400, detail="Не удалось определить длительность audio reference для Seedance 2.0.")
-    if duration_sec > SEEDANCE_AUDIO_MAX_DURATION_SEC:
-        raise HTTPException(status_code=400, detail="Для Seedance 2.0 audio reference должен быть не длиннее 15 секунд.")
+        raise HTTPException(status_code=400, detail="Не удалось определить длительность audio reference для Seedance.")
+    if float(min_duration_sec or 0.0) > 0 and duration_sec < float(min_duration_sec):
+        raise HTTPException(status_code=400, detail=f"Seedance audio reference должен быть не короче {float(min_duration_sec):g} секунд.")
+    if duration_sec > float(max_duration_sec):
+        raise HTTPException(status_code=400, detail=f"Seedance audio reference должен быть не длиннее {float(max_duration_sec):g} секунд.")
     return normalized_raw, "mp3", duration_sec
 
 
@@ -565,19 +580,50 @@ def _billable_motion_reference_seconds(value: Any) -> int:
         return 0
     return max(1, int(math.ceil(seconds - 0.25)))
 
-def _prepare_seedance_video_file(upload: Any, raw: bytes) -> tuple[bytes, str, float]:
+def _prepare_seedance_video_file(
+    upload: Any, raw: bytes, *, max_duration_sec: float = SEEDANCE_VIDEO_TOTAL_MAX_DURATION_SEC,
+    min_duration_sec: float = 0.0, mp4_only: bool = False, max_upload_bytes: Optional[int] = None,
+    strict_seedance25_media: bool = False,
+) -> tuple[bytes, str, float]:
+    if max_upload_bytes is not None and len(raw or b"") > int(max_upload_bytes):
+        raise HTTPException(status_code=400, detail=f"Seedance video reference слишком большой. Максимум {max(1, int(max_upload_bytes) // (1024 * 1024))} МБ.")
     ext = _guess_seedance_video_ext(
         filename=getattr(upload, "filename", None),
         content_type=getattr(upload, "content_type", None),
         raw=raw,
     )
+    if mp4_only and ext != "mp4":
+        raise HTTPException(status_code=400, detail="Для Seedance 2.5 video refs доступны только MP4.")
     if ext not in SEEDANCE_VIDEO_ALLOWED_EXTS:
-        raise HTTPException(status_code=400, detail="Для Seedance 2.0 video refs доступны только MP4 или MOV.")
+        raise HTTPException(status_code=400, detail="Для Seedance video refs доступны только MP4 или MOV.")
     duration_sec = _probe_seedance_video_duration_seconds(raw, ext)
     if duration_sec <= 0:
-        raise HTTPException(status_code=400, detail="Не удалось определить длительность video reference для Seedance 2.0.")
-    if duration_sec > SEEDANCE_VIDEO_TOTAL_MAX_DURATION_SEC:
-        raise HTTPException(status_code=400, detail="Для Seedance 2.0 video reference не должен быть длиннее 15.4 секунды.")
+        raise HTTPException(status_code=400, detail="Не удалось определить длительность video reference для Seedance.")
+    if float(min_duration_sec or 0.0) > 0 and duration_sec < float(min_duration_sec):
+        raise HTTPException(status_code=400, detail=f"Seedance video reference должен быть не короче {float(min_duration_sec):g} секунд.")
+    if duration_sec > float(max_duration_sec):
+        raise HTTPException(status_code=400, detail=f"Seedance video reference не должен быть длиннее {float(max_duration_sec):g} секунды.")
+    if strict_seedance25_media:
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
+                tmp.write(raw); tmp.flush(); tmp_path = tmp.name
+            meta = probe_media(tmp_path)
+            width = int(meta.get("width") or 0); height = int(meta.get("height") or 0); fps = float(meta.get("fps") or 0.0)
+            pixels = width * height
+            ratio = (float(width) / float(height)) if width > 0 and height > 0 else 0.0
+            if width < 300 or width > 6000 or height < 300 or height > 6000:
+                raise HTTPException(status_code=400, detail="Seedance 2.5 video reference: ширина/высота должны быть 300–6000 px.")
+            if ratio < 0.4 or ratio > 2.5:
+                raise HTTPException(status_code=400, detail="Seedance 2.5 video reference: aspect ratio должен быть в диапазоне 0.4–2.5.")
+            if pixels < 409600 or pixels > 8295044:
+                raise HTTPException(status_code=400, detail="Seedance 2.5 video reference: число пикселей должно быть в диапазоне 409600–8295044.")
+            if fps < 24.0 or fps > 60.0:
+                raise HTTPException(status_code=400, detail="Seedance 2.5 video reference: FPS должен быть 24–60.")
+        finally:
+            if tmp_path:
+                try: os.unlink(tmp_path)
+                except Exception: pass
     return raw, ext, duration_sec
 
 
@@ -1878,6 +1924,8 @@ def _normalize_workspace_video_resolution(provider: str, model: str, resolution:
         return normalize_grok_resolution(value or "480p")
     if provider == "google" and model == "gemini-omni-video":
         return normalize_gemini_omni_resolution(value or "1080p")
+    if provider == "seedance25":
+        return normalize_seedance25_resolution("480p" if "480" in str(model or "").lower() else "720p")
     if provider == "seedance_kie":
         normalized_model = normalize_seedance_kie_model(model)
         return seedance_kie_resolution(normalized_model)
@@ -2249,6 +2297,22 @@ async def _run_workspace_kling3_job(
         await asyncio.sleep(5.0)
 
 
+async def _workspace_seedance25_refund_once(*, user_id: int, tokens: int, reason: str, ref_id: str, meta: Dict[str, Any]) -> bool:
+    if int(tokens or 0) <= 0:
+        return False
+    stable_ref = str(ref_id or "").strip()
+    if not stable_ref:
+        raise RuntimeError("Seedance 2.5 workspace refund requires charge_ref_id")
+    return await asyncio.to_thread(
+        refund_seedance25_once,
+        int(user_id),
+        int(tokens),
+        reason=str(reason),
+        ref_id=stable_ref,
+        meta=dict(meta or {}),
+    )
+
+
 async def _run_workspace_video_job(
     *,
     generation_id: str,
@@ -2274,28 +2338,83 @@ async def _run_workspace_video_job(
     source_video_upload_id: Optional[str] = None,
     reference_image_url: Optional[str] = None,
     reference_image_urls_direct: Optional[List[str]] = None,
+    reference_audio_urls_direct: Optional[List[str]] = None,
+    reference_video_urls_direct: Optional[List[str]] = None,
     switchx_alpha_mode: Optional[str] = None,
     switchx_select_mask_url: Optional[str] = None,
     charge_tokens: int = 0,
     charge_ref_id: str = "",
     refund_reason: str = "workspace_video_refund",
-) -> None:
+    resume_task_id: str = "",
+    provider_task_id_callback: Optional[Any] = None,
+) -> bool:
+    if provider == "seedance25" and not str(resume_task_id or "").strip() and supabase is not None:
+        try:
+            existing = (
+                supabase.table(_WORKSPACE_VIDEO_GENERATIONS_TABLE)
+                .select("task_id")
+                .eq("id", str(generation_id))
+                .eq("user_id", str(user_id))
+                .limit(1)
+                .execute()
+            )
+            rows = list(getattr(existing, "data", None) or [])
+            if rows:
+                resume_task_id = str((rows[0] or {}).get("task_id") or "").strip()
+        except Exception:
+            pass
+    seedance25_task_id = str(resume_task_id or "").strip() if provider == "seedance25" else ""
     try:
         provider_mode = normalize_grok_provider_mode(provider_mode or "normal")
         provider_video_url: Optional[str] = None
 
-        def _persist_seedance_kie_task_id(task_id: str) -> None:
+        async def _persist_seedance_kie_task_id(task_id: str) -> None:
+            nonlocal seedance25_task_id
             task_id_text = str(task_id or "").strip()
             if not task_id_text:
                 return
-            _update_workspace_generation(
-                generation_id,
-                {
-                    "task_id": task_id_text,
-                    "status": "processing",
-                    "error_code": None,
-                    "error_message": None,
-                },
+            seedance25_task_id = task_id_text
+
+            # Seedance 2.5 runs through a reliable Redis Stream, while workspace
+            # generations also have their persistent Supabase row. Persist to
+            # both independently so one temporary backend outage does not leave
+            # a created KIE task without a recovery handle.
+            db_ok = False
+            redis_ok = False
+            db_error: Optional[BaseException] = None
+            redis_error: Optional[BaseException] = None
+            try:
+                _update_workspace_generation(
+                    generation_id,
+                    {
+                        "task_id": task_id_text,
+                        "status": "processing",
+                        "error_code": None,
+                        "error_message": None,
+                    },
+                )
+                db_ok = True
+            except Exception as exc:
+                db_error = exc
+
+            if provider_task_id_callback:
+                try:
+                    maybe = provider_task_id_callback(task_id_text)
+                    if hasattr(maybe, "__await__"):
+                        await maybe
+                    redis_ok = True
+                except Exception as exc:
+                    redis_error = exc
+            else:
+                # No reliable-worker callback was supplied, so the workspace DB
+                # write is the only expected persistence path.
+                redis_ok = False
+
+            if db_ok or redis_ok:
+                return
+            raise RuntimeError(
+                "Seedance 2.5 taskId could not be persisted to workspace DB or reliable Redis: "
+                f"db={db_error}; redis={redis_error}"
             )
 
         if provider == "kling":
@@ -2569,6 +2688,33 @@ async def _run_workspace_video_job(
             _update_workspace_generation(generation_id, {"task_id": str(pixverse_video_id), "status": "processing"})
             provider_video_url = await wait_for_pixverse_video(pixverse_video_id)
 
+        elif provider == "seedance25":
+            if mode == "omni_reference":
+                direct_images = [str(x or "").strip() for x in (reference_image_urls_direct or []) if str(x or "").strip()]
+                direct_videos = [str(x or "").strip() for x in (reference_video_urls_direct or []) if str(x or "").strip()]
+                direct_audios = [str(x or "").strip() for x in (reference_audio_urls_direct or []) if str(x or "").strip()]
+                if direct_images or direct_videos or direct_audios:
+                    provider_video_url = await run_seedance25_omni_reference_urls(
+                        user_id=user_id, prompt=prompt, resolution=resolution, duration=duration, aspect_ratio=aspect_ratio,
+                        on_task_id=_persist_seedance_kie_task_id, reference_image_urls=direct_images,
+                        reference_video_urls=direct_videos, reference_audio_urls=direct_audios,
+                        resume_task_id=resume_task_id,
+                    )
+                else:
+                    # Backward-compatible fallback for any older queued jobs.
+                    provider_video_url = await run_seedance25_omni_reference(
+                        user_id=user_id, prompt=prompt, resolution=resolution, duration=duration, aspect_ratio=aspect_ratio,
+                        on_task_id=_persist_seedance_kie_task_id, reference_images=reference_images,
+                        reference_videos=reference_video_clips, reference_audios=reference_audio_clips,
+                        resume_task_id=resume_task_id,
+                    )
+            else:
+                provider_video_url = await run_seedance25_text_to_video(
+                    prompt=prompt, resolution=resolution, duration=duration, aspect_ratio=aspect_ratio,
+                    on_task_id=_persist_seedance_kie_task_id,
+                    resume_task_id=resume_task_id,
+                )
+
         elif provider == "seedance_kie":
             if mode == "image_to_video" and not (reference_images or start_frame or last_frame):
                 raise RuntimeError("Для Seedance 2.0 Image→Video нужен хотя бы один image reference")
@@ -2776,32 +2922,108 @@ async def _run_workspace_video_job(
             user_id=user_id,
             provider_video_url=provider_video_url,
         )
-    except (Kling3Error, KlingFlowError, VeoFlowError, Veo31FastRelaxError, GrokVideoError, PixVerseC1Error, SwitchXError, ValueError, RuntimeError, TimeoutError) as e:
+        return True
+    except Seedance25TaskPendingError as e:
+        # taskId already exists; status/result is temporarily unknown. Do NOT
+        # refund and do NOT mark failed. Let the reliable worker leave this entry
+        # unacked and resume polling the same provider task later.
+        if provider == "seedance25":
+            try:
+                patch = {
+                    "status": "processing",
+                    "error_code": "provider_pending",
+                    "error_message": str(e)[:1000],
+                }
+                if seedance25_task_id:
+                    patch["task_id"] = seedance25_task_id
+                if provider_video_url:
+                    patch["provider_video_url"] = provider_video_url
+                _update_workspace_generation(generation_id, patch)
+            except Exception:
+                pass
+        raise
+    except Seedance25TaskFailedError as e:
+        # Explicit terminal KIE failure: this is the one post-taskId condition
+        # where an automatic refund is safe.
         _mark_workspace_generation_failed(generation_id, str(e), error_code="provider_error")
         if int(charge_tokens or 0) > 0:
             try:
-                add_tokens(
-                    int(user_id),
-                    int(charge_tokens),
-                    reason=str(refund_reason or "workspace_video_refund"),
-                    ref_id=charge_ref_id or uuid4().hex,
-                    meta={"origin": "workspace_video", "generation_id": generation_id, "error": str(e)[:300]},
+                await _workspace_seedance25_refund_once(
+                    user_id=int(user_id), tokens=int(charge_tokens),
+                    reason=str(refund_reason or "workspace_video_refund"), ref_id=charge_ref_id,
+                    meta={"origin": "workspace_video", "generation_id": generation_id, "stage": "provider_terminal_fail", "error": str(e)[:300]},
                 )
             except Exception:
                 pass
+        return False
+    except (Kling3Error, KlingFlowError, VeoFlowError, Veo31FastRelaxError, GrokVideoError, PixVerseC1Error, SwitchXError, ValueError, RuntimeError, TimeoutError) as e:
+        if provider == "seedance25" and (seedance25_task_id or str(provider_video_url or "").strip()):
+            # Unknown/local error after createTask or after provider success. KIE may
+            # already have charged us; preserve processing state and retry/resume.
+            try:
+                patch = {"status": "processing", "error_code": "provider_pending", "error_message": str(e)[:1000]}
+                if seedance25_task_id:
+                    patch["task_id"] = seedance25_task_id
+                if provider_video_url:
+                    patch["provider_video_url"] = str(provider_video_url)
+                _update_workspace_generation(generation_id, patch)
+            except Exception:
+                pass
+            raise Seedance25TaskPendingError(
+                f"Seedance 2.5 task/result needs retry without refund: {e}"
+            ) from e
+        _mark_workspace_generation_failed(generation_id, str(e), error_code="provider_error")
+        if int(charge_tokens or 0) > 0:
+            try:
+                if provider == "seedance25":
+                    await _workspace_seedance25_refund_once(
+                        user_id=int(user_id), tokens=int(charge_tokens),
+                        reason=str(refund_reason or "workspace_video_refund"), ref_id=charge_ref_id,
+                        meta={"origin": "workspace_video", "generation_id": generation_id, "error": str(e)[:300]},
+                    )
+                else:
+                    add_tokens(
+                        int(user_id), int(charge_tokens),
+                        reason=str(refund_reason or "workspace_video_refund"),
+                        ref_id=charge_ref_id or uuid4().hex,
+                        meta={"origin": "workspace_video", "generation_id": generation_id, "error": str(e)[:300]},
+                    )
+            except Exception:
+                pass
+        return False
     except Exception as e:
+        if provider == "seedance25" and (seedance25_task_id or str(provider_video_url or "").strip()):
+            try:
+                patch = {"status": "processing", "error_code": "provider_pending", "error_message": str(e)[:1000]}
+                if seedance25_task_id:
+                    patch["task_id"] = seedance25_task_id
+                if provider_video_url:
+                    patch["provider_video_url"] = str(provider_video_url)
+                _update_workspace_generation(generation_id, patch)
+            except Exception:
+                pass
+            raise Seedance25TaskPendingError(
+                f"Seedance 2.5 internal post-task error needs retry without refund: {e}"
+            ) from e
         _mark_workspace_generation_failed(generation_id, f"Internal run error: {e}", error_code="internal_error")
         if int(charge_tokens or 0) > 0:
             try:
-                add_tokens(
-                    int(user_id),
-                    int(charge_tokens),
-                    reason=str(refund_reason or "workspace_video_refund"),
-                    ref_id=charge_ref_id or uuid4().hex,
-                    meta={"origin": "workspace_video", "generation_id": generation_id, "error": str(e)[:300]},
-                )
+                if provider == "seedance25":
+                    await _workspace_seedance25_refund_once(
+                        user_id=int(user_id), tokens=int(charge_tokens),
+                        reason=str(refund_reason or "workspace_video_refund"), ref_id=charge_ref_id,
+                        meta={"origin": "workspace_video", "generation_id": generation_id, "error": str(e)[:300]},
+                    )
+                else:
+                    add_tokens(
+                        int(user_id), int(charge_tokens),
+                        reason=str(refund_reason or "workspace_video_refund"),
+                        ref_id=charge_ref_id or uuid4().hex,
+                        meta={"origin": "workspace_video", "generation_id": generation_id, "error": str(e)[:300]},
+                    )
             except Exception:
                 pass
+        return False
 
 
 
@@ -4816,6 +5038,23 @@ def _workspace_video_charge_spec(
             },
         }
 
+    if provider == "seedance25":
+        normalized_mode = normalize_seedance25_mode(mode)
+        normalized_duration = normalize_seedance25_duration(duration)
+        normalized_resolution = normalize_seedance25_resolution(resolution or ("480p" if "480" in str(model or "").lower() else "720p"))
+        input_video_sec = float(seedance_video_reference_duration_sec or 0.0) if normalized_mode == "omni_reference" and has_seedance_video_reference else 0.0
+        breakdown = seedance25_pricing_breakdown(normalized_resolution, normalized_duration, input_video_duration_sec=input_video_sec)
+        return {
+            "tokens": int(breakdown["tokens"]), "charge_reason": "seedance25_video", "refund_reason": "seedance25_video_refund",
+            "meta": {"origin":"workspace_video", "provider":provider, "model":model, "mode":normalized_mode,
+                     "duration":normalized_duration, "resolution":normalized_resolution, "generate_audio":True,
+                     "has_video_reference":bool(has_seedance_video_reference),
+                     "input_video_seconds":int(breakdown.get("input_video_seconds") or 0),
+                     "billable_seconds":int(breakdown.get("billable_seconds") or normalized_duration),
+                     "provider_rate_usd_per_sec":breakdown.get("provider_rate_usd_per_sec"),
+                     "provider_cost_usd":breakdown.get("provider_cost_usd"), "margin_pct":breakdown.get("margin_pct")},
+        }
+
     if provider == "seedance_kie":
         normalized_model = normalize_seedance_kie_model(model)
         normalized_mode = normalize_seedance_kie_mode(mode)
@@ -4939,7 +5178,7 @@ async def workspace_video_run(
     if not prompt:
         raise HTTPException(status_code=400, detail="Missing prompt")
 
-    supported = {"kling", "veo", "grok", "google", "seedance", "seedance_kie", "sora", "switchx", "pixverse_c1"}
+    supported = {"kling", "veo", "grok", "google", "seedance", "seedance_kie", "seedance25", "sora", "switchx", "pixverse_c1"}
     if provider not in supported:
         raise HTTPException(status_code=400, detail=f"Provider {provider} is not supported in /video/run yet")
 
@@ -4996,16 +5235,24 @@ async def workspace_video_run(
     for rf in ref_files:
         raw = await rf.read()
         if raw:
+            if provider == "seedance25" and not (raw.startswith(b"\x89PNG\r\n\x1a\n") or raw.startswith(b"\xff\xd8\xff")):
+                raise HTTPException(status_code=400, detail="Для Seedance 2.5 image refs доступны только PNG или JPEG.")
             reference_images.append(raw)
     reference_audios: List[bytes] = []
     reference_audio_names: List[str] = []
     reference_audio_types: List[str] = []
+    reference_audio_total_duration_sec = 0.0
     for idx, af in enumerate(ref_audio_files, start=1):
         raw = await af.read()
         if not raw:
             continue
-        normalized_audio, normalized_ext, _duration_sec = _prepare_seedance_audio_file(af, raw)
+        normalized_audio, normalized_ext, _duration_sec = _prepare_seedance_audio_file(
+            af, raw, max_duration_sec=(30.0 if provider == "seedance25" else SEEDANCE_AUDIO_MAX_DURATION_SEC),
+            min_duration_sec=(2.0 if provider == "seedance25" else 0.0), strict_mp3_wav=(provider == "seedance25"),
+            max_upload_bytes=(15 * 1024 * 1024 if provider == "seedance25" else None),
+        )
         reference_audios.append(normalized_audio)
+        reference_audio_total_duration_sec += float(_duration_sec or 0.0)
         base_name = Path(str(getattr(af, "filename", None) or f"seedance_ref_audio_{idx}")).stem or f"seedance_ref_audio_{idx}"
         reference_audio_names.append(f"{base_name}.{normalized_ext}")
         reference_audio_types.append("audio/mpeg" if normalized_ext == "mp3" else "audio/wav")
@@ -5018,7 +5265,12 @@ async def workspace_video_run(
         raw = await vf.read()
         if not raw:
             continue
-        normalized_video, normalized_ext, duration_sec = _prepare_seedance_video_file(vf, raw)
+        normalized_video, normalized_ext, duration_sec = _prepare_seedance_video_file(
+            vf, raw, max_duration_sec=(30.0 if provider == "seedance25" else SEEDANCE_VIDEO_TOTAL_MAX_DURATION_SEC),
+            min_duration_sec=(2.0 if provider == "seedance25" else 0.0), mp4_only=(provider == "seedance25"),
+            max_upload_bytes=(200 * 1024 * 1024 if provider == "seedance25" else None),
+            strict_seedance25_media=(provider == "seedance25"),
+        )
         reference_videos.append(normalized_video)
         base_name = Path(str(getattr(vf, "filename", None) or f"seedance_ref_video_{idx}")).stem or f"seedance_ref_video_{idx}"
         reference_video_names.append(f"{base_name}.{normalized_ext}")
@@ -5159,6 +5411,34 @@ async def workspace_video_run(
             last_frame = None
         reference_audios = []
         reference_videos = []
+
+    if provider == "seedance25":
+        mode = normalize_seedance25_mode(mode)
+        duration = normalize_seedance25_duration(duration)
+        resolution = normalize_seedance25_resolution(resolution or ("480p" if "480" in str(model or "").lower() else "720p"))
+        model = "seedance25-480p" if resolution == "480p" else "seedance25-720p"
+        aspect_ratio = normalize_seedance25_aspect_ratio(aspect_ratio or "adaptive")
+        enable_audio = True
+        if len(prompt) > int(os.getenv("SEEDANCE25_PROMPT_UI_MAX", "30000") or "30000"):
+            raise HTTPException(status_code=400, detail="Seedance 2.5: prompt максимум 30 000 символов.")
+        if mode not in {"text_to_video", "omni_reference"}:
+            raise HTTPException(status_code=400, detail="Seedance 2.5 поддерживает только Text→Video и Omni Reference.")
+        if mode == "omni_reference":
+            if len(reference_images) + len(reference_videos) + len(reference_audios) < 1:
+                raise HTTPException(status_code=400, detail="Для Seedance 2.5 Omni Reference нужен хотя бы один reference.")
+            if len(reference_images) > 30: raise HTTPException(status_code=400, detail="Seedance 2.5: максимум 30 image references.")
+            if len(reference_videos) > 10: raise HTTPException(status_code=400, detail="Seedance 2.5: максимум 10 video references.")
+            if len(reference_audios) > 10: raise HTTPException(status_code=400, detail="Seedance 2.5: максимум 10 audio references.")
+            if len(reference_images) + len(reference_videos) + len(reference_audios) > 50: raise HTTPException(status_code=400, detail="Seedance 2.5: максимум 50 refs суммарно.")
+            if any(len(raw or b"") > 30 * 1024 * 1024 for raw in reference_images): raise HTTPException(status_code=400, detail="Seedance 2.5: image reference максимум 30 МБ.")
+            if reference_video_total_duration_sec > 30.0: raise HTTPException(status_code=400, detail="Seedance 2.5: суммарная длительность video references максимум 30 секунд.")
+            if reference_audio_total_duration_sec > 30.0: raise HTTPException(status_code=400, detail="Seedance 2.5: суммарная длительность audio references максимум 30 секунд.")
+            if any(not str(name or "").lower().endswith(".mp4") for name in reference_video_names):
+                raise HTTPException(status_code=400, detail="Seedance 2.5: video references принимаются только в MP4.")
+            start_frame = None; end_frame = None; last_frame = None
+        else:
+            reference_images = []; reference_audios = []; reference_videos = []
+            start_frame = None; end_frame = None; last_frame = None
 
     if provider == "seedance_kie":
         model = normalize_seedance_kie_model(model)
@@ -5488,6 +5768,17 @@ async def workspace_video_run(
             "origin": "workspace",
             "delayed_start_sec": int(veo_relax_delay_sec or 0),
         }
+
+        if provider == "seedance25":
+            # All Seedance 2.5 refs are persisted in storage/upload records at
+            # this point. Release request-body bytes before enqueueing so the
+            # web process does not retain large Omni media longer than needed.
+            reference_images.clear()
+            reference_audios.clear()
+            reference_videos.clear()
+            start_frame = end_frame = last_frame = avatar_image = motion_video = source_video = switchx_select_mask = None
+            raw = None
+
         if provider == "kling" and model == "kling-3.0-new":
             job["kind"] = "workspace_kling3_kie_run"
             job["kie_mode"] = resolution
@@ -5500,10 +5791,14 @@ async def workspace_video_run(
             target_queue = WORKSPACE_GROK15_QUEUE_NAME
         elif provider == "kling" and model == "kling-3.0-new":
             target_queue = KLING3_KIE_QUEUE_NAME
+        elif provider == "seedance25":
+            target_queue = SEEDANCE25_QUEUE_NAME
         else:
             target_queue = WORKSPACE_MEDIA_QUEUE_NAME
         if int(veo_relax_delay_sec or 0) > 0:
             await enqueue_job_delayed(job, delay_sec=int(veo_relax_delay_sec or 0), queue_name=target_queue)
+        elif provider == "seedance25":
+            await enqueue_reliable_job(job, queue_name=target_queue)
         else:
             await enqueue_job(job, queue_name=target_queue)
 
@@ -5527,7 +5822,13 @@ async def workspace_video_run(
     except Exception as e:
         if charged and cost_tokens > 0:
             try:
-                add_tokens(uid, int(cost_tokens), reason=refund_reason, ref_id=charge_ref_id or uuid4().hex, meta={"origin": "workspace_video", "stage": "route", "error": str(e)[:300]})
+                if provider == "seedance25":
+                    await _workspace_seedance25_refund_once(
+                        user_id=uid, tokens=int(cost_tokens), reason=refund_reason, ref_id=charge_ref_id,
+                        meta={"origin": "workspace_video", "stage": "route", "error": str(e)[:300]},
+                    )
+                else:
+                    add_tokens(uid, int(cost_tokens), reason=refund_reason, ref_id=charge_ref_id or uuid4().hex, meta={"origin": "workspace_video", "stage": "route", "error": str(e)[:300]})
             except Exception:
                 pass
         if generation_id:
