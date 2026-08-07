@@ -18,6 +18,7 @@ from queue_redis import (
     acquire_generation_lock,
     enqueue_job,
     enqueue_job_delayed,
+    enqueue_reliable_job,
     release_generation_lock,
 )
 from chat_file_text import extract_file_text
@@ -140,6 +141,8 @@ from veo31_fast_relax_kie import (
     veo31_fast_relax_tokens_for_run,
 )
 from seedance_kie import seedance_kie_tokens_for_duration
+from seedance_25_kie import seedance25_tokens_for_run, seedance25_resolution_from_model
+from seedance25_billing import refund_seedance25_once
 from app.routers.tts import router as tts_router
 from app.services.video_editor_service import create_workspace_upload_record, probe_media
 
@@ -393,6 +396,7 @@ TG_CHAT_OPENAI_QUEUE_NAME = (os.getenv("TG_CHAT_OPENAI_QUEUE_NAME", "tg_chat_ope
 TG_CHAT_CLAUDE_QUEUE_NAME = (os.getenv("TG_CHAT_CLAUDE_QUEUE_NAME", "tg_chat_claude") or "tg_chat_claude").strip() or "tg_chat_claude"
 TG_CHAT_FABLE_QUEUE_NAME = (os.getenv("TG_CHAT_FABLE_QUEUE_NAME", "tg_chat_fable") or "tg_chat_fable").strip() or "tg_chat_fable"
 TG_STT_QUEUE_NAME = (os.getenv("TG_STT_QUEUE_NAME", "redactor_tg_stt") or "redactor_tg_stt").strip() or "redactor_tg_stt"
+SEEDANCE25_QUEUE_NAME = (os.getenv("SEEDANCE25_QUEUE_NAME", "seedance25") or "seedance25").strip() or "seedance25"
 
 BALANCE_BANNER_PATH = os.getenv("BALANCE_BANNER_PATH", "").strip()
 
@@ -1631,6 +1635,10 @@ try:
 except Exception:
     SEEDANCE_AUDIO_MAX_UPLOAD_MB = 30
 SEEDANCE_AUDIO_MAX_UPLOAD_BYTES = SEEDANCE_AUDIO_MAX_UPLOAD_MB * 1024 * 1024
+# This bot downloads Telegram references through the official Bot API getFile/file endpoint,
+# whose current download limit is 20 MB per file. Keep this separate from KIE's larger limit.
+SEEDANCE25_TG_VIDEO_MAX_UPLOAD_MB = 20
+SEEDANCE25_TG_VIDEO_MAX_UPLOAD_BYTES = SEEDANCE25_TG_VIDEO_MAX_UPLOAD_MB * 1024 * 1024
 AI_CHAT_VOICE_LANGUAGE = os.getenv("AI_CHAT_VOICE_LANGUAGE", "ru").strip()
 PROMPT_BUILDER_MODEL = os.getenv("PROMPT_BUILDER_MODEL", "gpt-5.4").strip() or "gpt-5.4"
 PROMPT_BUILDER_MAX_IMAGES = int(os.getenv("PROMPT_BUILDER_MAX_IMAGES", "9") or 9)
@@ -3966,12 +3974,23 @@ def _seedance_refs_collect_kb() -> dict:
 def _seedance_prompt_collect_kb(mode: str = "") -> dict:
     rows = [
         [{"text": "✅ Запустить", "callback_data": "seedance_prompt:done"}],
+        [{"text": "👁 Показать промпт", "callback_data": "seedance_prompt:show"}],
         [{"text": "🗑 Очистить промпт", "callback_data": "seedance_prompt:clear"}],
     ]
     if str(mode or "").strip() in ("seedance_i2v", "seedance_omni"):
         rows.append([{"text": "⬅️ Вернуться к refs", "callback_data": "seedance_refs:back"}])
     rows.append([{"text": "❌ Отмена", "callback_data": "seedance_prompt:cancel"}])
     return {"inline_keyboard": rows}
+
+
+def _seedance25_confirm_kb(cost_tokens: int) -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": f"🚀 Создать — {int(cost_tokens)} ток.", "callback_data": "seedance25_confirm:run"}],
+            [{"text": "⬅️ Вернуться к промпту", "callback_data": "seedance25_confirm:back"}],
+            [{"text": "❌ Отмена", "callback_data": "seedance_prompt:cancel"}],
+        ]
+    }
 
 
 def _seedance_prompt_back_kb() -> dict:
@@ -3985,13 +4004,16 @@ def _seedance_uses_kie_backend(settings: Optional[Dict[str, Any]]) -> bool:
     seedance_model = str(settings.get("seedance_model") or "").strip().lower()
     task_type = str(settings.get("task_type") or "").strip().lower()
     return (
-        provider_kind == "seedance_kie"
+        provider_kind in {"seedance_kie", "seedance25"}
         or seedance_model in {"seedance-kie-mini", "seedance-2-mini", "seedance-mini", "mini"}
         or task_type == "seedance-2-mini"
     )
 
 
 def _seedance_prompt_limit_from_settings(settings: Optional[Dict[str, Any]]) -> int:
+    settings = settings or {}
+    if str(settings.get("provider_kind") or "").strip().lower() == "seedance25":
+        return int(os.getenv("SEEDANCE25_PROMPT_UI_MAX", "30000") or "30000")
     return 20000 if _seedance_uses_kie_backend(settings) else 4000
 
 
@@ -4052,7 +4074,7 @@ def _seedance_prompt_append_part(st: Dict[str, Any], text: str, limit: int) -> T
     return True, "", len(parts), len(next_text)
 
 
-async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st: Dict[str, Any], prompt: str) -> Dict[str, bool]:
+async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st: Dict[str, Any], prompt: str, *, confirmed: bool = False) -> Dict[str, bool]:
     mode_now = str((st or {}).get("mode") or "").strip()
     if mode_now not in ("seedance_t2v", "seedance_i2v", "seedance_omni"):
         await tg_send_message(chat_id, "Сейчас я не жду Seedance-промпт. Открой настройки Seedance заново.", reply_markup=_main_menu_for(user_id))
@@ -4104,7 +4126,7 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
         if len(image_ids) + len(video_ids) + len(audio_ids) <= 0:
             await tg_send_message(chat_id, "Сначала пришли хотя бы один image/video/audio reference.", reply_markup=_seedance_refs_collect_kb())
             return {"ok": True}
-        if audio_ids and not (image_ids or video_ids):
+        if audio_ids and not (image_ids or video_ids) and provider_kind != "seedance25":
             await tg_send_message(chat_id, "Для Omni Reference аудио нельзя отправлять отдельно. Добавь хотя бы фото или видео reference.", reply_markup=_seedance_refs_collect_kb())
             return {"ok": True}
 
@@ -4124,18 +4146,59 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
             video_ids_for_price = [x for x in (so_price.get("video_file_ids") or []) if str(x or "").strip()]
             video_durations_for_price = list(so_price.get("video_durations_sec") or [])
             if video_ids_for_price:
+                fallback_sec = 30.0 if provider_kind == "seedance25" else 15.4
                 while len(video_durations_for_price) < len(video_ids_for_price):
-                    video_durations_for_price.append(15.4)
+                    video_durations_for_price.append(fallback_sec)
                 seedance_input_video_sec = float(sum(float(x or 0.0) for x in video_durations_for_price[:len(video_ids_for_price)]))
-        cost_tokens = int(seedance_kie_tokens_for_duration(
-            seedance_model,
-            duration,
-            input_video_duration_sec=seedance_input_video_sec,
-        ))
+        if provider_kind == "seedance25":
+            cost_tokens = int(seedance25_tokens_for_run(
+                seedance25_resolution_from_model(seedance_model),
+                duration,
+                input_video_duration_sec=seedance_input_video_sec,
+            ))
+        else:
+            cost_tokens = int(seedance_kie_tokens_for_duration(
+                seedance_model,
+                duration,
+                input_video_duration_sec=seedance_input_video_sec,
+            ))
     else:
         # Legacy fallback only. Seedance 2.0 Mini is normalized to KIE upstream.
         preview_price_map = {5: 9, 10: 18, 15: 27}
         cost_tokens = int(preview_price_map.get(int(duration), preview_price_map[5]))
+
+    # Seedance 2.5 always gets a final price screen BEFORE any token charge.
+    # Price is recomputed again when the user confirms, so stale buttons cannot
+    # charge an old amount after references/settings change.
+    if provider_kind == "seedance25" and not confirmed:
+        image_count = video_count = audio_count = 0
+        if mode_now == "seedance_omni":
+            so_preview = st.get("seedance_omni") or {}
+            image_count = len([x for x in (so_preview.get("image_file_ids") or []) if str(x or "").strip()])
+            video_count = len([x for x in (so_preview.get("video_file_ids") or []) if str(x or "").strip()])
+            audio_count = len([x for x in (so_preview.get("audio_file_ids") or []) if str(x or "").strip()])
+        resolution_label = seedance25_resolution_from_model(seedance_model)
+        mode_label = "Omni Reference" if mode_now == "seedance_omni" else "Text → Video"
+        refs_line = ""
+        if mode_now == "seedance_omni":
+            refs_line = (
+                f"\nРеференсы: 🖼 {image_count} · 🎬 {video_count} · 🎵 {audio_count}"
+                f"\nВходное video: {seedance_input_video_sec:g} сек"
+            )
+        await tg_send_message(
+            chat_id,
+            "🎬 Seedance 2.5 — подтверждение\n\n"
+            f"Режим: {mode_label}\n"
+            f"Качество: {resolution_label}\n"
+            f"Длительность результата: {int(duration)} сек\n"
+            f"Формат: {aspect_ratio}"
+            f"{refs_line}\n"
+            f"Промпт: {len(prompt)} символов\n\n"
+            f"💳 Стоимость: {int(cost_tokens)} токенов\n\n"
+            "Токены будут списаны только после нажатия кнопки ниже.",
+            reply_markup=_seedance25_confirm_kb(cost_tokens),
+        )
+        return {"ok": True}
 
     _busy_start(int(user_id), "Seedance видео")
     seedance_charged = False
@@ -4162,16 +4225,17 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
             "aspect_ratio": aspect_ratio,
             "cost_tokens": int(cost_tokens),
         }
+        charge_ref_id = str(uuid4())
         try:
-            add_tokens(user_id, -cost_tokens, reason="seedance_video", meta=charge_meta)
+            add_tokens(user_id, -cost_tokens, reason=("seedance25_video" if provider_kind == "seedance25" else "seedance_video"), ref_id=charge_ref_id, meta=charge_meta)
         except TypeError:
-            add_tokens(user_id, -int(cost_tokens), reason="seedance_video", meta=charge_meta)
+            add_tokens(user_id, -int(cost_tokens), reason=("seedance25_video" if provider_kind == "seedance25" else "seedance_video"), meta=charge_meta)
         seedance_charged = True
 
         job_id = uuid4().hex
         job: Dict[str, Any] = {
             "job_id": job_id,
-            "type": "seedance_video",
+            "type": ("seedance25_video" if provider_kind == "seedance25" else "seedance_video"),
             "chat_id": int(chat_id),
             "user_id": int(user_id),
             "provider_kind": provider_kind,
@@ -4180,7 +4244,10 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
             "prompt": prompt,
             "duration": int(duration),
             "aspect_ratio": aspect_ratio,
+            "resolution": (seedance25_resolution_from_model(seedance_model) if provider_kind == "seedance25" else None),
             "charge_tokens": int(cost_tokens),
+            "charge_ref_id": charge_ref_id,
+            "refund_reason": ("seedance25_video_refund" if provider_kind == "seedance25" else "seedance_video_refund"),
         }
 
         if mode_now == "seedance_i2v":
@@ -4211,16 +4278,26 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
         _set_mode(chat_id, user_id, "chat")
 
         await tg_send_message(chat_id, "⏳ Генерация может занять от 5 до 30 минут. Как будет готово — пришлю видео.", reply_markup=_help_menu_for(user_id))
-        await enqueue_job(job, queue_name="gen")
+        if provider_kind == "seedance25":
+            await enqueue_reliable_job(job, queue_name=SEEDANCE25_QUEUE_NAME)
+        else:
+            await enqueue_job(job, queue_name="gen")
         return {"ok": True}
 
     except Exception as e:
         try:
             if seedance_charged:
                 try:
-                    add_tokens(user_id, int(cost_tokens), reason="seedance_video_refund", meta={"stage": "main_exception"})
+                    refund_reason = ("seedance25_video_refund" if provider_kind == "seedance25" else "seedance_video_refund")
+                    if provider_kind == "seedance25":
+                        await asyncio.to_thread(
+                            refund_seedance25_once, user_id, int(cost_tokens),
+                            reason=refund_reason, ref_id=charge_ref_id, meta={"stage": "main_exception"}
+                        )
+                    elif not charge_ref_id or not ledger_ref_exists(reason=refund_reason, ref_id=charge_ref_id):
+                        add_tokens(user_id, int(cost_tokens), reason=refund_reason, ref_id=charge_ref_id or None, meta={"stage": "main_exception"})
                 except TypeError:
-                    add_tokens(user_id, int(cost_tokens), reason="seedance_video_refund")
+                    add_tokens(user_id, int(cost_tokens), reason=("seedance25_video_refund" if provider_kind == "seedance25" else "seedance_video_refund"))
         except Exception:
             pass
         await tg_send_message(chat_id, f"❌ Ошибка Seedance: {e}", reply_markup=_main_menu_for(user_id))
@@ -4249,10 +4326,12 @@ def _seedance_collect_summary_text(mode: str, settings: Optional[Dict[str, Any]]
         max_total_refs = max_images
 
     if mode == "seedance_omni":
+        is_25 = str(settings.get("provider_kind") or "").strip().lower() == "seedance25"
         return (
             f"Можешь прислать refs: фото до {max_images}, видео до {max_videos}, аудио до {max_audios}, "
             f"всего до {max_total_refs}.\n"
-            "Видео и аудио необязательны. Audio-only нельзя. Когда закончишь — нажми «✅ Готово»."
+            + ("Refs в промпте: @image1, @video1, @audio1 и т.д. Видео — только MP4. " if is_25 else "Видео и аудио необязательны. Audio-only нельзя. ")
+            + "Когда закончишь — нажми «✅ Готово»."
         )
 
     return (
@@ -7450,6 +7529,26 @@ async def process_telegram_update(update: Dict[str, Any]):
 
             return {"ok": True}
 
+        if chat_id and user_id and data.startswith("seedance25_confirm:"):
+            st = _ensure_state(chat_id, user_id)
+            action = data.split(":", 1)[1].strip()
+            mode_now = str(st.get("mode") or "").strip()
+            settings = st.get("seedance_settings") or {}
+            if mode_now not in ("seedance_t2v", "seedance_omni") or str(settings.get("provider_kind") or "").strip().lower() != "seedance25":
+                await tg_send_message(chat_id, "Настройки Seedance 2.5 уже изменились или были сброшены. Открой модель заново.", reply_markup=_main_menu_for(user_id))
+                return {"ok": True}
+            if action == "back":
+                await tg_send_message(
+                    chat_id,
+                    "Вернул к промпту. Можешь добавить ещё части, посмотреть или очистить его.",
+                    reply_markup=_seedance_prompt_collect_kb(mode_now),
+                )
+                return {"ok": True}
+            if action == "run":
+                prompt = _seedance_prompt_text_from_state(st)
+                return await _seedance_start_generation_from_prompt(chat_id, user_id, st, prompt, confirmed=True)
+            return {"ok": True}
+
         if chat_id and user_id and data.startswith("seedance_prompt:"):
             st = _ensure_state(chat_id, user_id)
             action = data.split(":", 1)[1].strip()
@@ -7480,6 +7579,16 @@ async def process_telegram_update(update: Dict[str, Any]):
                     "Промпт очищен. Пришли текст одной или несколькими частями, затем нажми «✅ Запустить».",
                     reply_markup=_seedance_prompt_collect_kb(mode_now),
                 )
+                return {"ok": True}
+
+            if action == "show":
+                prompt = _seedance_prompt_text_from_state(st)
+                if not prompt:
+                    await tg_send_message(chat_id, "Промпт пока пустой.", reply_markup=_seedance_prompt_collect_kb(mode_now))
+                    return {"ok": True}
+                await tg_send_message(chat_id, f"👁 Собранный промпт: {len(prompt)} символов.", reply_markup=_seedance_prompt_collect_kb(mode_now))
+                for chunk_start in range(0, len(prompt), 3800):
+                    await tg_send_message(chat_id, prompt[chunk_start:chunk_start + 3800])
                 return {"ok": True}
 
             if action == "done":
@@ -7563,7 +7672,7 @@ async def process_telegram_update(update: Dict[str, Any]):
                         reply_markup=_seedance_refs_collect_kb(),
                     )
                     return {"ok": True}
-                if audio_ids and not (image_ids or video_ids):
+                if audio_ids and not (image_ids or video_ids) and str(settings.get("provider_kind") or "").strip().lower() != "seedance25":
                     await tg_send_message(
                         chat_id,
                         "Для Omni Reference аудио нельзя отправлять отдельно. Добавь хотя бы фото или видео reference.",
@@ -8765,22 +8874,29 @@ async def process_telegram_update(update: Dict[str, Any]):
         if not file_id:
             await tg_send_message(chat_id, "Не смог прочитать audio file_id. Отправь аудио ещё раз.", reply_markup=_seedance_refs_collect_kb())
             return {"ok": True}
-        if duration_sec and duration_sec > 15:
-            await tg_send_message(chat_id, "Audio reference слишком длинный. Для Seedance Omni максимум 15 секунд.", reply_markup=_seedance_refs_collect_kb())
+        settings = st.get("seedance_settings") or {}
+        provider_kind = str(settings.get("provider_kind") or "").strip().lower()
+        max_audio_duration = 30 if provider_kind == "seedance25" else 15
+        max_audio_bytes = 15 * 1024 * 1024 if provider_kind == "seedance25" else SEEDANCE_AUDIO_MAX_UPLOAD_BYTES
+        if duration_sec and (duration_sec < 2 if provider_kind == "seedance25" else False):
+            await tg_send_message(chat_id, "Для Seedance 2.5 audio reference должен быть не короче 2 секунд.", reply_markup=_seedance_refs_collect_kb())
+            return {"ok": True}
+        if duration_sec and duration_sec > max_audio_duration:
+            await tg_send_message(chat_id, f"Audio reference слишком длинный. Максимум {max_audio_duration} секунд.", reply_markup=_seedance_refs_collect_kb())
             return {"ok": True}
         try:
             size_bytes = int(audio_msg.get("file_size") or 0)
         except Exception:
             size_bytes = 0
-        if size_bytes and size_bytes > SEEDANCE_AUDIO_MAX_UPLOAD_BYTES:
-            await tg_send_message(chat_id, f"Audio reference слишком большой. Лимит: до {SEEDANCE_AUDIO_MAX_UPLOAD_MB} МБ.", reply_markup=_seedance_refs_collect_kb())
+        if size_bytes and size_bytes > max_audio_bytes:
+            await tg_send_message(chat_id, f"Audio reference слишком большой. Лимит: до {15 if provider_kind == 'seedance25' else SEEDANCE_AUDIO_MAX_UPLOAD_MB} МБ.", reply_markup=_seedance_refs_collect_kb())
             return {"ok": True}
-        settings = st.get("seedance_settings") or {}
         audio_limit = int(settings.get("max_audios") or 3)
         total_limit = int(settings.get("max_total_refs") or 12)
         image_ids = list(so.get("image_file_ids") or [])
         video_ids = list(so.get("video_file_ids") or [])
         audio_ids = list(so.get("audio_file_ids") or [])
+        audio_durations = list(so.get("audio_durations_sec") or [])
         if len(audio_ids) >= audio_limit:
             await tg_send_message(chat_id, f"Аудио refs уже {audio_limit}/{audio_limit}. Пришли другие refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
             return {"ok": True}
@@ -8789,10 +8905,17 @@ async def process_telegram_update(update: Dict[str, Any]):
             return {"ok": True}
         if file_id not in audio_ids:
             audio_ids.append(file_id)
+            audio_durations.append(float(duration_sec or 30.0 if provider_kind == "seedance25" else duration_sec or 15.0))
+        if provider_kind == "seedance25" and sum(float(x or 0) for x in audio_durations) > 30.0:
+            await tg_send_message(chat_id, "Суммарная длительность audio references Seedance 2.5 не может превышать 30 секунд.", reply_markup=_seedance_refs_collect_kb())
+            return {"ok": True}
         so["audio_file_ids"] = audio_ids[:audio_limit]
+        so["audio_durations_sec"] = audio_durations[:audio_limit]
         st["seedance_omni"] = so
         st["ts"] = _now()
-        await tg_send_message(chat_id, f"Аудио reference #{len(so['audio_file_ids'])} получил ✅\nПришли ещё refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
+        audio_ref_no = len(so['audio_file_ids'])
+        alias = f" @audio{audio_ref_no}" if provider_kind == "seedance25" else ""
+        await tg_send_message(chat_id, f"Аудио reference #{audio_ref_no}{alias} получил ✅\nПришли ещё refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
         return {"ok": True}
 
     # ---------------- Voice для Seedance Omni: принимаем как audio ref и конвертируем в MP3 в worker ----------------
@@ -8807,22 +8930,29 @@ async def process_telegram_update(update: Dict[str, Any]):
         if not file_id:
             await tg_send_message(chat_id, "Не смог прочитать file_id голосового. Запиши голосовое ещё раз.", reply_markup=_seedance_refs_collect_kb())
             return {"ok": True}
-        if duration_sec and duration_sec > 15:
-            await tg_send_message(chat_id, "Голосовой audio reference слишком длинный. Для Seedance Omni максимум 15 секунд.", reply_markup=_seedance_refs_collect_kb())
+        settings = st.get("seedance_settings") or {}
+        provider_kind = str(settings.get("provider_kind") or "").strip().lower()
+        max_audio_duration = 30 if provider_kind == "seedance25" else 15
+        max_audio_bytes = 15 * 1024 * 1024 if provider_kind == "seedance25" else SEEDANCE_AUDIO_MAX_UPLOAD_BYTES
+        if duration_sec and provider_kind == "seedance25" and duration_sec < 2:
+            await tg_send_message(chat_id, "Для Seedance 2.5 audio reference должен быть не короче 2 секунд.", reply_markup=_seedance_refs_collect_kb())
+            return {"ok": True}
+        if duration_sec and duration_sec > max_audio_duration:
+            await tg_send_message(chat_id, f"Голосовой audio reference слишком длинный. Максимум {max_audio_duration} секунд.", reply_markup=_seedance_refs_collect_kb())
             return {"ok": True}
         try:
             size_bytes = int(voice.get("file_size") or 0)
         except Exception:
             size_bytes = 0
-        if size_bytes and size_bytes > SEEDANCE_AUDIO_MAX_UPLOAD_BYTES:
-            await tg_send_message(chat_id, f"Голосовой audio reference слишком большой. Лимит: до {SEEDANCE_AUDIO_MAX_UPLOAD_MB} МБ.", reply_markup=_seedance_refs_collect_kb())
+        if size_bytes and size_bytes > max_audio_bytes:
+            await tg_send_message(chat_id, f"Голосовой audio reference слишком большой. Лимит: до {15 if provider_kind == 'seedance25' else SEEDANCE_AUDIO_MAX_UPLOAD_MB} МБ.", reply_markup=_seedance_refs_collect_kb())
             return {"ok": True}
-        settings = st.get("seedance_settings") or {}
         audio_limit = int(settings.get("max_audios") or 3)
         total_limit = int(settings.get("max_total_refs") or 12)
         image_ids = list(so.get("image_file_ids") or [])
         video_ids = list(so.get("video_file_ids") or [])
         audio_ids = list(so.get("audio_file_ids") or [])
+        audio_durations = list(so.get("audio_durations_sec") or [])
         if len(audio_ids) >= audio_limit:
             await tg_send_message(chat_id, f"Аудио refs уже {audio_limit}/{audio_limit}. Пришли другие refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
             return {"ok": True}
@@ -8831,10 +8961,17 @@ async def process_telegram_update(update: Dict[str, Any]):
             return {"ok": True}
         if file_id not in audio_ids:
             audio_ids.append(file_id)
+            audio_durations.append(float(duration_sec or (30.0 if provider_kind == "seedance25" else 15.0)))
+        if provider_kind == "seedance25" and sum(float(x or 0) for x in audio_durations) > 30.0:
+            await tg_send_message(chat_id, "Суммарная длительность audio references Seedance 2.5 не может превышать 30 секунд.", reply_markup=_seedance_refs_collect_kb())
+            return {"ok": True}
         so["audio_file_ids"] = audio_ids[:audio_limit]
+        so["audio_durations_sec"] = audio_durations[:audio_limit]
         st["seedance_omni"] = so
         st["ts"] = _now()
-        await tg_send_message(chat_id, f"Голосовой audio reference #{len(so['audio_file_ids'])} получил ✅\nКонвертирую в MP3 при запуске. Пришли ещё refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
+        audio_ref_no = len(so['audio_file_ids'])
+        alias = f" @audio{audio_ref_no}" if provider_kind == "seedance25" else ""
+        await tg_send_message(chat_id, f"Голосовой audio reference #{audio_ref_no}{alias} получил ✅\nКонвертирую в MP3 при запуске. Пришли ещё refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
         return {"ok": True}
 
 
@@ -9169,10 +9306,11 @@ async def process_telegram_update(update: Dict[str, Any]):
         kie_seedance_models = (
             "seedance-kie-480p", "seedance-kie-720p", "seedance-kie-1080p",
             "seedance-kie", "seedance-kie-fast", "seedance-2", "seedance-2-fast",
+            "seedance25-480p", "seedance25-720p", "seedance-2-5",
         )
         is_seedance = (
             seedance_type_raw in ("seedance_settings", "seedance2_settings", "seedance_2_settings")
-            or seedance_provider_raw in ("seedance", "seedance2", "seedance_2", "seedance_kie", "seedance-kie")
+            or seedance_provider_raw in ("seedance", "seedance2", "seedance_2", "seedance_kie", "seedance-kie", "seedance25", "seedance_25", "seedance-2-5")
             or seedance_model_raw in ("mini", "seedance-mini", "seedance-2-mini", "preview", "fast", "seedance-2-preview", "seedance-2-fast-preview", *kie_seedance_models)
             or seedance_task_type_raw in ("seedance-2-mini", "seedance-2-preview", "seedance-2-fast-preview", "seedance-2", "seedance-2-fast")
         )
@@ -9180,6 +9318,12 @@ async def process_telegram_update(update: Dict[str, Any]):
         if is_seedance:
             provider_kind = "seedance"
             if (
+                seedance_provider_raw in ("seedance25", "seedance_25", "seedance-2-5")
+                or seedance_variant_raw in ("25", "2.5", "seedance25")
+                or seedance_model_raw in ("seedance25-480p", "seedance25-720p", "seedance-2-5")
+            ):
+                provider_kind = "seedance25"
+            elif (
                 seedance_provider_raw in ("seedance_kie", "seedance-kie")
                 or seedance_variant_raw == "kie"
                 or seedance_model_raw in kie_seedance_models
@@ -9190,16 +9334,28 @@ async def process_telegram_update(update: Dict[str, Any]):
             flow = str(payload.get("flow") or payload.get("gen_mode") or payload.get("mode") or "text").lower().strip()
             if flow not in ("text", "image", "omni"):
                 flow = "text"
+            if provider_kind == "seedance25" and flow == "image":
+                flow = "omni"
 
             try:
                 duration = int(payload.get("duration") or 5)
             except Exception:
                 duration = 5
-            if duration < 4 or duration > 15:
+            max_duration = 30 if provider_kind == "seedance25" else 15
+            if duration < 4 or duration > max_duration:
                 duration = 5
 
-            aspect_ratio = str(payload.get("aspect_ratio") or "16:9").strip()
-            if provider_kind == "seedance_kie":
+            aspect_ratio = str(payload.get("aspect_ratio") or ("adaptive" if provider_kind == "seedance25" else "16:9")).strip()
+            if provider_kind == "seedance25":
+                if aspect_ratio not in ("1:1", "4:3", "3:4", "16:9", "9:16", "21:9", "adaptive"):
+                    aspect_ratio = "adaptive"
+                seedance_model = "seedance25-480p" if "480" in seedance_model_raw else "seedance25-720p"
+                task_type = "seedance-2-5"
+                max_images = 30 if flow == "omni" else 0
+                max_videos = 10 if flow == "omni" else 0
+                max_audios = 10 if flow == "omni" else 0
+                max_total_refs = 50 if flow == "omni" else 0
+            elif provider_kind == "seedance_kie":
                 if aspect_ratio not in ("16:9", "9:16", "1:1"):
                     aspect_ratio = "16:9"
                 model_map = {
@@ -9253,9 +9409,11 @@ async def process_telegram_update(update: Dict[str, Any]):
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
-                    ("✅ Настройки Seedance 2.0 сохранены.\n\nПришли промпт одним или несколькими сообщениями. Когда всё отправишь — нажми «✅ Запустить»."
-                     if provider_kind == "seedance_kie" else
-                     "✅ Настройки Seedance 2.0 Mini сохранены.\n\nПришли промпт одним или несколькими сообщениями. Когда всё отправишь — нажми «✅ Запустить»."),
+                    ("✅ Настройки Seedance 2.5 сохранены.\n\nПришли промпт одним или несколькими сообщениями. Лимит NABEX: 30 000 символов. Когда всё отправишь — нажми «✅ Запустить»."
+                     if provider_kind == "seedance25" else
+                     ("✅ Настройки Seedance 2.0 сохранены.\n\nПришли промпт одним или несколькими сообщениями. Когда всё отправишь — нажми «✅ Запустить»."
+                      if provider_kind == "seedance_kie" else
+                      "✅ Настройки Seedance 2.0 Mini сохранены.\n\nПришли промпт одним или несколькими сообщениями. Когда всё отправишь — нажми «✅ Запустить».")),
                     reply_markup=_seedance_prompt_collect_kb("seedance_t2v"),
                 )
                 return {"ok": True}
@@ -9273,11 +9431,14 @@ async def process_telegram_update(update: Dict[str, Any]):
                 st["ts"] = _now()
                 await tg_send_message(
                     chat_id,
-                    ("✅ Настройки Seedance 2.0 Omni сохранены.\n\n"
-                     if provider_kind == "seedance_kie" else
-                     "✅ Настройки Seedance 2.0 Mini Omni сохранены.\n\n")
-                    + "Теперь пришли референсы: можно только фото, либо фото/видео/аудио вместе.\n"
-                    + "Аудио можно файлом или голосовым сообщением — я конвертирую в MP3. Audio-only нельзя. Когда закончишь — нажми «✅ Готово».",
+                    ("✅ Настройки Seedance 2.5 Omni Reference сохранены.\n\n"
+                     if provider_kind == "seedance25" else
+                     ("✅ Настройки Seedance 2.0 Omni сохранены.\n\n"
+                      if provider_kind == "seedance_kie" else
+                      "✅ Настройки Seedance 2.0 Mini Omni сохранены.\n\n"))
+                    + ("Теперь пришли refs: до 30 фото, до 10 MP4-видео (до 20 МБ каждое, суммарно до 30 сек) и до 10 аудио. Используй @image1 / @video1 / @audio1 в промпте. Когда закончишь — нажми «✅ Готово»."
+                       if provider_kind == "seedance25" else
+                       "Теперь пришли референсы: можно только фото, либо фото/видео/аудио вместе.\nАудио можно файлом или голосовым сообщением — я конвертирую в MP3. Audio-only нельзя. Когда закончишь — нажми «✅ Готово»."),
                     reply_markup=_seedance_refs_collect_kb(),
                 )
                 return {"ok": True}
@@ -10699,7 +10860,7 @@ async def process_telegram_update(update: Dict[str, Any]):
                     if total_refs <= 0:
                         await tg_send_message(chat_id, "Сначала пришли хотя бы один image/video/audio reference.", reply_markup=_seedance_refs_collect_kb())
                         return {"ok": True}
-                    if audio_ids and not (image_ids or video_ids):
+                    if audio_ids and not (image_ids or video_ids) and provider_kind != "seedance25":
                         await tg_send_message(chat_id, "Для Omni Reference аудио нельзя отправлять отдельно. Добавь хотя бы фото или видео reference.", reply_markup=_seedance_refs_collect_kb())
                         return {"ok": True}
                     so["step"] = "need_prompt"
@@ -12718,9 +12879,11 @@ async def process_telegram_update(update: Dict[str, Any]):
                     so["image_file_ids"] = image_ids[:limit]
                     st["seedance_omni"] = so
                     st["ts"] = _now()
+                    ref_no = len(so['image_file_ids'])
+                    alias = f" @image{ref_no}" if str(settings.get("provider_kind") or "").strip().lower() == "seedance25" else ""
                     await tg_send_message(
                         chat_id,
-                        f"Фото reference #{len(so['image_file_ids'])} получил ✅\n"
+                        f"Фото reference #{ref_no}{alias} получил ✅\n"
                         "Пришли ещё refs или нажми «✅ Готово», чтобы перейти к промпту.",
                         reply_markup=_seedance_refs_collect_kb(),
                     )
@@ -13065,10 +13228,44 @@ async def process_telegram_update(update: Dict[str, Any]):
                 await tg_send_message(chat_id, "Не смог прочитать video file_id. Пришли видео ещё раз.", reply_markup=_seedance_refs_collect_kb())
                 return {"ok": True}
             duration_hint = float(vid.get("duration") or 0)
-            if duration_hint and duration_hint > 15.4:
-                await tg_send_message(chat_id, "Видео reference слишком длинное. Для Seedance Omni сейчас максимум около 15 секунд.", reply_markup=_seedance_refs_collect_kb())
-                return {"ok": True}
             settings = st.get("seedance_settings") or {}
+            provider_kind = str(settings.get("provider_kind") or "").strip().lower()
+            max_single_video = 30.0 if provider_kind == "seedance25" else 15.4
+            try:
+                video_size_bytes = int(vid.get("file_size") or 0)
+            except Exception:
+                video_size_bytes = 0
+
+            # Telegram exposes message.video.duration as integer seconds. For Seedance 2.5
+            # pricing and the 30-second refs cap must use the real media duration instead.
+            duration_sec = float(duration_hint or 0.0)
+            if provider_kind == "seedance25":
+                if video_size_bytes and video_size_bytes > SEEDANCE25_TG_VIDEO_MAX_UPLOAD_BYTES:
+                    await tg_send_message(
+                        chat_id,
+                        f"Video reference слишком большой. В Telegram для Seedance 2.5 максимум {SEEDANCE25_TG_VIDEO_MAX_UPLOAD_MB} МБ на файл.",
+                        reply_markup=_seedance_refs_collect_kb(),
+                    )
+                    return {"ok": True}
+                try:
+                    file_path = await tg_get_file_path(file_id)
+                    raw_video = await tg_download_file_bytes(file_path)
+                    duration_sec = float(_probe_video_duration_from_bytes(raw_video, "mp4") or 0.0)
+                except Exception:
+                    duration_sec = 0.0
+                if duration_sec <= 0:
+                    await tg_send_message(
+                        chat_id,
+                        "Не удалось точно определить длительность video reference. Пришли корректный MP4 до 20 МБ.",
+                        reply_markup=_seedance_refs_collect_kb(),
+                    )
+                    return {"ok": True}
+                if duration_sec < 2.0:
+                    await tg_send_message(chat_id, "Для Seedance 2.5 video reference должен быть не короче 2 секунд.", reply_markup=_seedance_refs_collect_kb())
+                    return {"ok": True}
+            if duration_sec and duration_sec > max_single_video:
+                await tg_send_message(chat_id, f"Видео reference слишком длинное. Максимум {int(max_single_video)} секунд.", reply_markup=_seedance_refs_collect_kb())
+                return {"ok": True}
             video_limit = int(settings.get("max_videos") or 3)
             total_limit = int(settings.get("max_total_refs") or 12)
             image_ids = list(so.get("image_file_ids") or [])
@@ -13083,12 +13280,17 @@ async def process_telegram_update(update: Dict[str, Any]):
                 return {"ok": True}
             if file_id not in video_ids:
                 video_ids.append(file_id)
-                video_durations.append(float(duration_hint or 15.4))
+                video_durations.append(float(duration_sec or (30.0 if provider_kind == "seedance25" else 15.4)))
+            if provider_kind == "seedance25" and sum(float(x or 0) for x in video_durations) > 30.0:
+                await tg_send_message(chat_id, "Суммарная длительность video references Seedance 2.5 не может превышать 30 секунд.", reply_markup=_seedance_refs_collect_kb())
+                return {"ok": True}
             so["video_file_ids"] = video_ids[:video_limit]
             so["video_durations_sec"] = video_durations[:video_limit]
             st["seedance_omni"] = so
             st["ts"] = _now()
-            await tg_send_message(chat_id, f"Видео reference #{len(so['video_file_ids'])} получил ✅\nПришли ещё refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
+            ref_no = len(so['video_file_ids'])
+            alias = f" @video{ref_no}" if provider_kind == "seedance25" else ""
+            await tg_send_message(chat_id, f"Видео reference #{ref_no}{alias} получил ✅\nПришли ещё refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
             return {"ok": True}
 
         if st.get("mode") == "omni_flash_video_edit":
@@ -13318,18 +13520,35 @@ async def process_telegram_update(update: Dict[str, Any]):
             if not (is_image_document or is_video_document or is_audio_document):
                 await tg_send_message(chat_id, "Для Seedance Omni отправь фото, видео MP4/MOV или аудио MP3/WAV/M4A/OGG/OPUS.", reply_markup=_seedance_refs_collect_kb())
                 return {"ok": True}
-            if is_video_document and not (mime in ("video/mp4", "video/quicktime") or filename_l.endswith((".mp4", ".mov"))):
+            settings = st.get("seedance_settings") or {}
+            provider_kind = str(settings.get("provider_kind") or "").strip().lower()
+            if is_image_document and provider_kind == "seedance25" and not (mime in ("image/jpeg", "image/jpg", "image/png") or filename_l.endswith((".jpg", ".jpeg", ".png"))):
+                await tg_send_message(chat_id, "Для Seedance 2.5 image reference отправь только PNG или JPEG.", reply_markup=_seedance_refs_collect_kb())
+                return {"ok": True}
+            if is_video_document and provider_kind == "seedance25" and not (mime == "video/mp4" or filename_l.endswith(".mp4")):
+                await tg_send_message(chat_id, "Для Seedance 2.5 video reference отправь только в MP4.", reply_markup=_seedance_refs_collect_kb())
+                return {"ok": True}
+            if is_audio_document and provider_kind == "seedance25" and not (mime in ("audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/wave") or filename_l.endswith((".mp3", ".wav"))):
+                await tg_send_message(chat_id, "Для Seedance 2.5 audio reference отправь только MP3 или WAV.", reply_markup=_seedance_refs_collect_kb())
+                return {"ok": True}
+            if is_video_document and provider_kind != "seedance25" and not (mime in ("video/mp4", "video/quicktime") or filename_l.endswith((".mp4", ".mov"))):
                 await tg_send_message(chat_id, "Видео reference отправь в MP4 или MOV.", reply_markup=_seedance_refs_collect_kb())
                 return {"ok": True}
             try:
                 doc_size = int(doc.get("file_size") or 0)
             except Exception:
                 doc_size = 0
-            if is_audio_document and doc_size and doc_size > SEEDANCE_AUDIO_MAX_UPLOAD_BYTES:
-                await tg_send_message(chat_id, f"Audio reference слишком большой. Лимит: до {SEEDANCE_AUDIO_MAX_UPLOAD_MB} МБ.", reply_markup=_seedance_refs_collect_kb())
+            audio_max_bytes = 15 * 1024 * 1024 if provider_kind == "seedance25" else SEEDANCE_AUDIO_MAX_UPLOAD_BYTES
+            image_max_bytes = 30 * 1024 * 1024 if provider_kind == "seedance25" else 100 * 1024 * 1024
+            video_max_bytes = SEEDANCE25_TG_VIDEO_MAX_UPLOAD_BYTES if provider_kind == "seedance25" else 100 * 1024 * 1024
+            if is_audio_document and doc_size and doc_size > audio_max_bytes:
+                await tg_send_message(chat_id, f"Audio reference слишком большой. Лимит: до {15 if provider_kind == 'seedance25' else SEEDANCE_AUDIO_MAX_UPLOAD_MB} МБ.", reply_markup=_seedance_refs_collect_kb())
                 return {"ok": True}
-            if not is_audio_document and doc_size and doc_size > 100 * 1024 * 1024:
-                await tg_send_message(chat_id, "Файл слишком большой для reference. Лимит: до 100 МБ.", reply_markup=_seedance_refs_collect_kb())
+            if is_image_document and doc_size and doc_size > image_max_bytes:
+                await tg_send_message(chat_id, f"Image reference слишком большой. Лимит: до {30 if provider_kind == 'seedance25' else 100} МБ.", reply_markup=_seedance_refs_collect_kb())
+                return {"ok": True}
+            if is_video_document and doc_size and doc_size > video_max_bytes:
+                await tg_send_message(chat_id, f"Video reference слишком большой. Лимит: до {SEEDANCE25_TG_VIDEO_MAX_UPLOAD_MB if provider_kind == 'seedance25' else 100} МБ.", reply_markup=_seedance_refs_collect_kb())
                 return {"ok": True}
 
             settings = st.get("seedance_settings") or {}
@@ -13365,12 +13584,26 @@ async def process_telegram_update(update: Dict[str, Any]):
                     duration_sec = float(_probe_video_duration_from_bytes(raw_video, ext) or 0.0)
                 except Exception:
                     duration_sec = 0.0
-                if duration_sec and duration_sec > 15.4:
-                    await tg_send_message(chat_id, "Видео reference слишком длинное. Для Seedance Omni сейчас максимум около 15 секунд.", reply_markup=_seedance_refs_collect_kb())
+                max_single_video = 30.0 if provider_kind == "seedance25" else 15.4
+                if provider_kind == "seedance25" and duration_sec <= 0:
+                    await tg_send_message(
+                        chat_id,
+                        "Не удалось точно определить длительность video reference. Пришли корректный MP4 до 20 МБ.",
+                        reply_markup=_seedance_refs_collect_kb(),
+                    )
+                    return {"ok": True}
+                if provider_kind == "seedance25" and duration_sec < 2.0:
+                    await tg_send_message(chat_id, "Для Seedance 2.5 video reference должен быть не короче 2 секунд.", reply_markup=_seedance_refs_collect_kb())
+                    return {"ok": True}
+                if duration_sec and duration_sec > max_single_video:
+                    await tg_send_message(chat_id, f"Видео reference слишком длинное. Максимум {int(max_single_video)} секунд.", reply_markup=_seedance_refs_collect_kb())
                     return {"ok": True}
                 if file_id not in video_ids:
                     video_ids.append(str(file_id))
-                    video_durations.append(float(duration_sec or 15.4))
+                    video_durations.append(float(duration_sec or max_single_video))
+                if provider_kind == "seedance25" and sum(float(x or 0) for x in video_durations) > 30.0:
+                    await tg_send_message(chat_id, "Суммарная длительность video references Seedance 2.5 не может превышать 30 секунд.", reply_markup=_seedance_refs_collect_kb())
+                    return {"ok": True}
                 so["video_file_ids"] = video_ids[:video_limit]
                 so["video_durations_sec"] = video_durations[:video_limit]
                 label = f"Видео reference #{len(so['video_file_ids'])}"
@@ -13378,11 +13611,39 @@ async def process_telegram_update(update: Dict[str, Any]):
                 if len(audio_ids) >= audio_limit:
                     await tg_send_message(chat_id, f"Аудио refs уже {audio_limit}/{audio_limit}. Нажми «✅ Готово» или отправь другой тип refs.", reply_markup=_seedance_refs_collect_kb())
                     return {"ok": True}
+                audio_durations = list(so.get("audio_durations_sec") or [])
+                audio_duration_sec = 0.0
+                if provider_kind == "seedance25":
+                    try:
+                        file_path = await tg_get_file_path(str(file_id))
+                        raw_audio = await tg_download_file_bytes(file_path)
+                        ext_guess = "wav" if filename_l.endswith(".wav") else ("mp3" if filename_l.endswith(".mp3") else "bin")
+                        audio_duration_sec = float(_probe_video_duration_from_bytes(raw_audio, ext_guess) or 0.0)
+                    except Exception:
+                        audio_duration_sec = 0.0
+                    if audio_duration_sec and audio_duration_sec < 2.0:
+                        await tg_send_message(chat_id, "Для Seedance 2.5 audio reference должен быть не короче 2 секунд.", reply_markup=_seedance_refs_collect_kb())
+                        return {"ok": True}
+                    if audio_duration_sec and audio_duration_sec > 30.0:
+                        await tg_send_message(chat_id, "Для Seedance 2.5 audio reference максимум 30 секунд.", reply_markup=_seedance_refs_collect_kb())
+                        return {"ok": True}
                 if file_id not in audio_ids:
                     audio_ids.append(str(file_id))
+                    audio_durations.append(float(audio_duration_sec or (30.0 if provider_kind == "seedance25" else 15.0)))
+                if provider_kind == "seedance25" and sum(float(x or 0) for x in audio_durations) > 30.0:
+                    await tg_send_message(chat_id, "Суммарная длительность audio references Seedance 2.5 не может превышать 30 секунд.", reply_markup=_seedance_refs_collect_kb())
+                    return {"ok": True}
                 so["audio_file_ids"] = audio_ids[:audio_limit]
-                label = f"Аудио reference #{len(so['audio_file_ids'])}"
+                so["audio_durations_sec"] = audio_durations[:audio_limit]
+                ref_no = len(so['audio_file_ids'])
+                label = f"Аудио reference #{ref_no}" + (f" @audio{ref_no}" if provider_kind == "seedance25" else "")
 
+            if is_image_document and provider_kind == "seedance25":
+                ref_no = len(so.get("image_file_ids") or [])
+                label += f" @image{ref_no}"
+            elif is_video_document and provider_kind == "seedance25":
+                ref_no = len(so.get("video_file_ids") or [])
+                label += f" @video{ref_no}"
             st["seedance_omni"] = so
             st["ts"] = _now()
             await tg_send_message(chat_id, f"{label} получил ✅\nПришли ещё refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
