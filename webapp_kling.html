@@ -1164,10 +1164,16 @@
             <span class="desc">Как на сайте</span>
           </label>
 
+          <input id="seed_variant_25" type="radio" name="seedance_variant" value="25">
+          <label for="seed_variant_25">
+            <span class="name">Seedance 2.5</span>
+            <span class="desc">480p / 720p </span>
+          </label>
+
           <input id="seed_variant_preview" type="radio" name="seedance_variant" value="mini">
           <label for="seed_variant_preview">
             <span class="name">Seedance 2.0 Mini</span>
-            <span class="desc">720p · KIE</span>
+            <span class="desc">720p </span>
           </label>
         </div>
       </div>
@@ -1183,6 +1189,16 @@
             </label>
           </div>
           <div class="hint">720p, Text → Video, Image → Video или Omni Reference.</div>
+        </div>
+
+        <div id="seedance25ModelWrap" style="display:none;">
+          <div class="seg" role="radiogroup" aria-label="Модель Seedance 2.5">
+            <input id="seed25_480p" type="radio" name="seedance25_model" value="seedance25-480p">
+            <label for="seed25_480p"><span class="name">Seedance 2.5 480p</span><span class="desc">2 ток./сек без video ref</span></label>
+            <input id="seed25_720p" type="radio" name="seedance25_model" value="seedance25-720p" checked>
+            <label for="seed25_720p"><span class="name">Seedance 2.5 720p</span><span class="desc">4,5 ток./сек без video ref</span></label>
+          </div>
+          <div class="hint">Seedance 2.5: Text → Video и Omni Reference. Генерация аудио всегда включена.</div>
         </div>
 
         <div id="seedanceKieModelWrap">
@@ -1232,6 +1248,18 @@
         </div>
         <div class="hint">Text → Video, Image → Video и Omni Reference работают через KIE Mini. В Omni можно отправить image/video/audio refs.</div>
         <div class="hint">После сохранения: Text → Video — сразу отправь промпт; Image → Video — пришли 1–2 фото, нажми «Готово», затем промпт; Omni Reference — пришли refs, нажми «Готово», затем промпт.</div>
+      </div>
+
+      <div id="seedance25FlowCard" class="card" style="display:none;">
+        <h3>Режим</h3>
+        <div class="seg" role="radiogroup" aria-label="Режим Seedance 2.5">
+          <input id="seed25_flow_text" type="radio" name="seedance25_flow" value="text" checked>
+          <label for="seed25_flow_text"><span class="name">Text → Video</span><span class="desc">Только промпт</span></label>
+          <input id="seed25_flow_omni" type="radio" name="seedance25_flow" value="omni">
+          <label for="seed25_flow_omni"><span class="name">Omni Reference</span><span class="desc">Фото + MP4 + аудио refs</span></label>
+        </div>
+        <div class="hint">Omni: до 30 изображений, до 10 MP4-видео (суммарно до 30 сек), до 10 аудио. В промпте используй @image1 / @video1 / @audio1.</div>
+        <div class="hint">Промпт можно отправлять в Telegram несколькими сообщениями, общий лимит NABEX — 30 000 символов.</div>
       </div>
 
       <div id="seedanceKieFlowCard" class="card">
@@ -1786,18 +1814,23 @@
     function getSeedanceVariant(){ return qs('input[name="seedance_variant"]:checked')?.value || "kie"; }
     function getSeedancePreviewModel(){ return qs('input[name="seedance_model"]:checked')?.value || "mini"; }
     function getSeedanceKieModel(){ return qs('input[name="seedance_kie_model"]:checked')?.value || "seedance-kie-480p"; }
+    function getSeedance25Model(){ return qs('input[name="seedance25_model"]:checked')?.value || "seedance25-720p"; }
+    function getSeedance25Flow(){ return qs('input[name="seedance25_flow"]:checked')?.value || "text"; }
     function getSeedanceKieFlow(){ return qs('input[name="seedance_kie_flow"]:checked')?.value || "text"; }
 
     function updateSeedanceUI(){
       const seedTypeCard = qs('#seedanceTypeCard');
       const previewModelWrap = qs('#seedancePreviewModelWrap');
       const kieModelWrap = qs('#seedanceKieModelWrap');
+      const model25Wrap = qs('#seedance25ModelWrap');
       const previewFlowCard = qs('#seedancePreviewFlowCard');
       const kieFlowCard = qs('#seedanceKieFlowCard');
+      const flow25Card = qs('#seedance25FlowCard');
       const aspectHint = qs('#seedanceAspectHint');
       const aspectSelect = qs('#seedance_aspect');
       const variant = getSeedanceVariant();
       const isMini = variant === 'mini' || variant === 'preview';
+      const is25 = variant === '25';
 
       if (seedTypeCard) {
         seedTypeCard.style.display = 'block';
@@ -1806,16 +1839,24 @@
       }
 
       if (previewModelWrap) previewModelWrap.style.display = isMini ? 'block' : 'none';
-      if (kieModelWrap) kieModelWrap.style.display = isMini ? 'none' : 'block';
+      if (model25Wrap) model25Wrap.style.display = is25 ? 'block' : 'none';
+      if (kieModelWrap) kieModelWrap.style.display = (!isMini && !is25) ? 'block' : 'none';
       if (previewFlowCard) previewFlowCard.style.display = isMini ? 'block' : 'none';
-      if (kieFlowCard) kieFlowCard.style.display = isMini ? 'none' : 'block';
+      if (flow25Card) flow25Card.style.display = is25 ? 'block' : 'none';
+      if (kieFlowCard) kieFlowCard.style.display = (!isMini && !is25) ? 'block' : 'none';
 
-      if (!isMini && aspectSelect && ['4:3','3:4'].includes(aspectSelect.value)){
-        aspectSelect.value = '16:9';
+      if (!isMini && !is25 && aspectSelect && ['4:3','3:4','21:9','adaptive'].includes(aspectSelect.value)){ aspectSelect.value = '16:9'; }
+      const durSel = qs('#seedance_duration');
+      if (durSel) {
+        const opts = []; const max = is25 ? 30 : 15;
+        for (let i=4;i<=max;i++) opts.push([String(i), `${i} секунд`]);
+        setSelectOptions(durSel, opts, durSel.value || '5');
       }
+      if (aspectSelect && is25) setSelectOptions(aspectSelect, [['adaptive','Adaptive'],['16:9','16:9'],['9:16','9:16'],['1:1','1:1'],['4:3','4:3'],['3:4','3:4'],['21:9','21:9']], aspectSelect.value || 'adaptive');
+      else if (aspectSelect) setSelectOptions(aspectSelect, [['16:9','16:9 (YouTube)'],['9:16','9:16 (Reels)'],['1:1','1:1']], aspectSelect.value || '16:9');
       if (aspectHint) aspectHint.textContent = isMini
         ? 'Seedance 2.0 Mini: 720p, Text → Video, Image → Video или Omni Reference.'
-        : 'Для обычного Seedance 2.0 доступны форматы 16:9 / 9:16 / 1:1, как на сайте.';
+        : (is25 ? 'Seedance 2.5: 480p / 720p, 4–30 сек, Text → Video или Omni Reference.' : 'Для обычного Seedance 2.0 доступны форматы 16:9 / 9:16 / 1:1, как на сайте.');
     }
 
     function setFlowLabelText(labelEl, name, desc){
@@ -2110,8 +2151,10 @@
     qsa('input[name="seedance_variant"]').forEach(el => el.addEventListener('change', () => { updateSeedanceUI(); updateCostUI(); }));
     qsa('input[name="seedance_model"]').forEach(el => el.addEventListener('change', () => { updateCostUI(); }));
     qsa('input[name="seedance_kie_model"]').forEach(el => el.addEventListener('change', () => { updateCostUI(); }));
+    qsa('input[name="seedance25_model"]').forEach(el => el.addEventListener('change', () => { updateCostUI(); }));
     qsa('input[name="seedance_flow"]').forEach(el => el.addEventListener('change', () => { updateCostUI(); }));
     qsa('input[name="seedance_kie_flow"]').forEach(el => el.addEventListener('change', () => { updateCostUI(); }));
+    qsa('input[name="seedance25_flow"]').forEach(el => el.addEventListener('change', () => { updateCostUI(); }));
 qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () => {
       updateVeoPriceHint();
       setVeoAdvancedEnabled();
@@ -2443,6 +2486,12 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
         const variant = getSeedanceVariant();
         const seconds = parseInt((qs('#seedance_duration')?.value || "5"), 10);
 
+        if (variant === '25'){
+          const model = getSeedance25Model();
+          const rate = model === 'seedance25-480p' ? 2 : 4.5;
+          return { known:true, tokens: Math.ceil(seconds * rate), note:'Цена без входного video reference. Для Omni с video ref итог пересчитывается по длительности входных видео.' };
+        }
+
         if (variant === 'kie'){
           const model = getSeedanceKieModel();
           const priceMap = model === 'seedance-kie-1080p'
@@ -2709,7 +2758,12 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
           const duration = parseInt((qs('#seedance_duration')?.value || "5"), 10);
           const aspect_ratio = (qs('#seedance_aspect')?.value || "16:9");
 
-          if (variant === 'kie'){
+          if (variant === '25'){
+            payload = {
+              type: "seedance_settings", provider: "seedance25", seedance_variant: "25",
+              seedance_model: getSeedance25Model(), flow: getSeedance25Flow(), duration, aspect_ratio
+            };
+          } else           if (variant === 'kie'){
             payload = {
               type: "seedance_settings",
               provider: "seedance_kie",
