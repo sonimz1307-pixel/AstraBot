@@ -11,8 +11,6 @@ from typing import Any, Dict, Optional
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from app.services.legal_consent_service import LegalConsentError, current_legal_acceptance_status
-
 
 WORKSPACE_AUTH_SECRET = (
     os.getenv("WORKSPACE_AUTH_SECRET")
@@ -141,27 +139,16 @@ async def get_optional_workspace_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_http_bearer),
 ) -> Optional[Dict[str, Any]]:
-    """Возвращает валидную auth-сессию, не проверяя юридическое состояние.
-
-    Используется только там, где endpoint должен уметь работать и анонимно.
-    Защищённые workspace endpoint'ы используют get_current_workspace_user.
-    """
     try:
         return _decode_credentials_or_cookie(request=request, credentials=credentials)
     except WorkspaceAuthError:
         return None
 
 
-async def get_authenticated_workspace_user(
+async def get_current_workspace_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_http_bearer),
 ) -> Dict[str, Any]:
-    """Проверяет только подлинность сессии.
-
-    Нужен для /legal/accept-current и /legal/.../revoke: пользователь должен иметь
-    возможность подтвердить новую редакцию или отозвать согласие, даже когда
-    обычные workspace API уже заблокированы LEGAL_CONSENT_REQUIRED.
-    """
     try:
         user = _decode_credentials_or_cookie(request=request, credentials=credentials)
     except WorkspaceAuthError as e:
@@ -169,35 +156,6 @@ async def get_authenticated_workspace_user(
 
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
-    return user
-
-
-async def get_current_workspace_user(
-    user: Dict[str, Any] = Depends(get_authenticated_workspace_user),
-) -> Dict[str, Any]:
-    """Обычная защита workspace: валидная сессия + актуальные согласия.
-
-    Благодаря проверке здесь новая версия документов блокирует не только /me,
-    но и генерации, баланс, редактор, партнёрку и остальные защищённые роуты.
-    """
-    account_id = int(user.get("workspace_user_id") or user.get("telegram_user_id") or 0)
-    try:
-        legal_status = current_legal_acceptance_status(account_id=account_id)
-    except LegalConsentError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Не удалось проверить юридическое согласие: {exc}",
-        )
-
-    if not bool(legal_status.get("complete")):
-        raise HTTPException(
-            status_code=428,
-            detail={
-                "code": "LEGAL_CONSENT_REQUIRED",
-                "message": "Нужно подтвердить текущие версии документов и отдельное согласие на обработку персональных данных.",
-                "legal_status": legal_status,
-            },
-        )
     return user
 
 
