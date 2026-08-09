@@ -83,16 +83,7 @@ from app.services.workspace_account_service import (
     start_link_email,
     start_password_reset,
 )
-from app.services.workspace_auth import WORKSPACE_SESSION_COOKIE_NAME, WORKSPACE_SESSION_TTL_SEC, create_access_token, get_authenticated_workspace_user, get_current_workspace_user, get_optional_workspace_user
-from app.services.legal_consent_service import (
-    LegalConsentError,
-    LegalConsentRequired,
-    current_legal_acceptance_status,
-    ensure_current_legal_acceptance,
-    request_legal_evidence,
-    require_legal_acceptance,
-    revoke_personal_data_consent,
-)
+from app.services.workspace_auth import WORKSPACE_SESSION_COOKIE_NAME, WORKSPACE_SESSION_TTL_SEC, create_access_token, get_current_workspace_user, get_optional_workspace_user
 from billing_db import add_tokens, ensure_user_row, get_balance, get_balance_history, ledger_ref_exists
 from seedance25_billing import refund_seedance25_once
 from subscriptions_db import get_current_subscription, get_subscription_plan
@@ -155,96 +146,6 @@ def _clear_workspace_session_cookie(response: Response) -> None:
         httponly=True,
         samesite=WORKSPACE_SESSION_COOKIE_SAMESITE,
     )
-
-
-def _require_auth_legal_acceptance(payload: Any) -> None:
-    try:
-        require_legal_acceptance(
-            terms_accepted=bool(getattr(payload, "terms_accepted", False)),
-            personal_data_accepted=bool(getattr(payload, "personal_data_accepted", False)),
-        )
-    except LegalConsentRequired as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-
-def _ensure_auth_legal_acceptance(
-    *,
-    account: Dict[str, Any],
-    payload: Any,
-    source: str,
-    request: Optional[Request] = None,
-    evidence: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """Server-side source of truth for legal consent.
-
-    Existing users are not asked again while the current document versions are
-    already recorded in Supabase. IP and browser data never decide validity.
-    """
-    account_id = int(account.get("id") or 0)
-    try:
-        return ensure_current_legal_acceptance(
-            account_id=account_id,
-            terms_accepted=bool(getattr(payload, "terms_accepted", False)),
-            personal_data_accepted=bool(getattr(payload, "personal_data_accepted", False)),
-            source=source,
-            request=request,
-            evidence=evidence,
-        )
-    except LegalConsentRequired as exc:
-        try:
-            status = current_legal_acceptance_status(account_id=account_id)
-        except Exception:
-            status = {"complete": False}
-        raise HTTPException(
-            status_code=428,
-            detail={
-                "code": "LEGAL_CONSENT_REQUIRED",
-                "message": str(exc),
-                "legal_status": status,
-            },
-        )
-    except LegalConsentError as exc:
-        raise HTTPException(status_code=503, detail=f"Не удалось проверить или сохранить юридическое согласие: {exc}")
-
-
-def _ensure_existing_session_legal(
-    *,
-    user: Dict[str, Any],
-    payload: Any,
-    source: str,
-    request: Optional[Request] = None,
-) -> Dict[str, Any]:
-    account = ensure_workspace_account_from_claims(user)
-    _ensure_auth_legal_acceptance(
-        account=account,
-        payload=payload,
-        source=source,
-        request=request,
-    )
-    return account
-
-
-def _require_account_current_legal(*, account_id: int) -> Dict[str, Any]:
-    try:
-        legal_status = current_legal_acceptance_status(account_id=int(account_id or 0))
-    except LegalConsentError as exc:
-        raise HTTPException(status_code=503, detail=f"Не удалось проверить юридическое согласие: {exc}")
-    if not bool(legal_status.get("complete")):
-        raise HTTPException(
-            status_code=428,
-            detail={
-                "code": "LEGAL_CONSENT_REQUIRED",
-                "message": "Нужно подтвердить текущие версии документов и отдельное согласие на обработку персональных данных.",
-                "legal_status": legal_status,
-            },
-        )
-    return legal_status
-
-
-def _require_existing_session_legal(*, user: Dict[str, Any]) -> Dict[str, Any]:
-    account = ensure_workspace_account_from_claims(user)
-    _require_account_current_legal(account_id=int(account.get("id") or 0))
-    return account
 
 
 def _workspace_auth_payload(response: Response, *, account: Dict[str, Any]) -> Dict[str, Any]:
@@ -3128,48 +3029,34 @@ async def _run_workspace_video_job(
 
 class TelegramAuthPayload(BaseModel):
     auth_data: Dict[str, Any]
-    terms_accepted: bool = False
-    personal_data_accepted: bool = False
 
 
 class GoogleAuthPayload(BaseModel):
     credential: str = Field(..., min_length=40, max_length=6000)
-    terms_accepted: bool = False
-    personal_data_accepted: bool = False
 
 
 class MaxWebAppAuthPayload(BaseModel):
     init_data: str = Field(..., min_length=20, max_length=12000)
     state: Optional[str] = Field(default=None, max_length=160)
-    terms_accepted: bool = False
-    personal_data_accepted: bool = False
 
 
 class MaxAuthStartPayload(BaseModel):
     intent: Optional[str] = Field(default="login", max_length=16)
-    terms_accepted: bool = False
-    personal_data_accepted: bool = False
 
 
 class EmailAuthStartPayload(BaseModel):
     email: str = Field(..., min_length=5, max_length=200)
     password: str = Field(..., min_length=6, max_length=200)
-    terms_accepted: bool = False
-    personal_data_accepted: bool = False
 
 
 class EmailAuthConfirmPayload(BaseModel):
     email: str = Field(..., min_length=5, max_length=200)
     code: str = Field(..., min_length=4, max_length=12)
-    terms_accepted: bool = False
-    personal_data_accepted: bool = False
 
 
 class EmailLoginPayload(BaseModel):
     email: str = Field(..., min_length=5, max_length=200)
     password: str = Field(..., min_length=6, max_length=200)
-    terms_accepted: bool = False
-    personal_data_accepted: bool = False
 
 
 class EmailOnlyPayload(BaseModel):
@@ -3185,11 +3072,6 @@ class ResetPasswordConfirmPayload(BaseModel):
 class ChangePasswordPayload(BaseModel):
     current_password: str = Field(..., min_length=6, max_length=200)
     new_password: str = Field(..., min_length=6, max_length=200)
-
-
-class CurrentLegalAcceptPayload(BaseModel):
-    terms_accepted: bool = False
-    personal_data_accepted: bool = False
 
 
 class ChatTurn(BaseModel):
@@ -3355,16 +3237,7 @@ async def workspace_bootstrap(user: Optional[Dict[str, Any]] = Depends(get_optio
         "auth_required": True,
     }
     if user:
-        uid = int(user.get("workspace_user_id") or user.get("telegram_user_id") or 0)
-        try:
-            legal_status = current_legal_acceptance_status(account_id=uid)
-        except LegalConsentError:
-            payload["legal_check_unavailable"] = True
-            return payload
-        if not bool(legal_status.get("complete")):
-            payload["legal_consent_required"] = True
-            payload["legal_status"] = legal_status
-            return payload
+        uid = int(user["telegram_user_id"])
         ensure_user_row(uid)
         payload["user"] = _workspace_user_payload(user)
         payload["balance_tokens"] = int(get_balance(uid) or 0)
@@ -3971,7 +3844,7 @@ def _workspace_image_charge_reason(provider: str, mode: str, action_type: str = 
     return None
 
 @router.post("/auth/telegram")
-async def workspace_auth_telegram(payload: TelegramAuthPayload, request: Request, response: Response) -> Dict[str, Any]:
+async def workspace_auth_telegram(payload: TelegramAuthPayload, response: Response) -> Dict[str, Any]:
     try:
         verified = validate_telegram_login_data(payload.auth_data)
     except TelegramWebAuthError as e:
@@ -3983,7 +3856,6 @@ async def workspace_auth_telegram(payload: TelegramAuthPayload, request: Request
         raise HTTPException(status_code=403, detail="Пользователь не найден в AstraBot. Сначала открой Telegram-бота и запусти его хотя бы один раз.")
 
     account = get_or_create_workspace_account_for_telegram(verified, existing)
-    _ensure_auth_legal_acceptance(account=account, payload=payload, source="telegram_auth", request=request)
     return _workspace_auth_payload(response, account=account)
 
 
@@ -3997,29 +3869,16 @@ async def workspace_auth_google_config() -> Dict[str, Any]:
 
 
 @router.post("/auth/google")
-async def workspace_auth_google(payload: GoogleAuthPayload, request: Request, response: Response, user: Optional[Dict[str, Any]] = Depends(get_optional_workspace_user)) -> Dict[str, Any]:
-    current_account_id = None
-    if user is not None:
-        # Не позволяем старой cookie-сессии обойти новую редакцию документов
-        # через provider endpoint. Галочки могут пере-подтвердить текущую сессию.
-        current_account = _ensure_existing_session_legal(
-            user=user,
-            payload=payload,
-            source="google_session_reaccept",
-            request=request,
-        )
-        current_account_id = int(current_account.get("id") or 0)
-
+async def workspace_auth_google(payload: GoogleAuthPayload, response: Response, user: Optional[Dict[str, Any]] = Depends(get_optional_workspace_user)) -> Dict[str, Any]:
     try:
         verified = verify_google_id_token(payload.credential)
+        current_account_id = int(user.get("workspace_user_id") or 0) if user else None
         account = get_or_create_workspace_account_for_google(verified, current_account_id=current_account_id)
     except GoogleAuthError as e:
         raise HTTPException(status_code=401, detail=str(e))
     except WorkspaceAccountError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    if user is None:
-        _ensure_auth_legal_acceptance(account=account, payload=payload, source="google_auth", request=request)
     return _workspace_auth_payload(response, account=account)
 
 
@@ -4065,7 +3924,6 @@ async def workspace_auth_max_config() -> Dict[str, Any]:
 
 @router.post("/auth/max/start")
 async def workspace_auth_max_start(
-    request: Request,
     payload: MaxAuthStartPayload = MaxAuthStartPayload(),
     user: Optional[Dict[str, Any]] = Depends(get_optional_workspace_user),
 ) -> Dict[str, Any]:
@@ -4080,19 +3938,9 @@ async def workspace_auth_max_start(
     if intent == "link":
         if not user:
             raise HTTPException(status_code=401, detail="Сначала войди в аккаунт сайта, потом привяжи MAX.")
-        current_account = _require_existing_session_legal(user=user)
-        link_account_id = int(current_account.get("id") or 0)
+        link_account_id = int(user.get("workspace_user_id") or 0)
         if link_account_id <= 0:
             raise HTTPException(status_code=401, detail="Не удалось определить текущий аккаунт сайта.")
-    elif user is not None:
-        # /auth/max/start использует optional auth и потому обязан отдельно
-        # закрыть обход через старую cookie-сессию.
-        _ensure_existing_session_legal(
-            user=user,
-            payload=payload,
-            source="max_start_session_reaccept",
-            request=request,
-        )
 
     try:
         username = get_max_bot_username()
@@ -4101,26 +3949,18 @@ async def workspace_auth_max_start(
     except MaxWebAuthError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    legal_evidence = request_legal_evidence(request) if intent == "login" else {}
     supabase.table(MAX_AUTH_REQUESTS_TABLE).insert({
         "state": state,
         "status": "pending",
         "account_id": link_account_id,
         "expires_at": _max_auth_expires_iso(),
-        "meta": {
-            "source": "site_link" if intent == "link" else "site_login",
-            "intent": intent,
-            "legal_terms_accepted": bool(payload.terms_accepted) if intent == "login" else False,
-            "legal_personal_data_accepted": bool(payload.personal_data_accepted) if intent == "login" else False,
-            "legal_ip_address": legal_evidence.get("ip_address"),
-            "legal_user_agent": legal_evidence.get("user_agent"),
-        },
+        "meta": {"source": "site_link" if intent == "link" else "site_login", "intent": intent},
     }).execute()
     return {"ok": True, "state": state, "launch_url": launch_url, "intent": intent, "expires_in": MAX_AUTH_REQUEST_TTL_SEC}
 
 
 @router.post("/auth/max/webapp")
-async def workspace_auth_max_webapp(payload: MaxWebAppAuthPayload, request: Request, response: Response, user: Optional[Dict[str, Any]] = Depends(get_optional_workspace_user)) -> Dict[str, Any]:
+async def workspace_auth_max_webapp(payload: MaxWebAppAuthPayload, response: Response, user: Optional[Dict[str, Any]] = Depends(get_optional_workspace_user)) -> Dict[str, Any]:
     try:
         verified = validate_max_init_data(payload.init_data)
     except MaxWebAuthError as e:
@@ -4128,12 +3968,7 @@ async def workspace_auth_max_webapp(payload: MaxWebAppAuthPayload, request: Requ
 
     state_value = str(payload.state or verified.get("start_param") or "").strip()
     row = None
-    state_source = ""
     current_account_id = int(user.get("workspace_user_id") or 0) if user else None
-    login_requires_legal = user is None
-    legal_terms_accepted = bool(payload.terms_accepted)
-    legal_personal_data_accepted = bool(payload.personal_data_accepted)
-    legal_evidence: Dict[str, Any] = request_legal_evidence(request) if login_requires_legal else {}
 
     if state_value:
         state_value = _max_auth_state_valid(state_value)
@@ -4145,65 +3980,14 @@ async def workspace_auth_max_webapp(payload: MaxWebAppAuthPayload, request: Requ
         if _max_auth_row_is_expired(row):
             raise HTTPException(status_code=410, detail="MAX auth request expired")
         meta = row.get("meta") if isinstance(row, dict) else None
-        state_source = str((meta or {}).get("source") or (meta or {}).get("intent") or "").strip().lower() if isinstance(meta, dict) else ""
-        if row and state_source in {"site_link", "link"} and row.get("account_id"):
+        source = str((meta or {}).get("source") or (meta or {}).get("intent") or "").strip().lower() if isinstance(meta, dict) else ""
+        if row and source in {"site_link", "link"} and row.get("account_id"):
             current_account_id = int(row.get("account_id") or 0)
-            _require_account_current_legal(account_id=current_account_id)
-            login_requires_legal = False
-        elif isinstance(meta, dict):
-            legal_terms_accepted = bool(meta.get("legal_terms_accepted"))
-            legal_personal_data_accepted = bool(meta.get("legal_personal_data_accepted"))
-            legal_evidence = {
-                "ip_address": meta.get("legal_ip_address"),
-                "user_agent": meta.get("legal_user_agent"),
-            }
-
-    if user is not None:
-        if state_source in {"site_link", "link"}:
-            current_account = _require_existing_session_legal(user=user)
-        else:
-            class _SessionLegalPayload:
-                terms_accepted = legal_terms_accepted
-                personal_data_accepted = legal_personal_data_accepted
-            current_account = _ensure_existing_session_legal(
-                user=user,
-                payload=_SessionLegalPayload(),
-                source="max_webapp_session_reaccept",
-                request=request,
-            )
-        current_account_id = int(current_account.get("id") or 0)
-        login_requires_legal = False
 
     try:
         account = get_or_create_workspace_account_for_max(verified, current_account_id=current_account_id)
     except WorkspaceAccountError as e:
         raise HTTPException(status_code=400, detail=str(e))
-
-    if login_requires_legal:
-        class _ResolvedLegalPayload:
-            terms_accepted = legal_terms_accepted
-            personal_data_accepted = legal_personal_data_accepted
-        try:
-            _ensure_auth_legal_acceptance(
-                account=account,
-                payload=_ResolvedLegalPayload(),
-                source="max_auth",
-                evidence=legal_evidence,
-            )
-        except HTTPException as exc:
-            if exc.status_code == 428 and state_value and row:
-                try:
-                    meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
-                    meta = {**meta, "legal_required": True, "max_username": verified.get("username")}
-                    supabase.table(MAX_AUTH_REQUESTS_TABLE).update({
-                        "status": "legal_required",
-                        "account_id": int(account["id"]),
-                        "max_user_id": int(verified["id"]),
-                        "meta": meta,
-                    }).eq("state", state_value).execute()
-                except Exception:
-                    pass
-            raise
 
     if state_value and row and not row.get("consumed_at") and not _max_auth_row_is_expired(row):
         meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
@@ -4229,22 +4013,10 @@ async def workspace_auth_max_status(state: str, response: Response) -> Dict[str,
         raise HTTPException(status_code=410, detail="MAX auth request expired")
     if row.get("consumed_at"):
         raise HTTPException(status_code=410, detail="MAX auth request already consumed")
-    if str(row.get("status") or "") == "legal_required":
-        return {"ok": True, "status": "legal_required", "code": "LEGAL_CONSENT_REQUIRED"}
     if str(row.get("status") or "") != "confirmed" or not row.get("account_id"):
         return {"ok": True, "status": "pending"}
 
     account = ensure_workspace_account_from_claims({"workspace_user_id": int(row["account_id"])})
-    try:
-        _require_account_current_legal(account_id=int(account.get("id") or 0))
-    except HTTPException as exc:
-        if exc.status_code == 428:
-            try:
-                supabase.table(MAX_AUTH_REQUESTS_TABLE).update({"status": "legal_required"}).eq("state", state).execute()
-            except Exception:
-                pass
-            return {"ok": True, "status": "legal_required", "code": "LEGAL_CONSENT_REQUIRED"}
-        raise
     supabase.table(MAX_AUTH_REQUESTS_TABLE).update({"consumed_at": _utc_now_iso(), "status": "consumed"}).eq("state", state).execute()
     return _workspace_auth_payload(response, account=account)
 
@@ -4263,7 +4035,6 @@ async def workspace_account_link_max(payload: MaxWebAppAuthPayload, response: Re
 
 @router.post("/auth/email-register/start")
 async def workspace_auth_email_register_start(payload: EmailAuthStartPayload) -> Dict[str, Any]:
-    _require_auth_legal_acceptance(payload)
     try:
         start_email_registration(payload.email, payload.password)
         return {"ok": True, "message": "Код отправлен на почту."}
@@ -4272,19 +4043,17 @@ async def workspace_auth_email_register_start(payload: EmailAuthStartPayload) ->
 
 
 @router.post("/auth/email-register/confirm")
-async def workspace_auth_email_register_confirm(payload: EmailAuthConfirmPayload, request: Request, response: Response) -> Dict[str, Any]:
-    _require_auth_legal_acceptance(payload)
+async def workspace_auth_email_register_confirm(payload: EmailAuthConfirmPayload, response: Response) -> Dict[str, Any]:
     try:
         account = confirm_email_registration(payload.email, payload.code)
     except (WorkspaceCodeExpired, WorkspaceCodeTooManyAttempts, WorkspaceAccountError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    _ensure_auth_legal_acceptance(account=account, payload=payload, source="email_register", request=request)
     return _workspace_auth_payload(response, account=account)
 
 
 @router.post("/auth/email-login")
-async def workspace_auth_email_login(payload: EmailLoginPayload, request: Request, response: Response) -> Dict[str, Any]:
+async def workspace_auth_email_login(payload: EmailLoginPayload, response: Response) -> Dict[str, Any]:
     try:
         account = login_with_email(payload.email, payload.password)
     except WorkspaceAuthFailed as e:
@@ -4292,7 +4061,6 @@ async def workspace_auth_email_login(payload: EmailLoginPayload, request: Reques
     except WorkspaceAccountError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    _ensure_auth_legal_acceptance(account=account, payload=payload, source="email_login", request=request)
     return _workspace_auth_payload(response, account=account)
 
 
@@ -4314,88 +4082,7 @@ async def workspace_auth_password_reset_confirm(payload: ResetPasswordConfirmPay
     except (WorkspaceCodeExpired, WorkspaceCodeTooManyAttempts, WorkspaceAuthFailed, WorkspaceAccountError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Сброс пароля сам по себе не является согласием с документами.
-    # Если согласия актуальны — сохраняем прежнее удобство и авторизуем.
-    # Если нет — пароль уже изменён, но сессию НЕ выдаём: пользователь
-    # подтверждает документы отдельным действием при следующем входе.
-    try:
-        legal_status = current_legal_acceptance_status(account_id=int(account.get("id") or 0))
-    except LegalConsentError:
-        _clear_workspace_session_cookie(response)
-        return {
-            "ok": True,
-            "password_reset": True,
-            "login_required": True,
-            "legal_check_unavailable": True,
-            "message": "Пароль изменён. Войдите с новым паролем, чтобы продолжить.",
-        }
-
-    if not bool(legal_status.get("complete")):
-        _clear_workspace_session_cookie(response)
-        return {
-            "ok": True,
-            "password_reset": True,
-            "login_required": True,
-            "legal_consent_required": True,
-            "legal_status": legal_status,
-            "message": "Пароль изменён. Для входа подтвердите текущие версии документов.",
-        }
-
     return _workspace_auth_payload(response, account=account)
-
-
-@router.get("/legal/status")
-async def workspace_legal_status(
-    user: Dict[str, Any] = Depends(get_authenticated_workspace_user),
-) -> Dict[str, Any]:
-    account = ensure_workspace_account_from_claims(user)
-    try:
-        legal_status = current_legal_acceptance_status(account_id=int(account.get("id") or 0))
-    except LegalConsentError as exc:
-        raise HTTPException(status_code=503, detail=f"Не удалось проверить юридическое согласие: {exc}")
-    return {"ok": True, "legal_status": legal_status}
-
-
-@router.post("/legal/accept-current")
-async def workspace_legal_accept_current(
-    payload: CurrentLegalAcceptPayload,
-    request: Request,
-    response: Response,
-    user: Dict[str, Any] = Depends(get_authenticated_workspace_user),
-) -> Dict[str, Any]:
-    account = ensure_workspace_account_from_claims(user)
-    legal_status = _ensure_auth_legal_acceptance(
-        account=account,
-        payload=payload,
-        source="active_session_reaccept",
-        request=request,
-    )
-    result = _workspace_auth_payload(response, account=account)
-    result["legal_status"] = legal_status
-    return result
-
-
-@router.post("/legal/personal-data-consent/revoke")
-async def workspace_legal_revoke_personal_data_consent(
-    request: Request,
-    response: Response,
-    user: Dict[str, Any] = Depends(get_authenticated_workspace_user),
-) -> Dict[str, Any]:
-    account = ensure_workspace_account_from_claims(user)
-    try:
-        legal_status = revoke_personal_data_consent(
-            account_id=int(account.get("id") or 0),
-            source="workspace_profile",
-            request=request,
-        )
-    except LegalConsentError as exc:
-        raise HTTPException(status_code=503, detail=f"Не удалось отозвать согласие: {exc}")
-    _clear_workspace_session_cookie(response)
-    return {
-        "ok": True,
-        "revoked": bool(legal_status.get("personal_data_revoked")),
-        "legal_status": legal_status,
-    }
 
 
 @router.post("/account/link-email/start")
