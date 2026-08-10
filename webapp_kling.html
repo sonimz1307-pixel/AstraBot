@@ -1173,7 +1173,7 @@
           <input id="seed_variant_preview" type="radio" name="seedance_variant" value="mini">
           <label for="seed_variant_preview">
             <span class="name">Seedance 2.0 Mini</span>
-            <span class="desc">720p </span>
+            <span class="desc" id="seedanceMiniTypeDesc">720p · акция до 5 сентября</span>
           </label>
         </div>
       </div>
@@ -1185,7 +1185,7 @@
             <input id="seed_mini" type="radio" name="seedance_model" value="mini" checked>
             <label for="seed_mini">
               <span class="name">Seedance 2.0 Mini 720p</span>
-              <span class="desc">8 / 13 / 18 токенов</span>
+              <span class="desc" id="seedanceMiniPriceDesc">🔥 до 5 сентября · 3 / 6 / 9 ток. (5/10/15 сек)</span>
             </label>
           </div>
           <div class="hint">720p, Text → Video, Image → Video или Omni Reference.</div>
@@ -1810,6 +1810,40 @@
         : 'Длительности только 6 / 8 / 10 сек. 4 секунды отключены. Цена сейчас считается по нашей внутренней сетке.';
     }
 
+    // Seedance promo clocks. Backend remains authoritative for actual charging.
+    // UI syncs against the server HTTP Date header; device time is only a fallback if the sync request fails.
+    let SEEDANCE_SERVER_CLOCK_OFFSET_MS = 0;
+    let SEEDANCE_SERVER_CLOCK_SYNCED = false;
+    const SEEDANCE_MINI_PROMO_END_MS = Date.UTC(2026, 8, 5, 21, 0, 0); // 06.09 00:00 Europe/Moscow
+    function seedanceServerNowMs(){ return Date.now() + (SEEDANCE_SERVER_CLOCK_SYNCED ? SEEDANCE_SERVER_CLOCK_OFFSET_MS : 0); }
+    function isSeedanceMiniPromoActive(){ return seedanceServerNowMs() < SEEDANCE_MINI_PROMO_END_MS; }
+    async function syncSeedanceServerClock(){
+      try {
+        const res = await fetch('/health', { method:'GET', cache:'no-store', credentials:'same-origin' });
+        let serverMs = NaN;
+        try {
+          const data = await res.clone().json();
+          serverMs = Number(data?.server_now_ms);
+        } catch (_e) {}
+        if (!Number.isFinite(serverMs)) {
+          const dateHeader = res?.headers?.get?.('Date');
+          serverMs = Date.parse(dateHeader || '');
+        }
+        if (Number.isFinite(serverMs)) {
+          SEEDANCE_SERVER_CLOCK_OFFSET_MS = serverMs - Date.now();
+          SEEDANCE_SERVER_CLOCK_SYNCED = true;
+          updateSeedanceUI();
+          updateCostUI();
+        }
+      } catch (_e) {}
+    }
+    syncSeedanceServerClock();
+    function getSeedanceMiniRetailPriceMap(){
+      return isSeedanceMiniPromoActive()
+        ? {4:3, 5:3, 6:4, 7:4, 8:5, 9:5, 10:6, 11:6, 12:7, 13:7, 14:8, 15:9}
+        : {4:7, 5:8, 6:9, 7:10, 8:11, 9:12, 10:13, 11:14, 12:15, 13:16, 14:17, 15:18};
+    }
+
     // Seedance getters
     function getSeedanceVariant(){ return qs('input[name="seedance_variant"]:checked')?.value || "kie"; }
     function getSeedancePreviewModel(){ return qs('input[name="seedance_model"]:checked')?.value || "mini"; }
@@ -1854,8 +1888,15 @@
       }
       if (aspectSelect && is25) setSelectOptions(aspectSelect, [['adaptive','Adaptive'],['16:9','16:9'],['9:16','9:16'],['1:1','1:1'],['4:3','4:3'],['3:4','3:4'],['21:9','21:9']], aspectSelect.value || 'adaptive');
       else if (aspectSelect) setSelectOptions(aspectSelect, [['16:9','16:9 (YouTube)'],['9:16','9:16 (Reels)'],['1:1','1:1']], aspectSelect.value || '16:9');
+      const miniPromoActive = isSeedanceMiniPromoActive();
+      const miniTypeDesc = qs('#seedanceMiniTypeDesc');
+      const miniPriceDesc = qs('#seedanceMiniPriceDesc');
+      if (miniTypeDesc) miniTypeDesc.textContent = miniPromoActive ? '720p · акция до 5 сентября' : '720p';
+      if (miniPriceDesc) miniPriceDesc.textContent = miniPromoActive
+        ? '🔥 до 5 сентября · 3 / 6 / 9 ток. (5/10/15 сек)'
+        : '8 / 13 / 18 токенов (5/10/15 сек)';
       if (aspectHint) aspectHint.textContent = isMini
-        ? 'Seedance 2.0 Mini: 720p, Text → Video, Image → Video или Omni Reference.'
+        ? `Seedance 2.0 Mini: 720p, Text → Video, Image → Video или Omni Reference.${miniPromoActive ? ' 🔥 Акция до 5 сентября включительно.' : ''}`
         : (is25 ? 'Seedance 2.5: 480p / 720p, 4–30 сек, Text → Video или Omni Reference.' : 'Для обычного Seedance 2.0 доступны форматы 16:9 / 9:16 / 1:1, как на сайте.');
     }
 
@@ -2504,9 +2545,9 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
         }
 
         const previewModel = getSeedancePreviewModel();
-        const priceMap = {4: 7, 5: 8, 6: 9, 7: 10, 8: 11, 9: 12, 10: 13, 11: 14, 12: 15, 13: 16, 14: 17, 15: 18};
+        const priceMap = getSeedanceMiniRetailPriceMap();
         const tokens = priceMap[seconds] || priceMap[5];
-        return { known:true, tokens, note:'' };
+        return { known:true, tokens, note: isSeedanceMiniPromoActive() ? '🔥 акция до 5 сентября' : '' };
       }
 
       if (provider === 'sora'){
