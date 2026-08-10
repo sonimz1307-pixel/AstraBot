@@ -6,6 +6,7 @@ import math
 import os
 import re
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import httpx
@@ -39,7 +40,7 @@ SEEDANCE_KIE_MAX_AUDIO_REFS = int(os.getenv("KIE_SEEDANCE_MAX_AUDIO_REFS", "3") 
 SEEDANCE_KIE_MAX_VIDEO_REFS = int(os.getenv("KIE_SEEDANCE_MAX_VIDEO_REFS", "3") or "3")
 SEEDANCE_KIE_MAX_TOTAL_OMNI_REFS = int(os.getenv("KIE_SEEDANCE_MAX_TOTAL_OMNI_REFS", "12") or "12")
 
-# Final retail prices approved for every whole-second duration from 4 to 15 seconds.
+# Final regular retail prices approved for every whole-second duration from 4 to 15 seconds.
 # Do not derive these base prices from provider rates: product pricing is fixed by business rules.
 SEEDANCE_KIE_TOKEN_MAP = {
     "seedance-kie-mini": {
@@ -60,6 +61,42 @@ SEEDANCE_KIE_TOKEN_MAP = {
     },
 }
 
+# NABEX retail promotion for Seedance 2.0 Mini.
+# "Until 5 September" means through 2026-09-05 23:59:59 Europe/Moscow (UTC+3).
+# The backend is authoritative and compares absolute UTC timestamps, so server timezone does not matter.
+SEEDANCE_MINI_PROMO_TOKEN_MAP = {
+    4: 3, 5: 3, 6: 4, 7: 4, 8: 5, 9: 5,
+    10: 6, 11: 6, 12: 7, 13: 7, 14: 8, 15: 9,
+}
+SEEDANCE_MINI_PROMO_END_UTC = datetime(2026, 9, 5, 21, 0, 0, tzinfo=timezone.utc)
+SEEDANCE_MINI_PROMO_LABEL = "🔥 Акция до 5 сентября"
+
+# KIE's temporary Seedance 2.0 Mini provider discount ends 2026-09-07 06:00 UTC.
+# This is intentionally independent from the NABEX retail promotion above.
+SEEDANCE_MINI_KIE_PROMO_END_UTC = datetime(2026, 9, 7, 6, 0, 0, tzinfo=timezone.utc)
+SEEDANCE_MINI_KIE_PROMO_USD_RUB = float(os.getenv("SEEDANCE_MINI_KIE_PROMO_USD_RUB", "85") or "85")
+SEEDANCE_MINI_KIE_PROMO_RATES = {"with_video": 0.025, "no_video": 0.041}
+
+
+def _as_utc(value: Optional[datetime] = None) -> datetime:
+    now = value or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        return now.replace(tzinfo=timezone.utc)
+    return now.astimezone(timezone.utc)
+
+
+def seedance_mini_promo_is_active(now: Optional[datetime] = None) -> bool:
+    return _as_utc(now) < SEEDANCE_MINI_PROMO_END_UTC
+
+
+def seedance_mini_kie_promo_is_active(now: Optional[datetime] = None) -> bool:
+    return _as_utc(now) < SEEDANCE_MINI_KIE_PROMO_END_UTC
+
+
+def seedance_mini_promo_text(now: Optional[datetime] = None) -> str:
+    return SEEDANCE_MINI_PROMO_LABEL if seedance_mini_promo_is_active(now) else ""
+
+
 # KIE provider pricing for Seedance 2.0 video-input billing only.
 # Important: without video input the platform keeps the approved retail grid above.
 # With video input the provider bills Price × (Input seconds + Output seconds), so we only add
@@ -76,10 +113,25 @@ SEEDANCE_KIE_PROVIDER_USD_PER_SEC = {
 }
 
 
-def _seedance_kie_tokens_from_usd(cost_usd: float) -> int:
+def _seedance_kie_effective_rates(model: Any) -> Dict[str, float]:
+    normalized_model = normalize_seedance_kie_model(model)
+    if normalized_model == "seedance-kie-mini" and seedance_mini_kie_promo_is_active():
+        return dict(SEEDANCE_MINI_KIE_PROMO_RATES)
+    return dict(SEEDANCE_KIE_PROVIDER_USD_PER_SEC[normalized_model])
+
+
+def _seedance_kie_effective_usd_rub(model: Any) -> float:
+    normalized_model = normalize_seedance_kie_model(model)
+    if normalized_model == "seedance-kie-mini" and seedance_mini_kie_promo_is_active():
+        return float(SEEDANCE_MINI_KIE_PROMO_USD_RUB)
+    return float(SEEDANCE_KIE_USD_RUB)
+
+
+def _seedance_kie_tokens_from_usd(cost_usd: float, *, usd_rub: Optional[float] = None) -> int:
     if SEEDANCE_KIE_TOKEN_RUB <= 0:
         return 1
-    return max(1, int(math.ceil(float(cost_usd or 0.0) * SEEDANCE_KIE_USD_RUB / SEEDANCE_KIE_TOKEN_RUB)))
+    effective_usd_rub = float(SEEDANCE_KIE_USD_RUB if usd_rub is None else usd_rub)
+    return max(1, int(math.ceil(float(cost_usd or 0.0) * effective_usd_rub / SEEDANCE_KIE_TOKEN_RUB)))
 
 
 def seedance_kie_billable_input_video_seconds(value: Any) -> int:
@@ -97,7 +149,7 @@ def _seedance_kie_cost_usd(model: Any, duration: Any, *, input_video_duration_se
     normalized_model = normalize_seedance_kie_model(model)
     normalized_duration = normalize_seedance_kie_duration(duration)
     input_seconds = seedance_kie_billable_input_video_seconds(input_video_duration_sec)
-    rates = SEEDANCE_KIE_PROVIDER_USD_PER_SEC[normalized_model]
+    rates = _seedance_kie_effective_rates(normalized_model)
     if input_seconds > 0:
         return float(rates["with_video"]) * float(normalized_duration + input_seconds)
     return float(rates["no_video"]) * float(normalized_duration)
@@ -106,6 +158,8 @@ def _seedance_kie_cost_usd(model: Any, duration: Any, *, input_video_duration_se
 def _seedance_kie_base_tokens(model: Any, duration: Any) -> int:
     normalized_model = normalize_seedance_kie_model(model)
     normalized_duration = normalize_seedance_kie_duration(duration)
+    if normalized_model == "seedance-kie-mini" and seedance_mini_promo_is_active():
+        return int(SEEDANCE_MINI_PROMO_TOKEN_MAP[normalized_duration])
     return int(SEEDANCE_KIE_TOKEN_MAP[normalized_model][normalized_duration])
 
 
@@ -206,7 +260,8 @@ def seedance_kie_tokens_for_duration(model: Any, duration: Any, *, input_video_d
     if input_seconds <= 0:
         return int(base_tokens)
     provider_tokens = _seedance_kie_tokens_from_usd(
-        _seedance_kie_cost_usd(model, duration, input_video_duration_sec=input_seconds)
+        _seedance_kie_cost_usd(model, duration, input_video_duration_sec=input_seconds),
+        usd_rub=_seedance_kie_effective_usd_rub(model),
     )
     return max(int(base_tokens), int(provider_tokens))
 
@@ -216,12 +271,13 @@ def seedance_kie_pricing_breakdown(model: Any, duration: Any, *, input_video_dur
     normalized_duration = normalize_seedance_kie_duration(duration)
     input_seconds = seedance_kie_billable_input_video_seconds(input_video_duration_sec)
     has_video_input = input_seconds > 0
-    rates = SEEDANCE_KIE_PROVIDER_USD_PER_SEC[normalized_model]
+    rates = _seedance_kie_effective_rates(normalized_model)
+    effective_usd_rub = _seedance_kie_effective_usd_rub(normalized_model)
     rate_key = "with_video" if has_video_input else "no_video"
     billable_seconds = normalized_duration + input_seconds if has_video_input else normalized_duration
     cost_usd = float(rates[rate_key]) * float(billable_seconds)
     base_tokens = _seedance_kie_base_tokens(normalized_model, normalized_duration)
-    provider_cost_tokens = _seedance_kie_tokens_from_usd(cost_usd)
+    provider_cost_tokens = _seedance_kie_tokens_from_usd(cost_usd, usd_rub=effective_usd_rub)
     tokens = max(base_tokens, provider_cost_tokens) if has_video_input else base_tokens
     return {
         "model": normalized_model,
@@ -234,8 +290,12 @@ def seedance_kie_pricing_breakdown(model: Any, duration: Any, *, input_video_dur
         "provider_cost_tokens": provider_cost_tokens,
         "base_tokens": base_tokens,
         "video_reference_surcharge_tokens": max(0, int(tokens) - int(base_tokens)),
-        "usd_rub": SEEDANCE_KIE_USD_RUB,
+        "usd_rub": effective_usd_rub,
         "token_rub": SEEDANCE_KIE_TOKEN_RUB,
+        "retail_promo_active": normalized_model == "seedance-kie-mini" and seedance_mini_promo_is_active(),
+        "retail_promo_ends_at": SEEDANCE_MINI_PROMO_END_UTC.isoformat() if normalized_model == "seedance-kie-mini" else None,
+        "provider_promo_active": normalized_model == "seedance-kie-mini" and seedance_mini_kie_promo_is_active(),
+        "provider_promo_ends_at": SEEDANCE_MINI_KIE_PROMO_END_UTC.isoformat() if normalized_model == "seedance-kie-mini" else None,
         "tokens": int(tokens),
     }
 
