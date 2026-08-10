@@ -140,7 +140,7 @@ from veo31_fast_relax_kie import (
     upload_veo31_fast_relax_input_image,
     veo31_fast_relax_tokens_for_run,
 )
-from seedance_kie import seedance_kie_tokens_for_duration
+from seedance_kie import seedance_kie_tokens_for_duration, seedance_mini_promo_text
 from seedance_25_kie import seedance25_tokens_for_run, seedance25_resolution_from_model
 from seedance25_billing import refund_seedance25_once
 from app.routers.tts import router as tts_router
@@ -908,7 +908,10 @@ from fastapi.responses import HTMLResponse
 @app.get("/webapp/kling", response_class=HTMLResponse)
 async def webapp_kling():
     with open(os.path.join(BASE_DIR, "webapp_kling.html"), "r", encoding="utf-8") as f:
-        return f.read()
+        return HTMLResponse(
+            content=f.read(),
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+        )
 
 
 @app.get("/webapp/music", response_class=HTMLResponse)
@@ -3998,6 +4001,11 @@ def _seedance_prompt_back_kb() -> dict:
     return _seedance_prompt_collect_kb("seedance_omni")
 
 
+def _seedance_mini_promo_notice() -> str:
+    label = seedance_mini_promo_text()
+    return f"\n\n{label} включительно." if label else ""
+
+
 def _seedance_uses_kie_backend(settings: Optional[Dict[str, Any]]) -> bool:
     settings = settings or {}
     provider_kind = str(settings.get("provider_kind") or "seedance").strip().lower()
@@ -6767,7 +6775,7 @@ def _two_photos_prompt(user_task: str) -> str:
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "server_now_ms": int(time.time() * 1000)}
 
 
 
@@ -9413,7 +9421,7 @@ async def process_telegram_update(update: Dict[str, Any]):
                      if provider_kind == "seedance25" else
                      ("✅ Настройки Seedance 2.0 сохранены.\n\nПришли промпт одним или несколькими сообщениями. Когда всё отправишь — нажми «✅ Запустить»."
                       if provider_kind == "seedance_kie" else
-                      "✅ Настройки Seedance 2.0 Mini сохранены.\n\nПришли промпт одним или несколькими сообщениями. Когда всё отправишь — нажми «✅ Запустить».")),
+                      "✅ Настройки Seedance 2.0 Mini сохранены." + _seedance_mini_promo_notice() + "\n\nПришли промпт одним или несколькими сообщениями. Когда всё отправишь — нажми «✅ Запустить».")),
                     reply_markup=_seedance_prompt_collect_kb("seedance_t2v"),
                 )
                 return {"ok": True}
@@ -9435,7 +9443,7 @@ async def process_telegram_update(update: Dict[str, Any]):
                      if provider_kind == "seedance25" else
                      ("✅ Настройки Seedance 2.0 Omni сохранены.\n\n"
                       if provider_kind == "seedance_kie" else
-                      "✅ Настройки Seedance 2.0 Mini Omni сохранены.\n\n"))
+                      "✅ Настройки Seedance 2.0 Mini Omni сохранены." + _seedance_mini_promo_notice() + "\n\n"))
                     + ("Теперь пришли refs: до 30 фото, до 10 MP4-видео (до 20 МБ каждое, суммарно до 30 сек) и до 10 аудио. Используй @image1 / @video1 / @audio1 в промпте. Когда закончишь — нажми «✅ Готово»."
                        if provider_kind == "seedance25" else
                        "Теперь пришли референсы: можно только фото, либо фото/видео/аудио вместе.\nАудио можно файлом или голосовым сообщением — я конвертирую в MP3. Audio-only нельзя. Когда закончишь — нажми «✅ Готово»."),
@@ -9457,7 +9465,9 @@ async def process_telegram_update(update: Dict[str, Any]):
                 )
             else:
                 msg = (
-                    "✅ Настройки Seedance 2.0 Mini Image → Video сохранены.\n\nТеперь пришли 1–2 ФОТО. "
+                    "✅ Настройки Seedance 2.0 Mini Image → Video сохранены."
+                    + _seedance_mini_promo_notice()
+                    + "\n\nТеперь пришли 1–2 ФОТО. "
                     "Первое фото будет first frame, второе — optional last frame. После фото нажми «✅ Готово», затем пришли промпт частями и нажми «✅ Запустить»."
                 )
             await tg_send_message(chat_id, msg, reply_markup=_seedance_refs_collect_kb())
@@ -13281,8 +13291,12 @@ async def process_telegram_update(update: Dict[str, Any]):
             if file_id not in video_ids:
                 video_ids.append(file_id)
                 video_durations.append(float(duration_sec or (30.0 if provider_kind == "seedance25" else 15.4)))
-            if provider_kind == "seedance25" and sum(float(x or 0) for x in video_durations) > 30.0:
+            total_video_duration = sum(float(x or 0) for x in video_durations)
+            if provider_kind == "seedance25" and total_video_duration > 30.0:
                 await tg_send_message(chat_id, "Суммарная длительность video references Seedance 2.5 не может превышать 30 секунд.", reply_markup=_seedance_refs_collect_kb())
+                return {"ok": True}
+            if provider_kind != "seedance25" and total_video_duration > 15.4:
+                await tg_send_message(chat_id, "Для Seedance 2.0 суммарная длина всех video references должна быть не больше 15.4 секунды.", reply_markup=_seedance_refs_collect_kb())
                 return {"ok": True}
             so["video_file_ids"] = video_ids[:video_limit]
             so["video_durations_sec"] = video_durations[:video_limit]
@@ -13601,8 +13615,12 @@ async def process_telegram_update(update: Dict[str, Any]):
                 if file_id not in video_ids:
                     video_ids.append(str(file_id))
                     video_durations.append(float(duration_sec or max_single_video))
-                if provider_kind == "seedance25" and sum(float(x or 0) for x in video_durations) > 30.0:
+                total_video_duration = sum(float(x or 0) for x in video_durations)
+                if provider_kind == "seedance25" and total_video_duration > 30.0:
                     await tg_send_message(chat_id, "Суммарная длительность video references Seedance 2.5 не может превышать 30 секунд.", reply_markup=_seedance_refs_collect_kb())
+                    return {"ok": True}
+                if provider_kind != "seedance25" and total_video_duration > 15.4:
+                    await tg_send_message(chat_id, "Для Seedance 2.0 суммарная длина всех video references должна быть не больше 15.4 секунды.", reply_markup=_seedance_refs_collect_kb())
                     return {"ok": True}
                 so["video_file_ids"] = video_ids[:video_limit]
                 so["video_durations_sec"] = video_durations[:video_limit]
