@@ -3421,7 +3421,7 @@ class WorkspaceVideoEditIn(BaseModel):
 
 @router.get("/health")
 async def workspace_health() -> Dict[str, Any]:
-    return {"ok": True, "service": "workspace"}
+    return {"ok": True, "service": "workspace", "server_now_ms": int(time.time() * 1000)}
 
 
 @router.get("/bootstrap")
@@ -5464,6 +5464,10 @@ def _workspace_video_charge_spec(
                 "provider_cost_usd": breakdown.get("provider_cost_usd"),
                 "usd_rub": breakdown.get("usd_rub"),
                 "token_rub": breakdown.get("token_rub"),
+                "retail_promo_active": bool(breakdown.get("retail_promo_active")),
+                "retail_promo_ends_at": breakdown.get("retail_promo_ends_at"),
+                "provider_promo_active": bool(breakdown.get("provider_promo_active")),
+                "provider_promo_ends_at": breakdown.get("provider_promo_ends_at"),
             },
         }
 
@@ -5496,6 +5500,10 @@ def _workspace_video_charge_spec(
                 "provider_cost_usd": breakdown.get("provider_cost_usd"),
                 "usd_rub": breakdown.get("usd_rub"),
                 "token_rub": breakdown.get("token_rub"),
+                "retail_promo_active": bool(breakdown.get("retail_promo_active")),
+                "retail_promo_ends_at": breakdown.get("retail_promo_ends_at"),
+                "provider_promo_active": bool(breakdown.get("provider_promo_active")),
+                "provider_promo_ends_at": breakdown.get("provider_promo_ends_at"),
             },
         }
 
@@ -5902,8 +5910,8 @@ async def workspace_video_run(
     if provider == "seedance":
         model = "seedance-mini"
         resolution = "720p"
-        if duration not in {5, 10, 15}:
-            raise HTTPException(status_code=400, detail="Для Seedance 2.0 Mini доступны только 5, 10 или 15 секунд.")
+        if duration not in set(range(4, 16)):
+            raise HTTPException(status_code=400, detail="Для Seedance 2.0 Mini доступны длительности от 4 до 15 секунд.")
         if aspect_ratio not in {"16:9", "9:16", "1:1"}:
             aspect_ratio = "16:9"
         if mode not in {"text_to_video", "image_to_video", "omni_reference"}:
