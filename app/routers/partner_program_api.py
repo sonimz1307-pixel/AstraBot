@@ -24,6 +24,7 @@ from app.services.partner_program import (
     bind_referral,
     create_partner_payout,
     get_partner_dashboard,
+    get_partner_payout_by_id,
     serialize_payout,
 )
 from queue_redis import enqueue_job
@@ -54,6 +55,10 @@ class PayoutCreatePayload(BaseModel):
     card_number: str = Field(..., min_length=12, max_length=32)
     card_holder_name: str = Field(..., min_length=5, max_length=160)
     comment: Optional[str] = Field(None, max_length=500)
+    # Client-generated request key. When present, the DB guarantees that retries
+    # of the same payout request return the original payout instead of creating
+    # a second one. Kept optional for compatibility with older cached clients.
+    idempotency_key: Optional[str] = Field(None, min_length=16, max_length=128)
 
 
 class AdminPayoutActionPayload(BaseModel):
@@ -86,6 +91,23 @@ async def _notify_payout_created(payout: Optional[Dict[str, Any]]) -> None:
         )
     except Exception:
         # Notification must not break the payout request.
+        pass
+
+
+async def _notify_payout_status_changed(payout: Optional[Dict[str, Any]]) -> None:
+    if not payout:
+        return
+    try:
+        await enqueue_job(
+            {
+                "job_id": f"partner_payout_status_{uuid4().hex}",
+                "kind": "partner_payout_status",
+                "payout": payout,
+            },
+            queue_name=PARTNER_EVENTS_QUEUE_NAME,
+        )
+    except Exception:
+        # Status notification is best-effort and must never break admin action.
         pass
 
 
@@ -127,10 +149,13 @@ async def partner_create_payout(
             card_number=payload.card_number,
             card_holder_name=payload.card_holder_name,
             comment=payload.comment or "",
+            idempotency_key=payload.idempotency_key or "",
         )
         # The payout itself is already committed in Supabase at this point.
         # Admin notification is best-effort and must never delay the client response.
-        background_tasks.add_task(_notify_payout_created, out.get("payout"))
+        # An idempotent replay returns the existing payout and must not notify twice.
+        if out.get("created", True):
+            background_tasks.add_task(_notify_payout_created, out.get("payout"))
         return out
     except PartnerProgramError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -164,15 +189,23 @@ async def partner_admin_payout_paid(
     request: Request,
     payout_id: str,
     payload: AdminPayoutActionPayload,
+    background_tasks: BackgroundTasks,
     x_admin_token: Optional[str] = Header(None),
 ) -> Dict[str, Any]:
     _require_admin(request, x_admin_token)
     try:
-        return admin_mark_payout_paid(
+        out = admin_mark_payout_paid(
             payout_id=payout_id,
             admin_user_id=payload.admin_user_id,
             admin_note=payload.admin_note or "",
         )
+        try:
+            payout = get_partner_payout_by_id(payout_id)
+        except Exception:
+            payout = None
+        if payout:
+            background_tasks.add_task(_notify_payout_status_changed, payout)
+        return out
     except PartnerProgramError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -184,15 +217,23 @@ async def partner_admin_payout_reject(
     request: Request,
     payout_id: str,
     payload: AdminPayoutActionPayload,
+    background_tasks: BackgroundTasks,
     x_admin_token: Optional[str] = Header(None),
 ) -> Dict[str, Any]:
     _require_admin(request, x_admin_token)
     try:
-        return admin_reject_payout(
+        out = admin_reject_payout(
             payout_id=payout_id,
             admin_user_id=payload.admin_user_id,
             admin_note=payload.admin_note or "",
         )
+        try:
+            payout = get_partner_payout_by_id(payout_id)
+        except Exception:
+            payout = None
+        if payout:
+            background_tasks.add_task(_notify_payout_status_changed, payout)
+        return out
     except PartnerProgramError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
