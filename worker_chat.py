@@ -844,6 +844,59 @@ async def _notify_admins(text: str) -> None:
             print(f"[partner_worker] failed to notify admin={admin_id}: {exc}", flush=True)
 
 
+def _resolve_partner_telegram_user_id(partner_user_id: int) -> int:
+    uid = int(partner_user_id or 0)
+    if uid <= 0 or sb is None:
+        return 0
+
+    # Partner accounting uses workspace_accounts.id when Telegram is linked to
+    # a site account. Financial notifications are fail-closed: if this lookup
+    # itself errors, never reinterpret partner_user_id as a Telegram id.
+    try:
+        res = (
+            sb.table("workspace_accounts")
+            .select("telegram_user_id")
+            .eq("id", uid)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(res, "data", None) or []
+    except Exception as exc:
+        print(
+            f"[partner_worker] payout status recipient lookup failed at workspace_accounts partner_user_id={uid}: {type(exc).__name__}",
+            flush=True,
+        )
+        return 0
+
+    # If the workspace account exists, only its explicit Telegram link is valid.
+    # A present-but-unlinked workspace row must not fall through to legacy mode.
+    if rows:
+        tg_uid = int((rows[0] or {}).get("telegram_user_id") or 0)
+        return tg_uid if tg_uid > 0 else 0
+
+    # Legacy/bot-only partner profiles can use telegram_user_id directly, but
+    # only after the workspace lookup succeeded and proved there is no account
+    # with this id. Also verify that the Telegram user really exists in bot_users.
+    try:
+        res = (
+            sb.table("bot_users")
+            .select("telegram_user_id")
+            .eq("telegram_user_id", uid)
+            .limit(1)
+            .execute()
+        )
+        row = (getattr(res, "data", None) or [None])[0]
+        if row and int(row.get("telegram_user_id") or 0) == uid:
+            return uid
+    except Exception as exc:
+        print(
+            f"[partner_worker] payout status legacy recipient lookup failed partner_user_id={uid}: {type(exc).__name__}",
+            flush=True,
+        )
+        return 0
+    return 0
+
+
 async def process_partner_event(job: Dict[str, Any]) -> None:
     kind = _job_kind(job)
     if kind == "partner_bind_referral":
@@ -894,6 +947,38 @@ async def process_partner_event(job: Dict[str, Any]) -> None:
         print(f"[partner_worker] payout notification sent payout_id={payout_id}", flush=True)
         return
 
+    if kind == "partner_payout_status":
+        payout = job.get("payout") if isinstance(job.get("payout"), dict) else {}
+        if not payout:
+            return
+        partner_user_id = int(payout.get("partner_user_id") or 0)
+        tg_user_id = await asyncio.to_thread(_resolve_partner_telegram_user_id, partner_user_id)
+        if tg_user_id <= 0:
+            print(f"[partner_worker] payout status: telegram user not linked partner_user_id={partner_user_id}", flush=True)
+            return
+
+        payout_id = str(payout.get("id") or "")
+        suffix = payout_id[-8:] if payout_id else "—"
+        amount = float(payout.get("amount_rub") or 0)
+        status = str(payout.get("status") or "").strip().lower()
+        admin_note = str(payout.get("admin_note") or "").strip()
+        if status == "paid":
+            text = f"✅ Выплата #{suffix} выполнена.\nСумма: {amount:g} ₽."
+        elif status == "rejected":
+            text = f"❌ Выплата #{suffix} отклонена.\nСумма: {amount:g} ₽."
+            if admin_note:
+                text += f"\nКомментарий: {admin_note[:300]}"
+            text += "\nПроверь доступный партнёрский баланс в кабинете."
+        else:
+            text = f"ℹ️ Статус выплаты #{suffix}: {status or 'обновлён'}.\nСумма: {amount:g} ₽."
+        await tg_send_message(
+            tg_user_id,
+            text,
+            reply_markup={"inline_keyboard": [[{"text": "🧾 История выплат", "callback_data": "partner_payout:history"}]]},
+        )
+        print(f"[partner_worker] payout status sent payout_id={payout_id} tg_user_id={tg_user_id} status={status}", flush=True)
+        return
+
     print(f"[partner_worker] unsupported event kind={kind} job={job.get('job_id')}", flush=True)
 
 
@@ -910,7 +995,7 @@ async def _handle(job: Dict[str, Any]) -> None:
         if kind == "tg_broadcast":
             await process_tg_broadcast_job(job)
             return
-        if kind in {"partner_topup", "partner_bind_referral", "partner_payout_created"}:
+        if kind in {"partner_topup", "partner_bind_referral", "partner_payout_created", "partner_payout_status"}:
             await process_partner_event(job)
             return
         print(f"[chat_worker] skipped unsupported kind={kind} job={job.get('job_id')}", flush=True)
