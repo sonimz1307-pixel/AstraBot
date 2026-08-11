@@ -191,7 +191,13 @@ from app.routers.web_workspace_api import router as workspace_router
 from app.routers.video_editor_v2 import router as video_editor_v2_router, page_router as video_editor_v2_page_router
 from app.routers.site_builder_api import router as site_builder_router
 from app.routers.partner_program_api import router as partner_program_router
-from app.services.partner_program import ensure_partner_profile
+from app.services.partner_program import (
+    PARTNER_MIN_PAYOUT_RUB,
+    PartnerProgramError,
+    create_partner_payout,
+    ensure_partner_profile,
+    get_partner_dashboard,
+)
 from app.services.legnext_midjourney import (
     MIDJOURNEY_ALLOWED_ASPECT_RATIOS,
     build_midjourney_v7_prompt,
@@ -370,6 +376,591 @@ async def _enqueue_partner_topup_event(
             print(f"[partner] failed to enqueue topup event: {exc}", flush=True)
         except Exception:
             pass
+
+
+PARTNER_PAYOUT_STATE_PREFIX = "partner_payout_"
+# Defaults require no new ENV. These timeouts keep the sequential Telegram
+# update worker from waiting indefinitely on synchronous Supabase calls.
+try:
+    PARTNER_PAYOUT_STATE_TIMEOUT_SEC = max(2.0, float(os.getenv("PARTNER_PAYOUT_STATE_TIMEOUT_SEC", "8") or "8"))
+except Exception:
+    PARTNER_PAYOUT_STATE_TIMEOUT_SEC = 8.0
+try:
+    PARTNER_PAYOUT_RESOLVE_TIMEOUT_SEC = max(2.0, float(os.getenv("PARTNER_PAYOUT_RESOLVE_TIMEOUT_SEC", "8") or "8"))
+except Exception:
+    PARTNER_PAYOUT_RESOLVE_TIMEOUT_SEC = 8.0
+
+
+def _partner_payout_bot_url() -> str:
+    if not NABEX_PARTNER_BOT_USERNAME:
+        return ""
+    return f"{NABEX_PARTNER_TELEGRAM_LINK_BASE}/{NABEX_PARTNER_BOT_USERNAME}?start=payout"
+
+
+def _partner_payout_parse_amount(text: str) -> Optional[float]:
+    raw = str(text or "").strip().replace("\u00a0", " ").replace("₽", "").replace("руб.", "").replace("руб", "")
+    raw = raw.replace(" ", "").replace(",", ".")
+    if not re.fullmatch(r"\d+(?:\.\d{1,2})?", raw):
+        return None
+    try:
+        value = round(float(raw), 2)
+    except Exception:
+        return None
+    return value if value > 0 else None
+
+
+def _partner_payout_status_label(value: Any) -> str:
+    status = str(value or "").strip().lower()
+    return {
+        "pending": "🟡 Ожидает",
+        "paid": "✅ Выплачено",
+        "rejected": "❌ Отклонено",
+        "cancelled": "⚪ Отменено",
+        "canceled": "⚪ Отменено",
+    }.get(status, status or "—")
+
+
+def _partner_payout_mask_card(value: Any) -> str:
+    digits = re.sub(r"\D", "", str(value or ""))
+    if len(digits) < 8:
+        return ""
+    return f"{digits[:4]} •••• •••• {digits[-4:]}"
+
+
+class PartnerPayoutStateUnavailable(RuntimeError):
+    pass
+
+
+def _partner_payout_get_state_sync(user_id: int) -> Tuple[str, Dict[str, Any]]:
+    if sb is None:
+        raise PartnerPayoutStateUnavailable("Supabase недоступен")
+    try:
+        res = (
+            sb.table("bot_user_state")
+            .select("state,payload")
+            .eq("telegram_user_id", int(user_id))
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:
+        raise PartnerPayoutStateUnavailable("Не удалось проверить состояние выплаты") from exc
+    rows = getattr(res, "data", None) or []
+    if not rows:
+        return "idle", {}
+    row = rows[0] or {}
+    payload = row.get("payload")
+    return str(row.get("state") or "idle"), payload if isinstance(payload, dict) else {}
+
+
+def _partner_payout_set_state_sync(user_id: int, state_name: str, payload: Dict[str, Any]) -> None:
+    if sb is None:
+        raise PartnerPayoutStateUnavailable("Supabase недоступен")
+    try:
+        sb.table("bot_user_state").upsert(
+            {
+                "telegram_user_id": int(user_id),
+                "state": str(state_name),
+                "payload": dict(payload or {}),
+            },
+            on_conflict="telegram_user_id",
+        ).execute()
+    except Exception as exc:
+        raise PartnerPayoutStateUnavailable("Не удалось сохранить состояние выплаты") from exc
+
+
+def _partner_payout_clear_state_sync(user_id: int) -> None:
+    if sb is None:
+        raise PartnerPayoutStateUnavailable("Supabase недоступен")
+    try:
+        sb.table("bot_user_state").upsert(
+            {
+                "telegram_user_id": int(user_id),
+                "state": "idle",
+                "payload": None,
+            },
+            on_conflict="telegram_user_id",
+        ).execute()
+    except Exception as exc:
+        raise PartnerPayoutStateUnavailable("Не удалось очистить состояние выплаты") from exc
+
+
+async def _partner_payout_get_state(user_id: int) -> Tuple[str, Dict[str, Any]]:
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_partner_payout_get_state_sync, int(user_id)),
+            timeout=PARTNER_PAYOUT_STATE_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError as exc:
+        raise PartnerPayoutStateUnavailable("Таймаут проверки состояния выплаты") from exc
+
+
+async def _partner_payout_set_state(user_id: int, state_name: str, payload: Dict[str, Any]) -> None:
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(_partner_payout_set_state_sync, int(user_id), str(state_name), dict(payload or {})),
+            timeout=PARTNER_PAYOUT_STATE_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError as exc:
+        raise PartnerPayoutStateUnavailable("Таймаут сохранения состояния выплаты") from exc
+
+
+async def _partner_payout_clear_state(user_id: int) -> None:
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(_partner_payout_clear_state_sync, int(user_id)),
+            timeout=PARTNER_PAYOUT_STATE_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError as exc:
+        raise PartnerPayoutStateUnavailable("Таймаут очистки состояния выплаты") from exc
+
+
+def _partner_payout_looks_like_card(text: str) -> bool:
+    # Mirror the payout parser: any separators are possible because the actual
+    # card handler strips every non-digit character. This is intentionally
+    # conservative for fail-closed routing when Supabase state is unavailable.
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    digits = re.sub(r"\D", "", raw)
+    return 16 <= len(digits) <= 19
+
+
+def _partner_payout_resolve_user_id_sync(telegram_user_id: int) -> int:
+    """Resolve payout owner strictly; never fall back to another id on DB errors."""
+    uid = int(telegram_user_id or 0)
+    if uid <= 0:
+        raise PartnerPayoutStateUnavailable("Некорректный Telegram user id")
+    if sb is None:
+        raise PartnerPayoutStateUnavailable("Supabase недоступен")
+    try:
+        res = (
+            sb.table("workspace_accounts")
+            .select("id,telegram_user_id")
+            .eq("telegram_user_id", uid)
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:
+        raise PartnerPayoutStateUnavailable("Не удалось определить партнёрский аккаунт") from exc
+    rows = getattr(res, "data", None) or []
+    if rows:
+        account_id = int((rows[0] or {}).get("id") or 0)
+        if account_id > 0:
+            return account_id
+    # Bot-only / legacy partner account: Telegram id is the accounting id, but
+    # only after a successful workspace lookup proved that no link exists.
+    return uid
+
+
+async def _partner_payout_resolve_user_id(telegram_user_id: int) -> int:
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_partner_payout_resolve_user_id_sync, int(telegram_user_id)),
+            timeout=PARTNER_PAYOUT_RESOLVE_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError as exc:
+        raise PartnerPayoutStateUnavailable("Таймаут определения партнёрского аккаунта") from exc
+
+
+async def _enqueue_partner_payout_created_notification(payout: Optional[Dict[str, Any]]) -> None:
+    if not payout:
+        return
+    try:
+        await enqueue_job(
+            {
+                "job_id": f"partner_payout_notify_{uuid4().hex}",
+                "kind": "partner_payout_created",
+                "payout": payout,
+            },
+            queue_name=PARTNER_EVENTS_QUEUE_NAME,
+        )
+    except Exception as exc:
+        try:
+            print(f"[partner_payout_tg] admin notification enqueue failed: {exc}", flush=True)
+        except Exception:
+            pass
+
+
+async def _partner_payout_history_text(user_id: int) -> str:
+    try:
+        partner_user_id = await _partner_payout_resolve_user_id(int(user_id))
+        dashboard = await asyncio.wait_for(asyncio.to_thread(get_partner_dashboard, partner_user_id), timeout=20)
+    except Exception as exc:
+        return f"⚠️ Не удалось загрузить историю выплат: {str(exc)[:220]}"
+    stats = dashboard.get("stats") if isinstance(dashboard, dict) else {}
+    payouts = dashboard.get("payouts") if isinstance(dashboard, dict) else []
+    available = float((stats or {}).get("available_balance_rub") or 0)
+    pending = float((stats or {}).get("pending_payout_balance_rub") or 0)
+    lines = [
+        "💸 Партнёрские выплаты",
+        "",
+        f"Доступно: {available:,.2f} ₽".replace(",", " ").replace(".00", ""),
+        f"Ожидает выплаты: {pending:,.2f} ₽".replace(",", " ").replace(".00", ""),
+    ]
+    items = list(payouts or [])[:10]
+    if not items:
+        lines += ["", "История выплат пока пустая."]
+        return "\n".join(lines)
+    lines += ["", "Последние заявки:"]
+    for item in items:
+        amount = float((item or {}).get("amount_rub") or 0)
+        pid = str((item or {}).get("id") or "")
+        suffix = pid[-8:] if pid else "—"
+        lines.append(
+            f"• #{suffix} · {amount:,.2f} ₽ · {_partner_payout_status_label((item or {}).get('status'))}".replace(",", " ").replace(".00", "")
+        )
+    return "\n".join(lines)
+
+
+async def _start_partner_payout_flow(chat_id: int, user_id: int) -> None:
+    try:
+        partner_user_id = await _partner_payout_resolve_user_id(int(user_id))
+        dashboard = await asyncio.wait_for(asyncio.to_thread(get_partner_dashboard, partner_user_id), timeout=20)
+    except Exception as exc:
+        await tg_send_message(chat_id, f"❌ Не удалось открыть выплаты: {str(exc)[:240]}")
+        return
+
+    stats = dashboard.get("stats") if isinstance(dashboard, dict) else {}
+    available = round(float((stats or {}).get("available_balance_rub") or 0), 2)
+    pending = round(float((stats or {}).get("pending_payout_balance_rub") or 0), 2)
+    min_payout = round(float((stats or {}).get("min_payout_rub") or PARTNER_MIN_PAYOUT_RUB), 2)
+
+    if available < min_payout:
+        try:
+            await _partner_payout_clear_state(user_id)
+        except PartnerPayoutStateUnavailable:
+            pass
+        _set_mode(chat_id, user_id, "chat")
+        await tg_send_message(
+            chat_id,
+            (
+                "💸 Выплата партнёрского дохода\n\n"
+                f"Доступно: {available:,.2f} ₽\n".replace(",", " ").replace(".00", "")
+                + f"Ожидает выплаты: {pending:,.2f} ₽\n".replace(",", " ").replace(".00", "")
+                + f"Минимальная сумма выплаты: {min_payout:,.2f} ₽\n\n".replace(",", " ").replace(".00", "")
+                + "Пока недостаточно средств для новой заявки."
+            ),
+            reply_markup={"inline_keyboard": [[{"text": "🧾 История выплат", "callback_data": "partner_payout:history"}]]},
+        )
+        return
+
+    payload = {
+        "partner_user_id": int(partner_user_id),
+        "available_rub": available,
+        "pending_rub": pending,
+        "min_payout_rub": min_payout,
+        "idempotency_key": f"tgpayout_{uuid4().hex}",
+    }
+    try:
+        await _partner_payout_set_state(user_id, "partner_payout_amount", payload)
+    except PartnerPayoutStateUnavailable:
+        await tg_send_message(chat_id, "⚠️ Сервис выплат временно недоступен. Попробуй ещё раз чуть позже.")
+        return
+    _set_mode(chat_id, user_id, "partner_payout")
+    await tg_send_message(
+        chat_id,
+        (
+            "💸 Выплата партнёрского дохода\n\n"
+            f"Доступно: {available:,.2f} ₽\n".replace(",", " ").replace(".00", "")
+            + f"Ожидает выплаты: {pending:,.2f} ₽\n".replace(",", " ").replace(".00", "")
+            + f"Минимальная сумма: {min_payout:,.2f} ₽\n\n".replace(",", " ").replace(".00", "")
+            + "Напиши сумму выплаты одним сообщением, например: 1500"
+        ),
+        reply_markup={
+            "inline_keyboard": [
+                [{"text": f"💰 Вывести всё — {available:g} ₽", "callback_data": "partner_payout:all"}],
+                [{"text": "🧾 История выплат", "callback_data": "partner_payout:history"}],
+                [{"text": "❌ Отмена", "callback_data": "partner_payout:cancel"}],
+            ]
+        },
+    )
+
+
+async def _partner_payout_show_review(chat_id: int, user_id: int, payload: Dict[str, Any]) -> None:
+    amount = float(payload.get("amount_rub") or 0)
+    holder = str(payload.get("card_holder_name") or "").strip()
+    comment = str(payload.get("comment") or "").strip()
+    await _partner_payout_set_state(user_id, "partner_payout_review", payload)
+    text = (
+        "Проверь данные заявки:\n\n"
+        f"Сумма: {amount:,.2f} ₽\n".replace(",", " ").replace(".00", "")
+        + f"Получатель: {holder}\n"
+        + f"Комментарий: {comment or '—'}\n\n"
+        + "Если всё верно, нажми кнопку ниже. Затем бот попросит номер карты. "
+          "После отправки номера карты заявка будет создана сразу."
+    )
+    await tg_send_message(
+        chat_id,
+        text,
+        reply_markup={
+            "inline_keyboard": [
+                [{"text": "💳 Продолжить к карте", "callback_data": "partner_payout:card"}],
+                [{"text": "❌ Отмена", "callback_data": "partner_payout:cancel"}],
+            ]
+        },
+    )
+
+
+async def _partner_payout_handle_callback(chat_id: int, user_id: int, data: str) -> None:
+    action = str(data or "").split(":", 1)[1] if ":" in str(data or "") else ""
+    if action == "start":
+        await _start_partner_payout_flow(chat_id, user_id)
+        return
+    if action == "history":
+        text = await _partner_payout_history_text(user_id)
+        await tg_send_message(
+            chat_id,
+            text,
+            reply_markup={"inline_keyboard": [[{"text": "💸 Новая выплата", "callback_data": "partner_payout:start"}]]},
+        )
+        return
+    if action == "cancel":
+        await _partner_payout_clear_state(user_id)
+        _set_mode(chat_id, user_id, "chat")
+        await tg_send_message(chat_id, "✅ Оформление выплаты отменено.", reply_markup=_main_menu_for(user_id))
+        return
+
+    state_name, payload = await _partner_payout_get_state(user_id)
+    if action == "all":
+        if state_name != "partner_payout_amount":
+            await tg_send_message(chat_id, "Сессия выплаты устарела. Открой выплату заново.", reply_markup={"inline_keyboard": [[{"text": "💸 Начать", "callback_data": "partner_payout:start"}]]})
+            return
+        amount = round(float(payload.get("available_rub") or 0), 2)
+        if amount <= 0:
+            await _start_partner_payout_flow(chat_id, user_id)
+            return
+        payload["amount_rub"] = amount
+        await _partner_payout_set_state(user_id, "partner_payout_holder", payload)
+        await tg_send_message(chat_id, "Напиши ФИО получателя карты полностью.")
+        return
+
+    if action == "skip_comment":
+        if state_name != "partner_payout_comment":
+            await tg_send_message(chat_id, "Сессия выплаты устарела. Открой выплату заново.")
+            return
+        payload["comment"] = ""
+        await _partner_payout_show_review(chat_id, user_id, payload)
+        return
+
+    if action == "card":
+        if state_name != "partner_payout_review":
+            await tg_send_message(chat_id, "Сессия выплаты устарела. Открой выплату заново.")
+            return
+        await _partner_payout_set_state(user_id, "partner_payout_card", payload)
+        await tg_send_message(
+            chat_id,
+            "💳 Пришли номер карты одним сообщением (16–19 цифр).\n\n"
+            "После отправки карты заявка создастся сразу. Номер карты в промежуточном состоянии бота не сохраняется.",
+            reply_markup={"inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "partner_payout:cancel"}]]},
+        )
+        return
+
+
+async def _partner_payout_handle_text_state(
+    chat_id: int,
+    user_id: int,
+    incoming_text: str,
+    message_id: int = 0,
+    payout_mode_active: bool = False,
+) -> bool:
+    try:
+        state_name, payload = await _partner_payout_get_state(user_id)
+    except PartnerPayoutStateUnavailable:
+        if payout_mode_active or _partner_payout_looks_like_card(incoming_text):
+            await tg_send_message(
+                chat_id,
+                "⚠️ Сейчас не удалось безопасно проверить состояние выплаты. "
+                "Сообщение не передано в другие режимы бота. Попробуй ещё раз чуть позже.",
+            )
+            return True
+        return False
+    if not state_name.startswith(PARTNER_PAYOUT_STATE_PREFIX):
+        return False
+
+    # If the Telegram queue retries the exact card message after the payout was
+    # already committed, swallow it instead of letting the card number fall
+    # through into another bot mode. The next different user message clears this
+    # one-shot guard and is processed normally.
+    if state_name == "partner_payout_done":
+        completed_message_id = int(payload.get("completed_message_id") or 0)
+        if message_id > 0 and completed_message_id == int(message_id):
+            return True
+        await _partner_payout_clear_state(user_id)
+        _set_mode(chat_id, user_id, "chat")
+        return False
+
+    text = str(incoming_text or "").strip()
+    if not text or text.startswith("/"):
+        return False
+
+    if text.lower() in {"отмена", "cancel", "❌ отмена", "назад", "⬅ назад", "⬅️ назад", "меню", "главное меню"}:
+        await _partner_payout_clear_state(user_id)
+        _set_mode(chat_id, user_id, "chat")
+        await tg_send_message(chat_id, "✅ Оформление выплаты отменено.", reply_markup=_main_menu_for(user_id))
+        return True
+
+    # Existing bot navigation buttons should keep working even if a payout draft
+    # was left open. Clear only the payout FSM and let the normal handler process
+    # the navigation text.
+    if _is_nav_or_menu_text(text):
+        await _partner_payout_clear_state(user_id)
+        _set_mode(chat_id, user_id, "chat")
+        return False
+
+    if state_name == "partner_payout_amount":
+        amount = _partner_payout_parse_amount(text)
+        min_payout = float(payload.get("min_payout_rub") or PARTNER_MIN_PAYOUT_RUB)
+        available = float(payload.get("available_rub") or 0)
+        if amount is None:
+            await tg_send_message(chat_id, "Напиши сумму цифрами, например: 1500")
+            return True
+        if amount < min_payout:
+            await tg_send_message(chat_id, f"Минимальная сумма выплаты — {min_payout:g} ₽.")
+            return True
+        if amount > available:
+            await tg_send_message(chat_id, f"Сейчас доступно максимум {available:g} ₽.")
+            return True
+        payload["amount_rub"] = amount
+        await _partner_payout_set_state(user_id, "partner_payout_holder", payload)
+        await tg_send_message(chat_id, "Напиши ФИО получателя карты полностью.")
+        return True
+
+    if state_name == "partner_payout_holder":
+        holder = re.sub(r"\s+", " ", text).strip()
+        if len(holder) < 5 or len(holder) > 160:
+            await tg_send_message(chat_id, "Проверь ФИО получателя. Напиши его полностью одним сообщением.")
+            return True
+        payload["card_holder_name"] = holder
+        await _partner_payout_set_state(user_id, "partner_payout_comment", payload)
+        await tg_send_message(
+            chat_id,
+            "Комментарий к выплате — необязательно. Например: СБП / название банка.\n\nНапиши комментарий или нажми «Пропустить».",
+            reply_markup={"inline_keyboard": [[{"text": "Пропустить", "callback_data": "partner_payout:skip_comment"}], [{"text": "❌ Отмена", "callback_data": "partner_payout:cancel"}]]},
+        )
+        return True
+
+    if state_name == "partner_payout_comment":
+        comment = "" if text.lower() in {"-", "нет", "пропустить"} else text[:500]
+        payload["comment"] = comment
+        await _partner_payout_show_review(chat_id, user_id, payload)
+        return True
+
+    if state_name == "partner_payout_review":
+        await tg_send_message(chat_id, "Нажми «💳 Продолжить к карте» под предыдущим сообщением или «Отмена».")
+        return True
+
+    if state_name == "partner_payout_card":
+        digits = re.sub(r"\D", "", text)
+        if not (16 <= len(digits) <= 19):
+            await tg_send_message(chat_id, "Проверь номер карты: должно быть 16–19 цифр. Пришли номер ещё раз.")
+            return True
+
+        partner_user_id = int(payload.get("partner_user_id") or 0)
+        if partner_user_id <= 0:
+            try:
+                partner_user_id = await _partner_payout_resolve_user_id(int(user_id))
+            except PartnerPayoutStateUnavailable:
+                await tg_send_message(chat_id, "⚠️ Не удалось безопасно определить партнёрский аккаунт. Попробуй ещё раз позже.")
+                return True
+        amount = float(payload.get("amount_rub") or 0)
+        holder = str(payload.get("card_holder_name") or "").strip()
+        comment = str(payload.get("comment") or "").strip()
+        idem_key = str(payload.get("idempotency_key") or "").strip() or f"tgpayout_{uuid4().hex}"
+
+        # Best-effort: remove the message containing the full card number from the
+        # private Telegram chat as soon as we have parsed it. The PAN is never
+        # written to bot_user_state.
+        if message_id > 0:
+            try:
+                await tg_delete_message(chat_id, message_id)
+            except Exception:
+                pass
+
+        try:
+            out = await asyncio.wait_for(
+                asyncio.to_thread(
+                    create_partner_payout,
+                    partner_user_id=int(partner_user_id),
+                    amount_rub=amount,
+                    card_number=digits,
+                    card_holder_name=holder,
+                    comment=comment,
+                    idempotency_key=idem_key,
+                ),
+                timeout=35,
+            )
+        except PartnerProgramError as exc:
+            msg = str(exc)
+            low = msg.lower()
+            if "bad_card" in low:
+                await tg_send_message(chat_id, "Проверь номер карты и пришли его ещё раз.")
+                return True
+            if "insufficient_partner_balance" in low or "недостаточно" in low:
+                await _partner_payout_clear_state(user_id)
+                _set_mode(chat_id, user_id, "chat")
+                await tg_send_message(chat_id, "Баланс изменился и этой суммы уже недостаточно. Открой выплату заново.", reply_markup={"inline_keyboard": [[{"text": "💸 Открыть выплаты", "callback_data": "partner_payout:start"}]]})
+                return True
+            await tg_send_message(chat_id, f"Не удалось создать выплату: {msg}")
+            return True
+        except Exception as exc:
+            error_text = str(exc)
+            error_low = error_text.lower()
+            if "bad_card" in error_low:
+                await tg_send_message(chat_id, "Проверь номер карты и пришли его ещё раз.")
+                return True
+            if "insufficient_partner_balance" in error_low:
+                await _partner_payout_clear_state(user_id)
+                _set_mode(chat_id, user_id, "chat")
+                await tg_send_message(
+                    chat_id,
+                    "Баланс изменился и этой суммы уже недостаточно. Открой выплату заново.",
+                    reply_markup={"inline_keyboard": [[{"text": "💸 Открыть выплаты", "callback_data": "partner_payout:start"}]]},
+                )
+                return True
+            # Keep the same idempotency key and state. If the DB committed but the
+            # network reply was lost, repeating the card returns the original payout.
+            technical = re.sub(r"(?<!\d)(?:\d[\s\-]*){16,19}(?!\d)", "[CARD]", error_text[:180]) or type(exc).__name__
+            await tg_send_message(
+                chat_id,
+                "⚠️ Не удалось получить подтверждение от сервера.\n"
+                "Не создавай новую заявку вручную. Пришли тот же номер карты ещё раз — защита от дублей вернёт уже созданную выплату, если она успела сохраниться.\n\n"
+                f"Техническая ошибка: {technical}",
+            )
+            return True
+
+        payout = out.get("payout") if isinstance(out.get("payout"), dict) else {}
+        payout_id = str(out.get("payout_id") or (payout or {}).get("id") or "")
+        await _partner_payout_set_state(
+            user_id,
+            "partner_payout_done",
+            {
+                "payout_id": payout_id,
+                "completed_message_id": int(message_id or 0),
+                "completed_ts": _now(),
+            },
+        )
+        _set_mode(chat_id, user_id, "chat")
+        if out.get("created", True):
+            await _enqueue_partner_payout_created_notification(out.get("payout"))
+
+        card_mask = str((payout or {}).get("card_mask") or _partner_payout_mask_card(digits))
+        replay_note = "\nПовторный запрос распознан — новая заявка не создавалась." if out.get("idempotent_replay") else ""
+        await tg_send_message(
+            chat_id,
+            (
+                "✅ Заявка на выплату создана.\n\n"
+                f"Сумма: {amount:g} ₽\n"
+                f"Карта: {card_mask}\n"
+                f"Получатель: {holder}\n"
+                f"ID: {payout_id or '—'}\n"
+                "Статус: 🟡 Ожидает обработки."
+                + replay_note
+            ),
+            reply_markup={"inline_keyboard": [[{"text": "🧾 История выплат", "callback_data": "partner_payout:history"}]]},
+        )
+        return True
+
+    return False
 
 
 async def _enqueue_tg_broadcast_job(*, admin_chat_id: int, admin_user_id: int, text: str) -> str:
@@ -939,7 +1530,10 @@ async def webapp_prompts_admin():
 @app.get("/webapp/account", response_class=HTMLResponse)
 async def webapp_account():
     with open(os.path.join(BASE_DIR, "webapp_account.html"), "r", encoding="utf-8") as f:
-        return f.read()
+        return HTMLResponse(
+            content=f.read(),
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+        )
 
 @app.get("/webapp/topup", response_class=HTMLResponse)
 async def webapp_topup():
@@ -1247,6 +1841,7 @@ async def tg_account_info(request: Request):
             "balance": 0,
             "site_ref": "",
             "bot_ref": "",
+            "payout_bot_url": _partner_payout_bot_url(),
             "site_url": NABEX_PUBLIC_SITE_URL,
             "ref_cabinet_url": f"{NABEX_PUBLIC_SITE_URL}/#workspace",
             "topup_url": f"{NABEX_PUBLIC_SITE_URL}/tariffs.html",
@@ -1285,6 +1880,7 @@ async def tg_account_info(request: Request):
         "ref_code": ref_code,
         "site_ref": site_ref,
         "bot_ref": bot_ref,
+        "payout_bot_url": _partner_payout_bot_url(),
         "site_url": NABEX_PUBLIC_SITE_URL,
         "ref_cabinet_url": f"{NABEX_PUBLIC_SITE_URL}/#workspace",
         "topup_url": f"{NABEX_PUBLIC_SITE_URL}/tariffs.html",
@@ -4980,6 +5576,21 @@ async def tg_send_audio_bytes(
         if r.status_code >= 400:
             raise RuntimeError(f"Telegram sendAudio HTTP {r.status_code}: {r.text[:1200]}")
 
+async def tg_delete_message(chat_id: int, message_id: int) -> bool:
+    if not TELEGRAM_BOT_TOKEN or int(message_id or 0) <= 0:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"{TELEGRAM_API_BASE}/deleteMessage",
+                json={"chat_id": int(chat_id), "message_id": int(message_id)},
+            )
+        data = r.json() if r.content else {}
+        return bool(isinstance(data, dict) and data.get("ok"))
+    except Exception:
+        return False
+
+
 async def tg_send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None) -> Optional[int]:
     if not TELEGRAM_BOT_TOKEN:
         return None
@@ -7148,6 +7759,16 @@ async def process_telegram_update(update: Dict[str, Any]):
             except Exception:
                 pass
 
+        if chat_id and user_id and data.startswith("partner_payout:"):
+            if str(chat.get("type") or "").strip().lower() != "private":
+                await tg_send_message(chat_id, "🔒 Выплаты оформляются только в личном чате с ботом.")
+                return {"ok": True}
+            try:
+                await _partner_payout_handle_callback(chat_id, user_id, data)
+            except PartnerPayoutStateUnavailable:
+                await tg_send_message(chat_id, "⚠️ Сервис выплат временно недоступен. Попробуй ещё раз чуть позже.")
+            return {"ok": True}
+
         if chat_id and user_id and data.startswith("mj:"):
             st = _ensure_state(chat_id, user_id)
             parts = data.split(":")
@@ -8753,6 +9374,76 @@ async def process_telegram_update(update: Dict[str, Any]):
             pass
         await tg_send_message(chat_id, "✅ Сброс выполнен. Возвращаю в главное меню.", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
+
+    # --- Direct Telegram payout commands / deep link ---
+    _partner_private_chat = str(chat.get("type") or "").strip().lower() == "private"
+    if incoming_text.strip().lower() in {"/payout", "выплата", "💸 выплата"}:
+        if not _partner_private_chat:
+            await tg_send_message(chat_id, "🔒 Выплаты оформляются только в личном чате с ботом.")
+            return {"ok": True}
+        await _start_partner_payout_flow(chat_id, user_id)
+        return {"ok": True}
+    if incoming_text.startswith("/start"):
+        _pp_parts = incoming_text.split(maxsplit=1)
+        _pp_payload = _pp_parts[1].strip().lower() if len(_pp_parts) > 1 else ""
+        if _pp_payload in {"payout", "partner_payout", "withdraw"}:
+            if not _partner_private_chat:
+                await tg_send_message(chat_id, "🔒 Выплаты оформляются только в личном чате с ботом.")
+                return {"ok": True}
+            await _start_partner_payout_flow(chat_id, user_id)
+            return {"ok": True}
+        # A normal /start explicitly exits an unfinished payout flow.
+        try:
+            _pp_state, _pp_state_payload = await _partner_payout_get_state(user_id)
+            if _pp_state.startswith(PARTNER_PAYOUT_STATE_PREFIX):
+                await _partner_payout_clear_state(user_id)
+                _set_mode(chat_id, user_id, "chat")
+        except PartnerPayoutStateUnavailable:
+            # Normal /start must remain usable if Supabase is temporarily unavailable.
+            pass
+
+    # --- Telegram WebApp -> ordinary bot: partner payout ---
+    web_app_data = message.get("web_app_data") or {}
+    if isinstance(web_app_data, dict) and web_app_data.get("data"):
+        raw_web_data = str(web_app_data.get("data") or "").strip()
+        action = raw_web_data
+        try:
+            parsed_web_data = json.loads(raw_web_data)
+            if isinstance(parsed_web_data, dict):
+                action = str(parsed_web_data.get("action") or "").strip()
+        except Exception:
+            pass
+        if action in {"partner_payout", "payout"}:
+            if not _partner_private_chat:
+                await tg_send_message(chat_id, "🔒 Выплаты оформляются только в личном чате с ботом.")
+                return {"ok": True}
+            await _start_partner_payout_flow(chat_id, user_id)
+            return {"ok": True}
+
+    # --- Persistent Telegram payout FSM ---
+    if incoming_text and not _partner_private_chat and _partner_payout_looks_like_card(incoming_text):
+        await tg_send_message(chat_id, "🔒 Не отправляй номер карты в группе. Выплаты оформляются только в личном чате с ботом.")
+        return {"ok": True}
+    if incoming_text and _partner_private_chat:
+        try:
+            payout_handled = await _partner_payout_handle_text_state(
+                chat_id,
+                user_id,
+                incoming_text,
+                message_id=message_id,
+                payout_mode_active=(st.get("mode") == "partner_payout"),
+            )
+        except PartnerPayoutStateUnavailable:
+            # Do not let a payout message fall through into another bot mode and
+            # do not rely on the queue retry: message_id dedup would consume it.
+            await tg_send_message(
+                chat_id,
+                "⚠️ Сервис выплат временно недоступен. Сообщение не передано в другие режимы бота. "
+                "Попробуй отправить его ещё раз чуть позже.",
+            )
+            return {"ok": True}
+        if payout_handled:
+            return {"ok": True}
 
     # ---------------- Голосовые сообщения в режиме ИИ-чата ----------------
     voice = message.get("voice") or {}
