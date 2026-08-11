@@ -24,6 +24,7 @@ from uuid import uuid4
 import httpx
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ai_chat import openai_chat_answer
@@ -3421,7 +3422,7 @@ class WorkspaceVideoEditIn(BaseModel):
 
 @router.get("/health")
 async def workspace_health() -> Dict[str, Any]:
-    return {"ok": True, "service": "workspace", "server_now_ms": int(time.time() * 1000)}
+    return {"ok": True, "service": "workspace"}
 
 
 @router.get("/bootstrap")
@@ -5155,6 +5156,114 @@ async def workspace_history_item(
         raise HTTPException(status_code=500, detail=f"History item load failed: {e}")
 
 
+def _workspace_video_download_filename(row: Dict[str, Any]) -> str:
+    generation_id = re.sub(r"[^A-Za-z0-9_-]+", "-", str(row.get("id") or "video")).strip("-")[:80] or "video"
+    mime_type = str(row.get("mime_type") or "video/mp4").split(";", 1)[0].strip().lower()
+    source_url = str(row.get("provider_video_url") or "").strip()
+    ext = _storage_content_type_to_ext(mime_type, source_url) or "mp4"
+    ext = re.sub(r"[^A-Za-z0-9]+", "", str(ext or "mp4"))[:10] or "mp4"
+    return f"nabex-{generation_id}.{ext}"
+
+
+async def _proxy_workspace_video_download(*, source_url: str, filename: str, media_type: str = "video/mp4") -> StreamingResponse:
+    target_url = str(source_url or "").strip()
+    if not target_url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=404, detail="Video file is unavailable")
+
+    timeout = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=60.0)
+    client = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
+    upstream = None
+    try:
+        request = client.build_request("GET", target_url)
+        upstream = await client.send(request, stream=True)
+        upstream.raise_for_status()
+    except Exception as exc:
+        if upstream is not None:
+            try:
+                await upstream.aclose()
+            except Exception:
+                pass
+        await client.aclose()
+        raise HTTPException(status_code=502, detail=f"Video download source failed: {exc}")
+
+    upstream_content_type = str(upstream.headers.get("content-type") or media_type or "video/mp4").split(";", 1)[0].strip() or "video/mp4"
+    content_length = str(upstream.headers.get("content-length") or "").strip()
+
+    async def body_iterator():
+        try:
+            async for chunk in upstream.aiter_bytes(chunk_size=1024 * 1024):
+                if chunk:
+                    yield chunk
+        finally:
+            try:
+                await upstream.aclose()
+            finally:
+                await client.aclose()
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Cache-Control": "private, no-store, max-age=0",
+        "X-Content-Type-Options": "nosniff",
+    }
+    if content_length.isdigit():
+        headers["Content-Length"] = content_length
+
+    return StreamingResponse(body_iterator(), media_type=upstream_content_type, headers=headers)
+
+
+@router.get("/history/{generation_id}/download")
+async def workspace_history_download_item(
+    generation_id: str,
+    user: Dict[str, Any] = Depends(get_current_workspace_user),
+) -> StreamingResponse:
+    """Same-origin forced download for generated videos.
+
+    The browser must not leave Nabex for a provider/Supabase media URL.  This
+    endpoint verifies ownership, resolves a fresh signed/storage URL when
+    possible and streams it with Content-Disposition: attachment.
+    """
+    uid = int(user["telegram_user_id"])
+    generation_id_text = str(generation_id or "").strip()
+    if not generation_id_text:
+        raise HTTPException(status_code=400, detail="Missing generation_id")
+    if supabase is None:
+        raise HTTPException(status_code=404, detail="Generation not found")
+
+    try:
+        resp = (
+            supabase.table(_WORKSPACE_VIDEO_GENERATIONS_TABLE)
+            .select("id,user_id,provider_video_url,storage_path,mime_type,status,deleted_at")
+            .eq("id", generation_id_text)
+            .eq("user_id", str(uid))
+            .is_("deleted_at", "null")
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(resp, "data", None) or []
+        if not rows or not isinstance(rows[0], dict):
+            raise HTTPException(status_code=404, detail="Generation not found")
+        row = rows[0]
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Video download lookup failed: {exc}")
+
+    access = _build_workspace_video_access_urls(
+        storage_path=row.get("storage_path"),
+        fallback_url=row.get("provider_video_url"),
+        expires_in=900,
+    )
+    source_url = str(access.get("download_url") or "").strip()
+    if not source_url:
+        raise HTTPException(status_code=404, detail="Video file is unavailable")
+
+    return await _proxy_workspace_video_download(
+        source_url=source_url,
+        filename=_workspace_video_download_filename(row),
+        media_type=str(row.get("mime_type") or "video/mp4"),
+    )
+
+
 @router.delete("/history/{generation_id}")
 async def workspace_history_delete_item(
     generation_id: str,
@@ -5464,10 +5573,6 @@ def _workspace_video_charge_spec(
                 "provider_cost_usd": breakdown.get("provider_cost_usd"),
                 "usd_rub": breakdown.get("usd_rub"),
                 "token_rub": breakdown.get("token_rub"),
-                "retail_promo_active": bool(breakdown.get("retail_promo_active")),
-                "retail_promo_ends_at": breakdown.get("retail_promo_ends_at"),
-                "provider_promo_active": bool(breakdown.get("provider_promo_active")),
-                "provider_promo_ends_at": breakdown.get("provider_promo_ends_at"),
             },
         }
 
@@ -5500,10 +5605,6 @@ def _workspace_video_charge_spec(
                 "provider_cost_usd": breakdown.get("provider_cost_usd"),
                 "usd_rub": breakdown.get("usd_rub"),
                 "token_rub": breakdown.get("token_rub"),
-                "retail_promo_active": bool(breakdown.get("retail_promo_active")),
-                "retail_promo_ends_at": breakdown.get("retail_promo_ends_at"),
-                "provider_promo_active": bool(breakdown.get("provider_promo_active")),
-                "provider_promo_ends_at": breakdown.get("provider_promo_ends_at"),
             },
         }
 
@@ -5910,8 +6011,8 @@ async def workspace_video_run(
     if provider == "seedance":
         model = "seedance-mini"
         resolution = "720p"
-        if duration not in set(range(4, 16)):
-            raise HTTPException(status_code=400, detail="Для Seedance 2.0 Mini доступны длительности от 4 до 15 секунд.")
+        if duration not in {5, 10, 15}:
+            raise HTTPException(status_code=400, detail="Для Seedance 2.0 Mini доступны только 5, 10 или 15 секунд.")
         if aspect_ratio not in {"16:9", "9:16", "1:1"}:
             aspect_ratio = "16:9"
         if mode not in {"text_to_video", "image_to_video", "omni_reference"}:
