@@ -1309,6 +1309,7 @@
         <h3>Формат (соотношение сторон)</h3>
         <select id="seedance_aspect" aria-label="Формат Seedance">
           <option value="16:9">16:9 (YouTube)</option>
+          <option value="21:9">21:9 — Кино</option>
           <option value="9:16">9:16 (Reels)</option>
           <option value="1:1">1:1</option>
           <option value="4:3">4:3</option>
@@ -1879,7 +1880,7 @@
       if (flow25Card) flow25Card.style.display = is25 ? 'block' : 'none';
       if (kieFlowCard) kieFlowCard.style.display = (!isMini && !is25) ? 'block' : 'none';
 
-      if (!isMini && !is25 && aspectSelect && ['4:3','3:4','21:9','adaptive'].includes(aspectSelect.value)){ aspectSelect.value = '16:9'; }
+      if (!isMini && !is25 && aspectSelect && ['4:3','3:4','adaptive'].includes(aspectSelect.value)){ aspectSelect.value = '16:9'; }
       const durSel = qs('#seedance_duration');
       if (durSel) {
         const opts = []; const max = is25 ? 30 : 15;
@@ -1887,7 +1888,8 @@
         setSelectOptions(durSel, opts, durSel.value || '5');
       }
       if (aspectSelect && is25) setSelectOptions(aspectSelect, [['adaptive','Adaptive'],['16:9','16:9'],['9:16','9:16'],['1:1','1:1'],['4:3','4:3'],['3:4','3:4'],['21:9','21:9']], aspectSelect.value || 'adaptive');
-      else if (aspectSelect) setSelectOptions(aspectSelect, [['16:9','16:9 (YouTube)'],['9:16','9:16 (Reels)'],['1:1','1:1']], aspectSelect.value || '16:9');
+      else if (aspectSelect && isMini) setSelectOptions(aspectSelect, [['16:9','16:9 (YouTube)'],['9:16','9:16 (Reels)'],['1:1','1:1']], aspectSelect.value || '16:9');
+      else if (aspectSelect) setSelectOptions(aspectSelect, [['16:9','16:9 (YouTube)'],['21:9','21:9 — Кино'],['9:16','9:16 (Reels)'],['1:1','1:1']], aspectSelect.value || '16:9');
       const miniPromoActive = isSeedanceMiniPromoActive();
       const miniTypeDesc = qs('#seedanceMiniTypeDesc');
       const miniPriceDesc = qs('#seedanceMiniPriceDesc');
@@ -1897,7 +1899,7 @@
         : '8 / 13 / 18 токенов (5/10/15 сек)';
       if (aspectHint) aspectHint.textContent = isMini
         ? `Seedance 2.0 Mini: 720p, Text → Video, Image → Video или Omni Reference.${miniPromoActive ? ' 🔥 Акция до 5 сентября включительно.' : ''}`
-        : (is25 ? 'Seedance 2.5: 480p / 720p, 4–30 сек, Text → Video или Omni Reference.' : 'Для обычного Seedance 2.0 доступны форматы 16:9 / 9:16 / 1:1, как на сайте.');
+        : (is25 ? 'Seedance 2.5: 480p / 720p, 4–30 сек, Text → Video или Omni Reference.' : 'Для обычного Seedance 2.0 доступны форматы 16:9 / 21:9 — Кино / 9:16 / 1:1.');
     }
 
     function setFlowLabelText(labelEl, name, desc){
