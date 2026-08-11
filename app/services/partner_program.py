@@ -379,24 +379,66 @@ def get_partner_dashboard(user_id: int) -> Dict[str, Any]:
     }
 
 
-def create_partner_payout(*, partner_user_id: int, amount_rub: float, card_number: str, card_holder_name: str, comment: str = "") -> Dict[str, Any]:
+def create_partner_payout(
+    *,
+    partner_user_id: int,
+    amount_rub: float,
+    card_number: str,
+    card_holder_name: str,
+    comment: str = "",
+    idempotency_key: str = "",
+) -> Dict[str, Any]:
     sb = _require_supabase()
     amount = _money(amount_rub)
     if amount < PARTNER_MIN_PAYOUT_RUB:
         raise PartnerProgramError(f"Минимальная сумма вывода — {PARTNER_MIN_PAYOUT_RUB} ₽.")
-    res = sb.rpc(
-        "partner_create_payout",
-        {
-            "p_partner_user_id": int(partner_user_id),
-            "p_amount_rub": amount,
-            "p_card_number": str(card_number or ""),
-            "p_card_holder_name": str(card_holder_name or ""),
-            "p_comment": str(comment or ""),
-        },
-    ).execute()
-    payout_id = getattr(res, "data", None)
+
+    idem_key = str(idempotency_key or "").strip()
+    if idem_key and not (16 <= len(idem_key) <= 128):
+        raise PartnerProgramError("Некорректный ключ защиты выплаты. Обнови страницу и попробуй снова.")
+
+    rpc_name = "partner_create_payout_idempotent" if idem_key else "partner_create_payout"
+    params = {
+        "p_partner_user_id": int(partner_user_id),
+        "p_amount_rub": amount,
+        "p_card_number": str(card_number or ""),
+        "p_card_holder_name": str(card_holder_name or ""),
+        "p_comment": str(comment or ""),
+    }
+    if idem_key:
+        params["p_idempotency_key"] = idem_key
+
+    try:
+        res = sb.rpc(rpc_name, params).execute()
+    except Exception as exc:
+        message = str(exc)
+        if idem_key and ("partner_create_payout_idempotent" in message or "PGRST202" in message):
+            raise PartnerProgramError(
+                "Защита от повторной выплаты ещё не активирована. Сначала выполни SQL из Telegram payout patch."
+            ) from exc
+        raise
+
+    rpc_data = getattr(res, "data", None)
+    created_new = True
+    payout_id = rpc_data
+    if idem_key:
+        # PostgREST normally returns a JSON object for JSONB. Accept the
+        # one-row list shape too, because versions/configurations can differ.
+        if isinstance(rpc_data, list) and len(rpc_data) == 1 and isinstance(rpc_data[0], dict):
+            rpc_data = rpc_data[0]
+        if not isinstance(rpc_data, dict):
+            raise PartnerProgramError("Некорректный ответ сервера выплаты. Повтори запрос с тем же ключом.")
+        payout_id = rpc_data.get("payout_id")
+        created_new = bool(rpc_data.get("created", False))
+
     row = _select_one("partner_payouts", id=str(payout_id)) if payout_id else None
-    return {"ok": True, "payout_id": str(payout_id), "payout": serialize_payout(row) if row else None}
+    return {
+        "ok": True,
+        "payout_id": str(payout_id),
+        "payout": serialize_payout(row) if row else None,
+        "created": created_new,
+        "idempotent_replay": bool(idem_key and not created_new),
+    }
 
 
 def _clean_card_number(card_number: Any) -> str:
@@ -427,6 +469,11 @@ def serialize_payout(row: Optional[Dict[str, Any]], *, include_sensitive: bool =
         # User dashboard and payout-created notifications keep only the masked card.
         item["card_number"] = card_number
     return item
+
+
+def get_partner_payout_by_id(payout_id: str, *, include_sensitive: bool = False) -> Optional[Dict[str, Any]]:
+    row = _select_one("partner_payouts", id=_safe_uuid(payout_id))
+    return serialize_payout(row, include_sensitive=include_sensitive) if row else None
 
 
 def admin_list_payouts(status: str = "pending", limit: int = 100) -> Dict[str, Any]:
