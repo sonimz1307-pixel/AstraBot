@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import time
 from typing import Any, Dict, Optional
 
@@ -12,6 +13,39 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 _QUEUE_PREFIX = os.getenv("REDIS_QUEUE_PREFIX", "astrabot:queue").strip().rstrip(":")
 _DEFAULT_QUEUE_NAME = (os.getenv("TG_UPDATE_QUEUE_NAME", "tg_update") or "tg_update").strip()
 _REDIS_RECONNECT_SLEEP_SEC = float(os.getenv("REDIS_RECONNECT_SLEEP_SEC", "2") or "2")
+
+
+# Telegram payout accepts a card after stripping every non-digit character.
+# Permanent DLQ redaction therefore must not assume only spaces/hyphens.
+# This pattern catches 16-19 digits separated by arbitrary short non-digit
+# chunks (dots, slashes, spaces, hyphens, etc.) without matching a slice of a
+# longer all-digit number. The whole-string digit-count fallback below mirrors
+# the payout parser exactly for the usual "card in one message" case.
+_CARDLIKE_SEQUENCE_RE = re.compile(r"(?<!\d)(?:\d[^\d\r\n]{0,12}){15,18}\d(?!\d)")
+
+
+def _redact_sensitive_text(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+
+    # The payout handler does re.sub(r"\D", "", text), so any separator is
+    # valid. If a string contains exactly one card-sized digit payload, redact
+    # the entire string even when separators are unusual/long.
+    digits = re.sub(r"\D", "", value)
+    if 16 <= len(digits) <= 19:
+        return "[REDACTED_CARD]"
+
+    return _CARDLIKE_SEQUENCE_RE.sub("[REDACTED_CARD]", value)
+
+
+def _redact_dead_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(k): _redact_dead_payload(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_dead_payload(v) for v in value]
+    if isinstance(value, tuple):
+        return [_redact_dead_payload(v) for v in value]
+    return _redact_sensitive_text(value)
 
 
 def _safe_queue_name(queue_name: Optional[str] = None) -> str:
@@ -221,6 +255,10 @@ async def fail_tg_update_job(
         dead_payload["dead_ts"] = time.time()
         dead_payload["attempts"] = attempt
         dead_payload["last_error"] = (error or "")[-2000:]
+        # Never keep a full card-like number in the permanent Telegram DLQ.
+        # The ready/processing payload remains unchanged so a transient retry can
+        # still finish an idempotent payout, then ACK removes it from Redis.
+        dead_payload = _redact_dead_payload(dead_payload)
 
         pipe = r.pipeline(transaction=True)
         pipe.zrem(keys["processing"], job_id)
@@ -283,6 +321,9 @@ async def requeue_stale_tg_updates(
             dead_payload["dead_ts"] = time.time()
             dead_payload["attempts"] = attempt
             dead_payload["last_error"] = "processing timeout / worker died"
+            # Same permanent-DLQ policy as fail_tg_update_job(): never leave a
+            # full card number behind when a processing job dies/stales out.
+            dead_payload = _redact_dead_payload(dead_payload)
 
             pipe = r.pipeline(transaction=True)
             pipe.hdel(keys["jobs"], job_id)
