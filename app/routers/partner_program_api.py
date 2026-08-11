@@ -11,7 +11,7 @@ except Exception:  # pragma: no cover
     ZoneInfo = None
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from app.services.workspace_auth import get_current_workspace_user
@@ -115,7 +115,11 @@ async def partner_bind_referral(payload: ReferralBindPayload, user: Dict[str, An
 
 
 @router.post("/payouts")
-async def partner_create_payout(payload: PayoutCreatePayload, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
+async def partner_create_payout(
+    payload: PayoutCreatePayload,
+    background_tasks: BackgroundTasks,
+    user: Dict[str, Any] = Depends(get_current_workspace_user),
+) -> Dict[str, Any]:
     try:
         out = create_partner_payout(
             partner_user_id=_uid_from_user(user),
@@ -124,7 +128,9 @@ async def partner_create_payout(payload: PayoutCreatePayload, user: Dict[str, An
             card_holder_name=payload.card_holder_name,
             comment=payload.comment or "",
         )
-        await _notify_payout_created(out.get("payout"))
+        # The payout itself is already committed in Supabase at this point.
+        # Admin notification is best-effort and must never delay the client response.
+        background_tasks.add_task(_notify_payout_created, out.get("payout"))
         return out
     except PartnerProgramError as e:
         raise HTTPException(status_code=400, detail=str(e))
