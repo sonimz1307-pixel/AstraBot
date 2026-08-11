@@ -552,6 +552,22 @@
 
     .green-btn svg { width: 25px; height: 25px; }
 
+    .partner-payout-wrap {
+      margin-top: 16px;
+      padding: 16px;
+      border: 1px solid rgba(120, 219, 69, 0.22);
+      border-radius: 16px;
+      background: rgba(120, 219, 69, 0.045);
+    }
+
+    .partner-payout-note {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.4;
+      text-align: center;
+    }
+
 
     .ref-links-grid {
       display: grid;
@@ -2342,6 +2358,15 @@
           </button>
         </div>
       </div>
+
+      <div class="partner-payout-wrap">
+        <button class="green-btn" type="button" data-partner-payout>
+          <span>💸 Запросить выплату в Telegram</span>
+        </button>
+        <div class="partner-payout-note">
+          Ожидает выплаты: <strong id="refPendingPayout">0 ₽</strong>. Оформление продолжится в обычном чате с ботом.
+        </div>
+      </div>
     </section>
 
     <section class="card list-card">
@@ -2577,6 +2602,7 @@
       refCode: "",
       siteRef: "",
       botRef: "",
+      payoutBotUrl: "",
       contactEmail: "",
       subscription: null,
       partnerBalance: null,
@@ -2706,10 +2732,13 @@
       const partner = state.partnerBalance || {};
       const available = Number(partner.available_balance_rub || 0);
       const earned = Number(partner.earned_total_rub || 0);
+      const pending = Number(partner.pending_payout_balance_rub || 0);
       const refMonthIncomeEl = document.getElementById("refMonthIncome");
       const refTotalIncomeEl = document.getElementById("refTotalIncome");
+      const refPendingPayoutEl = document.getElementById("refPendingPayout");
       if (refMonthIncomeEl) refMonthIncomeEl.textContent = formatRubValue(available);
       if (refTotalIncomeEl) refTotalIncomeEl.textContent = formatRubValue(earned);
+      if (refPendingPayoutEl) refPendingPayoutEl.textContent = formatRubValue(pending);
     }
 
     function openSheet(sheet) {
@@ -2764,6 +2793,25 @@
         return;
       }
       window.location.href = url;
+    }
+
+    function startPartnerPayoutInBot() {
+      // When the cabinet was opened by the bot's reply-keyboard WebApp button,
+      // sendData cleanly closes the WebApp and delivers a service message to the bot.
+      const inTelegramClient = !!(tg && String(tg.platform || "").toLowerCase() !== "unknown");
+      if (inTelegramClient && typeof tg.sendData === "function") {
+        try {
+          tg.sendData(JSON.stringify({ action: "partner_payout" }));
+          return;
+        } catch (e) {}
+      }
+
+      const fallback = String(state.payoutBotUrl || "https://t.me/NeiroAstraBot?start=payout").trim();
+      if (tg && typeof tg.openTelegramLink === "function") {
+        tg.openTelegramLink(fallback);
+        return;
+      }
+      openUrl(fallback);
     }
 
     function buildTopupUrl() {
@@ -3161,6 +3209,7 @@
         state.refCode = data.ref_code || "";
         state.siteRef = data.site_ref || "";
         state.botRef = data.bot_ref || "";
+        state.payoutBotUrl = data.payout_bot_url || state.payoutBotUrl || "";
         state.topupUrl = data.topup_url || state.topupUrl;
         state.topupWebAppUrl = data.topup_webapp_url || state.topupWebAppUrl;
         state.contactEmail = data.contact_email || state.contactEmail || "";
@@ -3229,6 +3278,16 @@
 
       if (event.target.closest("[data-refresh-history]")) {
         await loadHistory(true);
+        return;
+      }
+
+      if (event.target.closest("[data-partner-payout]")) {
+        event.preventDefault();
+        if (tg && tg.HapticFeedback) {
+          try { tg.HapticFeedback.impactOccurred("light"); } catch (e) {}
+        }
+        showToast("Открываю выплату в Telegram…");
+        startPartnerPayoutInBot();
         return;
       }
 
