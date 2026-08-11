@@ -10055,7 +10055,7 @@ async def process_telegram_update(update: Dict[str, Any]):
                 max_audios = 10 if flow == "omni" else 0
                 max_total_refs = 50 if flow == "omni" else 0
             elif provider_kind == "seedance_kie":
-                if aspect_ratio not in ("16:9", "9:16", "1:1"):
+                if aspect_ratio not in ("16:9", "9:16", "1:1", "21:9"):
                     aspect_ratio = "16:9"
                 model_map = {
                     "seedance-kie-fast": "seedance-kie-480p",
