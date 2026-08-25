@@ -381,8 +381,17 @@ async def _ensure_reliable_group(queue_name: str) -> tuple[str, str]:
     return stream, group
 
 
-async def enqueue_reliable_job(job: Dict[str, Any], queue_name: str) -> str:
-    """Enqueue a job in a Redis Stream for at-least-once delivery with ACK."""
+async def enqueue_reliable_job(
+    job: Dict[str, Any], queue_name: str, *, dedupe_ttl_sec: int = 259200
+) -> str:
+    """Enqueue a job in a Redis Stream for at-least-once delivery with ACK.
+
+    ``dedupe_ttl_sec=0`` keeps the dedupe key persistent. Wan 3.0 uses that
+    mode so XADD and its durable proof-of-enqueue are committed atomically in
+    the same Redis Lua transaction; the Wan worker restores a bounded TTL after
+    provider taskId persistence/terminal settlement. Existing callers keep the
+    historical 3-day TTL by default.
+    """
     job_id = str(job.get("job_id") or job.get("id") or "").strip()
     if not job_id:
         job_id = f"job_{int(time.time() * 1000)}"
@@ -399,10 +408,15 @@ if redis.call('EXISTS', KEYS[2]) == 1 then
     return 0
 end
 redis.call('XADD', KEYS[1], '*', 'payload', ARGV[1], 'job_id', ARGV[2])
-redis.call('SET', KEYS[2], '1', 'EX', tonumber(ARGV[3]))
+local ttl = tonumber(ARGV[3]) or 0
+if ttl > 0 then
+    redis.call('SET', KEYS[2], '1', 'EX', ttl)
+else
+    redis.call('SET', KEYS[2], '1')
+end
 return 1
 """
-            await r.eval(script, 2, stream, dedupe_key, payload, job_id, 259200)
+            await r.eval(script, 2, stream, dedupe_key, payload, job_id, max(0, int(dedupe_ttl_sec or 0)))
             return job_id
         except (RedisTimeoutError, RedisConnectionError) as exc:
             last_exc = exc
