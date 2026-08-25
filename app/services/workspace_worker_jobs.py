@@ -13,6 +13,17 @@ from nano_banana_2_lite_kie import handle_nano_banana_2_lite
 from gpt_image_2_kie import handle_gpt_image_2_kie
 from seedream_5_pro_kie import handle_seedream_5_pro_kie
 from billing_db import add_tokens
+from wan3_billing import refund_wan3_once
+from wan3_kie import (
+    Wan3KieError,
+    Wan3TaskFailedError,
+    Wan3TaskPendingError,
+    normalize_wan3_aspect_ratio,
+    normalize_wan3_duration,
+    normalize_wan3_resolution,
+    run_wan3_video,
+    upload_wan3_reference_bytes,
+)
 from free_plan_limits import FEATURE_TTS, release_free_usage
 from grok_video_replicate import (
     GROK_LEGACY_MODEL,
@@ -155,6 +166,51 @@ async def _tg_send_video_url(chat_id: int, video_url: str, caption: Optional[str
         await _tg_send_message(chat_id, f"✅ Видео готово: {video_url}")
 
 
+def _telegram_file_url(file_path: str) -> str:
+    path = str(file_path or "").lstrip("/")
+    if not path:
+        raise RuntimeError("Telegram getFile returned empty file_path")
+    raw = _TELEGRAM_API_BASE_RAW.rstrip("/")
+    if raw:
+        token_marker = f"/bot{TELEGRAM_BOT_TOKEN}"
+        if token_marker in raw:
+            root = raw.split(token_marker, 1)[0].rstrip("/")
+        elif raw.endswith("/bot"):
+            root = raw[:-4].rstrip("/")
+        else:
+            root = raw
+        return f"{root}/file/bot{TELEGRAM_BOT_TOKEN}/{path}"
+    return f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{path}"
+
+
+async def _tg_get_file_info(file_id: str) -> Dict[str, Any]:
+    file_id = str(file_id or "").strip()
+    if not file_id:
+        raise RuntimeError("Telegram file_id is empty")
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        resp = await client.post(_telegram_method_url("getFile"), json={"file_id": file_id})
+    try:
+        payload = resp.json()
+    except Exception:
+        payload = {}
+    if resp.status_code >= 400 or not isinstance(payload, dict) or not payload.get("ok"):
+        detail = (payload.get("description") if isinstance(payload, dict) else "") or resp.text[:800]
+        raise RuntimeError(f"Telegram getFile failed: {detail}")
+    result = payload.get("result") or {}
+    if not isinstance(result, dict) or not str(result.get("file_path") or "").strip():
+        raise RuntimeError("Telegram getFile returned no file_path")
+    return result
+
+
+async def _tg_download_file_id(file_id: str, *, timeout: float = 600.0) -> tuple[bytes, str]:
+    info = await _tg_get_file_info(file_id)
+    file_path = str(info.get("file_path") or "").strip()
+    raw = await _download_bytes(_telegram_file_url(file_path), timeout=timeout)
+    if not raw:
+        raise RuntimeError("Telegram file is empty")
+    return raw, file_path
+
+
 async def _download_bytes(url: str, *, timeout: float = 300.0) -> bytes:
     target = str(url or "").strip()
     if not target:
@@ -212,8 +268,8 @@ async def process_workspace_video_job(job: Dict[str, Any], on_provider_task_id: 
     reference_audio_urls_direct: List[str] = []
     reference_video_urls_direct: List[str] = []
 
-    if provider_name == "seedance25":
-        # Seedance 2.5 refs are already persisted before the job is queued. Pass
+    if provider_name in {"seedance25", "wan3"}:
+        # KIE refs are already persisted before the job is queued. Pass
         # URLs through directly so this worker does not download up to hundreds
         # of MB into RAM and then keep those bytes alive during KIE polling.
         for upload_id in job.get("reference_audio_upload_ids") or []:
@@ -271,9 +327,11 @@ async def process_workspace_video_job(job: Dict[str, Any], on_provider_task_id: 
         reference_video_clips=reference_video_clips,
         source_video_upload_id=str(job.get("source_video_upload_id") or "").strip() or None,
         reference_image_url=str(job.get("reference_image_url") or "").strip() or None,
-        reference_image_urls_direct=reference_image_urls_direct if provider_name in {"google", "seedance25"} else None,
-        reference_audio_urls_direct=reference_audio_urls_direct if provider_name == "seedance25" else None,
-        reference_video_urls_direct=reference_video_urls_direct if provider_name == "seedance25" else None,
+        reference_image_urls_direct=reference_image_urls_direct if provider_name in {"google", "seedance25", "wan3"} else None,
+        reference_audio_urls_direct=reference_audio_urls_direct if provider_name in {"seedance25", "wan3"} else None,
+        reference_video_urls_direct=reference_video_urls_direct if provider_name in {"seedance25", "wan3"} else None,
+        reference_link_urls_direct=[str(x or "").strip() for x in (job.get("reference_link_urls") or []) if str(x or "").strip()] if provider_name == "wan3" else None,
+        reference_file_urls_direct=[str(x or "").strip() for x in (job.get("reference_file_urls") or []) if str(x or "").strip()] if provider_name == "wan3" else None,
         switchx_alpha_mode=str(job.get("switchx_alpha_mode") or "").strip() or None,
         switchx_select_mask_url=str(job.get("switchx_select_mask_url") or "").strip() or None,
         charge_tokens=int(job.get("charge_tokens") or 0),
@@ -360,6 +418,175 @@ async def process_workspace_switchx_ref_job(job: Dict[str, Any]) -> None:
                 pass
         ww._mark_workspace_image_generation_failed(generation_id, str(e), error_code="provider_error")
 
+
+
+async def process_tg_wan3_video_job(
+    job: Dict[str, Any],
+    *,
+    on_provider_task_id: Optional[Callable[[str], Any]] = None,
+) -> bool:
+    """Run one Telegram Wan 3.0 job through KIE without ever sharing Seedance slots.
+
+    A persisted KIE taskId is the recovery boundary. After task creation, any
+    unknown/local error is retryable and must not refund or create a second task.
+    Explicit KIE `fail` is terminal and is refunded atomically exactly once.
+    """
+    chat_id = int(job.get("chat_id") or 0)
+    user_id = int(job.get("user_id") or 0)
+    if not chat_id or not user_id:
+        raise RuntimeError("tg_wan3_video_run job missing chat_id/user_id")
+
+    mode = str(job.get("mode") or "text_to_video").strip().lower()
+    prompt = str(job.get("prompt") or "").strip()
+    resolution = normalize_wan3_resolution(job.get("resolution") or "720p")
+    duration = normalize_wan3_duration(job.get("duration") or 5)
+    aspect_ratio = normalize_wan3_aspect_ratio(job.get("aspect_ratio") or "adaptive")
+    enable_audio = bool(job.get("enable_audio", True))
+    charge_tokens = int(job.get("charge_tokens") or 0)
+    charge_ref_id = str(job.get("charge_ref_id") or "").strip()
+    refund_reason = str(job.get("refund_reason") or "wan3_video_refund").strip() or "wan3_video_refund"
+    known_task_id = str(job.get("resume_task_id") or "").strip()
+    provider_video_url = ""
+
+    async def _persist_task_id(task_id: str) -> None:
+        nonlocal known_task_id
+        task_id = str(task_id or "").strip()
+        if not task_id:
+            return
+        known_task_id = task_id
+        if on_provider_task_id:
+            result = on_provider_task_id(task_id)
+            if hasattr(result, "__await__"):
+                await result
+
+    async def _refund(stage: str, error: BaseException) -> bool:
+        if charge_tokens <= 0:
+            return False
+        return bool(await asyncio.to_thread(
+            refund_wan3_once,
+            user_id,
+            charge_tokens,
+            reason=refund_reason,
+            ref_id=charge_ref_id,
+            meta={"origin": "telegram_wan3", "stage": stage, "error": str(error)[:300]},
+        ))
+
+    def _check_ref(raw: bytes, file_path: str, kind: str) -> None:
+        name = str(file_path or "").lower()
+        size = len(raw or b"")
+        if kind in {"image", "frame"}:
+            if size > 20 * 1024 * 1024:
+                raise Wan3KieError("Wan 3.0 image reference maximum is 20 MB")
+            if not name.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp")):
+                raise Wan3KieError("Wan 3.0 image reference must be JPG, PNG, WEBP or BMP")
+        elif kind == "video":
+            if size > 100 * 1024 * 1024:
+                raise Wan3KieError("Wan 3.0 video reference maximum is 100 MB")
+            if not name.endswith((".mp4", ".mov")):
+                raise Wan3KieError("Wan 3.0 video reference must be MP4 or MOV")
+        elif kind == "audio":
+            if size > 15 * 1024 * 1024:
+                raise Wan3KieError("Wan 3.0 audio reference maximum is 15 MB")
+            if not name.endswith((".mp3", ".wav")):
+                raise Wan3KieError("Wan 3.0 audio reference must be MP3 or WAV")
+
+    try:
+        if known_task_id:
+            provider_video_url = await run_wan3_video(
+                user_id=user_id, prompt=prompt or "resume", resolution=resolution, duration=duration,
+                aspect_ratio=aspect_ratio, audio=enable_audio, resume_task_id=known_task_id,
+                on_task_id=_persist_task_id,
+            )
+        else:
+            first_frame = None
+            last_frame = None
+            image_urls: List[str] = []
+            video_urls: List[str] = []
+            audio_urls: List[str] = []
+
+            if mode == "image_to_video":
+                frame_ids = [str(x or "").strip() for x in (job.get("image_file_ids") or []) if str(x or "").strip()][:2]
+                if not frame_ids:
+                    raise Wan3KieError("Wan 3.0 First / Last Frame requires the first image")
+                first_frame, first_name = await _tg_download_file_id(frame_ids[0])
+                _check_ref(first_frame, first_name, "frame")
+                if len(frame_ids) > 1:
+                    last_frame, last_name = await _tg_download_file_id(frame_ids[1])
+                    _check_ref(last_frame, last_name, "frame")
+            elif mode == "omni_reference":
+                image_ids = [str(x or "").strip() for x in (job.get("image_file_ids") or []) if str(x or "").strip()][:10]
+                video_ids = [str(x or "").strip() for x in (job.get("video_file_ids") or []) if str(x or "").strip()][:5]
+                audio_ids = [str(x or "").strip() for x in (job.get("audio_file_ids") or []) if str(x or "").strip()][:5]
+                if not (image_ids or video_ids or audio_ids):
+                    raise Wan3KieError("Wan 3.0 Omni Reference requires at least one reference")
+
+                # Upload sequentially. At most one Telegram source file is held in RAM
+                # at a time, which matters for 100 MB video references.
+                for idx, file_id in enumerate(image_ids, start=1):
+                    raw, file_path = await _tg_download_file_id(file_id)
+                    _check_ref(raw, file_path, "image")
+                    image_urls.append(upload_wan3_reference_bytes(user_id, "image", idx, raw, filename=file_path))
+                    del raw
+                for idx, file_id in enumerate(video_ids, start=1):
+                    raw, file_path = await _tg_download_file_id(file_id, timeout=900.0)
+                    _check_ref(raw, file_path, "video")
+                    video_urls.append(upload_wan3_reference_bytes(user_id, "video", idx, raw, filename=file_path))
+                    del raw
+                for idx, file_id in enumerate(audio_ids, start=1):
+                    raw, file_path = await _tg_download_file_id(file_id)
+                    _check_ref(raw, file_path, "audio")
+                    audio_urls.append(upload_wan3_reference_bytes(user_id, "audio", idx, raw, filename=file_path))
+                    del raw
+            elif mode != "text_to_video":
+                raise Wan3KieError(f"Unsupported Wan 3.0 mode: {mode}")
+
+            provider_video_url = await run_wan3_video(
+                user_id=user_id,
+                prompt=prompt,
+                resolution=resolution,
+                duration=duration,
+                aspect_ratio=aspect_ratio,
+                audio=enable_audio,
+                first_frame=first_frame,
+                last_frame=last_frame,
+                reference_image_urls=image_urls,
+                reference_video_urls=video_urls,
+                reference_audio_urls=audio_urls,
+                on_task_id=_persist_task_id,
+            )
+
+        if not provider_video_url:
+            raise Wan3TaskPendingError(f"Wan 3.0 returned no result URL for taskId={known_task_id or 'unknown'}")
+        try:
+            await _tg_send_video_url(chat_id, provider_video_url, caption="✅ Wan 3.0 готов")
+        except Exception as exc:
+            # Provider already succeeded. Retry delivery using the same taskId; never refund.
+            raise Wan3TaskPendingError(f"Wan 3.0 result delivery needs retry: {exc}") from exc
+        return True
+
+    except Wan3TaskPendingError:
+        raise
+    except Wan3TaskFailedError as exc:
+        # Explicit provider terminal failure. Refund is idempotent; delivery errors
+        # after refund do not justify another provider generation.
+        await _refund("provider_terminal_fail", exc)
+        try:
+            await _tg_send_message(chat_id, f"❌ Wan 3.0 не смог создать видео. Токены возвращены.\n{str(exc)[:700]}")
+        except Exception:
+            pass
+        return False
+    except Exception as exc:
+        if known_task_id or provider_video_url:
+            raise Wan3TaskPendingError(
+                f"Wan 3.0 task/result needs retry without refund; taskId={known_task_id or 'unknown'}: {exc}"
+            ) from exc
+        # No provider task exists, so a local/pre-create failure is safe to refund.
+        await _refund("before_provider_task", exc)
+        try:
+            await _tg_send_message(chat_id, f"❌ Wan 3.0: {str(exc)[:800]}\nТокены возвращены.")
+        except Exception:
+            pass
+        return False
 
 
 async def process_tg_veo_relax_video_job(job: Dict[str, Any]) -> None:
