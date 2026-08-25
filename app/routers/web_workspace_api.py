@@ -96,6 +96,10 @@ from app.services.legal_consent_service import (
 )
 from billing_db import add_tokens, ensure_user_row, get_balance, get_balance_history, ledger_ref_exists
 from seedance25_billing import refund_seedance25_once
+from wan3_billing import (
+    Wan3InsufficientBalanceError, charge_wan3_once, mark_wan3_refund_pending, refund_wan3_once,
+)
+from wan3_queue_guard import wan3_queue_conflicts
 from subscriptions_db import get_current_subscription, get_subscription_plan
 from free_plan_limits import (
     FEATURE_CHAT,
@@ -401,6 +405,12 @@ from seedance_25_kie import (
     normalize_seedance25_aspect_ratio, normalize_seedance25_duration, normalize_seedance25_mode, normalize_seedance25_resolution,
     run_seedance25_omni_reference, run_seedance25_omni_reference_urls, run_seedance25_text_to_video, seedance25_pricing_breakdown,
 )
+from wan3_kie import (
+    Wan3TaskFailedError, Wan3TaskPendingError,
+    WAN3_ALLOWED_FILE_EXTS, WAN3_MAX_FILE_BYTES,
+    normalize_wan3_aspect_ratio, normalize_wan3_duration, normalize_wan3_mode, normalize_wan3_resolution,
+    run_wan3_video, upload_wan3_file_reference_bytes, upload_wan3_reference_bytes, wan3_pricing_breakdown,
+)
 from seedance_kie import (
     SeedanceKieError,
     normalize_seedance_kie_aspect_ratio,
@@ -514,6 +524,13 @@ WORKSPACE_GROK15_QUEUE_NAME = (os.getenv("WORKSPACE_GROK15_QUEUE_NAME", "workspa
 KLING3_KIE_QUEUE_NAME = (os.getenv("KLING3_KIE_QUEUE_NAME", "kling3_kie") or "kling3_kie").strip() or "kling3_kie"
 WORKSPACE_VEO_RELAX_QUEUE_NAME = (os.getenv("WORKSPACE_VEO_RELAX_QUEUE_NAME", "workspace_veo_relax") or "workspace_veo_relax").strip() or "workspace_veo_relax"
 SEEDANCE25_QUEUE_NAME = (os.getenv("SEEDANCE25_QUEUE_NAME", "seedance25") or "seedance25").strip() or "seedance25"
+WAN3_QUEUE_NAME = (os.getenv("WAN3_QUEUE_NAME", "wan3") or "wan3").strip() or "wan3"
+TG_TTS_QUEUE_NAME = (os.getenv("TG_TTS_QUEUE_NAME", "workspace_tg_tts") or "workspace_tg_tts").strip() or "workspace_tg_tts"
+
+
+def _wan3_queue_conflicts() -> List[str]:
+    """Return every project queue that conflicts with Wan's dedicated queue."""
+    return wan3_queue_conflicts(WAN3_QUEUE_NAME)
 
 def _env_non_negative_int(name: str, default: int) -> int:
     try:
@@ -2104,6 +2121,8 @@ def _normalize_workspace_video_resolution(provider: str, model: str, resolution:
         return normalize_gemini_omni_resolution(value or "1080p")
     if provider == "seedance25":
         return normalize_seedance25_resolution("480p" if "480" in str(model or "").lower() else "720p")
+    if provider == "wan3":
+        return normalize_wan3_resolution(value or "720p")
     if provider == "seedance_kie":
         normalized_model = normalize_seedance_kie_model(model)
         return seedance_kie_resolution(normalized_model)
@@ -2491,6 +2510,48 @@ async def _workspace_seedance25_refund_once(*, user_id: int, tokens: int, reason
     )
 
 
+async def _workspace_wan3_refund_once(*, user_id: int, tokens: int, reason: str, ref_id: str, meta: Dict[str, Any]) -> bool:
+    if int(tokens or 0) <= 0:
+        return False
+    stable_ref = str(ref_id or "").strip()
+    if not stable_ref:
+        raise RuntimeError("Wan 3.0 workspace refund requires charge_ref_id")
+    return await asyncio.to_thread(
+        refund_wan3_once,
+        int(user_id),
+        int(tokens),
+        reason=str(reason),
+        ref_id=stable_ref,
+        meta=dict(meta or {}),
+    )
+
+
+async def _workspace_wan3_refund_or_pending(
+    *, user_id: int, tokens: int, reason: str, ref_id: str, generation_id: str, stage: str, error: BaseException
+) -> None:
+    """Refund Wan or raise a retryable error so the reliable job cannot be ACKed."""
+    try:
+        await _workspace_wan3_refund_once(
+            user_id=int(user_id), tokens=int(tokens), reason=str(reason or "wan3_video_refund"), ref_id=ref_id,
+            meta={"origin": "workspace_video", "generation_id": generation_id, "stage": stage, "error": str(error)[:300]},
+        )
+    except Exception as refund_exc:
+        try:
+            _update_workspace_generation(
+                generation_id,
+                {
+                    "status": "failed",
+                    "error_code": "refund_pending",
+                    "error_message": f"{str(error)[:700]} | token refund pending: {str(refund_exc)[:250]}",
+                },
+            )
+        except Exception:
+            pass
+        raise Wan3TaskPendingError(
+            f"Wan 3.0 token refund is pending and the reliable job must retry: {refund_exc}"
+        ) from refund_exc
+
+
 async def _run_workspace_video_job(
     *,
     generation_id: str,
@@ -2518,6 +2579,8 @@ async def _run_workspace_video_job(
     reference_image_urls_direct: Optional[List[str]] = None,
     reference_audio_urls_direct: Optional[List[str]] = None,
     reference_video_urls_direct: Optional[List[str]] = None,
+    reference_link_urls_direct: Optional[List[str]] = None,
+    reference_file_urls_direct: Optional[List[str]] = None,
     switchx_alpha_mode: Optional[str] = None,
     switchx_select_mask_url: Optional[str] = None,
     charge_tokens: int = 0,
@@ -2526,7 +2589,7 @@ async def _run_workspace_video_job(
     resume_task_id: str = "",
     provider_task_id_callback: Optional[Any] = None,
 ) -> bool:
-    if provider == "seedance25" and not str(resume_task_id or "").strip() and supabase is not None:
+    if provider in {"seedance25", "wan3"} and not str(resume_task_id or "").strip() and supabase is not None:
         try:
             existing = (
                 supabase.table(_WORKSPACE_VIDEO_GENERATIONS_TABLE)
@@ -2541,7 +2604,7 @@ async def _run_workspace_video_job(
                 resume_task_id = str((rows[0] or {}).get("task_id") or "").strip()
         except Exception:
             pass
-    seedance25_task_id = str(resume_task_id or "").strip() if provider == "seedance25" else ""
+    seedance25_task_id = str(resume_task_id or "").strip() if provider in {"seedance25", "wan3"} else ""
     try:
         provider_mode = normalize_grok_provider_mode(provider_mode or "normal")
         provider_video_url: Optional[str] = None
@@ -2591,7 +2654,7 @@ async def _run_workspace_video_job(
             if db_ok or redis_ok:
                 return
             raise RuntimeError(
-                "Seedance 2.5 taskId could not be persisted to workspace DB or reliable Redis: "
+                f"{'Wan 3.0' if provider == 'wan3' else 'Seedance 2.5'} taskId could not be persisted to workspace DB or reliable Redis: "
                 f"db={db_error}; redis={redis_error}"
             )
 
@@ -2866,6 +2929,33 @@ async def _run_workspace_video_job(
             _update_workspace_generation(generation_id, {"task_id": str(pixverse_video_id), "status": "processing"})
             provider_video_url = await wait_for_pixverse_video(pixverse_video_id)
 
+        elif provider == "wan3":
+            direct_images = [str(x or "").strip() for x in (reference_image_urls_direct or []) if str(x or "").strip()]
+            direct_videos = [str(x or "").strip() for x in (reference_video_urls_direct or []) if str(x or "").strip()]
+            direct_audios = [str(x or "").strip() for x in (reference_audio_urls_direct or []) if str(x or "").strip()]
+            direct_links = [str(x or "").strip() for x in (reference_link_urls_direct or []) if str(x or "").strip()]
+            direct_files = [str(x or "").strip() for x in (reference_file_urls_direct or []) if str(x or "").strip()]
+            provider_video_url = await run_wan3_video(
+                user_id=user_id,
+                prompt=prompt,
+                resolution=resolution,
+                duration=duration,
+                aspect_ratio=aspect_ratio,
+                audio=bool(enable_audio),
+                first_frame=start_frame if mode == "image_to_video" else None,
+                last_frame=last_frame if mode == "image_to_video" else None,
+                reference_images=reference_images if mode == "omni_reference" and not direct_images else None,
+                reference_videos=reference_video_clips if mode == "omni_reference" and not direct_videos else None,
+                reference_audios=reference_audio_clips if mode == "omni_reference" and not direct_audios else None,
+                reference_image_urls=direct_images if mode == "omni_reference" else None,
+                reference_video_urls=direct_videos if mode == "omni_reference" else None,
+                reference_audio_urls=direct_audios if mode == "omni_reference" else None,
+                reference_link_urls=direct_links if mode == "omni_reference" else None,
+                reference_file_urls=direct_files if mode == "omni_reference" else None,
+                on_task_id=_persist_seedance_kie_task_id,
+                resume_task_id=resume_task_id,
+            )
+
         elif provider == "seedance25":
             if mode == "omni_reference":
                 direct_images = [str(x or "").strip() for x in (reference_image_urls_direct or []) if str(x or "").strip()]
@@ -3101,6 +3191,27 @@ async def _run_workspace_video_job(
             provider_video_url=provider_video_url,
         )
         return True
+    except Wan3TaskPendingError as e:
+        if provider == "wan3":
+            try:
+                patch = {"status": "processing", "error_code": "provider_pending", "error_message": str(e)[:1000]}
+                if seedance25_task_id:
+                    patch["task_id"] = seedance25_task_id
+                if provider_video_url:
+                    patch["provider_video_url"] = provider_video_url
+                _update_workspace_generation(generation_id, patch)
+            except Exception:
+                pass
+        raise
+    except Wan3TaskFailedError as e:
+        _mark_workspace_generation_failed(generation_id, str(e), error_code="provider_error")
+        if int(charge_tokens or 0) > 0:
+            await _workspace_wan3_refund_or_pending(
+                user_id=int(user_id), tokens=int(charge_tokens),
+                reason=str(refund_reason or "wan3_video_refund"), ref_id=charge_ref_id,
+                generation_id=generation_id, stage="provider_terminal_fail", error=e,
+            )
+        return False
     except Seedance25TaskPendingError as e:
         # taskId already exists; status/result is temporarily unknown. Do NOT
         # refund and do NOT mark failed. Let the reliable worker leave this entry
@@ -3135,7 +3246,7 @@ async def _run_workspace_video_job(
                 pass
         return False
     except (Kling3Error, KlingFlowError, VeoFlowError, Veo31FastRelaxError, GrokVideoError, PixVerseC1Error, SwitchXError, ValueError, RuntimeError, TimeoutError) as e:
-        if provider == "seedance25" and (seedance25_task_id or str(provider_video_url or "").strip()):
+        if provider in {"seedance25", "wan3"} and (seedance25_task_id or str(provider_video_url or "").strip()):
             # Unknown/local error after createTask or after provider success. KIE may
             # already have charged us; preserve processing state and retry/resume.
             try:
@@ -3147,30 +3258,36 @@ async def _run_workspace_video_job(
                 _update_workspace_generation(generation_id, patch)
             except Exception:
                 pass
-            raise Seedance25TaskPendingError(
-                f"Seedance 2.5 task/result needs retry without refund: {e}"
-            ) from e
+            pending_cls = Wan3TaskPendingError if provider == "wan3" else Seedance25TaskPendingError
+            raise pending_cls(f"{'Wan 3.0' if provider == 'wan3' else 'Seedance 2.5'} task/result needs retry without refund: {e}") from e
         _mark_workspace_generation_failed(generation_id, str(e), error_code="provider_error")
         if int(charge_tokens or 0) > 0:
-            try:
-                if provider == "seedance25":
-                    await _workspace_seedance25_refund_once(
-                        user_id=int(user_id), tokens=int(charge_tokens),
-                        reason=str(refund_reason or "workspace_video_refund"), ref_id=charge_ref_id,
-                        meta={"origin": "workspace_video", "generation_id": generation_id, "error": str(e)[:300]},
-                    )
-                else:
-                    add_tokens(
-                        int(user_id), int(charge_tokens),
-                        reason=str(refund_reason or "workspace_video_refund"),
-                        ref_id=charge_ref_id or uuid4().hex,
-                        meta={"origin": "workspace_video", "generation_id": generation_id, "error": str(e)[:300]},
-                    )
-            except Exception:
-                pass
+            if provider == "wan3":
+                await _workspace_wan3_refund_or_pending(
+                    user_id=int(user_id), tokens=int(charge_tokens),
+                    reason=str(refund_reason or "wan3_video_refund"), ref_id=charge_ref_id,
+                    generation_id=generation_id, stage="before_provider_task", error=e,
+                )
+            else:
+                try:
+                    if provider == "seedance25":
+                        await _workspace_seedance25_refund_once(
+                            user_id=int(user_id), tokens=int(charge_tokens),
+                            reason=str(refund_reason or "workspace_video_refund"), ref_id=charge_ref_id,
+                            meta={"origin": "workspace_video", "generation_id": generation_id, "error": str(e)[:300]},
+                        )
+                    else:
+                        add_tokens(
+                            int(user_id), int(charge_tokens),
+                            reason=str(refund_reason or "workspace_video_refund"),
+                            ref_id=charge_ref_id or uuid4().hex,
+                            meta={"origin": "workspace_video", "generation_id": generation_id, "error": str(e)[:300]},
+                        )
+                except Exception:
+                    pass
         return False
     except Exception as e:
-        if provider == "seedance25" and (seedance25_task_id or str(provider_video_url or "").strip()):
+        if provider in {"seedance25", "wan3"} and (seedance25_task_id or str(provider_video_url or "").strip()):
             try:
                 patch = {"status": "processing", "error_code": "provider_pending", "error_message": str(e)[:1000]}
                 if seedance25_task_id:
@@ -3180,27 +3297,33 @@ async def _run_workspace_video_job(
                 _update_workspace_generation(generation_id, patch)
             except Exception:
                 pass
-            raise Seedance25TaskPendingError(
-                f"Seedance 2.5 internal post-task error needs retry without refund: {e}"
-            ) from e
+            pending_cls = Wan3TaskPendingError if provider == "wan3" else Seedance25TaskPendingError
+            raise pending_cls(f"{'Wan 3.0' if provider == 'wan3' else 'Seedance 2.5'} internal post-task error needs retry without refund: {e}") from e
         _mark_workspace_generation_failed(generation_id, f"Internal run error: {e}", error_code="internal_error")
         if int(charge_tokens or 0) > 0:
-            try:
-                if provider == "seedance25":
-                    await _workspace_seedance25_refund_once(
-                        user_id=int(user_id), tokens=int(charge_tokens),
-                        reason=str(refund_reason or "workspace_video_refund"), ref_id=charge_ref_id,
-                        meta={"origin": "workspace_video", "generation_id": generation_id, "error": str(e)[:300]},
-                    )
-                else:
-                    add_tokens(
-                        int(user_id), int(charge_tokens),
-                        reason=str(refund_reason or "workspace_video_refund"),
-                        ref_id=charge_ref_id or uuid4().hex,
-                        meta={"origin": "workspace_video", "generation_id": generation_id, "error": str(e)[:300]},
-                    )
-            except Exception:
-                pass
+            if provider == "wan3":
+                await _workspace_wan3_refund_or_pending(
+                    user_id=int(user_id), tokens=int(charge_tokens),
+                    reason=str(refund_reason or "wan3_video_refund"), ref_id=charge_ref_id,
+                    generation_id=generation_id, stage="before_provider_task", error=e,
+                )
+            else:
+                try:
+                    if provider == "seedance25":
+                        await _workspace_seedance25_refund_once(
+                            user_id=int(user_id), tokens=int(charge_tokens),
+                            reason=str(refund_reason or "workspace_video_refund"), ref_id=charge_ref_id,
+                            meta={"origin": "workspace_video", "generation_id": generation_id, "error": str(e)[:300]},
+                        )
+                    else:
+                        add_tokens(
+                            int(user_id), int(charge_tokens),
+                            reason=str(refund_reason or "workspace_video_refund"),
+                            ref_id=charge_ref_id or uuid4().hex,
+                            meta={"origin": "workspace_video", "generation_id": generation_id, "error": str(e)[:300]},
+                        )
+                except Exception:
+                    pass
         return False
 
 
@@ -5530,6 +5653,18 @@ def _workspace_video_charge_spec(
             },
         }
 
+    if provider == "wan3":
+        normalized_mode = normalize_wan3_mode(mode)
+        normalized_duration = normalize_wan3_duration(duration)
+        normalized_resolution = normalize_wan3_resolution(resolution or "720p")
+        breakdown = wan3_pricing_breakdown(normalized_resolution, normalized_duration)
+        return {
+            "tokens": int(breakdown["tokens"]), "charge_reason": "wan3_video", "refund_reason": "wan3_video_refund",
+            "meta": {"origin": "workspace_video", "provider": provider, "model": "wan3.0-video", "mode": normalized_mode,
+                     "duration": normalized_duration, "resolution": normalized_resolution, "generate_audio": bool(enable_audio),
+                     "tokens_per_sec": breakdown.get("tokens_per_sec")},
+        }
+
     if provider == "seedance25":
         normalized_mode = normalize_seedance25_mode(mode)
         normalized_duration = normalize_seedance25_duration(duration)
@@ -5670,9 +5805,20 @@ async def workspace_video_run(
     if not prompt:
         raise HTTPException(status_code=400, detail="Missing prompt")
 
-    supported = {"kling", "veo", "grok", "google", "seedance", "seedance_kie", "seedance25", "sora", "switchx", "pixverse_c1"}
+    supported = {"kling", "veo", "grok", "google", "seedance", "seedance_kie", "seedance25", "wan3", "sora", "switchx", "pixverse_c1"}
     if provider not in supported:
         raise HTTPException(status_code=400, detail=f"Provider {provider} is not supported in /video/run yet")
+    if provider == "wan3":
+        queue_conflicts = _wan3_queue_conflicts()
+        if queue_conflicts:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Wan 3.0 queue misconfigured: WAN3_QUEUE_NAME overlaps "
+                    + ", ".join(queue_conflicts)
+                    + ". Tokens were not charged."
+                ),
+            )
 
     start_file = form.get("start_frame")
     end_file = form.get("end_frame")
@@ -5684,6 +5830,8 @@ async def workspace_video_run(
     ref_files = [f for f in form.getlist("reference_images") if getattr(f, "filename", None)]
     ref_audio_files = [f for f in form.getlist("reference_audios") if getattr(f, "filename", None)]
     ref_video_files = [f for f in form.getlist("reference_videos") if getattr(f, "filename", None)]
+    wan3_reference_link_url = str(form.get("reference_link_url") or "").strip()
+    wan3_reference_file = form.get("reference_file")
     source_video_upload_id = str(form.get("source_video_upload_id") or "").strip()
     direct_reference_image_url = str(form.get("reference_image_url") or "").strip()
     switchx_alpha_mode = _normalize_switchx_alpha_mode(form.get("switchx_alpha_mode"))
@@ -5712,6 +5860,7 @@ async def workspace_video_run(
             motion_duration_detected = True
     source_video = await _read_optional(source_video_file)
     switchx_select_mask = await _read_optional(switchx_select_mask_file)
+    wan3_reference_file_raw = await _read_optional(wan3_reference_file) if provider == "wan3" else None
     print("[switchx form]", {
         "provider": provider,
         "mode": mode,
@@ -5727,6 +5876,17 @@ async def workspace_video_run(
     for rf in ref_files:
         raw = await rf.read()
         if raw:
+            if provider == "wan3":
+                is_wan_image = (
+                    raw.startswith(b"\x89PNG\r\n\x1a\n")
+                    or raw.startswith(b"\xff\xd8\xff")
+                    or (raw.startswith(b"RIFF") and len(raw) >= 12 and raw[8:12] == b"WEBP")
+                    or raw.startswith(b"BM")
+                )
+                if not is_wan_image:
+                    raise HTTPException(status_code=400, detail="Wan 3.0 image refs: только JPEG, PNG, WEBP или BMP.")
+                if len(raw) > 20 * 1024 * 1024:
+                    raise HTTPException(status_code=400, detail="Wan 3.0 image reference максимум 20 МБ.")
             if provider == "seedance25" and not (raw.startswith(b"\x89PNG\r\n\x1a\n") or raw.startswith(b"\xff\xd8\xff")):
                 raise HTTPException(status_code=400, detail="Для Seedance 2.5 image refs доступны только PNG или JPEG.")
             reference_images.append(raw)
@@ -5739,9 +5899,9 @@ async def workspace_video_run(
         if not raw:
             continue
         normalized_audio, normalized_ext, _duration_sec = _prepare_seedance_audio_file(
-            af, raw, max_duration_sec=(30.0 if provider == "seedance25" else SEEDANCE_AUDIO_MAX_DURATION_SEC),
-            min_duration_sec=(2.0 if provider == "seedance25" else 0.0), strict_mp3_wav=(provider == "seedance25"),
-            max_upload_bytes=(15 * 1024 * 1024 if provider == "seedance25" else None),
+            af, raw, max_duration_sec=(15.0 if provider == "wan3" else (30.0 if provider == "seedance25" else SEEDANCE_AUDIO_MAX_DURATION_SEC)),
+            min_duration_sec=(1.0 if provider == "wan3" else (2.0 if provider == "seedance25" else 0.0)), strict_mp3_wav=(provider in {"seedance25", "wan3"}),
+            max_upload_bytes=(15 * 1024 * 1024 if provider in {"seedance25", "wan3"} else None),
         )
         reference_audios.append(normalized_audio)
         reference_audio_total_duration_sec += float(_duration_sec or 0.0)
@@ -5758,9 +5918,9 @@ async def workspace_video_run(
         if not raw:
             continue
         normalized_video, normalized_ext, duration_sec = _prepare_seedance_video_file(
-            vf, raw, max_duration_sec=(30.0 if provider == "seedance25" else SEEDANCE_VIDEO_TOTAL_MAX_DURATION_SEC),
-            min_duration_sec=(2.0 if provider == "seedance25" else 0.0), mp4_only=(provider == "seedance25"),
-            max_upload_bytes=(200 * 1024 * 1024 if provider == "seedance25" else None),
+            vf, raw, max_duration_sec=(15.0 if provider == "wan3" else (30.0 if provider == "seedance25" else SEEDANCE_VIDEO_TOTAL_MAX_DURATION_SEC)),
+            min_duration_sec=(1.0 if provider == "wan3" else (2.0 if provider == "seedance25" else 0.0)), mp4_only=(provider == "seedance25"),
+            max_upload_bytes=(100 * 1024 * 1024 if provider == "wan3" else (200 * 1024 * 1024 if provider == "seedance25" else None)),
             strict_seedance25_media=(provider == "seedance25"),
         )
         reference_videos.append(normalized_video)
@@ -5903,6 +6063,55 @@ async def workspace_video_run(
             last_frame = None
         reference_audios = []
         reference_videos = []
+
+    if provider == "wan3":
+        model = "wan3.0-video"
+        mode = normalize_wan3_mode(mode)
+        duration = normalize_wan3_duration(duration)
+        resolution = normalize_wan3_resolution(resolution or "720p")
+        aspect_ratio = normalize_wan3_aspect_ratio(aspect_ratio or "adaptive")
+        if len(prompt) > 20000:
+            raise HTTPException(status_code=400, detail="Wan 3.0: prompt максимум 20 000 символов.")
+        if wan3_reference_link_url and wan3_reference_file_raw:
+            raise HTTPException(status_code=400, detail="Wan 3.0: webpage reference и file reference нельзя использовать одновременно.")
+        if wan3_reference_link_url and not wan3_reference_link_url.lower().startswith(("http://", "https://")):
+            raise HTTPException(status_code=400, detail="Wan 3.0: webpage reference должен быть публичным http(s) URL.")
+        if wan3_reference_file_raw:
+            if len(wan3_reference_file_raw) > WAN3_MAX_FILE_BYTES:
+                raise HTTPException(status_code=400, detail="Wan 3.0: file reference максимум 100 МБ.")
+            suffix = Path(str(getattr(wan3_reference_file, "filename", None) or "")).suffix.lower()
+            if suffix not in WAN3_ALLOWED_FILE_EXTS:
+                raise HTTPException(status_code=400, detail="Wan 3.0: file reference поддерживает DOC/DOCX, XLS/XLSX, PPT/PPTX, PDF, TXT, KEY, PAGES, NUMBERS, MD.")
+        if mode == "image_to_video":
+            if not start_frame:
+                raise HTTPException(status_code=400, detail="Для Wan 3.0 Image→Video нужен первый кадр.")
+            if wan3_reference_link_url or wan3_reference_file_raw:
+                raise HTTPException(status_code=400, detail="Wan 3.0: webpage/file reference нельзя совмещать с first/last frame.")
+            for frame_name, frame_raw in (("first", start_frame), ("last", last_frame)):
+                if frame_raw:
+                    if len(frame_raw) > 20 * 1024 * 1024:
+                        raise HTTPException(status_code=400, detail=f"Wan 3.0: {frame_name} frame максимум 20 МБ.")
+                    if not (frame_raw.startswith(b"\x89PNG\r\n\x1a\n") or frame_raw.startswith(b"\xff\xd8\xff") or (frame_raw.startswith(b"RIFF") and len(frame_raw) >= 12 and frame_raw[8:12] == b"WEBP") or frame_raw.startswith(b"BM")):
+                        raise HTTPException(status_code=400, detail=f"Wan 3.0: {frame_name} frame должен быть JPEG, PNG, WEBP или BMP.")
+            reference_images = []; reference_audios = []; reference_videos = []
+            end_frame = None
+        elif mode == "omni_reference":
+            if start_frame or last_frame:
+                raise HTTPException(status_code=400, detail="Wan 3.0: first/last frame нельзя совмещать с Omni Reference.")
+            if len(reference_images) + len(reference_videos) + len(reference_audios) + int(bool(wan3_reference_link_url)) + int(bool(wan3_reference_file_raw)) < 1:
+                raise HTTPException(status_code=400, detail="Для Wan 3.0 Omni Reference нужен хотя бы один reference.")
+            if len(reference_images) > 10: raise HTTPException(status_code=400, detail="Wan 3.0: максимум 10 image references.")
+            if len(reference_videos) > 5: raise HTTPException(status_code=400, detail="Wan 3.0: максимум 5 video references.")
+            if len(reference_audios) > 5: raise HTTPException(status_code=400, detail="Wan 3.0: максимум 5 audio references.")
+            if any(len(raw or b"") > 20 * 1024 * 1024 for raw in reference_images): raise HTTPException(status_code=400, detail="Wan 3.0: image reference максимум 20 МБ.")
+            if reference_video_total_duration_sec > 15.0: raise HTTPException(status_code=400, detail="Wan 3.0: суммарная длительность video references максимум 15 секунд.")
+            if reference_audio_total_duration_sec > 15.0: raise HTTPException(status_code=400, detail="Wan 3.0: суммарная длительность audio references максимум 15 секунд.")
+            if reference_video_total_duration_sec + float(duration) > 30.0: raise HTTPException(status_code=400, detail="Wan 3.0: output duration + input video duration должно быть не больше 30 секунд.")
+            start_frame = None; end_frame = None; last_frame = None
+        else:
+            start_frame = None; end_frame = None; last_frame = None
+            reference_images = []; reference_audios = []; reference_videos = []
+            wan3_reference_link_url = ""; wan3_reference_file_raw = None
 
     if provider == "seedance25":
         mode = normalize_seedance25_mode(mode)
@@ -6119,8 +6328,21 @@ async def workspace_video_run(
 
     charged = False
     generation_id: Optional[str] = None
+    wan3_job_id = uuid4().hex if provider == "wan3" else ""
+    wan3_enqueue_started = False
+    wan3_enqueue_confirmed = False
     try:
-        if cost_tokens > 0 and charge_reason:
+        if provider == "wan3":
+            charge_meta.update({
+                "wan3_job_id": wan3_job_id,
+                "wan3_queue_name": WAN3_QUEUE_NAME,
+                "wan3_refund_pending": False,
+                "wan3_refund_reason": refund_reason,
+            })
+        # Wan 3.0 uploads can be large. Build/persist all inputs before charging so
+        # the charged->enqueue interval stays tiny and the orphan reconciler can
+        # safely treat a missing Redis marker as a genuinely unqueued charge.
+        if provider != "wan3" and cost_tokens > 0 and charge_reason:
             try:
                 add_tokens(uid, -int(cost_tokens), reason=charge_reason, ref_id=charge_ref_id, meta=charge_meta)
             except TypeError:
@@ -6143,15 +6365,26 @@ async def workspace_video_run(
             }
         )
 
-        start_frame_url = _upload_workspace_input_image(uid, start_frame, filename=getattr(start_file, "filename", None), slot="video_start_frame") if start_frame else None
-        end_frame_url = _upload_workspace_input_image(uid, end_frame, filename=getattr(end_file, "filename", None), slot="video_end_frame") if end_frame else None
-        last_frame_url = _upload_workspace_input_image(uid, last_frame, filename=getattr(last_file, "filename", None), slot="video_last_frame") if last_frame else None
+        if provider == "wan3":
+            start_frame_url = upload_wan3_reference_bytes(uid, "frame", 1, start_frame, filename=getattr(start_file, "filename", None) or "") if start_frame else None
+            end_frame_url = None
+            last_frame_url = upload_wan3_reference_bytes(uid, "frame", 2, last_frame, filename=getattr(last_file, "filename", None) or "") if last_frame else None
+            reference_image_urls = [
+                upload_wan3_reference_bytes(uid, "image", idx + 1, raw, filename=getattr(ref_files[idx], "filename", None) if idx < len(ref_files) else "")
+                for idx, raw in enumerate(reference_images) if raw
+            ]
+            wan3_reference_file_url = upload_wan3_file_reference_bytes(uid, wan3_reference_file_raw, filename=getattr(wan3_reference_file, "filename", None) or "") if wan3_reference_file_raw else ""
+        else:
+            start_frame_url = _upload_workspace_input_image(uid, start_frame, filename=getattr(start_file, "filename", None), slot="video_start_frame") if start_frame else None
+            end_frame_url = _upload_workspace_input_image(uid, end_frame, filename=getattr(end_file, "filename", None), slot="video_end_frame") if end_frame else None
+            last_frame_url = _upload_workspace_input_image(uid, last_frame, filename=getattr(last_file, "filename", None), slot="video_last_frame") if last_frame else None
+            reference_image_urls = [
+                _upload_workspace_input_image(uid, raw, filename=getattr(ref_files[idx], "filename", None) if idx < len(ref_files) else None, slot=f"video_reference_{idx + 1}")
+                for idx, raw in enumerate(reference_images)
+                if raw
+            ]
+            wan3_reference_file_url = ""
         avatar_image_url = _upload_workspace_input_image(uid, avatar_image, filename=getattr(avatar_file, "filename", None), slot="video_avatar_image") if avatar_image else None
-        reference_image_urls = [
-            _upload_workspace_input_image(uid, raw, filename=getattr(ref_files[idx], "filename", None) if idx < len(ref_files) else None, slot=f"video_reference_{idx + 1}")
-            for idx, raw in enumerate(reference_images)
-            if raw
-        ]
         reference_audio_upload_ids: List[str] = []
         for idx, raw in enumerate(reference_audios):
             upload_row = create_workspace_upload_record(
@@ -6228,7 +6461,7 @@ async def workspace_video_run(
             kling3_kie_elements = normalize_kling3_kie_elements(enriched_elements)
 
         job = {
-            "job_id": uuid4().hex,
+            "job_id": (wan3_job_id or uuid4().hex),
             "kind": "workspace_video_run",
             "generation_id": generation_id,
             "user_id": uid,
@@ -6250,6 +6483,8 @@ async def workspace_video_run(
             "source_video_upload_id": source_video_upload_id,
             "reference_image_url": switchx_reference_image_url,
             "reference_image_urls": reference_image_urls,
+            "reference_link_urls": ([wan3_reference_link_url] if provider == "wan3" and wan3_reference_link_url else []),
+            "reference_file_urls": ([wan3_reference_file_url] if provider == "wan3" and wan3_reference_file_url else []),
             "switchx_alpha_mode": switchx_alpha_mode if provider == "switchx" else None,
             "switchx_select_mask_url": switchx_select_mask_url,
             "reference_audio_upload_ids": reference_audio_upload_ids,
@@ -6261,14 +6496,15 @@ async def workspace_video_run(
             "delayed_start_sec": int(veo_relax_delay_sec or 0),
         }
 
-        if provider == "seedance25":
-            # All Seedance 2.5 refs are persisted in storage/upload records at
+        if provider in {"seedance25", "wan3"}:
+            # KIE refs are persisted in storage/upload records at
             # this point. Release request-body bytes before enqueueing so the
             # web process does not retain large Omni media longer than needed.
             reference_images.clear()
             reference_audios.clear()
             reference_videos.clear()
             start_frame = end_frame = last_frame = avatar_image = motion_video = source_video = switchx_select_mask = None
+            wan3_reference_file_raw = None
             raw = None
 
         if provider == "kling" and model == "kling-3.0-new":
@@ -6285,12 +6521,38 @@ async def workspace_video_run(
             target_queue = KLING3_KIE_QUEUE_NAME
         elif provider == "seedance25":
             target_queue = SEEDANCE25_QUEUE_NAME
+        elif provider == "wan3":
+            target_queue = WAN3_QUEUE_NAME
         else:
             target_queue = WORKSPACE_MEDIA_QUEUE_NAME
         if int(veo_relax_delay_sec or 0) > 0:
             await enqueue_job_delayed(job, delay_sec=int(veo_relax_delay_sec or 0), queue_name=target_queue)
-        elif provider == "seedance25":
-            await enqueue_reliable_job(job, queue_name=target_queue)
+        elif provider in {"seedance25", "wan3"}:
+            if provider == "wan3":
+                # Charge only after all reference uploads and job construction have
+                # succeeded. From here to the atomic Redis XADD+dedupe marker there
+                # are no remote media uploads, which closes the long pre-enqueue gap.
+                if cost_tokens > 0 and charge_reason:
+                    # V5: balance lock + insufficient-funds check + debit + ledger
+                    # insert happen in one PostgreSQL transaction. There is no
+                    # legacy add_tokens fallback for Wan 3.0.
+                    try:
+                        charge_wan3_once(
+                            uid, int(cost_tokens),
+                            ref_id=charge_ref_id, meta=charge_meta,
+                        )
+                    except Wan3InsufficientBalanceError as charge_exc:
+                        raise HTTPException(
+                            status_code=402,
+                            detail=f"Недостаточно токенов. Нужно: {charge_exc.required} ток. Баланс: {charge_exc.balance} ток.",
+                        ) from charge_exc
+                    charged = True
+                    job["charge_tokens"] = int(cost_tokens)
+                wan3_enqueue_started = True
+                await enqueue_reliable_job(job, queue_name=target_queue, dedupe_ttl_sec=0)
+                wan3_enqueue_confirmed = True
+            else:
+                await enqueue_reliable_job(job, queue_name=target_queue)
         else:
             await enqueue_job(job, queue_name=target_queue)
 
@@ -6312,19 +6574,69 @@ async def workspace_video_run(
     except HTTPException:
         raise
     except Exception as e:
+        wan3_recovery_pending = False
         if charged and cost_tokens > 0:
-            try:
-                if provider == "seedance25":
-                    await _workspace_seedance25_refund_once(
-                        user_id=uid, tokens=int(cost_tokens), reason=refund_reason, ref_id=charge_ref_id,
-                        meta={"origin": "workspace_video", "stage": "route", "error": str(e)[:300]},
-                    )
+            if provider == "wan3":
+                if wan3_enqueue_started and not wan3_enqueue_confirmed:
+                    # The Redis Lua enqueue is atomic, but the network response can
+                    # be lost after commit. Defer the decision to the reconciler,
+                    # which checks the reliable dedupe key before any refund.
+                    wan3_recovery_pending = True
+                    # Do not touch charge JSON at this uncertain-commit boundary;
+                    # the worker may already be storing provider_task_id there. The
+                    # original wan3_job_id + Redis atomic dedupe key are sufficient
+                    # for safe reconciliation.
                 else:
-                    add_tokens(uid, int(cost_tokens), reason=refund_reason, ref_id=charge_ref_id or uuid4().hex, meta={"origin": "workspace_video", "stage": "route", "error": str(e)[:300]})
-            except Exception:
-                pass
+                    try:
+                        await _workspace_wan3_refund_once(
+                            user_id=uid, tokens=int(cost_tokens), reason=refund_reason, ref_id=charge_ref_id,
+                            meta={"origin": "workspace_video", "stage": "route", "wan3_job_id": wan3_job_id, "error": str(e)[:300]},
+                        )
+                    except Exception as refund_exc:
+                        wan3_recovery_pending = True
+                        try:
+                            await asyncio.to_thread(
+                                mark_wan3_refund_pending, charge_ref_id,
+                                job_id=wan3_job_id, queue_name=WAN3_QUEUE_NAME,
+                                tokens=int(cost_tokens), refund_reason=refund_reason,
+                                stage="workspace_refund_failed", error=str(refund_exc),
+                            )
+                        except Exception as marker_exc:
+                            print(f"[workspace/wan3] refund-pending marker failed ref={charge_ref_id}: {marker_exc}", flush=True)
+            else:
+                try:
+                    if provider == "seedance25":
+                        await _workspace_seedance25_refund_once(
+                            user_id=uid, tokens=int(cost_tokens), reason=refund_reason, ref_id=charge_ref_id,
+                            meta={"origin": "workspace_video", "stage": "route", "error": str(e)[:300]},
+                        )
+                    else:
+                        add_tokens(uid, int(cost_tokens), reason=refund_reason, ref_id=charge_ref_id or uuid4().hex, meta={"origin": "workspace_video", "stage": "route", "error": str(e)[:300]})
+                except Exception:
+                    pass
         if generation_id:
-            _mark_workspace_generation_failed(generation_id, str(e), error_code="queue_error")
+            if provider == "wan3" and charged and wan3_enqueue_started and not wan3_enqueue_confirmed:
+                # The request does not know whether Redis committed. Keep the DB
+                # record non-terminal: the reliable worker may already own it.
+                try:
+                    _update_workspace_generation(generation_id, {
+                        "status": "queued",
+                        "error_code": "queue_reconcile_pending",
+                        "error_message": str(e)[:1000],
+                    })
+                except Exception:
+                    pass
+            else:
+                _mark_workspace_generation_failed(
+                    generation_id,
+                    str(e),
+                    error_code=("refund_pending" if provider == "wan3" and wan3_recovery_pending else "queue_error"),
+                )
+        if provider == "wan3" and wan3_recovery_pending:
+            raise HTTPException(
+                status_code=503,
+                detail="Wan 3.0 queue state is being reconciled automatically. The job will continue if Redis accepted it; otherwise tokens will be refunded.",
+            )
         raise HTTPException(status_code=500, detail=f"Video run failed: {e}")
 
 
