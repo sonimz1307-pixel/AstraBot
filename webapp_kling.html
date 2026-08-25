@@ -606,6 +606,13 @@
           </div>
         </label>
 
+        <input id="provider_wan3" type="radio" name="provider" value="wan3">
+        <label for="provider_wan3" aria-label="Wan 3.0">
+          <img class="pimg" src="/static/img/providers/seedance.png" alt="Wan 3.0">
+          <div class="poverlay"></div>
+          <div class="ptxt"><div class="pname">Wan 3.0</div><div class="pnote">KIE</div></div>
+        </label>
+
         <input id="provider_sora" type="radio" name="provider" value="sora">
         <label for="provider_sora" aria-label="Sora 2">
           <img class="pimg" src="/static/img/providers/sora2.png" alt="Sora 2">
@@ -1124,6 +1131,43 @@
         </div>
 
         <div id="omni_hint" class="hint">Длительности только 6 / 8 / 10 сек.</div>
+      </div>
+    </div>
+
+    <!-- ===================== WAN 3.0 BLOCK ===================== -->
+    <div id="wan3Block" style="display:none;">
+      <div class="card">
+        <h3>Wan 3.0 Video</h3>
+        <div class="hint">Обычный Wan 3.0 2–30 сек. Аналог Seedance</div>
+      </div>
+      <div class="card">
+        <h3>Режим</h3>
+        <div class="seg" role="radiogroup" aria-label="Режим Wan 3.0">
+          <input id="wan3_flow_text" type="radio" name="wan3_flow" value="text" checked>
+          <label for="wan3_flow_text"><span class="name">Text → Video</span><span class="desc">Только промпт</span></label>
+          <input id="wan3_flow_image" type="radio" name="wan3_flow" value="image">
+          <label for="wan3_flow_image"><span class="name">First / Last Frame</span><span class="desc">1–2 изображения</span></label>
+          <input id="wan3_flow_omni" type="radio" name="wan3_flow" value="omni">
+          <label for="wan3_flow_omni"><span class="name">Omni Reference</span><span class="desc">Фото + видео + аудио</span></label>
+        </div>
+        <div class="hint">Omni: до 10 изображений, 5 видео и 5 аудио. Video refs суммарно до 15 сек. Frame mode с Omni не смешивается.</div>
+      </div>
+      <div class="card">
+        <h3>Параметры</h3>
+        <div class="row">
+          <select id="wan3_duration" aria-label="Длительность Wan 3.0"></select>
+          <select id="wan3_resolution" aria-label="Разрешение Wan 3.0">
+            <option value="480p">480p · 1 ток/сек</option>
+            <option value="720p" selected>720p · 2 ток/сек</option>
+            <option value="1080p">1080p · 4 ток/сек</option>
+          </select>
+        </div>
+        <div class="row" style="margin-top:10px;">
+          <select id="wan3_aspect" aria-label="Формат Wan 3.0">
+            <option value="adaptive" selected>Adaptive</option><option value="16:9">16:9</option><option value="4:3">4:3</option><option value="1:1">1:1</option><option value="3:4">3:4</option><option value="9:16">9:16</option>
+          </select>
+        </div>
+        <div class="toggle" style="margin-top:12px;"><div class="left"><div class="tname">Генерировать звук</div><div class="tdesc">Не меняет нашу цену.</div></div><input id="wan3_audio" type="checkbox" checked></div>
       </div>
     </div>
 
@@ -1811,6 +1855,15 @@
         : 'Длительности только 6 / 8 / 10 сек. 4 секунды отключены. Цена сейчас считается по нашей внутренней сетке.';
     }
 
+    function getWan3Flow(){ return qs('input[name="wan3_flow"]:checked')?.value || "text"; }
+    function updateWan3UI(){
+      const dur = qs('#wan3_duration');
+      if (dur) {
+        const opts=[]; for(let i=2;i<=30;i++) opts.push([String(i), `${i} секунд`]);
+        setSelectOptions(dur, opts, dur.value || '5');
+      }
+    }
+
     // Seedance promo clocks. Backend remains authoritative for actual charging.
     // UI syncs against the server HTTP Date header; device time is only a fallback if the sync request fails.
     let SEEDANCE_SERVER_CLOCK_OFFSET_MS = 0;
@@ -2160,6 +2213,7 @@
       const seedanceBlock = qs('#seedanceBlock');
       const omniFlashBlock = qs('#omniFlashBlock');
       const soraBlock = qs('#soraBlock');
+      const wan3Block = qs('#wan3Block');
 
       if (klingBlock) klingBlock.style.display = (provider === 'kling') ? 'block' : 'none';
       if (veoBlock) veoBlock.style.display   = (provider === 'veo')   ? 'block' : 'none';
@@ -2167,6 +2221,7 @@
       if (seedanceBlock) seedanceBlock.style.display = (provider === 'seedance') ? 'block' : 'none';
       if (omniFlashBlock) omniFlashBlock.style.display = (provider === 'google') ? 'block' : 'none';
       if (soraBlock) soraBlock.style.display = (provider === 'sora') ? 'block' : 'none';
+      if (wan3Block) wan3Block.style.display = (provider === 'wan3') ? 'block' : 'none';
 
       if (provider === 'kling'){
         updateKlingUI();
@@ -2178,6 +2233,8 @@
         updateGrokUI();
       } else if (provider === 'google') {
         updateOmniUI();
+      } else if (provider === 'wan3') {
+        updateWan3UI();
       }
       updateCostUI();
     }
@@ -2210,6 +2267,8 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
     qsa('input[name="grok_model"]').forEach(el => el.addEventListener('change', () => { updateGrokUI(); updateCostUI(); }));
     qsa('input[name="grok_flow"]').forEach(el => el.addEventListener('change', () => { updateGrokUI(); updateCostUI(); }));
     qsa('input[name="omni_flow"]').forEach(el => el.addEventListener('change', () => { updateOmniUI(); updateCostUI(); }));
+    qsa('input[name="wan3_flow"]').forEach(el => el.addEventListener('change', () => { updateWan3UI(); updateCostUI(); }));
+    ['#wan3_duration','#wan3_resolution','#wan3_aspect','#wan3_audio'].forEach(sel => { const el=qs(sel); if(el) el.addEventListener('change', () => { updateCostUI(); persistRememberedSettings(); }); });
     ['#veo_duration', '#veo_resolution', '#veo_aspect', '#omni_duration', '#omni_resolution', '#omni_aspect'].forEach(sel => {
       const el = qs(sel);
       if (el) el.addEventListener('change', () => {
@@ -2307,6 +2366,7 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
       if (provider === 'grok') return `grok::${getGrokModel()}`;
       if (provider === 'google') return 'google::gemini-omni-video';
       if (provider === 'sora') return 'sora::sora-2';
+      if (provider === 'wan3') return 'wan3::wan3.0-video';
       return provider;
     }
 
@@ -2371,6 +2431,12 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
         payload.duration = parseInt((qs('#omni_duration')?.value || '8'), 10);
         payload.resolution = (qs('#omni_resolution')?.value || '1080p');
         payload.aspect_ratio = (qs('#omni_aspect')?.value || '16:9');
+      } else if (provider === 'wan3') {
+        payload.flow = getWan3Flow();
+        payload.duration = parseInt((qs('#wan3_duration')?.value || '5'), 10);
+        payload.resolution = (qs('#wan3_resolution')?.value || '720p');
+        payload.aspect_ratio = (qs('#wan3_aspect')?.value || 'adaptive');
+        payload.enable_audio = !!qs('#wan3_audio')?.checked;
       } else if (provider === 'sora') {
         payload.duration = parseInt((qs('#sora_duration')?.value || '4'), 10);
         payload.aspect_ratio = (qs('#sora_aspect')?.value || '16:9');
@@ -2472,6 +2538,13 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
         if (payload.resolution) setSelectValue('omni_resolution', payload.resolution);
         if (payload.aspect_ratio) setSelectValue('omni_aspect', payload.aspect_ratio);
         updateOmniUI();
+      } else if (provider === 'wan3') {
+        if (payload.flow) setRadioValue('wan3_flow', payload.flow);
+        if (payload.duration) setSelectValue('wan3_duration', payload.duration);
+        if (payload.resolution) setSelectValue('wan3_resolution', payload.resolution);
+        if (payload.aspect_ratio) setSelectValue('wan3_aspect', payload.aspect_ratio);
+        const wa = qs('#wan3_audio'); if (wa) wa.checked = payload.enable_audio !== false;
+        updateWan3UI();
       } else if (provider === 'sora') {
         if (payload.duration) setSelectValue('sora_duration', payload.duration);
         if (payload.aspect_ratio) setSelectValue('sora_aspect', payload.aspect_ratio);
@@ -2513,6 +2586,7 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
     updateVeoPriceHint();
     setVeoAdvancedEnabled();
     updateGrokUI();
+    updateWan3UI();
     updateCostUI();
 
     function pluralizeToken(n){
@@ -2550,6 +2624,13 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
         const priceMap = getSeedanceMiniRetailPriceMap();
         const tokens = priceMap[seconds] || priceMap[5];
         return { known:true, tokens, note: isSeedanceMiniPromoActive() ? '🔥 акция до 5 сентября' : '' };
+      }
+
+      if (provider === 'wan3'){
+        const seconds = Math.max(2, Math.min(30, parseInt((qs('#wan3_duration')?.value || '5'), 10) || 5));
+        const resolution = String(qs('#wan3_resolution')?.value || '720p').toLowerCase();
+        const rate = resolution === '480p' ? 1 : (resolution === '1080p' ? 4 : 2);
+        return { known:true, tokens:Math.ceil(seconds * rate), note:`Wan 3.0 ${resolution} · ${rate} ток/сек` };
       }
 
       if (provider === 'sora'){
@@ -2795,6 +2876,14 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
             duration: parseInt((qs('#omni_duration')?.value || "8"), 10),
             resolution: (qs('#omni_resolution')?.value || '1080p'),
             aspect_ratio: (qs('#omni_aspect')?.value || '16:9')
+          };
+        } else if (provider === 'wan3'){
+          payload = {
+            type: 'wan3_settings', provider: 'wan3', model: 'wan3.0-video', flow: getWan3Flow(),
+            duration: Math.max(2, Math.min(30, parseInt((qs('#wan3_duration')?.value || '5'), 10) || 5)),
+            resolution: (qs('#wan3_resolution')?.value || '720p'),
+            aspect_ratio: (qs('#wan3_aspect')?.value || 'adaptive'),
+            enable_audio: !!qs('#wan3_audio')?.checked
           };
         } else if (provider === 'seedance'){
           const variant = getSeedanceVariant();
