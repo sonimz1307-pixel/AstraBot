@@ -24,7 +24,11 @@ KIE_API_TOKEN = (
 WAN3_CALLBACK_URL = (os.getenv("WAN3_CALLBACK_URL") or "").strip()
 WAN3_TIMEOUT_SECONDS = float(os.getenv("WAN3_TIMEOUT_SECONDS", "7200") or "7200")
 WAN3_POLL_SECONDS = float(os.getenv("WAN3_POLL_SECONDS", "6") or "6")
-WAN3_MODEL_ID = (os.getenv("WAN3_KIE_MODEL_ID") or "wan3.0-video").strip() or "wan3.0-video"
+_WAN3_MODEL_ID_RAW = (os.getenv("WAN3_KIE_MODEL_ID") or "wan/3-0-video").strip() or "wan/3-0-video"
+# Backward compatibility with the invalid model id used by earlier NABEX Wan patches.
+WAN3_MODEL_ID = {
+    "wan3.0-video": "wan/3-0-video",
+}.get(_WAN3_MODEL_ID_RAW.lower(), _WAN3_MODEL_ID_RAW)
 WAN3_PROMPT_MAX_CHARS = max(1, int(os.getenv("WAN3_PROMPT_MAX_CHARS", "20000") or "20000"))
 WAN3_MAX_IMAGE_REFS = 10
 WAN3_MAX_VIDEO_REFS = 5
