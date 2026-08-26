@@ -2346,6 +2346,14 @@ PROGRESS_UPDATE_EVERY = float(os.getenv("PROGRESS_UPDATE_EVERY", "2.0"))
 TELEGRAM_API_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 TELEGRAM_FILE_BASE = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}"
 
+# Telegram Bot API may return 429 when several reference confirmations are sent
+# back-to-back (especially when a user uploads an album/media group).  Keep this
+# retry policy local to sendMessage: a 429 means Telegram explicitly rejected
+# the request, so retrying after retry_after cannot duplicate an accepted message.
+TG_SEND_MESSAGE_MAX_ATTEMPTS = max(2, int(os.getenv("TG_SEND_MESSAGE_MAX_ATTEMPTS", "5") or "5"))
+TG_SEND_MESSAGE_RETRY_PAD_SEC = max(0.0, float(os.getenv("TG_SEND_MESSAGE_RETRY_PAD_SEC", "0.35") or "0.35"))
+TG_SEND_MESSAGE_5XX_BACKOFF_SEC = max(0.25, float(os.getenv("TG_SEND_MESSAGE_5XX_BACKOFF_SEC", "0.75") or "0.75"))
+
 
 # ---------------- Supabase: user state (bot_user_state) ----------------
 # Uses shared client from db_supabase.py (service key).
@@ -5719,19 +5727,100 @@ async def tg_delete_message(chat_id: int, message_id: int) -> bool:
 
 
 async def tg_send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None) -> Optional[int]:
+    """Send a Telegram text message with safe Bot API flood-control retries.
+
+    The previous implementation silently dropped Telegram 429 responses. That is
+    visible when several Wan/Seedance reference images arrive quickly: the photo
+    is stored in the bot state, but the following "reference accepted" message
+    with the Ready/Cancel keyboard can disappear.
+
+    We retry only responses that are safe to retry:
+      * 429: Telegram explicitly rejected the request and supplies retry_after;
+      * 5xx: transient Bot API failure, with a short bounded backoff.
+
+    Ambiguous client/network exceptions are deliberately NOT retried here because
+    Telegram may already have accepted the request before the connection failed;
+    retrying such a request could create duplicate user-visible messages.
+    """
     if not TELEGRAM_BOT_TOKEN:
         return None
-    payload = {"chat_id": chat_id, "text": text}
+
+    payload: Dict[str, Any] = {"chat_id": int(chat_id), "text": str(text)}
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
+
+    max_attempts = max(2, int(TG_SEND_MESSAGE_MAX_ATTEMPTS or 2))
+
     async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(f"{TELEGRAM_API_BASE}/sendMessage", json=payload)
-    try:
-        j = r.json()
-        if isinstance(j, dict) and j.get("ok") and j.get("result"):
-            return int((j.get("result") or {}).get("message_id") or 0) or None
-    except Exception:
-        pass
+        for attempt in range(1, max_attempts + 1):
+            try:
+                r = await client.post(f"{TELEGRAM_API_BASE}/sendMessage", json=payload)
+            except Exception as exc:
+                # Do not blindly retry an ambiguous network failure: the message
+                # could already have been accepted by Telegram. Log it instead of
+                # silently swallowing the failure as the old code did.
+                logging.warning(
+                    "Telegram sendMessage request failed chat_id=%s attempt=%s/%s: %r",
+                    chat_id, attempt, max_attempts, exc,
+                )
+                return None
+
+            try:
+                data = r.json() if r.content else {}
+            except Exception:
+                data = {}
+
+            if isinstance(data, dict) and data.get("ok") and data.get("result"):
+                try:
+                    return int((data.get("result") or {}).get("message_id") or 0) or None
+                except Exception:
+                    return None
+
+            error_code = int(
+                (data.get("error_code") if isinstance(data, dict) else 0)
+                or r.status_code
+                or 0
+            )
+            description = str(
+                (data.get("description") if isinstance(data, dict) else "")
+                or r.text
+                or "unknown Telegram error"
+            )
+
+            retry_after = 0.0
+            if isinstance(data, dict):
+                parameters = data.get("parameters") if isinstance(data.get("parameters"), dict) else {}
+                try:
+                    retry_after = float(parameters.get("retry_after") or 0)
+                except Exception:
+                    retry_after = 0.0
+
+            if error_code == 429 and attempt < max_attempts:
+                # retry_after is normally present for flood control. Use a safe
+                # one-second fallback if Telegram omitted it.
+                delay = max(1.0, retry_after) + float(TG_SEND_MESSAGE_RETRY_PAD_SEC)
+                logging.warning(
+                    "Telegram sendMessage rate-limited chat_id=%s attempt=%s/%s retry_after=%.2fs",
+                    chat_id, attempt, max_attempts, delay,
+                )
+                await asyncio.sleep(delay)
+                continue
+
+            if 500 <= error_code <= 599 and attempt < max_attempts:
+                delay = min(3.0, float(TG_SEND_MESSAGE_5XX_BACKOFF_SEC) * attempt)
+                logging.warning(
+                    "Telegram sendMessage transient error chat_id=%s code=%s attempt=%s/%s; retry in %.2fs",
+                    chat_id, error_code, attempt, max_attempts, delay,
+                )
+                await asyncio.sleep(delay)
+                continue
+
+            logging.error(
+                "Telegram sendMessage failed chat_id=%s code=%s attempt=%s/%s description=%s",
+                chat_id, error_code, attempt, max_attempts, description[:600],
+            )
+            return None
+
     return None
         
 
