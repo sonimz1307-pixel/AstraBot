@@ -2596,6 +2596,8 @@
   <script>
     const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
     const query = new URLSearchParams(window.location.search || "");
+    const YOOKASSA_PENDING_PAYMENT_KEY = "astrabot:yookassaPendingPaymentId";
+    let yookassaReconcileInFlight = false;
 
     const state = {
       balance: 0,
@@ -3104,6 +3106,9 @@
         }
 
         if (data.confirmation_url) {
+          try {
+            if (data.payment_id) localStorage.setItem(YOOKASSA_PENDING_PAYMENT_KEY, String(data.payment_id));
+          } catch (e) {}
           showToast("Открываю оплату…");
           if (tg && tg.HapticFeedback) {
             try { tg.HapticFeedback.impactOccurred("light"); } catch (e) {}
@@ -3174,6 +3179,9 @@
         }
 
         if (data.confirmation_url) {
+          try {
+            if (data.payment_id) localStorage.setItem(YOOKASSA_PENDING_PAYMENT_KEY, String(data.payment_id));
+          } catch (e) {}
           showToast("Открываю оплату тарифа…");
           if (tg && tg.HapticFeedback) {
             try { tg.HapticFeedback.impactOccurred("light"); } catch (e) {}
@@ -3193,6 +3201,42 @@
       }
     }
 
+
+    async function reconcilePendingYookassaPayment() {
+      if (yookassaReconcileInFlight) return;
+      let paymentId = "";
+      try { paymentId = String(localStorage.getItem(YOOKASSA_PENDING_PAYMENT_KEY) || "").trim(); } catch (e) {}
+      if (!paymentId) return;
+
+      const uid = query.get("uid") || query.get("tg_user_id") || query.get("user_id") || "";
+      yookassaReconcileInFlight = true;
+      try {
+        const response = await fetch("/api/tg/payment/status", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Telegram-Init-Data": tg && tg.initData ? tg.initData : ""
+          },
+          body: JSON.stringify({ payment_id: paymentId, uid, user_id: uid, tg_user_id: uid })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data || !data.ok) return;
+
+        const status = String(data.status || "").toLowerCase();
+        if (status === "applied" || status === "canceled") {
+          try { localStorage.removeItem(YOOKASSA_PENDING_PAYMENT_KEY); } catch (e) {}
+        }
+        if (status === "applied") {
+          showToast("Оплата зачислена");
+          await loadAccount();
+          loadBalanceHistory().catch(() => {});
+        }
+      } catch (e) {
+        // Webhook/periodic reconciliation remain active even if this client check fails.
+      } finally {
+        yookassaReconcileInFlight = false;
+      }
+    }
 
     async function loadAccount() {
       const params = new URLSearchParams();
@@ -3462,7 +3506,11 @@
     initTariffPreviewCarousel();
 
     renderAccount();
-    loadAccount();
+    loadAccount().finally(() => reconcilePendingYookassaPayment());
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) reconcilePendingYookassaPayment();
+    });
+    window.addEventListener("focus", () => reconcilePendingYookassaPayment());
   </script>
 </body>
 </html>
