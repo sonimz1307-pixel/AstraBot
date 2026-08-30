@@ -667,6 +667,7 @@
   <script>
     const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
     const query = new URLSearchParams(window.location.search || "");
+    const YOOKASSA_PENDING_PAYMENT_KEY = "astrabot:yookassaPendingPaymentId";
     const toast = document.getElementById("toast");
     const emailOverlay = document.getElementById("emailOverlay");
     const emailInput = document.getElementById("emailInput");
@@ -814,6 +815,9 @@
         if (emailOverride) state.customerEmail = String(emailOverride).trim();
 
         if (data.method === "yookassa" && data.confirmation_url) {
+          try {
+            if (data.payment_id) localStorage.setItem(YOOKASSA_PENDING_PAYMENT_KEY, String(data.payment_id));
+          } catch (e) {}
           openUrl(data.confirmation_url);
           return;
         }
