@@ -368,6 +368,22 @@ def _reliable_state_key(queue_name: str, job_id: str) -> str:
     return f"{_RELIABLE_STATE_PREFIX}:{q}:{jid}"
 
 
+def _reliable_submission_key(queue_name: str, job_id: str) -> str:
+    q = (queue_name or _DEFAULT_QUEUE_NAME or "gen").strip() or "gen"
+    jid = str(job_id or "").strip()
+    if not jid:
+        raise ValueError("job_id is required")
+    return f"{_RELIABLE_STATE_PREFIX}:submission:{q}:{jid}"
+
+
+def _reliable_user_settlement_key(queue_name: str, user_id: int) -> str:
+    q = (queue_name or _DEFAULT_QUEUE_NAME or "gen").strip() or "gen"
+    uid = int(user_id or 0)
+    if uid <= 0:
+        raise ValueError("user_id is required")
+    return f"{_RELIABLE_STATE_PREFIX}:settlement:{q}:{uid}"
+
+
 async def _ensure_reliable_group(queue_name: str) -> tuple[str, str]:
     stream = _reliable_stream_key(queue_name)
     group = _reliable_group_name(queue_name)
@@ -424,6 +440,498 @@ return 1
             if attempt < _REDIS_ENQUEUE_ATTEMPTS:
                 await asyncio.sleep(_REDIS_RECONNECT_SLEEP_SEC)
     raise RuntimeError(f"Redis reliable enqueue failed after {_REDIS_ENQUEUE_ATTEMPTS} attempts: {last_exc}")
+
+
+async def reliable_job_was_enqueued(*, queue_name: str, job_id: str) -> Optional[bool]:
+    """Return Redis' durable proof for an uncertain reliable enqueue.
+
+    ``True`` means the Lua transaction created the dedupe key together with
+    XADD. ``False`` means Redis answered and the job was not committed. ``None``
+    means Redis itself is unavailable, so the caller must not guess whether it
+    is safe to refund a charge.
+    """
+    if not str(job_id or "").strip():
+        return False
+    dedupe_key = _reliable_dedupe_key(queue_name, job_id)
+    for attempt in range(1, _REDIS_ENQUEUE_ATTEMPTS + 1):
+        try:
+            r = await get_redis()
+            return bool(await r.exists(dedupe_key))
+        except (RedisTimeoutError, RedisConnectionError) as exc:
+            print(
+                f"[queue_redis] Redis enqueue proof error attempt={attempt}/{_REDIS_ENQUEUE_ATTEMPTS} "
+                f"key={dedupe_key}: {exc}",
+                flush=True,
+            )
+            await _reset_redis_client()
+            if attempt < _REDIS_ENQUEUE_ATTEMPTS:
+                await asyncio.sleep(_REDIS_RECONNECT_SLEEP_SEC)
+        except Exception as exc:
+            print(f"[queue_redis] Redis enqueue proof unavailable key={dedupe_key}: {exc}", flush=True)
+            return None
+    return None
+
+
+async def claim_reliable_submission(
+    *,
+    queue_name: str,
+    job_id: str,
+    submission_nonce: str,
+    owner_token: str,
+    ttl_sec: int = 259200,
+    stale_after_sec: int = 600,
+) -> Dict[str, Any]:
+    """Atomically claim one user submission before any token charge.
+
+    A Telegram callback can be retried by the existing update worker.  The
+    caller therefore derives ``job_id`` from a draft nonce and uses this guard
+    to ensure that only the first handling may cross the billing boundary.
+    ``ready`` is reusable immediately. A stale ``claimed``/``charged`` lease
+    may be reclaimed with the same nonce and deterministic billing reference;
+    terminal or unresolved states remain fail-closed.
+    """
+    nonce = str(submission_nonce or "").strip()
+    owner = str(owner_token or "").strip()
+    if not nonce:
+        raise ValueError("submission_nonce is required")
+    if not owner:
+        raise ValueError("owner_token is required")
+    key = _reliable_submission_key(queue_name, job_id)
+    now_ts = time.time()
+    stale_before_ts = now_ts - max(60, int(stale_after_sec or 600))
+    script = """
+local current_status = redis.call('HGET', KEYS[1], 'status')
+local current_nonce = redis.call('HGET', KEYS[1], 'nonce')
+local current_updated_at = tonumber(redis.call('HGET', KEYS[1], 'updated_at') or '0')
+if current_nonce and current_nonce ~= ARGV[1] then
+    return {'conflict', '0', tostring(current_updated_at)}
+end
+if (not current_status) or current_status == '' or current_status == 'ready' then
+    redis.call('HSET', KEYS[1],
+        'nonce', ARGV[1],
+        'status', 'claimed',
+        'owner_token', ARGV[2],
+        'updated_at', ARGV[3])
+    redis.call('EXPIRE', KEYS[1], ARGV[4])
+    return {'claimed', '1', ARGV[3], ARGV[2]}
+end
+if (current_status == 'claimed' or current_status == 'charged')
+        and current_updated_at <= tonumber(ARGV[5]) then
+    redis.call('HSET', KEYS[1],
+        'owner_token', ARGV[2],
+        'updated_at', ARGV[3])
+    redis.call('EXPIRE', KEYS[1], ARGV[4])
+    return {current_status, '1', ARGV[3], ARGV[2]}
+end
+return {current_status, '0', tostring(current_updated_at), redis.call('HGET', KEYS[1], 'owner_token') or ''}
+"""
+    r = await get_redis()
+    result = await r.eval(
+        script,
+        1,
+        key,
+        nonce,
+        owner,
+        now_ts,
+        max(3600, int(ttl_sec or 259200)),
+        stale_before_ts,
+    )
+    status = str((result or ["unavailable"])[0] or "unavailable")
+    claimed = str((result or ["", "0"])[1] or "0") == "1"
+    try:
+        updated_at = float((result or ["", "", "0"])[2] or 0.0)
+    except Exception:
+        updated_at = 0.0
+    current_owner = str((result or ["", "", "", ""])[3] or "")
+    return {
+        "status": status,
+        "claimed": claimed,
+        "updated_at": updated_at,
+        "owner_token": current_owner,
+    }
+
+
+async def get_reliable_submission_status(*, queue_name: str, job_id: str) -> Dict[str, Any]:
+    """Read the durable submission state used by V5 reconciliation."""
+    key = _reliable_submission_key(queue_name, job_id)
+    r = await get_redis()
+    raw = await r.hgetall(key)
+    return dict(raw or {})
+
+
+async def refresh_reliable_submission_claim(
+    *,
+    queue_name: str,
+    job_id: str,
+    user_id: int,
+    submission_nonce: str,
+    owner_token: str,
+    ttl_sec: int = 259200,
+) -> bool:
+    """Refresh an active charge lease only while the caller still owns it."""
+    nonce = str(submission_nonce or "").strip()
+    owner = str(owner_token or "").strip()
+    if not nonce or not owner:
+        return False
+    submission_key = _reliable_submission_key(queue_name, job_id)
+    settlement_key = _reliable_user_settlement_key(queue_name, user_id)
+    now_ts = time.time()
+    script = """
+if redis.call('HGET', KEYS[1], 'nonce') ~= ARGV[1]
+        or redis.call('HGET', KEYS[1], 'owner_token') ~= ARGV[2] then
+    return 0
+end
+local current_status = redis.call('HGET', KEYS[1], 'status') or ''
+if current_status ~= 'claimed' and current_status ~= 'charged' then
+    return 0
+end
+if redis.call('HGET', KEYS[2], 'job_id') ~= ARGV[3] then
+    return 0
+end
+redis.call('HSET', KEYS[1], 'updated_at', ARGV[4])
+redis.call('EXPIRE', KEYS[1], ARGV[5])
+redis.call('HSET', KEYS[2], 'updated_at', ARGV[4])
+redis.call('EXPIRE', KEYS[2], ARGV[5])
+return 1
+"""
+    r = await get_redis()
+    return bool(int(await r.eval(
+        script,
+        2,
+        submission_key,
+        settlement_key,
+        nonce,
+        owner,
+        str(job_id),
+        now_ts,
+        max(3600, int(ttl_sec or 259200)),
+    ) or 0))
+
+
+async def set_reliable_submission_status(
+    *,
+    queue_name: str,
+    job_id: str,
+    submission_nonce: str,
+    status: str,
+    owner_token: str = "",
+    force_enqueued: bool = False,
+    ttl_sec: int = 259200,
+) -> bool:
+    """Persist a financial/queue settlement state for one submission."""
+    nonce = str(submission_nonce or "").strip()
+    owner = str(owner_token or "").strip()
+    next_status = str(status or "").strip().lower()
+    if not nonce:
+        raise ValueError("submission_nonce is required")
+    if next_status not in {
+        "ready",
+        "claimed",
+        "charged",
+        "enqueued",
+        "refunded",
+        "refund_pending",
+        "review_required",
+        "reconciling",
+        "not_charged",
+    }:
+        raise ValueError(f"unsupported reliable submission status: {next_status}")
+    key = _reliable_submission_key(queue_name, job_id)
+    script = """
+local current_nonce = redis.call('HGET', KEYS[1], 'nonce')
+if current_nonce and current_nonce ~= ARGV[1] then
+    return 0
+end
+local current_status = redis.call('HGET', KEYS[1], 'status') or ''
+local next_status = ARGV[2]
+local owner_token = ARGV[5]
+local force_enqueued = ARGV[6] == '1'
+if current_status == 'enqueued' or current_status == 'refunded' or current_status == 'not_charged' then
+    if current_status == next_status then
+        return 1
+    end
+    return 0
+end
+if force_enqueued then
+    if next_status ~= 'enqueued' then
+        return 0
+    end
+elseif owner_token == '' or redis.call('HGET', KEYS[1], 'owner_token') ~= owner_token then
+    return 0
+end
+local allowed = false
+if current_status == 'claimed' then
+    allowed = next_status == 'ready' or next_status == 'charged'
+        or next_status == 'refunded' or next_status == 'refund_pending'
+        or next_status == 'review_required' or next_status == 'not_charged'
+elseif current_status == 'charged' then
+    allowed = next_status == 'enqueued' or next_status == 'refunded'
+        or next_status == 'refund_pending' or next_status == 'review_required'
+elseif current_status == 'reconciling' then
+    allowed = next_status == 'enqueued' or next_status == 'refunded'
+        or next_status == 'refund_pending' or next_status == 'review_required'
+        or next_status == 'not_charged'
+elseif current_status == 'refund_pending' or current_status == 'review_required' then
+    allowed = next_status == 'reconciling'
+else
+    allowed = current_status == next_status
+end
+if not allowed then
+    return 0
+end
+redis.call('HSET', KEYS[1],
+    'nonce', ARGV[1],
+    'status', ARGV[2],
+    'updated_at', ARGV[3])
+if next_status == 'enqueued' or next_status == 'refunded' or next_status == 'not_charged' then
+    redis.call('HDEL', KEYS[1], 'owner_token')
+end
+redis.call('EXPIRE', KEYS[1], ARGV[4])
+return 1
+"""
+    r = await get_redis()
+    changed = int(await r.eval(
+        script,
+        1,
+        key,
+        nonce,
+        next_status,
+        time.time(),
+        max(3600, int(ttl_sec or 259200)),
+        owner,
+        "1" if force_enqueued else "0",
+    ) or 0)
+    return bool(changed)
+
+
+async def enqueue_reliable_submission_job(
+    job: Dict[str, Any],
+    queue_name: str,
+    *,
+    submission_nonce: str,
+    owner_token: str,
+    dedupe_ttl_sec: int = 259200,
+) -> Dict[str, Any]:
+    """Atomically fence the owner, XADD the job and mark it enqueued."""
+    job_id = str(job.get("job_id") or job.get("id") or "").strip()
+    nonce = str(submission_nonce or "").strip()
+    owner = str(owner_token or "").strip()
+    if not job_id or not nonce or not owner:
+        raise ValueError("job_id, submission_nonce and owner_token are required")
+    payload = json.dumps(job, ensure_ascii=False)
+    stream, _group = await _ensure_reliable_group(queue_name)
+    dedupe_key = _reliable_dedupe_key(queue_name, job_id)
+    submission_key = _reliable_submission_key(queue_name, job_id)
+    script = """
+if redis.call('EXISTS', KEYS[2]) == 1 then
+    if redis.call('HGET', KEYS[3], 'nonce') ~= ARGV[2] then
+        return {'conflict', '0'}
+    end
+    redis.call('HSET', KEYS[3], 'status', 'enqueued', 'updated_at', ARGV[5])
+    redis.call('HDEL', KEYS[3], 'owner_token')
+    redis.call('EXPIRE', KEYS[3], ARGV[4])
+    return {'enqueued', '0'}
+end
+if redis.call('HGET', KEYS[3], 'nonce') ~= ARGV[2]
+        or redis.call('HGET', KEYS[3], 'owner_token') ~= ARGV[3]
+        or redis.call('HGET', KEYS[3], 'status') ~= 'charged' then
+    return {'owner_lost', '0'}
+end
+redis.call('XADD', KEYS[1], '*', 'payload', ARGV[1], 'job_id', ARGV[6])
+local dedupe_ttl = tonumber(ARGV[7]) or 0
+if dedupe_ttl > 0 then
+    redis.call('SET', KEYS[2], '1', 'EX', dedupe_ttl)
+else
+    redis.call('SET', KEYS[2], '1')
+end
+redis.call('HSET', KEYS[3], 'status', 'enqueued', 'updated_at', ARGV[5])
+redis.call('HDEL', KEYS[3], 'owner_token')
+redis.call('EXPIRE', KEYS[3], ARGV[4])
+return {'enqueued', '1'}
+"""
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, _REDIS_ENQUEUE_ATTEMPTS + 1):
+        try:
+            r = await get_redis()
+            result = await r.eval(
+                script,
+                3,
+                stream,
+                dedupe_key,
+                submission_key,
+                payload,
+                nonce,
+                owner,
+                max(3600, int(dedupe_ttl_sec or 259200)),
+                time.time(),
+                job_id,
+                max(0, int(dedupe_ttl_sec or 0)),
+            )
+            status = str((result or ["unavailable"])[0] or "unavailable")
+            inserted = str((result or ["", "0"])[1] or "0") == "1"
+            return {"status": status, "enqueued": status == "enqueued", "inserted": inserted}
+        except (RedisTimeoutError, RedisConnectionError) as exc:
+            last_exc = exc
+            await _reset_redis_client()
+            if attempt < _REDIS_ENQUEUE_ATTEMPTS:
+                await asyncio.sleep(_REDIS_RECONNECT_SLEEP_SEC)
+    raise RuntimeError(
+        f"Redis fenced reliable enqueue failed after {_REDIS_ENQUEUE_ATTEMPTS} attempts: {last_exc}"
+    )
+
+
+async def claim_reliable_user_settlement_reconciliation(
+    *,
+    queue_name: str,
+    user_id: int,
+    job_id: str,
+    reconciliation_token: str,
+    ttl_sec: int = 259200,
+    stale_after_sec: int = 600,
+) -> Dict[str, Any]:
+    """Take a stale/unresolved pre-enqueue settlement for safe reconciliation."""
+    token = str(reconciliation_token or "").strip()
+    jid = str(job_id or "").strip()
+    if not token or not jid:
+        raise ValueError("job_id and reconciliation_token are required")
+    settlement_key = _reliable_user_settlement_key(queue_name, user_id)
+    submission_key = _reliable_submission_key(queue_name, jid)
+    now_ts = time.time()
+    stale_before = now_ts - max(60, int(stale_after_sec or 600))
+    script = """
+if redis.call('HGET', KEYS[1], 'job_id') ~= ARGV[1] then
+    return {'settlement_changed', '0', '', ''}
+end
+local block_status = redis.call('HGET', KEYS[1], 'status') or ''
+local block_updated = tonumber(redis.call('HGET', KEYS[1], 'updated_at') or '0')
+local submission_status = redis.call('HGET', KEYS[2], 'status') or ''
+local nonce = redis.call('HGET', KEYS[2], 'nonce') or ''
+if nonce == '' then
+    return {'missing_submission', '0', '', submission_status}
+end
+if submission_status == 'enqueued' or submission_status == 'refunded'
+        or submission_status == 'not_charged' then
+    return {submission_status, '0', nonce, submission_status}
+end
+if block_status == 'in_progress' and block_updated > tonumber(ARGV[4]) then
+    return {'in_progress', '0', nonce, submission_status}
+end
+if block_status == 'reconciling' and block_updated > tonumber(ARGV[4]) then
+    return {'reconciling', '0', nonce, submission_status}
+end
+redis.call('HSET', KEYS[1],
+    'status', 'reconciling',
+    'owner_token', ARGV[2],
+    'updated_at', ARGV[3])
+redis.call('EXPIRE', KEYS[1], ARGV[5])
+redis.call('HSET', KEYS[2],
+    'status', 'reconciling',
+    'owner_token', ARGV[2],
+    'updated_at', ARGV[3])
+redis.call('EXPIRE', KEYS[2], ARGV[5])
+return {'reconciling', '1', nonce, submission_status}
+"""
+    r = await get_redis()
+    result = await r.eval(
+        script,
+        2,
+        settlement_key,
+        submission_key,
+        jid,
+        token,
+        now_ts,
+        stale_before,
+        max(3600, int(ttl_sec or 259200)),
+    )
+    return {
+        "status": str((result or ["unavailable"])[0] or "unavailable"),
+        "claimed": str((result or ["", "0"])[1] or "0") == "1",
+        "submission_nonce": str((result or ["", "", ""])[2] or ""),
+        "previous_status": str((result or ["", "", "", ""])[3] or ""),
+        "owner_token": token,
+    }
+
+
+async def get_reliable_user_settlement_block(
+    *,
+    queue_name: str,
+    user_id: int,
+) -> Dict[str, Any]:
+    """Return a durable per-user block for an unresolved paid submission."""
+    key = _reliable_user_settlement_key(queue_name, user_id)
+    r = await get_redis()
+    raw = await r.hgetall(key)
+    return dict(raw or {})
+
+
+async def set_reliable_user_settlement_block(
+    *,
+    queue_name: str,
+    user_id: int,
+    job_id: str,
+    status: str,
+    code: str,
+    ttl_sec: int = 259200,
+) -> bool:
+    """Block every new Seedance 2.5 charge until one job is reconciled."""
+    jid = str(job_id or "").strip()
+    normalized = str(status or "").strip().lower()
+    if not jid:
+        raise ValueError("job_id is required")
+    if normalized not in {"in_progress", "refund_pending", "review_required"}:
+        raise ValueError(f"unsupported settlement block status: {normalized}")
+    key = _reliable_user_settlement_key(queue_name, user_id)
+    script = """
+local current_job = redis.call('HGET', KEYS[1], 'job_id')
+if current_job and current_job ~= ARGV[1] then
+    return 0
+end
+redis.call('HSET', KEYS[1],
+    'job_id', ARGV[1],
+    'status', ARGV[2],
+    'code', ARGV[3],
+    'updated_at', ARGV[4])
+redis.call('EXPIRE', KEYS[1], ARGV[5])
+return 1
+"""
+    r = await get_redis()
+    stored = int(await r.eval(
+        script,
+        1,
+        key,
+        jid,
+        normalized,
+        str(code or "").strip(),
+        time.time(),
+        max(3600, int(ttl_sec or 259200)),
+    ) or 0)
+    return bool(stored)
+
+
+async def clear_reliable_user_settlement_block(
+    *,
+    queue_name: str,
+    user_id: int,
+    job_id: str,
+) -> bool:
+    """Clear only the settlement block owned by ``job_id``."""
+    jid = str(job_id or "").strip()
+    if not jid:
+        return False
+    key = _reliable_user_settlement_key(queue_name, user_id)
+    script = """
+local current_job = redis.call('HGET', KEYS[1], 'job_id')
+if not current_job then
+    return 1
+end
+if current_job ~= ARGV[1] then
+    return 0
+end
+redis.call('DEL', KEYS[1])
+return 1
+"""
+    r = await get_redis()
+    return bool(int(await r.eval(script, 1, key, jid) or 0))
 
 
 async def _promote_one_legacy_job_to_reliable(queue_name: str) -> bool:
