@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 import httpx
 
 from app.services.site_builder_service import process_site_job
-from billing_db import add_tokens, supabase as billing_supabase
+from billing_db import add_tokens, ledger_ref_exists, supabase as billing_supabase
 from seedance25_billing import refund_seedance25_once
 from free_plan_limits import FEATURE_CHAT, release_free_usage
 from kling3_kie_runner import run_kling3_kie_task_and_wait
@@ -19,7 +19,9 @@ from queue_redis import (
     enqueue_job,
     dequeue_reliable_job,
     ack_reliable_job,
+    clear_reliable_user_settlement_block,
     requeue_reliable_job,
+    set_reliable_submission_status,
     touch_reliable_job,
     get_reliable_job_state,
     set_reliable_job_state,
@@ -49,6 +51,13 @@ SEEDANCE25_CONCURRENCY = max(1, int(os.getenv("SEEDANCE25_CONCURRENCY", "4") or 
 SEEDANCE25_RELIABLE_STALE_SEC = max(120, int(os.getenv("SEEDANCE25_RELIABLE_STALE_SEC", "300") or "300"))
 SEEDANCE25_RELIABLE_TOUCH_SEC = max(30, min(SEEDANCE25_RELIABLE_STALE_SEC // 2, int(os.getenv("SEEDANCE25_RELIABLE_TOUCH_SEC", "60") or "60")))
 SEEDANCE25_DELIVERY_MAX_ATTEMPTS = max(1, int(os.getenv("SEEDANCE25_DELIVERY_MAX_ATTEMPTS", "6") or "6"))
+try:
+    SEEDANCE25_FAILURE_NOTICE_MAX_ATTEMPTS = max(
+        1,
+        int(os.getenv("SEEDANCE25_FAILURE_NOTICE_MAX_ATTEMPTS", "6") or "6"),
+    )
+except Exception:
+    SEEDANCE25_FAILURE_NOTICE_MAX_ATTEMPTS = 6
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}" if TELEGRAM_BOT_TOKEN else ""
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
@@ -71,6 +80,23 @@ def _project_ready_keyboard(project_id: str, version_number: int) -> dict:
     }
 
 
+def _seedance25_recovery_keyboard(job_id: str) -> dict:
+    """Return the user to the last Seedance draft kept by the TG process."""
+    callback_data = f"seedance25_recovery:{str(job_id or '').strip()}"
+    if len(callback_data.encode("utf-8")) > 64:
+        callback_data = "seedance25_recovery:"
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "✏️ Исправить промпт и повторить",
+                    "callback_data": callback_data,
+                }
+            ]
+        ]
+    }
+
+
 async def tg_send_message(chat_id: int, text: str, *, reply_markup: Optional[dict] = None) -> Optional[int]:
     if not TG_API:
         raise RuntimeError("TELEGRAM_BOT_TOKEN not set")
@@ -78,13 +104,37 @@ async def tg_send_message(chat_id: int, text: str, *, reply_markup: Optional[dic
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
     async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(f"{TG_API}/sendMessage", json=payload)
-    try:
-        data = response.json()
-        if isinstance(data, dict) and data.get("ok"):
-            return int((data.get("result") or {}).get("message_id") or 0) or None
-    except Exception:
-        pass
+        for attempt in range(1, 4):
+            response = await client.post(f"{TG_API}/sendMessage", json=payload)
+            try:
+                data = response.json()
+            except Exception:
+                data = {}
+            if isinstance(data, dict) and data.get("ok"):
+                return int((data.get("result") or {}).get("message_id") or 0) or None
+
+            error_code = int(
+                (data.get("error_code") if isinstance(data, dict) else 0)
+                or response.status_code
+                or 0
+            )
+            if attempt < 3 and error_code == 429:
+                params = data.get("parameters") if isinstance(data, dict) and isinstance(data.get("parameters"), dict) else {}
+                try:
+                    retry_after = float(params.get("retry_after") or 1.0)
+                except Exception:
+                    retry_after = 1.0
+                await asyncio.sleep(max(1.0, retry_after) + 0.25)
+                continue
+            if attempt < 3 and 500 <= error_code <= 599:
+                await asyncio.sleep(float(attempt))
+                continue
+            print(
+                f"[redactor/telegram] sendMessage failed chat_id={chat_id} "
+                f"code={error_code} detail={str(data or response.text)[:500]}",
+                flush=True,
+            )
+            return None
     return None
 
 
@@ -634,7 +684,7 @@ async def _seedance25_refund_once(user_id: int, charge_tokens: int, refund_reaso
             ref_id = str(uuid5(NAMESPACE_URL, f"nabex:seedance25:refund:{stable_job_id}"))
     if not ref_id:
         raise RuntimeError("Seedance 2.5 refund requires stable charge_ref_id/job_id")
-    return await asyncio.to_thread(
+    refunded = await asyncio.to_thread(
         refund_seedance25_once,
         int(user_id),
         int(charge_tokens),
@@ -642,31 +692,174 @@ async def _seedance25_refund_once(user_id: int, charge_tokens: int, refund_reaso
         ref_id=ref_id,
         meta=dict(meta or {}),
     )
+    if refunded:
+        return True
+    already_refunded = await asyncio.to_thread(
+        ledger_ref_exists,
+        reason=str(refund_reason),
+        ref_id=ref_id,
+    )
+    if already_refunded:
+        return True
+    raise RuntimeError(
+        f"Seedance 2.5 refund was not confirmed for ref_id={ref_id}"
+    )
 
 
 class _Seedance25DeliveryPending(RuntimeError):
     """Provider succeeded, but Telegram delivery still needs retrying."""
 
 
+class _Seedance25FailureNoticePending(RuntimeError):
+    """Refund finished, but the Telegram failure notice still needs retrying."""
+
+
+async def _seedance25_finalize_tg_failure(
+    *,
+    job_id: str,
+    chat_id: int,
+    detail: str,
+    recovery_snapshot: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Notify the Telegram user before allowing the reliable job to be ACKed.
+
+    ``tg_send_message`` deliberately returns ``None`` for a Telegram API error
+    after its short HTTP retries.  Treat that as a pending reliable-queue stage
+    instead of swallowing it: the existing stale-entry reclaim will retry only
+    this notice, without charging again or calling the video provider again.
+    """
+    clean_detail = str(detail or "временная ошибка worker")[:700]
+    current_state = await get_reliable_job_state(
+        queue_name=SEEDANCE25_QUEUE_NAME,
+        job_id=job_id,
+    ) if job_id else {}
+    failure_notice_attempts = _safe_int(current_state.get("failure_notice_attempts"), 0) + 1
+    state_updates: Dict[str, Any] = {
+        "phase": "failure_notice_pending",
+        "error": clean_detail[:500],
+        "failure_notice_attempts": failure_notice_attempts,
+    }
+    if isinstance(recovery_snapshot, dict):
+        state_updates["recovery_snapshot"] = dict(recovery_snapshot)
+    if job_id:
+        await set_reliable_job_state(
+            queue_name=SEEDANCE25_QUEUE_NAME,
+            job_id=job_id,
+            updates=state_updates,
+        )
+
+    if int(chat_id or 0) > 0:
+        try:
+            message_id = await tg_send_message(
+                int(chat_id),
+                f"❌ Seedance 2.5: ошибка генерации. Токены возвращены.\n{clean_detail}",
+                reply_markup=_seedance25_recovery_keyboard(job_id),
+            )
+        except Exception as exc:
+            if failure_notice_attempts >= SEEDANCE25_FAILURE_NOTICE_MAX_ATTEMPTS:
+                if job_id:
+                    await set_reliable_job_state(
+                        queue_name=SEEDANCE25_QUEUE_NAME,
+                        job_id=job_id,
+                        updates={"terminal": "failed", "phase": "failure_notice_abandoned"},
+                    )
+                print(
+                    f"[redactor/seedance25] failure notice abandoned after {failure_notice_attempts} "
+                    f"attempts job={job_id} chat_id={chat_id}: {exc}",
+                    flush=True,
+                )
+                return
+            raise _Seedance25FailureNoticePending(str(exc)) from exc
+        if not message_id:
+            if failure_notice_attempts >= SEEDANCE25_FAILURE_NOTICE_MAX_ATTEMPTS:
+                if job_id:
+                    await set_reliable_job_state(
+                        queue_name=SEEDANCE25_QUEUE_NAME,
+                        job_id=job_id,
+                        updates={"terminal": "failed", "phase": "failure_notice_abandoned"},
+                    )
+                print(
+                    f"[redactor/seedance25] failure notice abandoned after {failure_notice_attempts} "
+                    f"attempts job={job_id} chat_id={chat_id}: no message_id",
+                    flush=True,
+                )
+                return
+            raise _Seedance25FailureNoticePending(
+                f"Telegram did not accept Seedance 2.5 failure notice for chat_id={chat_id}"
+            )
+
+    if job_id:
+        try:
+            await set_reliable_job_state(
+                queue_name=SEEDANCE25_QUEUE_NAME,
+                job_id=job_id,
+                updates={"terminal": "failed", "phase": "failed"},
+            )
+        except Exception as state_exc:
+            # The user has already received the notice.  The Stream ACK below is
+            # sufficient to complete the job even if this auxiliary write fails.
+            print(
+                f"[redactor/seedance25] failed state write warning job={job_id}: {state_exc}",
+                flush=True,
+            )
+
+
 async def _handle_seedance25(job: Dict[str, Any]) -> None:
     job_id = str(job.get("job_id") or "").strip()
     user_id = _safe_int(job.get("user_id"))
+    submission_nonce = str(job.get("submission_nonce") or "").strip()
     charge_tokens = _safe_int(job.get("charge_tokens"))
     charge_ref_id = str(job.get("charge_ref_id") or "").strip()
     refund_reason = str(job.get("refund_reason") or "seedance25_video_refund").strip() or "seedance25_video_refund"
+    if job_id and user_id > 0 and submission_nonce:
+        # Stream delivery itself is durable proof that the web process crossed
+        # the charge/enqueue boundary. Heal a post-XADD Redis/UI failure by
+        # settling the V4 submission and removing its temporary per-user block.
+        try:
+            submission_settled = await set_reliable_submission_status(
+                queue_name=SEEDANCE25_QUEUE_NAME,
+                job_id=job_id,
+                submission_nonce=submission_nonce,
+                status="enqueued",
+                force_enqueued=True,
+            )
+            if submission_settled:
+                await clear_reliable_user_settlement_block(
+                    queue_name=SEEDANCE25_QUEUE_NAME,
+                    user_id=user_id,
+                    job_id=job_id,
+                )
+            else:
+                print(
+                    f"[redactor/seedance25] Stream job conflicts with terminal settlement job={job_id}",
+                    flush=True,
+                )
+        except Exception as settlement_exc:
+            print(
+                f"[redactor/seedance25] submission settlement warning job={job_id}: {settlement_exc}",
+                flush=True,
+            )
     state = await get_reliable_job_state(queue_name=SEEDANCE25_QUEUE_NAME, job_id=job_id) if job_id else {}
     if str(state.get("terminal") or "").lower() in {"completed", "failed"}:
         print(f"[redactor/seedance25] skip terminal replay job={job_id} terminal={state.get('terminal')}", flush=True)
         return
 
-    # If a previous attempt reached the refund stage but died before ACK, finish
-    # the refund idempotently instead of starting a free second generation.
-    if str(state.get("phase") or "").lower() == "failing":
-        await _seedance25_refund_once(user_id, charge_tokens, refund_reason, charge_ref_id, {
-            "origin": "seedance25", "job_id": job_id, "stage": "recovered_failing"
-        })
-        if job_id:
-            await set_reliable_job_state(queue_name=SEEDANCE25_QUEUE_NAME, job_id=job_id, updates={"terminal": "failed", "phase": "failed"})
+    # If a previous attempt reached the refund/notice stage but died before ACK,
+    # finish it idempotently instead of starting a free second generation.  A
+    # pending Telegram notice is retried before this Stream entry can be ACKed.
+    failure_phase = str(state.get("phase") or "").lower()
+    if failure_phase in {"failing", "failure_notice_pending"}:
+        if failure_phase == "failing":
+            await _seedance25_refund_once(user_id, charge_tokens, refund_reason, charge_ref_id, {
+                "origin": "seedance25", "job_id": job_id, "stage": "recovered_failing"
+            })
+        recovered_chat_id = _safe_int(job.get("chat_id"))
+        await _seedance25_finalize_tg_failure(
+            job_id=job_id,
+            chat_id=recovered_chat_id,
+            detail=str(state.get("error") or "временная ошибка worker"),
+            recovery_snapshot=job.get("recovery_snapshot") if isinstance(job.get("recovery_snapshot"), dict) else None,
+        )
         return
 
     existing_task_id = str(state.get("task_id") or job.get("provider_task_id") or "").strip()
@@ -873,16 +1066,12 @@ async def _handle_seedance25(job: Dict[str, Any]) -> None:
             except Exception as refund_exc:
                 print(f"[redactor/seedance25] refund pending job={job_id} error={refund_exc}", flush=True)
                 raise
-            if job_id:
-                await set_reliable_job_state(
-                    queue_name=SEEDANCE25_QUEUE_NAME, job_id=job_id,
-                    updates={"terminal": "failed", "phase": "failed"},
-                )
-            if chat_id:
-                try:
-                    await tg_send_message(chat_id, f"❌ Seedance 2.5: ошибка генерации. Токены возвращены.\n{str(exc)[:700]}")
-                except Exception:
-                    pass
+            await _seedance25_finalize_tg_failure(
+                job_id=job_id,
+                chat_id=chat_id,
+                detail=str(exc),
+                recovery_snapshot=job.get("recovery_snapshot") if isinstance(job.get("recovery_snapshot"), dict) else None,
+            )
             print(f"[redactor/seedance25] terminal provider failure job={job_id} error={exc}", flush=True)
             return
         except Exception as exc:
@@ -916,17 +1105,12 @@ async def _handle_seedance25(job: Dict[str, Any]) -> None:
             except Exception as refund_exc:
                 print(f"[redactor/seedance25] refund pending job={job_id} error={refund_exc}", flush=True)
                 raise
-            if job_id:
-                await set_reliable_job_state(
-                    queue_name=SEEDANCE25_QUEUE_NAME,
-                    job_id=job_id,
-                    updates={"terminal": "failed", "phase": "failed"},
-                )
-            if chat_id:
-                try:
-                    await tg_send_message(chat_id, f"❌ Seedance 2.5: ошибка генерации. Токены возвращены.\n{str(exc)[:700]}")
-                except Exception:
-                    pass
+            await _seedance25_finalize_tg_failure(
+                job_id=job_id,
+                chat_id=chat_id,
+                detail=str(exc),
+                recovery_snapshot=job.get("recovery_snapshot") if isinstance(job.get("recovery_snapshot"), dict) else None,
+            )
             print(f"[redactor/seedance25] failed provider job={job_id} error={exc}", flush=True)
             return
 
@@ -1138,7 +1322,16 @@ async def _seedance25_worker_slot(slot: int) -> None:
             if acked:
                 job_id = str(job.get("job_id") or "").strip()
                 if job_id:
-                    await delete_reliable_job_state(queue_name=SEEDANCE25_QUEUE_NAME, job_id=job_id)
+                    final_state = await get_reliable_job_state(
+                        queue_name=SEEDANCE25_QUEUE_NAME,
+                        job_id=job_id,
+                    )
+                    keep_recovery = bool(
+                        str(final_state.get("terminal") or "").strip().lower() == "failed"
+                        and isinstance(final_state.get("recovery_snapshot"), dict)
+                    )
+                    if not keep_recovery:
+                        await delete_reliable_job_state(queue_name=SEEDANCE25_QUEUE_NAME, job_id=job_id)
             job = None
         except asyncio.CancelledError:
             if heartbeat:
