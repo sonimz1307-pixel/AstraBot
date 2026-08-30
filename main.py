@@ -109,7 +109,9 @@ from topaz_pricing import (
     calc_video_retail_tokens,
     get_video_preset_settings,
 )
-from yookassa_flow import create_yookassa_payment, fetch_yookassa_payment
+from yookassa_flow import create_yookassa_payment
+from yookassa_recovery import reconcile_yookassa_payment
+from yookassa_store import list_recoverable_yookassa_payments
 from subscriptions_db import get_current_subscription, get_subscription_plan, set_user_subscription, extend_user_subscription
 from kling3_pricing import calculate_kling3_price
 from kling3_telegram_handler import handle_kling3_wait_prompt
@@ -3591,6 +3593,50 @@ async def tg_answer_pre_checkout_query(cq_id: str, *, ok: bool, error_message: s
         body["error_message"] = str(error_message)[:200]
     async with httpx.AsyncClient(timeout=15) as client:
         await client.post(f"{TELEGRAM_API_BASE}/answerPreCheckoutQuery", json=body)
+
+
+@app.post("/api/tg/payment/status")
+async def tg_yookassa_payment_status(request: Request):
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            payload = {}
+    except Exception:
+        payload = {}
+
+    user_id = _tg_user_id_from_request(request, payload)
+    if user_id <= 0:
+        return {"ok": False, "error": "user_id_required", "message": "Откройте личный кабинет из Telegram-бота."}
+
+    payment_id = str(payload.get("payment_id") or "").strip()
+    if not payment_id:
+        return {"ok": False, "error": "payment_id_required"}
+
+    try:
+        result = await reconcile_yookassa_payment(
+            payment_id,
+            expected_user_id=user_id,
+            source="tg_client_status",
+        )
+    except PermissionError:
+        return Response(status_code=403, content="forbidden")
+    except Exception as exc:
+        try:
+            print(f"[yookassa] tg status reconcile failed payment_id={payment_id}: {exc}", flush=True)
+        except Exception:
+            pass
+        return {"ok": False, "error": "reconcile_failed", "message": "Не удалось проверить оплату. Попробуйте обновить баланс ещё раз."}
+
+    if str(result.get("status") or "") == "applied":
+        try:
+            await _yookassa_post_apply_side_effects(result, event="client.status")
+        except Exception:
+            pass
+    try:
+        result["balance_tokens"] = int((await asyncio.to_thread(get_balance, user_id)) or result.get("balance_tokens") or 0)
+    except Exception:
+        pass
+    return result
 
 
 # --- YooKassa helpers (payments in RUB: cards + SBP on hosted checkout) ---
@@ -9424,14 +9470,7 @@ async def sunoapi_callback(req: Request):
 @app.post("/api/yookassa/webhook")
 @app.post("/yookassa/webhook")
 async def yookassa_webhook(request: Request):
-    """
-    YooKassa payment notifications.
-    Phase-1 safe hardening:
-    - keeps the current webhook URLs unchanged;
-    - does not require a secret unless YOOKASSA_WEBHOOK_REQUIRE_SECRET=1;
-    - verifies payment_id through YooKassa API before any tokens/subscription are granted;
-    - avoids logging full webhook payload / receipt / customer data.
-    """
+    """YooKassa notification entrypoint with durable recovery and atomic credit."""
     if YOOKASSA_WEBHOOK_REQUIRE_SECRET:
         auth = (request.headers.get("authorization") or "").strip()
         header_token = (request.headers.get("x-webhook-token") or "").strip()
@@ -9458,166 +9497,43 @@ async def yookassa_webhook(request: Request):
     if not isinstance(obj, dict):
         return {"ok": True}
 
-    payment_id = (obj.get("id") or "").strip()
+    payment_id = str(obj.get("id") or "").strip()
     if not payment_id:
         return {"ok": True}
 
-    # We process only successful payment notifications. The final status is still rechecked below via YooKassa API.
-    webhook_status = (obj.get("status") or "").strip()
+    webhook_status = str(obj.get("status") or "").strip().lower()
     if webhook_status != "succeeded" and event != "payment.succeeded":
         return {"ok": True}
 
-    _yk_cleanup_processed()
-    if payment_id in _YK_PROCESSED:
-        return {"ok": True}
-    if payment_id in _YK_PROCESSING:
-        return {"ok": True}
-    _YK_PROCESSING[payment_id] = time.time()
-
-    uid = 0
-    tokens = 0
-    payment_type = ""
-    plan_code = ""
-    is_subscription_payment = False
-    reason = "yookassa_topup"
-    payment_ref_id = str(uuid5(NAMESPACE_URL, f"nabex:yookassa:{payment_id}"))
-    amount_rub = 0.0
-    plan: Optional[Dict[str, Any]] = None
-
     try:
-        verified = await fetch_yookassa_payment(payment_id)
-        verified_id = (verified.get("id") or "").strip()
-        status = (verified.get("status") or "").strip()
-        paid = bool(verified.get("paid"))
-
-        if verified_id != payment_id:
-            raise RuntimeError("YooKassa payment id mismatch")
-
-        # Do not trust the webhook body for money/status. Use only the object fetched from YooKassa.
-        if status != "succeeded" or not paid:
-            _yk_mark_processed(payment_id)
-            return {"ok": True}
-
-        amount_obj = verified.get("amount") if isinstance(verified, dict) else {}
-        if not isinstance(amount_obj, dict):
-            amount_obj = {}
-        currency = str(amount_obj.get("currency") or "").strip().upper()
-        if currency and currency != "RUB":
-            if ADMIN_IDS:
-                try:
-                    await tg_send_message(next(iter(ADMIN_IDS)), f"⚠️ YooKassa webhook: currency mismatch. payment_id={payment_id} currency={currency}")
-                except Exception:
-                    pass
-            _yk_mark_processed(payment_id)
-            return {"ok": True}
-        try:
-            amount_rub = float(amount_obj.get("value") or 0)
-        except Exception:
-            amount_rub = 0.0
-
-        md = verified.get("metadata") or {}
-        if not isinstance(md, dict):
-            md = {}
-
-        try:
-            uid = int(md.get("user_id") or 0)
-            tokens = int(md.get("tokens") or 0)
-        except Exception:
-            uid = 0
-            tokens = 0
-
-        payment_type = str(md.get("payment_type") or "").strip().lower()
-        plan_code = str(md.get("plan_code") or "").strip().lower()
-        is_subscription_payment = payment_type == "subscription" or plan_code in PUBLIC_SUBSCRIPTION_PLAN_CODES
-        reason = "yookassa_subscription" if is_subscription_payment else "yookassa_topup"
-
-        # If metadata is missing, do nothing and do not leak payload/customer data to logs.
-        if uid <= 0 or tokens <= 0:
-            if ADMIN_IDS:
-                try:
-                    admin_id = next(iter(ADMIN_IDS))
-                    await tg_send_message(admin_id, f"⚠️ YooKassa webhook: missing metadata user_id/tokens. payment_id={payment_id}")
-                except Exception:
-                    pass
-            _yk_mark_processed(payment_id)
-            return {"ok": True}
-
-        tokens_already_granted = False
-        try:
-            tokens_already_granted = ledger_ref_exists(reason=reason, ref_id=payment_ref_id)
-        except Exception:
-            tokens_already_granted = False
-
-        subscription_already_applied = False
-        if is_subscription_payment:
-            subscription_already_applied = _yookassa_subscription_payment_already_applied(uid, payment_id)
-            if tokens_already_granted and subscription_already_applied:
-                _yk_mark_processed(payment_id)
-                return {"ok": True}
-        elif tokens_already_granted:
-            _yk_mark_processed(payment_id)
-            return {"ok": True}
-
-        ensure_user_row(uid)
-
-        # Apply subscription first. If token credit fails afterwards, YooKassa retry will see
-        # the subscription payment_id and will not extend/activate it a second time.
-        if is_subscription_payment and not subscription_already_applied:
-            plan = _public_subscription_plan_for_tg(plan_code)
-            if not plan:
-                raise RuntimeError(f"Unknown or unavailable subscription plan: {plan_code}")
-            duration_days = int(float(md.get("duration_days") or plan.get("duration_days") or 30))
-            current_sub = get_current_subscription(uid)
-            if bool(current_sub.get("is_active")) and str(current_sub.get("plan_code") or "").strip().lower() == plan_code:
-                extend_user_subscription(
-                    uid,
-                    days=duration_days,
-                    source="yookassa",
-                    payment_id=payment_id,
-                    comment=f"YooKassa subscription payment {payment_id}",
-                )
-            else:
-                set_user_subscription(
-                    uid,
-                    plan_code,
-                    duration_days=duration_days,
-                    source="yookassa",
-                    payment_id=payment_id,
-                    comment=f"YooKassa subscription payment {payment_id}",
-                    meta={"payment_id": payment_id, "amount_rub": amount_rub, "tokens_granted": tokens},
-                )
-
-        if not tokens_already_granted:
-            add_tokens(
-                uid,
-                tokens,
-                reason=reason,
-                ref_id=payment_ref_id,
-                meta={
-                    "payment_id": payment_id,
-                    "event": event,
-                    "status": status,
-                    "amount_rub": amount_rub,
-                    "provider": "yookassa",
-                    "payment_type": payment_type or ("subscription" if is_subscription_payment else "topup"),
-                    "plan_code": plan_code if is_subscription_payment else "",
-                },
-            )
-
-        _yk_mark_processed(payment_id)
-
-    except Exception as e:
-        _YK_PROCESSING.pop(payment_id, None)
+        result = await reconcile_yookassa_payment(payment_id, source="webhook")
+    except Exception as exc:
         if ADMIN_IDS:
             try:
-                admin_id = next(iter(ADMIN_IDS))
-                await tg_send_message(admin_id, f"❌ YooKassa начисление упало: {e}\nuser={uid} payment_id={payment_id}")
+                await tg_send_message(next(iter(ADMIN_IDS)), f"❌ YooKassa reconcile failed: {exc}\npayment_id={payment_id}")
             except Exception:
                 pass
-        # Return non-2xx so YooKassa can retry the webhook instead of silently losing the payment.
+        # Non-2xx asks YooKassa to retry, while our own durable reconciler also keeps
+        # checking the payment independently.
         return Response(status_code=500, content="processing error")
 
-    # Non-critical side effects: do not retry financial operations only because a notification failed.
+    if str(result.get("status") or "") == "applied":
+        await _yookassa_post_apply_side_effects(result, event=event or "payment.succeeded")
+
+    return {"ok": True}
+
+
+async def _yookassa_post_apply_side_effects(result: Dict[str, Any], *, event: str) -> None:
+    """Non-critical notifications/partner accounting after the financial commit."""
+    uid = int(result.get("user_id") or 0)
+    payment_id = str(result.get("payment_id") or "").strip()
+    tokens = int(result.get("tokens") or 0)
+    amount_rub = float(result.get("amount_rub") or 0)
+    payment_type = str(result.get("payment_type") or "topup").strip().lower() or "topup"
+    plan_code = str(result.get("plan_code") or "").strip().lower()
+
+    # Partner commission RPC is payment-id idempotent, so enqueueing it again after
+    # a retry is safe and closes the gap if a previous enqueue was lost.
     try:
         await _enqueue_partner_topup_event(
             user_id=uid,
@@ -9625,24 +9541,21 @@ async def yookassa_webhook(request: Request):
             amount_rub=amount_rub,
             tokens=tokens,
             provider="yookassa",
-            meta={"event": event, "status": "succeeded", "payment_type": payment_type or ("subscription" if is_subscription_payment else "topup")},
+            meta={"event": event, "status": "succeeded", "payment_type": payment_type},
         )
-    except Exception as e:
-        if ADMIN_IDS:
-            try:
-                admin_id = next(iter(ADMIN_IDS))
-                await tg_send_message(admin_id, f"⚠️ YooKassa partner event не записался: {e}\nuser={uid} payment_id={payment_id}")
-            except Exception:
-                pass
+    except Exception:
+        pass
+
+    if not bool(result.get("newly_applied")):
+        return
 
     try:
-        bal = int(get_balance(uid) or 0)
-        if is_subscription_payment:
-            if plan is None:
-                try:
-                    plan = _public_subscription_plan_for_tg(plan_code)
-                except Exception:
-                    plan = None
+        bal = int((await asyncio.to_thread(get_balance, uid)) or result.get("balance_tokens") or 0)
+        if payment_type == "subscription":
+            try:
+                plan = await asyncio.to_thread(get_subscription_plan, plan_code)
+            except Exception:
+                plan = {}
             plan_name = str((plan or {}).get("name") or plan_code.title())
             await tg_send_message(uid, f"✅ Тариф {plan_name} подключён!\nНачислено: +{tokens} токенов\nБаланс: {bal}", reply_markup=_help_menu_for(uid))
         else:
@@ -9650,7 +9563,65 @@ async def yookassa_webhook(request: Request):
     except Exception:
         pass
 
-    return {"ok": True}
+
+async def _yookassa_recovery_loop() -> None:
+    try:
+        interval = max(30, min(int(os.getenv("YOOKASSA_RECONCILE_INTERVAL_SEC", "60") or "60"), 900))
+    except Exception:
+        interval = 60
+    # Small startup delay lets the web service finish booting before external calls.
+    await asyncio.sleep(5)
+    while True:
+        try:
+            payment_ids = await asyncio.to_thread(list_recoverable_yookassa_payments, limit=25)
+            for payment_id in payment_ids:
+                try:
+                    result = await reconcile_yookassa_payment(payment_id, source="periodic_reconcile")
+                    if str(result.get("status") or "") == "applied":
+                        await _yookassa_post_apply_side_effects(result, event="periodic.reconcile")
+                except Exception as exc:
+                    try:
+                        print(f"[yookassa] periodic reconcile failed payment_id={payment_id}: {exc}", flush=True)
+                    except Exception:
+                        pass
+        except Exception as exc:
+            try:
+                print(f"[yookassa] recovery loop error: {exc}", flush=True)
+            except Exception:
+                pass
+        await asyncio.sleep(interval)
+
+
+_YOOKASSA_RECOVERY_TASK: Optional[asyncio.Task] = None
+
+
+@app.on_event("startup")
+async def _start_yookassa_recovery_loop() -> None:
+    global _YOOKASSA_RECOVERY_TASK
+    if not _yookassa_enabled():
+        return
+    if _YOOKASSA_RECOVERY_TASK is None or _YOOKASSA_RECOVERY_TASK.done():
+        # Keep a strong reference to the long-running task for the lifetime of
+        # the process; asyncio only keeps weak references to scheduled tasks.
+        _YOOKASSA_RECOVERY_TASK = asyncio.create_task(
+            _yookassa_recovery_loop(),
+            name="yookassa-payment-recovery",
+        )
+
+
+@app.on_event("shutdown")
+async def _stop_yookassa_recovery_loop() -> None:
+    global _YOOKASSA_RECOVERY_TASK
+    task = _YOOKASSA_RECOVERY_TASK
+    _YOOKASSA_RECOVERY_TASK = None
+    if task is None or task.done():
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
 
 @app.post("/internal/dl2k")
 async def internal_dl2k(request: Request):
