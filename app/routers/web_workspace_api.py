@@ -481,6 +481,8 @@ from switchx_service import SwitchXClient, SwitchXError
 from topaz_image_replicate import TopazImageParams, run_topaz_image_upscale
 from topaz_pricing import get_photo_preset_settings, get_photo_preset_tokens
 from yookassa_flow import create_yookassa_payment
+from yookassa_recovery import reconcile_yookassa_payment
+from app.services.partner_program import apply_topup_event
 from app.services.legnext_midjourney import (
     MIDJOURNEY_ALLOWED_ASPECT_RATIOS,
     LegnextMidjourneyError,
@@ -4724,6 +4726,55 @@ async def workspace_topup_create(payload: WorkspaceTopupCreatePayload, user: Dic
         "customer_email": email,
     }
 
+
+
+@router.get("/payment/status/{payment_id}")
+async def workspace_yookassa_payment_status(
+    payment_id: str,
+    user: Dict[str, Any] = Depends(get_current_workspace_user),
+) -> Dict[str, Any]:
+    account = ensure_workspace_account_from_claims(user)
+    uid = int(account.get("id") or user.get("workspace_user_id") or user.get("telegram_user_id") or 0)
+    if uid <= 0:
+        raise HTTPException(status_code=400, detail="Не удалось определить пользователя.")
+    pid = str(payment_id or "").strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="payment_id обязателен")
+    try:
+        result = await reconcile_yookassa_payment(pid, expected_user_id=uid, source="workspace_client_status")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Платёж принадлежит другому аккаунту.")
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Не удалось проверить оплату: {exc}")
+    # The workspace client can be the first recovery path when the provider
+    # webhook was lost. Financial credit is already committed by reconcile();
+    # partner commission is a separate idempotent RPC, so complete it here too.
+    if str(result.get("status") or "").strip().lower() == "applied":
+        try:
+            await asyncio.to_thread(
+                apply_topup_event,
+                referred_user_id=uid,
+                source_payment_id=str(result.get("payment_id") or pid),
+                payment_amount_rub=float(result.get("amount_rub") or 0),
+                purchased_tokens=int(result.get("tokens") or 0),
+                payment_provider="yookassa",
+                meta={
+                    "event": "workspace_client_status",
+                    "status": "succeeded",
+                    "payment_type": str(result.get("payment_type") or "topup"),
+                },
+            )
+        except Exception as exc:
+            try:
+                print(f"[yookassa] workspace partner reconcile failed payment_id={pid}: {exc}", flush=True)
+            except Exception:
+                pass
+
+    try:
+        result["balance_tokens"] = int((await asyncio.to_thread(get_balance, uid)) or result.get("balance_tokens") or 0)
+    except Exception:
+        pass
+    return result
 
 
 @router.post("/subscription/create")
