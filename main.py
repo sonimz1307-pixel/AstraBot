@@ -19,6 +19,7 @@ from queue_redis import (
     acquire_generation_lock,
     claim_reliable_submission,
     claim_reliable_user_settlement_reconciliation,
+    clear_seedance25_draft,
     clear_reliable_user_settlement_block,
     enqueue_job,
     enqueue_job_delayed,
@@ -27,9 +28,11 @@ from queue_redis import (
     get_reliable_job_state,
     get_reliable_submission_status,
     get_reliable_user_settlement_block,
+    load_seedance25_draft,
     reliable_job_was_enqueued,
     refresh_reliable_submission_claim,
     release_generation_lock,
+    save_seedance25_draft,
     set_reliable_submission_status,
     set_reliable_user_settlement_block,
 )
@@ -3580,6 +3583,20 @@ try:
     )
 except Exception:
     SEEDANCE25_SUBMISSION_STALE_SECONDS = 600
+try:
+    SEEDANCE25_DRAFT_IO_TIMEOUT_SECONDS = max(
+        1.0,
+        min(10.0, float(os.getenv("SEEDANCE25_DRAFT_IO_TIMEOUT_SECONDS", "4") or "4")),
+    )
+except Exception:
+    SEEDANCE25_DRAFT_IO_TIMEOUT_SECONDS = 4.0
+try:
+    SEEDANCE25_DRAFT_LOCK_WAIT_SECONDS = max(
+        1.0,
+        min(15.0, float(os.getenv("SEEDANCE25_DRAFT_LOCK_WAIT_SECONDS", "6") or "6")),
+    )
+except Exception:
+    SEEDANCE25_DRAFT_LOCK_WAIT_SECONDS = 6.0
 SEEDANCE25_CHARGE_LEASE_REFRESH_SECONDS = max(
     15,
     min(60, SEEDANCE25_SUBMISSION_STALE_SECONDS // 4),
@@ -4804,11 +4821,226 @@ class _Seedance25SubmissionOwnershipLost(RuntimeError):
     """A newer reconciler owns this stable billing/enqueue submission."""
 
 
+class _Seedance25DraftPersistenceError(RuntimeError):
+    """The shared pre-enqueue Seedance 2.5 draft could not be saved."""
+
+
+class _Seedance25DraftRestoreError(RuntimeError):
+    """The shared pre-enqueue Seedance 2.5 draft could not be checked/restored."""
+
+
+def _seedance25_shared_draft_snapshot(st: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a JSON-safe, narrowly scoped snapshot of the active TG draft."""
+    if not _seedance25_is_active(st):
+        raise ValueError("Seedance 2.5 draft is not active")
+    mode_now = str(st.get("mode") or "").strip()
+    settings = st.get("seedance_settings")
+    context = st.get(mode_now)
+    if not isinstance(settings, dict) or not isinstance(context, dict):
+        raise ValueError("Seedance 2.5 draft settings/context are missing")
+    snapshot: Dict[str, Any] = {
+        "schema_version": 1,
+        "saved_at": _now(),
+        "mode": mode_now,
+        "seedance_settings": copy.deepcopy(settings),
+        "context": copy.deepcopy(context),
+    }
+    confirmation = st.get("seedance25_confirmation")
+    if isinstance(confirmation, dict):
+        snapshot["seedance25_confirmation"] = copy.deepcopy(confirmation)
+    last_submission = st.get("seedance_last_submission")
+    if isinstance(last_submission, dict):
+        snapshot["seedance_last_submission"] = copy.deepcopy(last_submission)
+    last_error = str(st.get("seedance_last_error") or "").strip()
+    if last_error:
+        snapshot["seedance_last_error"] = last_error[:1000]
+    return snapshot
+
+
+def _seedance25_apply_shared_draft(st: Dict[str, Any], snapshot: Any) -> bool:
+    """Validate and restore a shared draft without importing unrelated state."""
+    if not isinstance(snapshot, dict):
+        return False
+    mode_now = str(snapshot.get("mode") or "").strip()
+    settings = snapshot.get("seedance_settings")
+    context = snapshot.get("context")
+    if mode_now not in ("seedance_t2v", "seedance_i2v", "seedance_omni"):
+        return False
+    if not isinstance(settings, dict) or not isinstance(context, dict):
+        return False
+    if str(settings.get("provider_kind") or "").strip().lower() != "seedance25":
+        return False
+    try:
+        saved_at = float(snapshot.get("saved_at") or snapshot.get("persisted_at") or 0.0)
+    except Exception:
+        saved_at = 0.0
+    # Redis already enforces the TTL.  This extra validation prevents a copied
+    # or malformed payload from resurrecting an arbitrarily old paid draft.
+    if saved_at <= 0 or (_now() - saved_at) > 7 * 24 * 3600 or saved_at > (_now() + 300):
+        return False
+
+    st.pop("seedance_t2v", None)
+    st.pop("seedance_i2v", None)
+    st.pop("seedance_omni", None)
+    st["mode"] = mode_now
+    st["seedance_settings"] = copy.deepcopy(settings)
+    st[mode_now] = copy.deepcopy(context)
+    st["ts"] = _now()
+
+    confirmation = snapshot.get("seedance25_confirmation")
+    if isinstance(confirmation, dict):
+        st["seedance25_confirmation"] = copy.deepcopy(confirmation)
+    else:
+        st.pop("seedance25_confirmation", None)
+    last_submission = snapshot.get("seedance_last_submission")
+    if isinstance(last_submission, dict):
+        st["seedance_last_submission"] = copy.deepcopy(last_submission)
+    else:
+        st.pop("seedance_last_submission", None)
+    last_error = str(snapshot.get("seedance_last_error") or "").strip()
+    if last_error:
+        st["seedance_last_error"] = last_error[:1000]
+    else:
+        st.pop("seedance_last_error", None)
+    return True
+
+
+async def _seedance25_save_shared_draft(
+    chat_id: int,
+    user_id: int,
+    st: Dict[str, Any],
+) -> None:
+    try:
+        snapshot = _seedance25_shared_draft_snapshot(st)
+        saved = await asyncio.wait_for(
+            save_seedance25_draft(int(chat_id), int(user_id), snapshot),
+            timeout=SEEDANCE25_DRAFT_IO_TIMEOUT_SECONDS,
+        )
+        if not saved:
+            raise RuntimeError("Redis did not confirm Seedance 2.5 draft save")
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        raise _Seedance25DraftPersistenceError(str(exc)) from exc
+
+
+async def _seedance25_restore_shared_draft(
+    chat_id: int,
+    user_id: int,
+    st: Dict[str, Any],
+) -> bool:
+    if _seedance25_is_active(st):
+        return True
+    try:
+        snapshot = await asyncio.wait_for(
+            load_seedance25_draft(int(chat_id), int(user_id)),
+            timeout=SEEDANCE25_DRAFT_IO_TIMEOUT_SECONDS,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        raise _Seedance25DraftRestoreError(str(exc)) from exc
+    if snapshot is None:
+        return False
+    if not _seedance25_apply_shared_draft(st, snapshot):
+        raise _Seedance25DraftRestoreError("shared Seedance 2.5 draft is invalid or expired")
+    return True
+
+
+async def _seedance25_clear_shared_draft(chat_id: int, user_id: int) -> None:
+    try:
+        cleared = await asyncio.wait_for(
+            clear_seedance25_draft(int(chat_id), int(user_id)),
+            timeout=SEEDANCE25_DRAFT_IO_TIMEOUT_SECONDS,
+        )
+        if not cleared:
+            raise RuntimeError("Redis did not confirm Seedance 2.5 draft clear")
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        raise _Seedance25DraftPersistenceError(str(exc)) from exc
+
+
+async def _seedance25_acquire_draft_update_lock(user_id: int, update: Dict[str, Any]) -> str:
+    """Serialize one user's draft mutations across Render processes."""
+    update_id = str((update or {}).get("update_id") or "").strip()
+    owner = f"tg:{int(user_id)}:{update_id or uuid4().hex}:{uuid4().hex}"
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + SEEDANCE25_DRAFT_LOCK_WAIT_SECONDS
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise _Seedance25DraftRestoreError(
+                "another Telegram update still owns the Seedance 2.5 draft lock"
+            )
+        try:
+            acquired = await asyncio.wait_for(
+                acquire_generation_lock(
+                    int(user_id),
+                    owner,
+                    lock_name="seedance25_tg_draft",
+                    ttl_sec=120,
+                ),
+                timeout=min(SEEDANCE25_DRAFT_IO_TIMEOUT_SECONDS, remaining),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise _Seedance25DraftRestoreError(str(exc)) from exc
+        if acquired:
+            return owner
+        await asyncio.sleep(min(0.2, max(0.05, remaining)))
+
+
+async def _seedance25_release_draft_update_lock(user_id: int, owner: str) -> None:
+    if not str(owner or "").strip():
+        return
+    try:
+        await asyncio.wait_for(
+            release_generation_lock(
+                int(user_id),
+                str(owner),
+                lock_name="seedance25_tg_draft",
+            ),
+            timeout=SEEDANCE25_DRAFT_IO_TIMEOUT_SECONDS,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        # The 120-second TTL guarantees eventual release.  Never turn an
+        # already persisted/acknowledged Telegram action into a duplicate retry.
+        logging.warning(
+            "Seedance 2.5 draft lock release failed user_id=%s: %s",
+            user_id,
+            exc,
+        )
+
+
+def _seedance25_active_state_for_chat(chat_id: int) -> Tuple[int, Optional[Dict[str, Any]]]:
+    """Resolve the active Seedance 2.5 user state for a Telegram chat."""
+    try:
+        cid = int(chat_id)
+    except Exception:
+        return 0, None
+    # Private Telegram chats normally have chat_id == user_id.
+    direct = STATE.get(_get_user_key(cid, cid))
+    if _seedance25_is_active(direct):
+        return cid, direct
+    matches: List[Tuple[int, Dict[str, Any]]] = []
+    for (state_chat_id, state_user_id), candidate in list(STATE.items()):
+        if int(state_chat_id) == cid and _seedance25_is_active(candidate):
+            matches.append((int(state_user_id), candidate))
+    if len(matches) == 1:
+        return matches[0]
+    return 0, None
+
+
 async def _seedance25_send_required(
     chat_id: int,
     text: str,
     *,
     reply_markup: Optional[dict] = None,
+    sync_active_draft: bool = True,
 ) -> int:
     """Return only after Telegram confirms the message with message_id.
 
@@ -4816,6 +5048,14 @@ async def _seedance25_send_required(
     outer retry covers the old silent ``None`` result as well.  A duplicate is
     preferable to permanently consuming the Telegram update without any reply.
     """
+    # Save the mutation before the user sees its acknowledgement.  This closes
+    # the small but real race where another Render process receives the next
+    # prompt/callback immediately after Telegram accepted this message.
+    if sync_active_draft:
+        active_user_id, active_state = _seedance25_active_state_for_chat(chat_id)
+        if active_user_id and _seedance25_is_active(active_state):
+            await _seedance25_save_shared_draft(chat_id, active_user_id, active_state)
+
     last_exc: Optional[BaseException] = None
     for attempt in range(1, SEEDANCE25_NOTICE_ATTEMPTS + 1):
         try:
@@ -4844,7 +5084,7 @@ async def _seedance_send_for_provider(
 
 
 async def _seedance_clear_session_after_enqueue(chat_id: int, user_id: int, st: Dict[str, Any]) -> None:
-    """Clear the Telegram Seedance draft only after Redis accepted the job."""
+    """Clear local and shared Telegram drafts only after Redis accepted the job."""
     st.pop("seedance_t2v", None)
     st.pop("seedance_i2v", None)
     st.pop("seedance_omni", None)
@@ -4853,6 +5093,10 @@ async def _seedance_clear_session_after_enqueue(chat_id: int, user_id: int, st: 
     st.pop("seedance25_confirmation", None)
     st["ts"] = _now()
     _set_mode(chat_id, user_id, "chat")
+    # This key is the cross-process pre-enqueue draft added in V6.  Clear it
+    # only after the reliable Stream enqueue is confirmed; otherwise another
+    # process must still be able to restore the user's prompt and references.
+    await _seedance25_clear_shared_draft(chat_id, user_id)
     # The queue already owns the full recovery snapshot.  Persisted FSM cleanup
     # is best-effort and must not delay acknowledgement of a paid submission.
     _schedule_seedance25_persisted_state_clear(user_id)
@@ -9853,6 +10097,8 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
                 st.pop("seedance_last_error", None)
                 st.pop("seedance25_confirmation", None)
                 st["ts"] = _now()
+                if prompt_provider == "seedance25":
+                    await _seedance25_clear_shared_draft(chat_id, user_id)
                 await _seedance_send_for_provider(
                     prompt_provider,
                     chat_id,
@@ -9925,6 +10171,8 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
                 st.pop("seedance_last_error", None)
                 st.pop("seedance25_confirmation", None)
                 st["ts"] = _now()
+                if refs_provider == "seedance25":
+                    await _seedance25_clear_shared_draft(chat_id, user_id)
                 await _seedance_send_for_provider(
                     refs_provider,
                     chat_id,
@@ -11077,6 +11325,8 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
             await reset_tg_chat_memory(chat_id, user_id)
         except Exception:
             pass
+        # V6: reset must also remove a draft created by another Render process.
+        await _seedance25_clear_shared_draft(chat_id, user_id)
         await tg_send_message(chat_id, "✅ Сброс выполнен. Возвращаю в главное меню.", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
 
@@ -11333,7 +11583,7 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
         st["ts"] = _now()
         audio_ref_no = len(so['audio_file_ids'])
         alias = f" @audio{audio_ref_no}" if provider_kind == "seedance25" else ""
-        await tg_send_message(chat_id, f"Аудио reference #{audio_ref_no}{alias} получил ✅\nПришли ещё refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
+        await _seedance_send_for_provider(provider_kind, chat_id, f"Аудио reference #{audio_ref_no}{alias} получил ✅\nПришли ещё refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
         return {"ok": True}
 
     # ---------------- Voice для Seedance Omni: принимаем как audio ref и конвертируем в MP3 в worker ----------------
@@ -11392,7 +11642,7 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
         st["ts"] = _now()
         audio_ref_no = len(so['audio_file_ids'])
         alias = f" @audio{audio_ref_no}" if provider_kind == "seedance25" else ""
-        await tg_send_message(chat_id, f"Голосовой audio reference #{audio_ref_no}{alias} получил ✅\nКонвертирую в MP3 при запуске. Пришли ещё refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
+        await _seedance_send_for_provider(provider_kind, chat_id, f"Голосовой audio reference #{audio_ref_no}{alias} получил ✅\nКонвертирую в MP3 при запуске. Пришли ещё refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
         return {"ok": True}
 
 
@@ -11736,6 +11986,12 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
             resolution = normalize_wan3_resolution(payload.get("resolution") or "720p")
             aspect_ratio = normalize_wan3_aspect_ratio(payload.get("aspect_ratio") or "adaptive")
             enable_audio = str(payload.get("enable_audio", "true")).lower() not in {"0","false","no","off"} if not isinstance(payload.get("enable_audio"), bool) else bool(payload.get("enable_audio"))
+            if provider_kind == "seedance25":
+                # A fresh WebApp selection is a new draft boundary.  Never
+                # carry an old confirmation nonce or recovery snapshot into it.
+                st.pop("seedance25_confirmation", None)
+                st.pop("seedance_last_submission", None)
+                st.pop("seedance_last_error", None)
             st["seedance_settings"] = {
                 "provider_kind": "wan3", "seedance_model": "wan3.0-video", "task_type": "wan3.0-video",
                 "flow": flow, "duration": duration, "resolution": resolution, "aspect_ratio": aspect_ratio, "enable_audio": enable_audio,
@@ -11868,7 +12124,8 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
                 _set_mode(chat_id, user_id, "seedance_t2v")
                 st["seedance_t2v"] = {"step": "need_prompt"}
                 st["ts"] = _now()
-                await tg_send_message(
+                await _seedance_send_for_provider(
+                    provider_kind,
                     chat_id,
                     ("✅ Настройки Seedance 2.5 сохранены.\n\nПришли промпт одним или несколькими сообщениями. Лимит NABEX: 30 000 символов. Когда всё отправишь — нажми «✅ Запустить»."
                      if provider_kind == "seedance25" else
@@ -11890,7 +12147,8 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
                     "prompt": None,
                 }
                 st["ts"] = _now()
-                await tg_send_message(
+                await _seedance_send_for_provider(
+                    provider_kind,
                     chat_id,
                     ("✅ Настройки Seedance 2.5 Omni Reference сохранены.\n\n"
                      if provider_kind == "seedance25" else
@@ -11923,7 +12181,7 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
                     + "\n\nТеперь пришли 1–2 ФОТО. "
                     "Первое фото будет first frame, второе — optional last frame. После фото нажми «✅ Готово», затем пришли промпт частями и нажми «✅ Запустить»."
                 )
-            await tg_send_message(chat_id, msg, reply_markup=_seedance_refs_collect_kb())
+            await _seedance_send_for_provider(provider_kind, chat_id, msg, reply_markup=_seedance_refs_collect_kb())
             return {"ok": True}
 
 # ----- WebApp data (Sora 2 settings) -----
@@ -13257,6 +13515,8 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
             st.pop("seedance_omni", None)
             st.pop("seedance_settings", None)
             st["ts"] = _now()
+            if provider_kind == "seedance25":
+                await _seedance25_clear_shared_draft(chat_id, user_id)
             await _seedance_send_for_provider(
                 provider_kind,
                 chat_id,
@@ -15370,6 +15630,7 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
         # ---- SEEDANCE 2 Image/Omni: сбор фото-референсов ----
         if st.get("mode") in ("seedance_i2v", "seedance_omni"):
             settings = st.get("seedance_settings") or {}
+            provider_kind = str(settings.get("provider_kind") or "seedance").strip().lower() or "seedance"
             limit = int(settings.get("max_images") or (7 if _seedance_uses_kie_backend(settings) else 2))
             total_limit = int(settings.get("max_total_refs") or 12)
 
@@ -15394,7 +15655,8 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
                     st["ts"] = _now()
                     ref_no = len(so['image_file_ids'])
                     alias = f" @image{ref_no}" if str(settings.get("provider_kind") or "").strip().lower() == "seedance25" else ""
-                    await tg_send_message(
+                    await _seedance_send_for_provider(
+                        provider_kind,
                         chat_id,
                         f"Фото reference #{ref_no}{alias} получил ✅\n"
                         "Пришли ещё refs или нажми «✅ Готово», чтобы перейти к промпту.",
@@ -15419,14 +15681,16 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
                     si["step"] = "need_prompt"
                     st["seedance_i2v"] = si
                     st["ts"] = _now()
-                    await tg_send_message(
+                    await _seedance_send_for_provider(
+                        provider_kind,
                         chat_id,
                         f"Получил {limit}/{limit} фото ✅ Теперь пришли ТЕКСТ (промпт), что должно происходить в видео.",
                         reply_markup=_seedance_prompt_back_kb(),
                     )
                     return {"ok": True}
 
-                await tg_send_message(
+                await _seedance_send_for_provider(
+                    provider_kind,
                     chat_id,
                     f"Фото #{len(imgs)} получил ✅\n"
                     f"Пришли ещё фото (до {limit}) или нажми «✅ Готово», чтобы перейти к промпту.",
@@ -15823,7 +16087,7 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
             st["ts"] = _now()
             ref_no = len(so['video_file_ids'])
             alias = f" @video{ref_no}" if provider_kind == "seedance25" else ""
-            await tg_send_message(chat_id, f"Видео reference #{ref_no}{alias} получил ✅\nПришли ещё refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
+            await _seedance_send_for_provider(provider_kind, chat_id, f"Видео reference #{ref_no}{alias} получил ✅\nПришли ещё refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
             return {"ok": True}
 
         if st.get("mode") == "omni_flash_video_edit":
@@ -16217,7 +16481,7 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
                 label += f" @video{ref_no}"
             st["seedance_omni"] = so
             st["ts"] = _now()
-            await tg_send_message(chat_id, f"{label} получил ✅\nПришли ещё refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
+            await _seedance_send_for_provider(provider_kind, chat_id, f"{label} получил ✅\nПришли ещё refs или нажми «✅ Готово».", reply_markup=_seedance_refs_collect_kb())
             return {"ok": True}
 
         if file_id and mime.startswith("video/") and st.get("mode") == "omni_flash_video_edit":
@@ -19013,22 +19277,150 @@ def _telegram_update_actor(update: Dict[str, Any]) -> Tuple[int, int]:
     return chat_id, user_id
 
 
-async def process_telegram_update(update: Dict[str, Any]):
-    """Process an update and keep a broken Seedance draft recoverable.
-
-    The legacy handler is intentionally large.  This narrow guard changes only
-    Seedance behaviour: an unexpected per-user exception releases the busy flag,
-    retains that user's prompt/references, and presents working recovery buttons.
-    Other modes preserve the existing exception/retry semantics.
-    """
+def _telegram_update_message_marker(update: Dict[str, Any]) -> Tuple[int, int]:
+    """Return (chat_id, message_id) for retry-safe processed-marker cleanup."""
+    chat_id, _ = _telegram_update_actor(update)
+    message = (update or {}).get("message") or (update or {}).get("edited_message") or {}
+    if not isinstance(message, dict):
+        return chat_id, 0
     try:
-        return await _process_telegram_update_impl(update)
+        return chat_id, int(message.get("message_id") or 0)
+    except Exception:
+        return chat_id, 0
+
+
+def _seedance25_update_needs_shared_lookup(update: Dict[str, Any]) -> bool:
+    """Identify updates that can continue a draft on a different TG process."""
+    if not isinstance(update, dict):
+        return False
+    callback = update.get("callback_query")
+    if isinstance(callback, dict):
+        data = str(callback.get("data") or "").strip()
+        return data.startswith(("seedance_prompt:", "seedance_refs:", "seedance25_confirm:"))
+    message = update.get("message") or update.get("edited_message") or {}
+    if not isinstance(message, dict):
+        return False
+    text = str(message.get("text") or message.get("caption") or "").strip()
+    if text:
+        # /reset is handled explicitly and clears the shared key even when the
+        # local process has never seen this user's draft.
+        if text.startswith("/reset") or text.startswith("/resetgen") or text == "🔄 Сбросить генерацию":
+            return False
+        return True
+    return bool(
+        message.get("photo")
+        or message.get("video")
+        or message.get("audio")
+        or message.get("voice")
+        or message.get("document")
+        or message.get("web_app_data")
+    )
+
+
+def _seedance25_update_is_reset(update: Dict[str, Any]) -> bool:
+    message = (update or {}).get("message") or (update or {}).get("edited_message") or {}
+    if not isinstance(message, dict):
+        return False
+    text = str(message.get("text") or message.get("caption") or "").strip()
+    return bool(
+        text.startswith("/reset")
+        or text.startswith("/resetgen")
+        or text == "🔄 Сбросить генерацию"
+    )
+
+
+def _forget_processed_message_for_retry(update: Dict[str, Any]) -> None:
+    chat_id, message_id = _telegram_update_message_marker(update)
+    if chat_id and message_id:
+        PROCESSED_MESSAGES.pop((chat_id, message_id), None)
+
+
+async def process_telegram_update(update: Dict[str, Any]):
+    """Process an update and keep a Seedance 2.5 draft cross-process safe.
+
+    V6 restores the pre-enqueue draft before text/media/callback processing and
+    persists every successful state transition before acknowledging the update.
+    The V5 per-user error guard remains as a second recovery layer.
+    """
+    chat_id, user_id = _telegram_update_actor(update)
+    st: Optional[Dict[str, Any]] = None
+    seedance_was_active = False
+    reset_requested = _seedance25_update_is_reset(update)
+    draft_lock_owner = ""
+    try:
+        if chat_id and user_id:
+            if _seedance25_update_needs_shared_lookup(update) or reset_requested:
+                draft_lock_owner = await _seedance25_acquire_draft_update_lock(user_id, update)
+            st = _ensure_state(chat_id, user_id)
+            if _seedance25_update_needs_shared_lookup(update) and not _seedance25_is_active(st):
+                restored = await _seedance25_restore_shared_draft(chat_id, user_id, st)
+                if restored:
+                    logging.info(
+                        "Seedance 2.5 shared draft restored chat_id=%s user_id=%s mode=%s",
+                        chat_id,
+                        user_id,
+                        str(st.get("mode") or ""),
+                    )
+            seedance_was_active = _seedance25_is_active(st)
+
+        result = await _process_telegram_update_impl(update)
+
+        st_after = STATE.get(_get_user_key(chat_id, user_id)) if chat_id and user_id else None
+        if chat_id and user_id and _seedance25_is_active(st_after):
+            await _seedance25_save_shared_draft(chat_id, user_id, st_after)
+        elif chat_id and user_id and (seedance_was_active or reset_requested):
+            await _seedance25_clear_shared_draft(chat_id, user_id)
+        return result
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        chat_id, user_id = _telegram_update_actor(update)
         st = STATE.get(_get_user_key(chat_id, user_id)) if chat_id and user_id else None
         mode_now = str((st or {}).get("mode") or "").strip()
+
+        if isinstance(exc, _Seedance25DraftRestoreError):
+            logging.exception(
+                "Seedance 2.5 shared draft restore failed chat_id=%s user_id=%s",
+                chat_id,
+                user_id,
+            )
+            try:
+                await _seedance25_send_required(
+                    chat_id,
+                    "⚠️ Не удалось восстановить сессию Seedance 2.5 из общего хранилища. "
+                    "Сообщение пока не обработано — повтори его через несколько секунд. "
+                    "Токены не списаны.",
+                    reply_markup=_help_menu_for(user_id),
+                )
+            except Exception:
+                pass
+            _forget_processed_message_for_retry(update)
+            raise
+
+        if isinstance(exc, _Seedance25DraftPersistenceError):
+            logging.exception(
+                "Seedance 2.5 shared draft sync failed chat_id=%s user_id=%s mode=%s",
+                chat_id,
+                user_id,
+                mode_now,
+            )
+            try:
+                await _seedance25_send_required(
+                    chat_id,
+                    "⚠️ Не удалось надёжно синхронизировать состояние Seedance 2.5. "
+                    "Последнее действие будет повторно проверено; не запускай новую задачу и "
+                    "повтори действие через несколько секунд.",
+                    reply_markup=(
+                        _seedance_recovery_markup(st, user_id)
+                        if _seedance25_is_active(st)
+                        else _help_menu_for(user_id)
+                    ),
+                    sync_active_draft=False,
+                )
+            except Exception:
+                pass
+            _forget_processed_message_for_retry(update)
+            raise
+
         if _seedance25_is_active(st):
             _busy_end(user_id)
             st["seedance_last_error"] = str(exc)[:1000]
@@ -19039,6 +19431,19 @@ async def process_telegram_update(update: Dict[str, Any]):
                 user_id,
                 mode_now,
             )
+            try:
+                # The recovery message below may claim that the prompt/refs are
+                # saved only after the cross-process snapshot is confirmed.
+                await _seedance25_save_shared_draft(chat_id, user_id, st)
+            except Exception as draft_exc:
+                logging.error(
+                    "Seedance recovery draft save failed chat_id=%s user_id=%s: %s",
+                    chat_id,
+                    user_id,
+                    draft_exc,
+                )
+                _forget_processed_message_for_retry(update)
+                raise draft_exc from exc
             try:
                 await _seedance25_send_required(
                     chat_id,
@@ -19057,29 +19462,18 @@ async def process_telegram_update(update: Dict[str, Any]):
                 # A Telegram update must not be ACKed when every recovery notice
                 # failed. The prompt append is message_id-idempotent, so a queue
                 # or webhook retry can safely resend the same update.
-                message = (update or {}).get("message") or (update or {}).get("edited_message") or {}
-                if isinstance(message, dict):
-                    try:
-                        message_id = int(message.get("message_id") or 0)
-                    except Exception:
-                        message_id = 0
-                    if chat_id and message_id:
-                        PROCESSED_MESSAGES.pop((chat_id, message_id), None)
+                _forget_processed_message_for_retry(update)
                 raise notify_exc from exc
             return {"ok": True, "seedance_recovered": True}
 
         # The message was marked as processed inside the legacy handler.  On an
         # unrelated unhandled failure, remove only this update's marker so an
         # existing Telegram/queue retry can really process it again.
-        message = (update or {}).get("message") or (update or {}).get("edited_message") or {}
-        if isinstance(message, dict):
-            try:
-                message_id = int(message.get("message_id") or 0)
-            except Exception:
-                message_id = 0
-            if chat_id and message_id:
-                PROCESSED_MESSAGES.pop((chat_id, message_id), None)
+        _forget_processed_message_for_retry(update)
         raise
+    finally:
+        if user_id and draft_lock_owner:
+            await _seedance25_release_draft_update_lock(user_id, draft_lock_owner)
 
 
 @app.post("/webhook/{secret}")
