@@ -21,6 +21,17 @@ _REDIS_HEALTH_CHECK_INTERVAL_SEC = int(os.getenv("REDIS_HEALTH_CHECK_INTERVAL_SE
 _REDIS_RECONNECT_SLEEP_SEC = float(os.getenv("REDIS_RECONNECT_SLEEP_SEC", "2") or "2")
 _REDIS_ENQUEUE_ATTEMPTS = max(1, int(os.getenv("REDIS_ENQUEUE_ATTEMPTS", "3") or "3"))
 _LOCK_PREFIX = (os.getenv("REDIS_LOCK_PREFIX", "astrabot:lock") or "astrabot:lock").strip().rstrip(":") or "astrabot:lock"
+_SEEDANCE25_DRAFT_PREFIX = (
+    os.getenv("SEEDANCE25_DRAFT_PREFIX", f"{_QUEUE_PREFIX}:seedance25:draft")
+    or f"{_QUEUE_PREFIX}:seedance25:draft"
+).strip().rstrip(":")
+try:
+    _SEEDANCE25_DRAFT_TTL_SEC = max(
+        3_600,
+        min(7 * 24 * 3_600, int(os.getenv("SEEDANCE25_DRAFT_TTL_SECONDS", "86400") or "86400")),
+    )
+except Exception:
+    _SEEDANCE25_DRAFT_TTL_SEC = 86_400
 
 _REDIS_CLIENT: Optional[redis.Redis] = None
 
@@ -49,6 +60,114 @@ def _generation_lock_key(user_id: int, lock_name: str = "generation") -> str:
         raise ValueError("invalid user_id for Redis generation lock") from exc
     safe_name = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(lock_name or "generation").strip()) or "generation"
     return f"{_LOCK_PREFIX}:{safe_name}:{uid}"
+
+
+def _seedance25_draft_key(chat_id: int, user_id: int) -> str:
+    """Stable cross-process key for one Telegram Seedance 2.5 draft."""
+    try:
+        cid = int(chat_id)
+        uid = int(user_id)
+    except Exception as exc:
+        raise ValueError("invalid chat_id/user_id for Seedance 2.5 draft") from exc
+    if not cid or not uid:
+        raise ValueError("chat_id and user_id are required for Seedance 2.5 draft")
+    return f"{_SEEDANCE25_DRAFT_PREFIX}:{cid}:{uid}"
+
+
+async def save_seedance25_draft(
+    chat_id: int,
+    user_id: int,
+    draft: Dict[str, Any],
+    *,
+    ttl_sec: Optional[int] = None,
+) -> bool:
+    """Persist the pre-enqueue Telegram draft so another process can resume it.
+
+    The operation is deliberately awaited by the Telegram update handler before
+    that update is acknowledged.  A successful bot reply must never be the only
+    copy of the user's settings, references, prompt, or confirmation nonce.
+    """
+    if not isinstance(draft, dict):
+        raise ValueError("Seedance 2.5 draft must be a dict")
+    key = _seedance25_draft_key(chat_id, user_id)
+    ttl = max(3_600, min(7 * 24 * 3_600, int(ttl_sec or _SEEDANCE25_DRAFT_TTL_SEC)))
+    payload = dict(draft)
+    payload["persisted_at"] = time.time()
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, _REDIS_ENQUEUE_ATTEMPTS + 1):
+        try:
+            r = await get_redis()
+            await r.set(key, encoded, ex=ttl)
+            return True
+        except (RedisTimeoutError, RedisConnectionError) as exc:
+            last_exc = exc
+            print(
+                f"[queue_redis] Seedance 2.5 draft save error "
+                f"attempt={attempt}/{_REDIS_ENQUEUE_ATTEMPTS} key={key}: {exc}",
+                flush=True,
+            )
+            await _reset_redis_client()
+            if attempt < _REDIS_ENQUEUE_ATTEMPTS:
+                await asyncio.sleep(_REDIS_RECONNECT_SLEEP_SEC)
+    raise RuntimeError(
+        f"Seedance 2.5 draft save failed after {_REDIS_ENQUEUE_ATTEMPTS} attempts: {last_exc}"
+    )
+
+
+async def load_seedance25_draft(chat_id: int, user_id: int) -> Optional[Dict[str, Any]]:
+    """Load a shared Telegram draft, returning None only when it does not exist."""
+    key = _seedance25_draft_key(chat_id, user_id)
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, _REDIS_ENQUEUE_ATTEMPTS + 1):
+        try:
+            r = await get_redis()
+            raw = await r.get(key)
+            if raw is None:
+                return None
+            decoded = json.loads(raw)
+            if not isinstance(decoded, dict):
+                raise RuntimeError("Seedance 2.5 draft payload is not an object")
+            return decoded
+        except (RedisTimeoutError, RedisConnectionError) as exc:
+            last_exc = exc
+            print(
+                f"[queue_redis] Seedance 2.5 draft load error "
+                f"attempt={attempt}/{_REDIS_ENQUEUE_ATTEMPTS} key={key}: {exc}",
+                flush=True,
+            )
+            await _reset_redis_client()
+            if attempt < _REDIS_ENQUEUE_ATTEMPTS:
+                await asyncio.sleep(_REDIS_RECONNECT_SLEEP_SEC)
+        except (TypeError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
+            raise RuntimeError(f"Seedance 2.5 draft is corrupted for key={key}: {exc}") from exc
+    raise RuntimeError(
+        f"Seedance 2.5 draft load failed after {_REDIS_ENQUEUE_ATTEMPTS} attempts: {last_exc}"
+    )
+
+
+async def clear_seedance25_draft(chat_id: int, user_id: int) -> bool:
+    """Delete a shared draft after cancel/reset or a confirmed Redis enqueue."""
+    key = _seedance25_draft_key(chat_id, user_id)
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, _REDIS_ENQUEUE_ATTEMPTS + 1):
+        try:
+            r = await get_redis()
+            await r.delete(key)
+            return True
+        except (RedisTimeoutError, RedisConnectionError) as exc:
+            last_exc = exc
+            print(
+                f"[queue_redis] Seedance 2.5 draft clear error "
+                f"attempt={attempt}/{_REDIS_ENQUEUE_ATTEMPTS} key={key}: {exc}",
+                flush=True,
+            )
+            await _reset_redis_client()
+            if attempt < _REDIS_ENQUEUE_ATTEMPTS:
+                await asyncio.sleep(_REDIS_RECONNECT_SLEEP_SEC)
+    raise RuntimeError(
+        f"Seedance 2.5 draft clear failed after {_REDIS_ENQUEUE_ATTEMPTS} attempts: {last_exc}"
+    )
 
 
 async def acquire_generation_lock(
