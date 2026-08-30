@@ -8,6 +8,7 @@ import urllib.parse
 import hashlib
 import hmac
 import logging
+import copy
 import tempfile
 from uuid import uuid4, uuid5, NAMESPACE_URL
 from io import BytesIO
@@ -16,10 +17,21 @@ from typing import Optional, Literal, Dict, Any, Tuple, List, Union
 import httpx
 from queue_redis import (
     acquire_generation_lock,
+    claim_reliable_submission,
+    claim_reliable_user_settlement_reconciliation,
+    clear_reliable_user_settlement_block,
     enqueue_job,
     enqueue_job_delayed,
     enqueue_reliable_job,
+    enqueue_reliable_submission_job,
+    get_reliable_job_state,
+    get_reliable_submission_status,
+    get_reliable_user_settlement_block,
+    reliable_job_was_enqueued,
+    refresh_reliable_submission_claim,
     release_generation_lock,
+    set_reliable_submission_status,
+    set_reliable_user_settlement_block,
 )
 from chat_file_text import extract_file_text
 from chat_memory_redis import reset_tg_chat_memory
@@ -142,7 +154,12 @@ from veo31_fast_relax_kie import (
 )
 from seedance_kie import seedance_kie_tokens_for_duration, seedance_mini_promo_text
 from seedance_25_kie import seedance25_tokens_for_run, seedance25_resolution_from_model
-from seedance25_billing import refund_seedance25_once
+from seedance25_billing import (
+    Seedance25InsufficientBalanceError,
+    charge_seedance25_once,
+    get_seedance25_charge_amount,
+    refund_seedance25_once,
+)
 from wan3_kie import wan3_tokens_for_run, normalize_wan3_resolution, normalize_wan3_duration, normalize_wan3_aspect_ratio
 from wan3_billing import (
     Wan3InsufficientBalanceError, charge_wan3_once, mark_wan3_refund_pending, refund_wan3_once,
@@ -2357,6 +2374,52 @@ TG_SEND_MESSAGE_5XX_BACKOFF_SEC = max(0.25, float(os.getenv("TG_SEND_MESSAGE_5XX
 
 # ---------------- Supabase: user state (bot_user_state) ----------------
 # Uses shared client from db_supabase.py (service key).
+_ACTIVITY_TRACK_SEMAPHORE = asyncio.Semaphore(4)
+
+
+async def _track_user_activity_background(tg_user: Dict[str, Any]) -> None:
+    # Analytics must never hold the Telegram update path. If all four bounded
+    # slots are busy, dropping one last_seen refresh is safer than growing an
+    # unbounded backlog during a Supabase outage.
+    if _ACTIVITY_TRACK_SEMAPHORE.locked():
+        return
+    async with _ACTIVITY_TRACK_SEMAPHORE:
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(track_user_activity, dict(tg_user or {})),
+                timeout=SEEDANCE25_DB_READ_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            pass
+
+
+def _schedule_track_user_activity(tg_user: Dict[str, Any]) -> None:
+    try:
+        asyncio.get_running_loop().create_task(_track_user_activity_background(tg_user))
+    except Exception:
+        pass
+
+
+async def _seedance25_clear_persisted_state_background(user_id: int) -> None:
+    """Best-effort FSM cleanup that cannot delay a Telegram acknowledgement."""
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(sb_clear_user_state, int(user_id)),
+            timeout=SEEDANCE25_DB_READ_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        pass
+
+
+def _schedule_seedance25_persisted_state_clear(user_id: int) -> None:
+    try:
+        asyncio.get_running_loop().create_task(
+            _seedance25_clear_persisted_state_background(int(user_id))
+        )
+    except Exception:
+        pass
+
+
 def sb_get_user_state(user_id: int):
     """
     Returns (state, payload_dict) or ("idle", None) if not set / Supabase disabled.
@@ -3482,6 +3545,45 @@ def _yk_extract_confirmation_url(payment_json: Dict[str, Any]) -> str:
 
 # ---------------- In-memory state ----------------
 STATE_TTL_SECONDS = int(os.getenv("STATE_TTL_SECONDS", "1800"))  # 30 минут
+try:
+    SEEDANCE_RECOVERY_TTL_SECONDS = max(
+        STATE_TTL_SECONDS,
+        int(os.getenv("SEEDANCE_RECOVERY_TTL_SECONDS", "21600") or "21600"),
+    )
+except Exception:
+    SEEDANCE_RECOVERY_TTL_SECONDS = max(STATE_TTL_SECONDS, 21600)
+try:
+    SEEDANCE25_DB_READ_TIMEOUT_SECONDS = max(
+        1.0,
+        float(os.getenv("SEEDANCE25_DB_READ_TIMEOUT_SECONDS", "6") or "6"),
+    )
+except Exception:
+    SEEDANCE25_DB_READ_TIMEOUT_SECONDS = 6.0
+try:
+    SEEDANCE25_NOTICE_ATTEMPTS = max(
+        1,
+        min(3, int(os.getenv("SEEDANCE25_NOTICE_ATTEMPTS", "2") or "2")),
+    )
+except Exception:
+    SEEDANCE25_NOTICE_ATTEMPTS = 2
+try:
+    SEEDANCE25_REFUND_ATTEMPTS = max(
+        1,
+        min(5, int(os.getenv("SEEDANCE25_REFUND_ATTEMPTS", "3") or "3")),
+    )
+except Exception:
+    SEEDANCE25_REFUND_ATTEMPTS = 3
+try:
+    SEEDANCE25_SUBMISSION_STALE_SECONDS = max(
+        120,
+        int(os.getenv("SEEDANCE25_SUBMISSION_STALE_SECONDS", "600") or "600"),
+    )
+except Exception:
+    SEEDANCE25_SUBMISSION_STALE_SECONDS = 600
+SEEDANCE25_CHARGE_LEASE_REFRESH_SECONDS = max(
+    15,
+    min(60, SEEDANCE25_SUBMISSION_STALE_SECONDS // 4),
+)
 MIDJOURNEY_SESSION_TTL_SECONDS = int(os.getenv("MIDJOURNEY_SESSION_TTL_SECONDS", "86400") or "86400")
 SUPABASE_STORAGE_BUCKET = (os.getenv("SUPABASE_BUCKET") or "").strip()
 STATE: Dict[Tuple[int, int], Dict[str, Any]] = {}
@@ -3527,7 +3629,17 @@ def _cleanup_state():
                 if ts_mj and (now - ts_mj <= MIDJOURNEY_SESSION_TTL_SECONDS):
                     has_live_mj_session = True
                     break
-        if now - ts > STATE_TTL_SECONDS and not has_live_mj_session:
+        seedance_recovery = v.get("seedance_last_submission")
+        try:
+            seedance_recovery_ts = float((seedance_recovery or {}).get("ts") or 0.0)
+        except Exception:
+            seedance_recovery_ts = 0.0
+        has_live_seedance_recovery = bool(
+            isinstance(seedance_recovery, dict)
+            and seedance_recovery_ts
+            and (now - seedance_recovery_ts <= SEEDANCE_RECOVERY_TTL_SECONDS)
+        )
+        if now - ts > STATE_TTL_SECONDS and not has_live_mj_session and not has_live_seedance_recovery:
             expired_state.append(k)
     for k in expired_state:
         STATE.pop(k, None)
@@ -4606,6 +4718,16 @@ def _seedance25_confirm_kb(cost_tokens: int) -> dict:
     }
 
 
+def _seedance25_settlement_kb() -> dict:
+    """No launch button while a previous billing/enqueue attempt is settling."""
+    return {
+        "inline_keyboard": [
+            [{"text": "⬅️ Вернуться к промпту", "callback_data": "seedance25_confirm:back"}],
+            [{"text": "❌ Отмена", "callback_data": "seedance_prompt:cancel"}],
+        ]
+    }
+
+
 def _seedance_prompt_back_kb() -> dict:
     # Backward-compatible wrapper for old call sites.
     return _seedance_prompt_collect_kb("seedance_omni")
@@ -4632,10 +4754,633 @@ def _seedance_prompt_limit_from_settings(settings: Optional[Dict[str, Any]]) -> 
     settings = settings or {}
     provider_kind = str(settings.get("provider_kind") or "").strip().lower()
     if provider_kind == "seedance25":
-        return int(os.getenv("SEEDANCE25_PROMPT_UI_MAX", "30000") or "30000")
+        try:
+            return max(1, int(os.getenv("SEEDANCE25_PROMPT_UI_MAX", "30000") or "30000"))
+        except Exception:
+            return 30000
     if provider_kind == "wan3":
         return 20000
     return 20000 if _seedance_uses_kie_backend(settings) else 4000
+
+
+def _seedance_setting_int(
+    settings: Optional[Dict[str, Any]],
+    key: str,
+    default: int,
+    *,
+    minimum: int = 0,
+    maximum: int = 100_000,
+) -> int:
+    """Read a Seedance UI setting without poisoning one user's FSM state.
+
+    Telegram WebApp payloads normally contain integers, but an old client or a
+    partially restored session can contain strings such as ``"5.0"`` or a bad
+    value.  A plain ``int(...)`` used to raise before the Seedance handler could
+    answer, so every later text from that same user hit the same exception.
+    """
+    raw = (settings or {}).get(key, default)
+    try:
+        value = int(float(raw))
+    except Exception:
+        value = int(default)
+    return max(int(minimum), min(int(maximum), value))
+
+
+def _seedance25_is_active(st: Optional[Dict[str, Any]]) -> bool:
+    st = st or {}
+    mode_now = str(st.get("mode") or "").strip()
+    settings = st.get("seedance_settings") if isinstance(st.get("seedance_settings"), dict) else {}
+    return bool(
+        mode_now in ("seedance_t2v", "seedance_i2v", "seedance_omni")
+        and str(settings.get("provider_kind") or "").strip().lower() == "seedance25"
+    )
+
+
+class _Seedance25NoticePending(RuntimeError):
+    """Telegram did not confirm a user-facing Seedance 2.5 message."""
+
+
+class _Seedance25SubmissionOwnershipLost(RuntimeError):
+    """A newer reconciler owns this stable billing/enqueue submission."""
+
+
+async def _seedance25_send_required(
+    chat_id: int,
+    text: str,
+    *,
+    reply_markup: Optional[dict] = None,
+) -> int:
+    """Return only after Telegram confirms the message with message_id.
+
+    ``tg_send_message`` already retries explicit 429/5xx responses.  This small
+    outer retry covers the old silent ``None`` result as well.  A duplicate is
+    preferable to permanently consuming the Telegram update without any reply.
+    """
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, SEEDANCE25_NOTICE_ATTEMPTS + 1):
+        try:
+            message_id = await tg_send_message(chat_id, text, reply_markup=reply_markup)
+            if message_id:
+                return int(message_id)
+            last_exc = RuntimeError("Telegram sendMessage returned no message_id")
+        except Exception as exc:
+            last_exc = exc
+        if attempt < SEEDANCE25_NOTICE_ATTEMPTS:
+            await asyncio.sleep(0.75 * attempt)
+    raise _Seedance25NoticePending(str(last_exc or "Telegram notification was not accepted"))
+
+
+async def _seedance_send_for_provider(
+    provider_kind: str,
+    chat_id: int,
+    text: str,
+    *,
+    reply_markup: Optional[dict] = None,
+) -> Optional[int]:
+    """Use confirmed Telegram delivery only for Seedance 2.5 flows."""
+    if str(provider_kind or "").strip().lower() == "seedance25":
+        return await _seedance25_send_required(chat_id, text, reply_markup=reply_markup)
+    return await tg_send_message(chat_id, text, reply_markup=reply_markup)
+
+
+async def _seedance_clear_session_after_enqueue(chat_id: int, user_id: int, st: Dict[str, Any]) -> None:
+    """Clear the Telegram Seedance draft only after Redis accepted the job."""
+    st.pop("seedance_t2v", None)
+    st.pop("seedance_i2v", None)
+    st.pop("seedance_omni", None)
+    st.pop("seedance_settings", None)
+    st.pop("seedance_last_error", None)
+    st.pop("seedance25_confirmation", None)
+    st["ts"] = _now()
+    _set_mode(chat_id, user_id, "chat")
+    # The queue already owns the full recovery snapshot.  Persisted FSM cleanup
+    # is best-effort and must not delay acknowledgement of a paid submission.
+    _schedule_seedance25_persisted_state_clear(user_id)
+
+
+def _seedance25_draft_fingerprint(
+    st: Dict[str, Any],
+    *,
+    mode: str,
+    settings: Dict[str, Any],
+    prompt: str,
+) -> str:
+    mode_now = str(mode or "").strip()
+    context = st.get(mode_now) if isinstance(st.get(mode_now), dict) else {}
+    payload = {
+        "mode": mode_now,
+        "settings": dict(settings or {}),
+        "prompt": str(prompt or "").strip(),
+        "image_file_ids": list((context or {}).get("image_file_ids") or []),
+        "video_file_ids": list((context or {}).get("video_file_ids") or []),
+        "video_durations_sec": list((context or {}).get("video_durations_sec") or []),
+        "audio_file_ids": list((context or {}).get("audio_file_ids") or []),
+        "audio_durations_sec": list((context or {}).get("audio_durations_sec") or []),
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _seedance25_confirmation_for_draft(
+    st: Dict[str, Any],
+    *,
+    mode: str,
+    settings: Dict[str, Any],
+    prompt: str,
+    create: bool,
+) -> Optional[Dict[str, Any]]:
+    fingerprint = _seedance25_draft_fingerprint(
+        st,
+        mode=mode,
+        settings=settings,
+        prompt=prompt,
+    )
+    current = st.get("seedance25_confirmation")
+    if isinstance(current, dict) and str(current.get("fingerprint") or "") == fingerprint:
+        nonce = str(current.get("nonce") or "").strip()
+        if nonce:
+            return current
+    if not create:
+        return None
+    confirmation = {
+        "nonce": uuid4().hex,
+        "fingerprint": fingerprint,
+        "status": "ready",
+        "ts": _now(),
+    }
+    st["seedance25_confirmation"] = confirmation
+    st["ts"] = _now()
+    return confirmation
+
+
+def _seedance25_set_local_confirmation_status(st: Dict[str, Any], status: str) -> None:
+    confirmation = st.get("seedance25_confirmation")
+    if not isinstance(confirmation, dict):
+        return
+    confirmation["status"] = str(status or "").strip().lower()
+    confirmation["ts"] = _now()
+    st["seedance25_confirmation"] = confirmation
+    st["ts"] = _now()
+
+
+def _seedance25_submission_ids(user_id: int, submission_nonce: str) -> Tuple[str, str]:
+    nonce = str(submission_nonce or "").strip()
+    if not nonce:
+        raise ValueError("Seedance 2.5 submission nonce is missing")
+    identity = f"{int(user_id)}:{nonce}"
+    job_uuid = uuid5(NAMESPACE_URL, f"nabex:seedance25:job:{identity}")
+    charge_uuid = uuid5(NAMESPACE_URL, f"nabex:seedance25:charge:{identity}")
+    return job_uuid.hex, str(charge_uuid)
+
+
+async def _seedance25_store_submission_status(
+    st: Dict[str, Any],
+    *,
+    job_id: str,
+    submission_nonce: str,
+    status: str,
+    owner_token: str = "",
+    force_enqueued: bool = False,
+) -> bool:
+    try:
+        stored = await set_reliable_submission_status(
+            queue_name=SEEDANCE25_QUEUE_NAME,
+            job_id=str(job_id),
+            submission_nonce=str(submission_nonce),
+            status=str(status),
+            owner_token=str(owner_token or ""),
+            force_enqueued=bool(force_enqueued),
+        )
+        if not stored:
+            logging.error(
+                "Seedance 2.5 submission status conflict job=%s status=%s",
+                job_id,
+                status,
+            )
+        else:
+            _seedance25_set_local_confirmation_status(st, status)
+        return bool(stored)
+    except Exception as exc:
+        # Local state still blocks a second charge in the running TG process.
+        # A restarted process has no active draft to confirm, so this remains
+        # fail-closed even while Redis is temporarily unavailable.
+        logging.error(
+            "Seedance 2.5 submission status write failed job=%s status=%s: %s",
+            job_id,
+            status,
+            exc,
+        )
+        if str(status or "").strip().lower() not in {"enqueued", "refunded", "not_charged"}:
+            _seedance25_set_local_confirmation_status(st, status)
+        return False
+
+
+def _seedance25_blocked_submission_text(status: str, code: str) -> str:
+    normalized = str(status or "").strip().lower()
+    if normalized == "enqueued":
+        return "⏳ Эта задача Seedance 2.5 уже принята очередью. Повторного списания не будет."
+    if normalized == "refunded":
+        return (
+            "✅ Возврат по прошлой попытке завершён. Нажми «Вернуться к промпту», "
+            "затем снова «Запустить» — будет создано новое подтверждение."
+        )
+    if normalized == "not_charged":
+        return "✅ Проверка завершена: по прошлой попытке токены не списывались. Можно запустить заново."
+    if normalized in {"claimed", "in_progress", "reconciling"}:
+        return "⏳ Этот запуск Seedance 2.5 уже обрабатывается. Повторного списания не будет."
+    return (
+        "⚠️ По прошлому запуску Seedance 2.5 ещё требуется сверка списания и очереди. "
+        f"Новый запуск заблокирован; сообщи поддержке код {code}."
+    )
+
+
+def _seedance_remember_last_submission(
+    st: Dict[str, Any],
+    *,
+    mode: str,
+    settings: Dict[str, Any],
+    prompt: str,
+    job_id: str,
+) -> Optional[Dict[str, Any]]:
+    mode_now = str(mode or "").strip()
+    if mode_now not in ("seedance_t2v", "seedance_i2v", "seedance_omni"):
+        return None
+    context = copy.deepcopy(st.get(mode_now) or {})
+    context["prompt"] = str(prompt or "").strip()
+    context["prompt_parts"] = [str(prompt or "").strip()] if str(prompt or "").strip() else []
+    context["step"] = "need_prompt"
+    snapshot = {
+        "ts": _now(),
+        "mode": mode_now,
+        "settings": copy.deepcopy(settings or {}),
+        "context": context,
+        "prompt": str(prompt or "").strip(),
+        "job_id": str(job_id or "").strip(),
+    }
+    st["seedance_last_submission"] = snapshot
+    return copy.deepcopy(snapshot)
+
+
+def _seedance_restore_submission_snapshot(
+    st: Dict[str, Any],
+    snapshot: Any,
+    *,
+    expected_job_id: str = "",
+) -> bool:
+    if not isinstance(snapshot, dict):
+        return False
+    try:
+        age = _now() - float(snapshot.get("ts") or 0.0)
+    except Exception:
+        return False
+    if age < 0 or age > SEEDANCE_RECOVERY_TTL_SECONDS:
+        return False
+
+    expected = str(expected_job_id or "").strip()
+    if expected and str(snapshot.get("job_id") or "").strip() != expected:
+        # Never restore a newer/different generation when the user clicked an
+        # error button belonging to an older job.
+        return False
+
+    mode_now = str(snapshot.get("mode") or "").strip()
+    settings = snapshot.get("settings")
+    context = snapshot.get("context")
+    if mode_now not in ("seedance_t2v", "seedance_i2v", "seedance_omni"):
+        return False
+    if not isinstance(settings, dict) or not isinstance(context, dict):
+        return False
+    if str(settings.get("provider_kind") or "").strip().lower() != "seedance25":
+        return False
+
+    st["seedance_settings"] = copy.deepcopy(settings)
+    st[mode_now] = copy.deepcopy(context)
+    st[mode_now]["step"] = "need_prompt"
+    st["seedance_last_submission"] = copy.deepcopy(snapshot)
+    st.pop("seedance_last_error", None)
+    # A recovered failed job must receive a fresh confirmation nonce before a
+    # new charge.  The old submission remains permanently settled/refunded.
+    st.pop("seedance25_confirmation", None)
+    st["mode"] = mode_now
+    st["ts"] = _now()
+    return True
+
+
+def _seedance_restore_last_submission(st: Dict[str, Any], *, expected_job_id: str = "") -> bool:
+    snapshot = st.get("seedance_last_submission")
+    restored = _seedance_restore_submission_snapshot(
+        st,
+        snapshot,
+        expected_job_id=expected_job_id,
+    )
+    if not restored and isinstance(snapshot, dict):
+        try:
+            expired = _now() - float(snapshot.get("ts") or 0.0) > SEEDANCE_RECOVERY_TTL_SECONDS
+        except Exception:
+            expired = True
+        if expired:
+            st.pop("seedance_last_submission", None)
+    return restored
+
+
+def _seedance_recovery_markup(st: Optional[Dict[str, Any]], user_id: int) -> dict:
+    confirmation = (st or {}).get("seedance25_confirmation")
+    if isinstance(confirmation, dict):
+        submit_status = str(confirmation.get("status") or "ready").strip().lower()
+        if submit_status not in {"", "ready"}:
+            return _seedance25_settlement_kb()
+    mode_now = str((st or {}).get("mode") or "").strip()
+    if mode_now in ("seedance_t2v", "seedance_i2v", "seedance_omni"):
+        return _seedance_prompt_collect_kb(mode_now)
+    return _main_menu_for(user_id)
+
+
+def _seedance_charge_sync(
+    user_id: int,
+    cost_tokens: int,
+    *,
+    reason: str,
+    charge_ref_id: str,
+    charge_meta: Dict[str, Any],
+) -> Dict[str, Any]:
+    if str(reason or "").strip() != "seedance25_video":
+        raise ValueError(f"Unexpected Seedance 2.5 charge reason: {reason}")
+    return charge_seedance25_once(
+        int(user_id),
+        int(cost_tokens),
+        ref_id=str(charge_ref_id),
+        meta=dict(charge_meta or {}),
+    )
+
+
+async def _seedance25_charge_with_lease(
+    user_id: int,
+    cost_tokens: int,
+    *,
+    job_id: str,
+    submission_nonce: str,
+    owner_token: str,
+    reason: str,
+    charge_ref_id: str,
+    charge_meta: Dict[str, Any],
+) -> Tuple[Dict[str, Any], bool]:
+    """Keep the Redis owner lease alive while the blocking billing RPC runs."""
+    charge_task = asyncio.create_task(asyncio.to_thread(
+        _seedance_charge_sync,
+        int(user_id),
+        int(cost_tokens),
+        reason=str(reason),
+        charge_ref_id=str(charge_ref_id),
+        charge_meta=dict(charge_meta or {}),
+    ))
+    ownership_lost = False
+    while not charge_task.done():
+        done, _pending = await asyncio.wait(
+            {charge_task},
+            timeout=float(SEEDANCE25_CHARGE_LEASE_REFRESH_SECONDS),
+        )
+        if done:
+            break
+        try:
+            refreshed = await refresh_reliable_submission_claim(
+                queue_name=SEEDANCE25_QUEUE_NAME,
+                job_id=str(job_id),
+                user_id=int(user_id),
+                submission_nonce=str(submission_nonce),
+                owner_token=str(owner_token),
+            )
+            if not refreshed:
+                ownership_lost = True
+        except Exception as exc:
+            # A transient Redis outage is resolved by the fenced status/enqueue
+            # write after the RPC.  It is not evidence that another owner won.
+            logging.warning(
+                "Seedance 2.5 charge lease refresh failed job=%s: %s",
+                job_id,
+                exc,
+            )
+    result = await charge_task
+    return dict(result or {}), ownership_lost
+
+
+async def _seedance25_refund_with_retries(
+    user_id: int,
+    cost_tokens: int,
+    *,
+    reason: str,
+    ref_id: str,
+    meta: Dict[str, Any],
+) -> bool:
+    """Retry the existing idempotent refund RPC and verify duplicate success."""
+    for attempt in range(1, SEEDANCE25_REFUND_ATTEMPTS + 1):
+        try:
+            refunded = await asyncio.to_thread(
+                refund_seedance25_once,
+                int(user_id),
+                int(cost_tokens),
+                reason=str(reason),
+                ref_id=str(ref_id),
+                meta=dict(meta or {}),
+            )
+            if refunded:
+                return True
+            already_refunded = await asyncio.to_thread(
+                ledger_ref_exists,
+                reason=str(reason),
+                ref_id=str(ref_id),
+            )
+            if already_refunded:
+                return True
+        except Exception as exc:
+            logging.warning(
+                "Seedance 2.5 refund attempt failed user=%s ref=%s attempt=%s/%s: %s",
+                user_id,
+                ref_id,
+                attempt,
+                SEEDANCE25_REFUND_ATTEMPTS,
+                exc,
+            )
+        if attempt < SEEDANCE25_REFUND_ATTEMPTS:
+            await asyncio.sleep(min(3.0, float(attempt)))
+    return False
+
+
+async def _seedance25_reconcile_user_settlement(
+    user_id: int,
+    block: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Resolve a stale V4/V5 pre-enqueue block without risking a free job."""
+    old_job_id = str((block or {}).get("job_id") or "").strip()
+    if not old_job_id:
+        return {"status": "clear", "resolved": True, "job_id": ""}
+    token = uuid4().hex
+    code = str((block or {}).get("code") or old_job_id[-8:]).strip()
+    try:
+        claim = await claim_reliable_user_settlement_reconciliation(
+            queue_name=SEEDANCE25_QUEUE_NAME,
+            user_id=int(user_id),
+            job_id=old_job_id,
+            reconciliation_token=token,
+            stale_after_sec=SEEDANCE25_SUBMISSION_STALE_SECONDS,
+        )
+    except Exception as exc:
+        logging.error("Seedance 2.5 settlement claim failed job=%s: %s", old_job_id, exc)
+        return {
+            "status": str((block or {}).get("status") or "review_required"),
+            "resolved": False,
+            "job_id": old_job_id,
+            "code": code,
+        }
+
+    status = str((claim or {}).get("status") or "review_required").strip().lower()
+    nonce = str((claim or {}).get("submission_nonce") or "").strip()
+    if not bool((claim or {}).get("claimed")):
+        if status in {"enqueued", "refunded", "not_charged"}:
+            try:
+                await clear_reliable_user_settlement_block(
+                    queue_name=SEEDANCE25_QUEUE_NAME,
+                    user_id=int(user_id),
+                    job_id=old_job_id,
+                )
+            except Exception:
+                pass
+            return {"status": status, "resolved": True, "job_id": old_job_id, "code": code}
+        return {"status": status, "resolved": False, "job_id": old_job_id, "code": code}
+
+    async def _leave_for_review(detail: str) -> Dict[str, Any]:
+        try:
+            current = await get_reliable_submission_status(
+                queue_name=SEEDANCE25_QUEUE_NAME,
+                job_id=old_job_id,
+            )
+            current_status = str((current or {}).get("status") or "").strip().lower()
+            if current_status in {"enqueued", "refunded", "not_charged"}:
+                await clear_reliable_user_settlement_block(
+                    queue_name=SEEDANCE25_QUEUE_NAME,
+                    user_id=int(user_id),
+                    job_id=old_job_id,
+                )
+                return {
+                    "status": current_status,
+                    "resolved": True,
+                    "job_id": old_job_id,
+                    "code": code,
+                }
+        except Exception:
+            pass
+        try:
+            await set_reliable_submission_status(
+                queue_name=SEEDANCE25_QUEUE_NAME,
+                job_id=old_job_id,
+                submission_nonce=nonce,
+                status="review_required",
+                owner_token=token,
+            )
+        except Exception:
+            pass
+        try:
+            await set_reliable_user_settlement_block(
+                queue_name=SEEDANCE25_QUEUE_NAME,
+                user_id=int(user_id),
+                job_id=old_job_id,
+                status="review_required",
+                code=code,
+            )
+        except Exception:
+            pass
+        logging.error("Seedance 2.5 settlement needs review job=%s: %s", old_job_id, detail)
+        return {"status": "review_required", "resolved": False, "job_id": old_job_id, "code": code}
+
+    if not nonce:
+        return await _leave_for_review("submission nonce is missing")
+    try:
+        derived_job_id, charge_ref_id = _seedance25_submission_ids(int(user_id), nonce)
+    except Exception as exc:
+        return await _leave_for_review(f"stable ids cannot be derived: {exc}")
+    if derived_job_id != old_job_id:
+        return await _leave_for_review("settlement job does not match stable submission id")
+
+    enqueue_proof = await reliable_job_was_enqueued(
+        queue_name=SEEDANCE25_QUEUE_NAME,
+        job_id=old_job_id,
+    )
+    if enqueue_proof is True:
+        stored = await set_reliable_submission_status(
+            queue_name=SEEDANCE25_QUEUE_NAME,
+            job_id=old_job_id,
+            submission_nonce=nonce,
+            status="enqueued",
+            force_enqueued=True,
+        )
+        if not stored:
+            return await _leave_for_review("enqueue proof could not settle submission")
+        await clear_reliable_user_settlement_block(
+            queue_name=SEEDANCE25_QUEUE_NAME,
+            user_id=int(user_id),
+            job_id=old_job_id,
+        )
+        return {"status": "enqueued", "resolved": True, "job_id": old_job_id, "code": code}
+    if enqueue_proof is None:
+        return await _leave_for_review("Redis enqueue proof is unavailable")
+
+    try:
+        charged_tokens = await asyncio.to_thread(
+            get_seedance25_charge_amount,
+            int(user_id),
+            ref_id=charge_ref_id,
+        )
+    except Exception as exc:
+        return await _leave_for_review(f"charge ledger lookup failed: {exc}")
+
+    if charged_tokens is None:
+        stored = await set_reliable_submission_status(
+            queue_name=SEEDANCE25_QUEUE_NAME,
+            job_id=old_job_id,
+            submission_nonce=nonce,
+            status="not_charged",
+            owner_token=token,
+        )
+        if not stored:
+            return await _leave_for_review("no-charge result lost ownership")
+        await clear_reliable_user_settlement_block(
+            queue_name=SEEDANCE25_QUEUE_NAME,
+            user_id=int(user_id),
+            job_id=old_job_id,
+        )
+        return {"status": "not_charged", "resolved": True, "job_id": old_job_id, "code": code}
+
+    refunded = await _seedance25_refund_with_retries(
+        int(user_id),
+        int(charged_tokens),
+        reason="seedance25_video_refund",
+        ref_id=charge_ref_id,
+        meta={"stage": "stale_submission_reconciliation", "job_id": old_job_id},
+    )
+    final_status = "refunded" if refunded else "refund_pending"
+    stored = await set_reliable_submission_status(
+        queue_name=SEEDANCE25_QUEUE_NAME,
+        job_id=old_job_id,
+        submission_nonce=nonce,
+        status=final_status,
+        owner_token=token,
+    )
+    if refunded and stored:
+        await clear_reliable_user_settlement_block(
+            queue_name=SEEDANCE25_QUEUE_NAME,
+            user_id=int(user_id),
+            job_id=old_job_id,
+        )
+        return {"status": "refunded", "resolved": True, "job_id": old_job_id, "code": code}
+    try:
+        await set_reliable_user_settlement_block(
+            queue_name=SEEDANCE25_QUEUE_NAME,
+            user_id=int(user_id),
+            job_id=old_job_id,
+            status="refund_pending",
+            code=code,
+        )
+    except Exception:
+        pass
+    return {"status": "refund_pending", "resolved": False, "job_id": old_job_id, "code": code}
 
 
 def _seedance_prompt_state_key(st: Dict[str, Any]) -> str:
@@ -4662,11 +5407,19 @@ def _seedance_prompt_clear_state(st: Dict[str, Any]) -> None:
     ctx = (st or {}).get(key) or {}
     ctx["prompt_parts"] = []
     ctx["prompt"] = None
+    ctx["prompt_message_ids"] = []
     st[key] = ctx
+    st.pop("seedance25_confirmation", None)
     st["ts"] = _now()
 
 
-def _seedance_prompt_append_part(st: Dict[str, Any], text: str, limit: int) -> Tuple[bool, str, int, int]:
+def _seedance_prompt_append_part(
+    st: Dict[str, Any],
+    text: str,
+    limit: int,
+    *,
+    message_id: int = 0,
+) -> Tuple[bool, str, int, int]:
     key = _seedance_prompt_state_key(st)
     if not key:
         return False, "Сейчас я не жду Seedance-промпт.", 0, 0
@@ -4677,6 +5430,19 @@ def _seedance_prompt_append_part(st: Dict[str, Any], text: str, limit: int) -> T
 
     ctx = (st or {}).get(key) or {"step": "need_prompt"}
     parts = [str(x or "").strip() for x in (ctx.get("prompt_parts") or []) if str(x or "").strip()]
+    message_ids = []
+    for raw_id in list(ctx.get("prompt_message_ids") or []):
+        try:
+            parsed_id = int(raw_id or 0)
+        except Exception:
+            parsed_id = 0
+        if parsed_id > 0 and parsed_id not in message_ids:
+            message_ids.append(parsed_id)
+    current_text = "\n\n".join(parts).strip()
+    if int(message_id or 0) > 0 and int(message_id) in message_ids:
+        # Telegram/webhook retry of the same update: resend the acknowledgement
+        # without appending the same prompt part for a second time.
+        return True, "", len(parts), len(current_text)
     next_text = "\n\n".join(parts + [part]).strip()
 
     if int(limit or 0) > 0 and len(next_text) > int(limit):
@@ -4688,9 +5454,15 @@ def _seedance_prompt_append_part(st: Dict[str, Any], text: str, limit: int) -> T
         )
 
     parts.append(part)
+    if int(message_id or 0) > 0:
+        message_ids.append(int(message_id))
     ctx["prompt_parts"] = parts
     ctx["prompt"] = next_text
+    ctx["prompt_message_ids"] = message_ids[-64:]
     st[key] = ctx
+    # Any actual edit invalidates the price/charge nonce. A retry of the same
+    # Telegram message returns above and deliberately preserves it.
+    st.pop("seedance25_confirmation", None)
     st["ts"] = _now()
     return True, "", len(parts), len(next_text)
 
@@ -4702,7 +5474,7 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
         return {"ok": True}
 
     settings = st.get("seedance_settings") or {}
-    provider_kind = str(settings.get("provider_kind") or "seedance").strip() or "seedance"
+    provider_kind = str(settings.get("provider_kind") or "seedance").strip().lower() or "seedance"
     if provider_kind == "wan3":
         queue_conflicts = wan3_queue_conflicts(WAN3_QUEUE_NAME)
         if queue_conflicts:
@@ -4719,35 +5491,59 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
     if seedance_model.lower() in {"seedance-kie-mini", "seedance-2-mini", "seedance-mini", "mini"} or task_type.lower() == "seedance-2-mini":
         seedance_model = "seedance-kie-mini"
         task_type = "seedance-2-mini"
-    duration = int(settings.get("duration") or 5)
+    duration = _seedance_setting_int(settings, "duration", 5, minimum=4, maximum=30)
     aspect_ratio = str(settings.get("aspect_ratio") or "16:9").strip()
-    max_images = int(settings.get("max_images") or (7 if _seedance_uses_kie_backend(settings) else 2))
-    max_videos = int(settings.get("max_videos") or 0)
-    max_audios = int(settings.get("max_audios") or 0)
+    max_images = _seedance_setting_int(
+        settings,
+        "max_images",
+        7 if _seedance_uses_kie_backend(settings) else 2,
+        maximum=50,
+    )
+    max_videos = _seedance_setting_int(settings, "max_videos", 0, maximum=20)
+    max_audios = _seedance_setting_int(settings, "max_audios", 0, maximum=20)
     prompt_limit = _seedance_prompt_limit_from_settings(settings)
 
     prompt = str(prompt or "").strip()
     if not prompt:
-        await tg_send_message(
-            chat_id,
-            "Промпт пока пустой. Пришли текст одной или несколькими частями, потом нажми «✅ Запустить».",
-            reply_markup=_seedance_prompt_collect_kb(mode_now),
-        )
+        if provider_kind == "seedance25":
+            await _seedance25_send_required(
+                chat_id,
+                "Промпт пока пустой. Пришли текст одной или несколькими частями, потом нажми «✅ Запустить».",
+                reply_markup=_seedance_prompt_collect_kb(mode_now),
+            )
+        else:
+            await tg_send_message(
+                chat_id,
+                "Промпт пока пустой. Пришли текст одной или несколькими частями, потом нажми «✅ Запустить».",
+                reply_markup=_seedance_prompt_collect_kb(mode_now),
+            )
         return {"ok": True}
 
     if len(prompt) > prompt_limit:
-        await tg_send_message(
-            chat_id,
-            f"Промпт слишком длинный: {len(prompt)} символов. Лимит для этого режима: {prompt_limit}.",
-            reply_markup=_seedance_prompt_collect_kb(mode_now),
-        )
+        if provider_kind == "seedance25":
+            await _seedance25_send_required(
+                chat_id,
+                f"Промпт слишком длинный: {len(prompt)} символов. Лимит для этого режима: {prompt_limit}.",
+                reply_markup=_seedance_prompt_collect_kb(mode_now),
+            )
+        else:
+            await tg_send_message(
+                chat_id,
+                f"Промпт слишком длинный: {len(prompt)} символов. Лимит для этого режима: {prompt_limit}.",
+                reply_markup=_seedance_prompt_collect_kb(mode_now),
+            )
         return {"ok": True}
 
     if mode_now == "seedance_i2v":
         si = st.get("seedance_i2v") or {}
         imgs = [x for x in (si.get("image_file_ids") or []) if str(x or "").strip()]
         if not imgs:
-            await tg_send_message(chat_id, "Сначала пришли хотя бы 1 фото.", reply_markup=_seedance_refs_collect_kb())
+            await _seedance_send_for_provider(
+                provider_kind,
+                chat_id,
+                "Сначала пришли хотя бы 1 фото.",
+                reply_markup=_seedance_refs_collect_kb(),
+            )
             return {"ok": True}
 
     if mode_now == "seedance_omni":
@@ -4756,7 +5552,12 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
         video_ids = [x for x in (so.get("video_file_ids") or []) if str(x or "").strip()]
         audio_ids = [x for x in (so.get("audio_file_ids") or []) if str(x or "").strip()]
         if len(image_ids) + len(video_ids) + len(audio_ids) <= 0:
-            await tg_send_message(chat_id, "Сначала пришли хотя бы один image/video/audio reference.", reply_markup=_seedance_refs_collect_kb())
+            await _seedance_send_for_provider(
+                provider_kind,
+                chat_id,
+                "Сначала пришли хотя бы один image/video/audio reference.",
+                reply_markup=_seedance_refs_collect_kb(),
+            )
             return {"ok": True}
         if audio_ids and not (image_ids or video_ids) and provider_kind not in {"seedance25", "wan3"}:
             await tg_send_message(chat_id, "Для Omni Reference аудио нельзя отправлять отдельно. Добавь хотя бы фото или видео reference.", reply_markup=_seedance_refs_collect_kb())
@@ -4764,7 +5565,8 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
 
     if _busy_is_active(int(user_id)):
         kind = _busy_kind(int(user_id)) or "генерация"
-        await tg_send_message(
+        await _seedance_send_for_provider(
+            provider_kind,
             chat_id,
             f"⏳ Сейчас выполняется: {kind}. Дождись завершения (или /reset).",
             reply_markup=_help_menu_for(user_id),
@@ -4822,6 +5624,48 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
         preview_price_map = {5: 9, 10: 18, 15: 27}
         cost_tokens = int(preview_price_map.get(int(duration), preview_price_map[5]))
 
+    seedance25_submission_nonce = ""
+    if provider_kind == "seedance25":
+        confirmation = _seedance25_confirmation_for_draft(
+            st,
+            mode=mode_now,
+            settings=settings,
+            prompt=prompt,
+            create=not confirmed,
+        )
+        if not isinstance(confirmation, dict):
+            await _seedance25_send_required(
+                chat_id,
+                "⚠️ Подтверждение Seedance 2.5 устарело. Нажми «Запустить», чтобы заново проверить цену.",
+                reply_markup=_seedance_prompt_collect_kb(mode_now),
+            )
+            return {"ok": True}
+        seedance25_submission_nonce = str(confirmation.get("nonce") or "").strip()
+        local_submit_status = str(confirmation.get("status") or "ready").strip().lower()
+        blocking_statuses = {
+            "claimed", "charged", "enqueued", "refunded", "refund_pending",
+            "review_required", "reconciling", "not_charged",
+        }
+        if local_submit_status in blocking_statuses or (not confirmed and local_submit_status != "ready"):
+            stable_job_id, stable_charge_ref_id = _seedance25_submission_ids(
+                user_id,
+                seedance25_submission_nonce,
+            )
+            if local_submit_status == "enqueued":
+                await _seedance_clear_session_after_enqueue(chat_id, user_id, st)
+                reply_markup = _help_menu_for(user_id)
+            else:
+                reply_markup = _seedance25_settlement_kb()
+            await _seedance25_send_required(
+                chat_id,
+                _seedance25_blocked_submission_text(
+                    local_submit_status,
+                    stable_charge_ref_id[-8:] or stable_job_id[-8:],
+                ),
+                reply_markup=reply_markup,
+            )
+            return {"ok": True}
+
     # Seedance 2.5 always gets a final price screen BEFORE any token charge.
     # Price is recomputed again when the user confirms, so stale buttons cannot
     # charge an old amount after references/settings change.
@@ -4840,8 +5684,7 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
                 f"\nРеференсы: 🖼 {image_count} · 🎬 {video_count} · 🎵 {audio_count}"
                 f"\nВходное video: {seedance_input_video_sec:g} сек"
             )
-        await tg_send_message(
-            chat_id,
+        confirmation_text = (
             ("🎬 Wan 3.0 — подтверждение\n\n" if provider_kind == "wan3" else "🎬 Seedance 2.5 — подтверждение\n\n")
             + f"Режим: {mode_label}\n"
             f"Качество: {resolution_label}\n"
@@ -4850,33 +5693,58 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
             f"{refs_line}\n"
             f"Промпт: {len(prompt)} символов\n\n"
             f"💳 Стоимость: {int(cost_tokens)} токенов\n\n"
-            "Токены будут списаны только после нажатия кнопки ниже.",
-            reply_markup=_seedance25_confirm_kb(cost_tokens),
+            "Токены будут списаны только после нажатия кнопки ниже."
         )
+        if provider_kind == "seedance25":
+            await _seedance25_send_required(
+                chat_id,
+                confirmation_text,
+                reply_markup=_seedance25_confirm_kb(cost_tokens),
+            )
+        else:
+            await tg_send_message(
+                chat_id,
+                confirmation_text,
+                reply_markup=_seedance25_confirm_kb(cost_tokens),
+            )
         return {"ok": True}
 
     _busy_start(int(user_id), "Wan 3.0 видео" if provider_kind == "wan3" else "Seedance видео")
     seedance_charged = False
-    charge_ref_id = ""
-    job_id = ""
+    if provider_kind == "seedance25":
+        job_id, charge_ref_id = _seedance25_submission_ids(user_id, seedance25_submission_nonce)
+        seedance25_owner_token = uuid4().hex
+    else:
+        charge_ref_id = ""
+        job_id = ""
+        seedance25_owner_token = ""
     wan3_enqueue_started = False
     wan3_enqueue_confirmed = False
+    seedance25_refund_ok: Optional[bool] = None
+    seedance25_wait_message_id = 0
+    seedance25_charge_attempted = False
+    seedance25_charge_status_unknown = False
+    seedance25_enqueue_started = False
+    seedance25_enqueue_confirmed = False
+    seedance25_resume_charged = False
     try:
-        try:
-            ensure_user_row(user_id)
-            bal = int(get_balance(user_id) or 0)
-        except Exception:
-            bal = 0
+        if provider_kind != "seedance25":
+            try:
+                ensure_user_row(user_id)
+                bal = int(get_balance(user_id) or 0)
+            except Exception:
+                bal = 0
 
-        if bal < cost_tokens:
-            await tg_send_message(
-                chat_id,
-                f"❌ Недостаточно токенов.\nНужно: {cost_tokens}\nБаланс: {bal}",
-                reply_markup=_topup_balance_inline_kb(),
-            )
-            return {"ok": True}
+            if bal < cost_tokens:
+                await tg_send_message(
+                    chat_id,
+                    f"❌ Недостаточно токенов.\nНужно: {cost_tokens}\nБаланс: {bal}",
+                    reply_markup=_topup_balance_inline_kb(),
+                )
+                return {"ok": True}
 
-        job_id = uuid4().hex
+        if not job_id:
+            job_id = uuid4().hex
         charge_meta = {
             "provider_kind": provider_kind,
             "seedance_model": seedance_model,
@@ -4892,15 +5760,235 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
                 "wan3_refund_pending": False,
                 "wan3_refund_reason": "wan3_video_refund",
             })
-        charge_ref_id = str(uuid4())
+        if not charge_ref_id:
+            charge_ref_id = str(uuid4())
         # For Wan 3.0 the durable charge is intentionally delayed until the job
         # is completely built and local/session cleanup has succeeded. This keeps
         # the charge -> atomic Redis enqueue window to only the debit + Lua call.
         if provider_kind != "wan3":
-            try:
-                add_tokens(user_id, -cost_tokens, reason=("seedance25_video" if provider_kind == "seedance25" else "seedance_video"), ref_id=charge_ref_id, meta=charge_meta)
-            except TypeError:
-                add_tokens(user_id, -int(cost_tokens), reason=("seedance25_video" if provider_kind == "seedance25" else "seedance_video"), meta=charge_meta)
+            if provider_kind == "seedance25":
+                seedance25_wait_message_id = await _seedance25_send_required(
+                    chat_id,
+                    "⏳ Проверяю баланс и ставлю Seedance 2.5 в очередь…",
+                    reply_markup=_seedance_prompt_collect_kb(mode_now),
+                )
+                existing_settlement = await get_reliable_user_settlement_block(
+                    queue_name=SEEDANCE25_QUEUE_NAME,
+                    user_id=user_id,
+                )
+                existing_settlement_job = str((existing_settlement or {}).get("job_id") or "").strip()
+                existing_settlement_status = str((existing_settlement or {}).get("status") or "").strip().lower()
+                if existing_settlement_job:
+                    reconciliation = await _seedance25_reconcile_user_settlement(
+                        user_id,
+                        existing_settlement,
+                    )
+                    reconciled_job = str((reconciliation or {}).get("job_id") or existing_settlement_job)
+                    reconciled_status = str(
+                        (reconciliation or {}).get("status") or existing_settlement_status or "review_required"
+                    ).strip().lower()
+                    resolved = bool((reconciliation or {}).get("resolved"))
+                    if resolved and reconciled_job != job_id and reconciled_status in {"refunded", "not_charged"}:
+                        existing_settlement_job = ""
+                    else:
+                        _seedance25_set_local_confirmation_status(st, reconciled_status)
+                        if resolved and reconciled_status in {"refunded", "not_charged"}:
+                            st.pop("seedance25_confirmation", None)
+                        if resolved and reconciled_status == "enqueued" and reconciled_job == job_id:
+                            seedance25_enqueue_confirmed = True
+                            await _seedance_clear_session_after_enqueue(chat_id, user_id, st)
+                        await _seedance25_send_required(
+                            chat_id,
+                            _seedance25_blocked_submission_text(
+                                reconciled_status,
+                                str((reconciliation or {}).get("code") or charge_ref_id[-8:] or job_id[-8:]),
+                            ),
+                            reply_markup=(
+                                _help_menu_for(user_id)
+                                if reconciled_status == "enqueued"
+                                else _seedance25_settlement_kb()
+                            ),
+                        )
+                        if seedance25_wait_message_id:
+                            await tg_delete_message(chat_id, seedance25_wait_message_id)
+                        return {"ok": True}
+                if existing_settlement_job:
+                    _seedance25_set_local_confirmation_status(
+                        st,
+                        existing_settlement_status or "review_required",
+                    )
+                    await _seedance25_send_required(
+                        chat_id,
+                        _seedance25_blocked_submission_text(
+                            existing_settlement_status or "review_required",
+                            str((existing_settlement or {}).get("code") or charge_ref_id[-8:] or job_id[-8:]),
+                        ),
+                        reply_markup=_seedance25_settlement_kb(),
+                    )
+                    if seedance25_wait_message_id:
+                        await tg_delete_message(chat_id, seedance25_wait_message_id)
+                    return {"ok": True}
+                guard = await claim_reliable_submission(
+                    queue_name=SEEDANCE25_QUEUE_NAME,
+                    job_id=job_id,
+                    submission_nonce=seedance25_submission_nonce,
+                    owner_token=seedance25_owner_token,
+                    stale_after_sec=SEEDANCE25_SUBMISSION_STALE_SECONDS,
+                )
+                guard_status = str((guard or {}).get("status") or "unavailable").strip().lower()
+                if bool((guard or {}).get("claimed")) and guard_status == "charged":
+                    # A stale handler stopped after the idempotent debit.  Its
+                    # 10-minute processing lease has expired, so this handling
+                    # may safely continue the same deterministic job/ref.
+                    seedance25_resume_charged = True
+                    seedance25_charge_attempted = True
+                    seedance_charged = True
+                if not bool((guard or {}).get("claimed")):
+                    _seedance25_set_local_confirmation_status(st, guard_status)
+                    if guard_status == "enqueued":
+                        seedance25_enqueue_confirmed = True
+                        try:
+                            await clear_reliable_user_settlement_block(
+                                queue_name=SEEDANCE25_QUEUE_NAME,
+                                user_id=user_id,
+                                job_id=job_id,
+                            )
+                        except Exception:
+                            pass
+                        await _seedance_clear_session_after_enqueue(chat_id, user_id, st)
+                        await _seedance25_send_required(
+                            chat_id,
+                            _seedance25_blocked_submission_text(
+                                guard_status,
+                                charge_ref_id[-8:] or job_id[-8:],
+                            ),
+                            reply_markup=_help_menu_for(user_id),
+                        )
+                        if seedance25_wait_message_id:
+                            await tg_delete_message(chat_id, seedance25_wait_message_id)
+                        return {"ok": True}
+                    elif guard_status in {"refunded", "not_charged"}:
+                        try:
+                            await clear_reliable_user_settlement_block(
+                                queue_name=SEEDANCE25_QUEUE_NAME,
+                                user_id=user_id,
+                                job_id=job_id,
+                            )
+                        except Exception:
+                            pass
+                        st.pop("seedance25_confirmation", None)
+                        await _seedance25_send_required(
+                            chat_id,
+                            _seedance25_blocked_submission_text(
+                                guard_status,
+                                charge_ref_id[-8:] or job_id[-8:],
+                            ),
+                            reply_markup=_seedance25_settlement_kb(),
+                        )
+                        if seedance25_wait_message_id:
+                            await tg_delete_message(chat_id, seedance25_wait_message_id)
+                        return {"ok": True}
+                    else:
+                        await _seedance25_send_required(
+                            chat_id,
+                            _seedance25_blocked_submission_text(
+                                guard_status,
+                                charge_ref_id[-8:] or job_id[-8:],
+                            ),
+                            reply_markup=_seedance25_settlement_kb(),
+                        )
+                        if seedance25_wait_message_id:
+                            await tg_delete_message(chat_id, seedance25_wait_message_id)
+                        return {"ok": True}
+                else:
+                    _seedance25_set_local_confirmation_status(st, "claimed")
+
+                if guard_status in {"claimed", "charged"}:
+                    block_stored = await set_reliable_user_settlement_block(
+                        queue_name=SEEDANCE25_QUEUE_NAME,
+                        user_id=user_id,
+                        job_id=job_id,
+                        status="in_progress",
+                        code=charge_ref_id[-8:] or job_id[-8:],
+                    )
+                    if not block_stored:
+                        await _seedance25_store_submission_status(
+                            st,
+                            job_id=job_id,
+                            submission_nonce=seedance25_submission_nonce,
+                            status="ready",
+                            owner_token=seedance25_owner_token,
+                        )
+                        conflicting = await get_reliable_user_settlement_block(
+                            queue_name=SEEDANCE25_QUEUE_NAME,
+                            user_id=user_id,
+                        )
+                        await _seedance25_send_required(
+                            chat_id,
+                            _seedance25_blocked_submission_text(
+                                str((conflicting or {}).get("status") or "review_required"),
+                                str((conflicting or {}).get("code") or charge_ref_id[-8:] or job_id[-8:]),
+                            ),
+                            reply_markup=_seedance25_settlement_kb(),
+                        )
+                        if seedance25_wait_message_id:
+                            await tg_delete_message(chat_id, seedance25_wait_message_id)
+                        return {"ok": True}
+
+                try:
+                    if not seedance25_resume_charged:
+                        seedance25_charge_attempted = True
+                        _charge_result, ownership_lost = await _seedance25_charge_with_lease(
+                            user_id,
+                            int(cost_tokens),
+                            job_id=job_id,
+                            submission_nonce=seedance25_submission_nonce,
+                            owner_token=seedance25_owner_token,
+                            reason="seedance25_video",
+                            charge_ref_id=charge_ref_id,
+                            charge_meta=charge_meta,
+                        )
+                        seedance_charged = True
+                        charged_stored = await _seedance25_store_submission_status(
+                            st,
+                            job_id=job_id,
+                            submission_nonce=seedance25_submission_nonce,
+                            status="charged",
+                            owner_token=seedance25_owner_token,
+                        )
+                        if ownership_lost or not charged_stored:
+                            raise _Seedance25SubmissionOwnershipLost(
+                                "Seedance 2.5 submission ownership changed after charge"
+                            )
+                except Seedance25InsufficientBalanceError as charge_exc:
+                    await _seedance25_store_submission_status(
+                        st,
+                        job_id=job_id,
+                        submission_nonce=seedance25_submission_nonce,
+                        status="ready",
+                        owner_token=seedance25_owner_token,
+                    )
+                    try:
+                        await clear_reliable_user_settlement_block(
+                            queue_name=SEEDANCE25_QUEUE_NAME,
+                            user_id=user_id,
+                            job_id=job_id,
+                        )
+                    except Exception:
+                        pass
+                    await _seedance25_send_required(
+                        chat_id,
+                        f"❌ Недостаточно токенов.\nНужно: {charge_exc.required}\nБаланс: {charge_exc.balance}",
+                        reply_markup=_topup_balance_inline_kb(),
+                    )
+                    if seedance25_wait_message_id:
+                        await tg_delete_message(chat_id, seedance25_wait_message_id)
+                    return {"ok": True}
+            else:
+                try:
+                    add_tokens(user_id, -cost_tokens, reason="seedance_video", ref_id=charge_ref_id, meta=charge_meta)
+                except TypeError:
+                    add_tokens(user_id, -int(cost_tokens), reason="seedance_video", meta=charge_meta)
             seedance_charged = True
 
         job: Dict[str, Any] = {
@@ -4921,6 +6009,8 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
             "charge_ref_id": charge_ref_id,
             "refund_reason": ("wan3_video_refund" if provider_kind == "wan3" else ("seedance25_video_refund" if provider_kind == "seedance25" else "seedance_video_refund")),
         }
+        if provider_kind == "seedance25":
+            job["submission_nonce"] = seedance25_submission_nonce
 
         if mode_now == "seedance_i2v":
             si = st.get("seedance_i2v") or {}
@@ -4942,15 +6032,27 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
             se["task_type"] = task_type
             st["seedance_extend"] = se
 
-        st.pop("seedance_t2v", None)
-        st.pop("seedance_i2v", None)
-        st.pop("seedance_omni", None)
-        st.pop("seedance_settings", None)
-        st["ts"] = _now()
-        sb_clear_user_state(user_id)
-        _set_mode(chat_id, user_id, "chat")
+        if provider_kind not in {"wan3", "seedance25"}:
+            # Preserve the legacy Seedance 2.0 ordering.  This patch is scoped
+            # to Seedance 2.5 only.
+            st.pop("seedance_t2v", None)
+            st.pop("seedance_i2v", None)
+            st.pop("seedance_omni", None)
+            st.pop("seedance_settings", None)
+            st["ts"] = _now()
+            sb_clear_user_state(user_id)
+            _set_mode(chat_id, user_id, "chat")
 
         if provider_kind == "wan3":
+            # Keep the existing Wan 3.0 charge/enqueue boundary unchanged.  The
+            # Seedance 2.5 recovery fix below deliberately does not alter Wan.
+            st.pop("seedance_t2v", None)
+            st.pop("seedance_i2v", None)
+            st.pop("seedance_omni", None)
+            st.pop("seedance_settings", None)
+            st["ts"] = _now()
+            sb_clear_user_state(user_id)
+            _set_mode(chat_id, user_id, "chat")
             # No network/UI work is allowed between this debit and Redis enqueue.
             # If the enqueue reply is lost, the atomic persistent dedupe marker
             # lets the media-worker prove whether XADD committed before refunding.
@@ -4977,15 +6079,228 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
             except Exception as notify_exc:
                 logging.warning("Wan 3.0 queued but progress message failed job=%s: %s", job_id, notify_exc)
         else:
-            await tg_send_message(chat_id, "⏳ Генерация может занять от 5 до 30 минут. Как будет готово — пришлю видео.", reply_markup=_help_menu_for(user_id))
             if provider_kind == "seedance25":
-                await enqueue_reliable_job(job, queue_name=SEEDANCE25_QUEUE_NAME)
+                recovery_snapshot = _seedance_remember_last_submission(
+                    st,
+                    mode=mode_now,
+                    settings=settings,
+                    prompt=prompt,
+                    job_id=job_id,
+                )
+                if recovery_snapshot:
+                    job["recovery_snapshot"] = recovery_snapshot
+                seedance25_enqueue_started = True
+                enqueue_result = await enqueue_reliable_submission_job(
+                    job,
+                    queue_name=SEEDANCE25_QUEUE_NAME,
+                    submission_nonce=seedance25_submission_nonce,
+                    owner_token=seedance25_owner_token,
+                )
+                if not bool((enqueue_result or {}).get("enqueued")):
+                    raise _Seedance25SubmissionOwnershipLost(
+                        "Seedance 2.5 enqueue rejected a stale submission owner"
+                    )
+                seedance25_enqueue_confirmed = True
+                submission_settled = await _seedance25_store_submission_status(
+                    st,
+                    job_id=job_id,
+                    submission_nonce=seedance25_submission_nonce,
+                    status="enqueued",
+                    force_enqueued=True,
+                )
+                if submission_settled:
+                    try:
+                        await clear_reliable_user_settlement_block(
+                            queue_name=SEEDANCE25_QUEUE_NAME,
+                            user_id=user_id,
+                            job_id=job_id,
+                        )
+                    except Exception as settlement_clear_exc:
+                        logging.warning(
+                            "Seedance 2.5 enqueued settlement block clear failed job=%s: %s",
+                            job_id,
+                            settlement_clear_exc,
+                        )
+                # Critical ordering: a transient Redis/Telegram/Supabase error
+                # must not destroy this user's prompt and references.  Only a
+                # confirmed enqueue is allowed to close the Seedance 2.5 draft.
+                await _seedance_clear_session_after_enqueue(chat_id, user_id, st)
+                try:
+                    await _seedance25_send_required(
+                        chat_id,
+                        "⏳ Генерация может занять от 5 до 30 минут. Как будет готово — пришлю видео.",
+                        reply_markup=_help_menu_for(user_id),
+                    )
+                    if seedance25_wait_message_id:
+                        await tg_delete_message(chat_id, seedance25_wait_message_id)
+                except _Seedance25NoticePending as notify_exc:
+                    # The job is already durable.  A Telegram notification
+                    # failure must neither refund it nor enqueue a duplicate.
+                    logging.warning(
+                        "Seedance 2.5 queued but progress message failed job=%s user=%s: %s",
+                        job_id,
+                        user_id,
+                        notify_exc,
+                    )
             else:
+                # Preserve the legacy Seedance 2.0 message/enqueue order.
+                await tg_send_message(
+                    chat_id,
+                    "⏳ Генерация может занять от 5 до 30 минут. Как будет готово — пришлю видео.",
+                    reply_markup=_help_menu_for(user_id),
+                )
                 await enqueue_job(job, queue_name="gen")
         return {"ok": True}
 
     except Exception as e:
         wan3_recovery_pending = False
+        if provider_kind == "seedance25" and seedance25_enqueue_confirmed:
+            # Once XADD is confirmed, no later UI/state error may refund this
+            # paid job.  Finish acknowledgement best-effort and leave the same
+            # deterministic job to the existing worker.
+            submission_settled = await _seedance25_store_submission_status(
+                st,
+                job_id=job_id,
+                submission_nonce=seedance25_submission_nonce,
+                status="enqueued",
+                force_enqueued=True,
+            )
+            if submission_settled:
+                try:
+                    await clear_reliable_user_settlement_block(
+                        queue_name=SEEDANCE25_QUEUE_NAME,
+                        user_id=user_id,
+                        job_id=job_id,
+                    )
+                except Exception:
+                    pass
+            await _seedance_clear_session_after_enqueue(chat_id, user_id, st)
+            try:
+                await _seedance25_send_required(
+                    chat_id,
+                    "⏳ Задача Seedance 2.5 уже принята очередью. Генерация продолжится без повторного списания.",
+                    reply_markup=_help_menu_for(user_id),
+                )
+                if seedance25_wait_message_id:
+                    await tg_delete_message(chat_id, seedance25_wait_message_id)
+            except _Seedance25NoticePending as notify_exc:
+                logging.warning(
+                    "Seedance 2.5 post-enqueue recovery notice failed job=%s user=%s: %s",
+                    job_id,
+                    user_id,
+                    notify_exc,
+                )
+            return {"ok": True}
+        if provider_kind == "seedance25" and seedance25_charge_attempted and not seedance_charged and charge_ref_id:
+            try:
+                seedance_charged = bool(await asyncio.to_thread(
+                    ledger_ref_exists,
+                    reason="seedance25_video",
+                    ref_id=charge_ref_id,
+                ))
+                if seedance_charged:
+                    await _seedance25_store_submission_status(
+                        st,
+                        job_id=job_id,
+                        submission_nonce=seedance25_submission_nonce,
+                        status="charged",
+                        owner_token=seedance25_owner_token,
+                    )
+            except Exception as charge_check_exc:
+                seedance25_charge_status_unknown = True
+                logging.error(
+                    "Seedance 2.5 charge reconciliation unavailable user=%s ref=%s: %s",
+                    user_id,
+                    charge_ref_id,
+                    charge_check_exc,
+                )
+        if (
+            provider_kind == "seedance25"
+            and seedance_charged
+            and seedance25_enqueue_started
+            and not seedance25_enqueue_confirmed
+        ):
+            enqueue_proof = await reliable_job_was_enqueued(
+                queue_name=SEEDANCE25_QUEUE_NAME,
+                job_id=job_id,
+            )
+            if enqueue_proof is True:
+                # The Redis response was lost, but XADD and the proof key were
+                # committed atomically. Treat this as success: refunding here
+                # would create a paid provider job with free user balance.
+                seedance25_enqueue_confirmed = True
+                submission_settled = await _seedance25_store_submission_status(
+                    st,
+                    job_id=job_id,
+                    submission_nonce=seedance25_submission_nonce,
+                    status="enqueued",
+                    force_enqueued=True,
+                )
+                if submission_settled:
+                    try:
+                        await clear_reliable_user_settlement_block(
+                            queue_name=SEEDANCE25_QUEUE_NAME,
+                            user_id=user_id,
+                            job_id=job_id,
+                        )
+                    except Exception:
+                        pass
+                await _seedance_clear_session_after_enqueue(chat_id, user_id, st)
+                try:
+                    await _seedance25_send_required(
+                        chat_id,
+                        "⏳ Задача Seedance 2.5 принята очередью. Генерация может занять от 5 до 30 минут.",
+                        reply_markup=_help_menu_for(user_id),
+                    )
+                    if seedance25_wait_message_id:
+                        await tg_delete_message(chat_id, seedance25_wait_message_id)
+                except _Seedance25NoticePending as notify_exc:
+                    logging.warning(
+                        "Seedance 2.5 enqueue was reconciled but notice failed job=%s user=%s: %s",
+                        job_id,
+                        user_id,
+                        notify_exc,
+                    )
+                return {"ok": True}
+            if enqueue_proof is None:
+                # Redis cannot currently prove either outcome. Preserve both
+                # the charge and draft until an operator can reconcile by the
+                # stable job/ref identifiers; an automatic refund would be an
+                # unsafe guess.
+                seedance25_charge_status_unknown = True
+                await _seedance25_store_submission_status(
+                    st,
+                    job_id=job_id,
+                    submission_nonce=seedance25_submission_nonce,
+                    status="review_required",
+                    owner_token=seedance25_owner_token,
+                )
+                try:
+                    await set_reliable_user_settlement_block(
+                        queue_name=SEEDANCE25_QUEUE_NAME,
+                        user_id=user_id,
+                        job_id=job_id,
+                        status="review_required",
+                        code=charge_ref_id[-8:] or job_id[-8:],
+                    )
+                except Exception as settlement_exc:
+                    # The pre-charge in_progress block already exists and is
+                    # intentionally left in Redis when this update fails.
+                    logging.error(
+                        "Seedance 2.5 review block update failed job=%s: %s",
+                        job_id,
+                        settlement_exc,
+                    )
+                await _seedance25_send_required(
+                    chat_id,
+                    "⚠️ Seedance 2.5: очередь временно не отвечает, поэтому статус запуска нельзя подтвердить. "
+                    "Не запускай задачу повторно. Промпт сохранён; сообщи поддержке код "
+                    f"{charge_ref_id[-8:] or job_id[-8:]} — списание и очередь нужно сверить.",
+                    reply_markup=_seedance25_settlement_kb(),
+                )
+                if seedance25_wait_message_id:
+                    await tg_delete_message(chat_id, seedance25_wait_message_id)
+                return {"ok": True}
         if seedance_charged:
             if provider_kind == "wan3":
                 refund_reason = "wan3_video_refund"
@@ -5018,19 +6333,23 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
                         except Exception as marker_exc:
                             logging.warning("Wan 3.0 refund-pending marker failed ref=%s job=%s: %s", charge_ref_id, job_id, marker_exc)
             else:
-                try:
-                    refund_reason = "seedance25_video_refund" if provider_kind == "seedance25" else "seedance_video_refund"
-                    if provider_kind == "seedance25":
-                        await asyncio.to_thread(
-                            refund_seedance25_once, user_id, int(cost_tokens),
-                            reason=refund_reason, ref_id=charge_ref_id, meta={"stage": "main_exception"}
-                        )
-                    elif not charge_ref_id or not ledger_ref_exists(reason=refund_reason, ref_id=charge_ref_id):
-                        add_tokens(user_id, int(cost_tokens), reason=refund_reason, ref_id=charge_ref_id or None, meta={"stage": "main_exception"})
-                except TypeError:
-                    add_tokens(user_id, int(cost_tokens), reason=("seedance25_video_refund" if provider_kind == "seedance25" else "seedance_video_refund"))
-                except Exception:
-                    pass
+                refund_reason = "seedance25_video_refund" if provider_kind == "seedance25" else "seedance_video_refund"
+                if provider_kind == "seedance25":
+                    seedance25_refund_ok = await _seedance25_refund_with_retries(
+                        user_id,
+                        int(cost_tokens),
+                        reason=refund_reason,
+                        ref_id=charge_ref_id,
+                        meta={"stage": "main_exception", "job_id": job_id, "error": str(e)[:300]},
+                    )
+                else:
+                    try:
+                        if not charge_ref_id or not ledger_ref_exists(reason=refund_reason, ref_id=charge_ref_id):
+                            add_tokens(user_id, int(cost_tokens), reason=refund_reason, ref_id=charge_ref_id or None, meta={"stage": "main_exception"})
+                    except TypeError:
+                        add_tokens(user_id, int(cost_tokens), reason=refund_reason)
+                    except Exception:
+                        pass
         if provider_kind == "wan3" and wan3_recovery_pending:
             await tg_send_message(
                 chat_id,
@@ -5038,6 +6357,83 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
                 "если задача не была принята Redis, токены вернутся автоматически; если была принята — генерация продолжится без повторного списания.",
                 reply_markup=_main_menu_for(user_id),
             )
+        elif provider_kind == "seedance25":
+                active_draft = _seedance25_is_active(st)
+                if active_draft:
+                    st["seedance_last_error"] = str(e)[:1000]
+                    st["ts"] = _now()
+                if seedance_charged and seedance25_refund_ok:
+                    final_submit_status = "refunded"
+                    token_status = "Токены возвращены."
+                elif seedance_charged:
+                    final_submit_status = "refund_pending"
+                    token_status = (
+                        "Не удалось подтвердить автоматический возврат токенов. "
+                        f"Не запускай задачу повторно и сообщи поддержке код {charge_ref_id[-8:] or job_id[-8:]}."
+                    )
+                elif seedance25_charge_status_unknown:
+                    final_submit_status = "review_required"
+                    token_status = (
+                        "Статус списания временно не удалось проверить. "
+                        f"Не запускай задачу повторно и сообщи поддержке код {charge_ref_id[-8:] or job_id[-8:]}."
+                    )
+                else:
+                    final_submit_status = "ready"
+                    token_status = "Токены не списаны."
+                final_status_stored = await _seedance25_store_submission_status(
+                    st,
+                    job_id=job_id,
+                    submission_nonce=seedance25_submission_nonce,
+                    status=final_submit_status,
+                    owner_token=seedance25_owner_token,
+                )
+                if final_submit_status in {"refund_pending", "review_required"}:
+                    try:
+                        await set_reliable_user_settlement_block(
+                            queue_name=SEEDANCE25_QUEUE_NAME,
+                            user_id=user_id,
+                            job_id=job_id,
+                            status=final_submit_status,
+                            code=charge_ref_id[-8:] or job_id[-8:],
+                        )
+                    except Exception as settlement_exc:
+                        logging.error(
+                            "Seedance 2.5 unresolved settlement block update failed job=%s: %s",
+                            job_id,
+                            settlement_exc,
+                        )
+                elif final_status_stored:
+                    try:
+                        await clear_reliable_user_settlement_block(
+                            queue_name=SEEDANCE25_QUEUE_NAME,
+                            user_id=user_id,
+                            job_id=job_id,
+                        )
+                    except Exception:
+                        pass
+                recovery_text = (
+                    "Промпт и референсы сохранены. Для новой попытки вернись к промпту и заново подтверди цену."
+                    if active_draft
+                    else "Локальный режим уже был сброшен, но финансовый статус попытки обработан."
+                )
+                await _seedance25_send_required(
+                    chat_id,
+                    "❌ Не удалось запустить Seedance 2.5. "
+                    f"{token_status}\n"
+                    f"{recovery_text}\n\n"
+                    f"Ошибка: {str(e)[:700]}",
+                    reply_markup=(
+                        _seedance_prompt_collect_kb(str(st.get("mode") or ""))
+                        if final_submit_status == "ready" and active_draft
+                        else (
+                            _seedance25_settlement_kb()
+                            if active_draft
+                            else _main_menu_for(user_id)
+                        )
+                    ),
+                )
+                if seedance25_wait_message_id:
+                    await tg_delete_message(chat_id, seedance25_wait_message_id)
         else:
             await tg_send_message(chat_id, f"❌ Ошибка Seedance: {e}", reply_markup=_main_menu_for(user_id))
         return {"ok": True}
@@ -7943,7 +9339,7 @@ async def internal_midjourney_register(request: Request):
     _midjourney_cache_session(chat_id, user_id, token, session, persist=True)
     return {"ok": True, "token": token}
 
-async def process_telegram_update(update: Dict[str, Any]):
+async def _process_telegram_update_impl(update: Dict[str, Any]):
     """Process one Telegram update.
 
     This function contains the old Telegram webhook logic.
@@ -7961,8 +9357,8 @@ async def process_telegram_update(update: Dict[str, Any]):
         cq_id = callback_query.get("id") or ""
         from_user = callback_query.get("from") or {}
         user_id = int(from_user.get("id") or 0)
-        # 📊 Supabase: user + DAU tracking
-        track_user_activity(from_user)
+        # 📊 Supabase: user + DAU tracking outside the Telegram critical path.
+        _schedule_track_user_activity(from_user)
         msg = callback_query.get("message") or {}
         chat = msg.get("chat") or {}
         chat_id = int(chat.get("id") or 0)
@@ -8374,6 +9770,36 @@ async def process_telegram_update(update: Dict[str, Any]):
 
             return {"ok": True}
 
+        if chat_id and user_id and data.startswith("seedance25_recovery:"):
+            st = _ensure_state(chat_id, user_id)
+            _busy_end(user_id)
+            recovery_job_id = data.split(":", 1)[1].strip()
+            restored = _seedance_restore_last_submission(st, expected_job_id=recovery_job_id)
+            if not restored and recovery_job_id:
+                persisted_state = await get_reliable_job_state(
+                    queue_name=SEEDANCE25_QUEUE_NAME,
+                    job_id=recovery_job_id,
+                )
+                restored = _seedance_restore_submission_snapshot(
+                    st,
+                    (persisted_state or {}).get("recovery_snapshot"),
+                    expected_job_id=recovery_job_id,
+                )
+            if not restored:
+                await _seedance25_send_required(
+                    chat_id,
+                    "Не удалось восстановить прошлый запуск Seedance 2.5: данные уже устарели. Открой модель заново.",
+                    reply_markup=_main_menu_for(user_id),
+                )
+                return {"ok": True}
+            await _seedance25_send_required(
+                chat_id,
+                "✅ Последний промпт и референсы Seedance 2.5 восстановлены. "
+                "Исправь промпт или сразу нажми «✅ Запустить».",
+                reply_markup=_seedance_prompt_collect_kb(str(st.get("mode") or "")),
+            )
+            return {"ok": True}
+
         if chat_id and user_id and data.startswith("seedance25_confirm:"):
             st = _ensure_state(chat_id, user_id)
             action = data.split(":", 1)[1].strip()
@@ -8384,7 +9810,13 @@ async def process_telegram_update(update: Dict[str, Any]):
                 await tg_send_message(chat_id, "Настройки модели уже изменились или были сброшены. Открой модель заново.", reply_markup=_main_menu_for(user_id))
                 return {"ok": True}
             if action == "back":
-                await tg_send_message(
+                if confirm_provider == "seedance25":
+                    # Returning to the draft is the explicit boundary that may
+                    # create a fresh nonce/charge after a settled refund.
+                    st.pop("seedance25_confirmation", None)
+                    st["ts"] = _now()
+                await _seedance_send_for_provider(
+                    confirm_provider,
                     chat_id,
                     "Вернул к промпту. Можешь добавить ещё части, посмотреть или очистить его.",
                     reply_markup=_seedance_prompt_collect_kb(mode_now),
@@ -8399,9 +9831,16 @@ async def process_telegram_update(update: Dict[str, Any]):
             st = _ensure_state(chat_id, user_id)
             action = data.split(":", 1)[1].strip()
             mode_now = str(st.get("mode") or "").strip()
+            prompt_settings = st.get("seedance_settings") if isinstance(st.get("seedance_settings"), dict) else {}
+            prompt_provider = str(prompt_settings.get("provider_kind") or "").strip().lower()
 
             if mode_now not in ("seedance_t2v", "seedance_i2v", "seedance_omni"):
-                await tg_send_message(chat_id, "Сейчас я не жду Seedance-промпт. Открой настройки Seedance заново.", reply_markup=_main_menu_for(user_id))
+                await _seedance_send_for_provider(
+                    prompt_provider,
+                    chat_id,
+                    "Сейчас я не жду Seedance-промпт. Открой настройки Seedance заново.",
+                    reply_markup=_main_menu_for(user_id),
+                )
                 return {"ok": True}
 
             if action == "cancel":
@@ -8410,17 +9849,29 @@ async def process_telegram_update(update: Dict[str, Any]):
                 st.pop("seedance_i2v", None)
                 st.pop("seedance_omni", None)
                 st.pop("seedance_settings", None)
+                st.pop("seedance_last_submission", None)
+                st.pop("seedance_last_error", None)
+                st.pop("seedance25_confirmation", None)
                 st["ts"] = _now()
-                try:
-                    sb_clear_user_state(user_id)
-                except Exception:
-                    pass
-                await tg_send_message(chat_id, "Ок, Seedance отменил. Главное меню.", reply_markup=_main_menu_for(user_id))
+                await _seedance_send_for_provider(
+                    prompt_provider,
+                    chat_id,
+                    "Ок, Seedance отменил. Главное меню.",
+                    reply_markup=_main_menu_for(user_id),
+                )
+                if prompt_provider == "seedance25":
+                    _schedule_seedance25_persisted_state_clear(user_id)
+                else:
+                    try:
+                        sb_clear_user_state(user_id)
+                    except Exception:
+                        pass
                 return {"ok": True}
 
             if action == "clear":
                 _seedance_prompt_clear_state(st)
-                await tg_send_message(
+                await _seedance_send_for_provider(
+                    prompt_provider,
                     chat_id,
                     "Промпт очищен. Пришли текст одной или несколькими частями, затем нажми «✅ Запустить».",
                     reply_markup=_seedance_prompt_collect_kb(mode_now),
@@ -8430,11 +9881,25 @@ async def process_telegram_update(update: Dict[str, Any]):
             if action == "show":
                 prompt = _seedance_prompt_text_from_state(st)
                 if not prompt:
-                    await tg_send_message(chat_id, "Промпт пока пустой.", reply_markup=_seedance_prompt_collect_kb(mode_now))
+                    await _seedance_send_for_provider(
+                        prompt_provider,
+                        chat_id,
+                        "Промпт пока пустой.",
+                        reply_markup=_seedance_prompt_collect_kb(mode_now),
+                    )
                     return {"ok": True}
-                await tg_send_message(chat_id, f"👁 Собранный промпт: {len(prompt)} символов.", reply_markup=_seedance_prompt_collect_kb(mode_now))
+                await _seedance_send_for_provider(
+                    prompt_provider,
+                    chat_id,
+                    f"👁 Собранный промпт: {len(prompt)} символов.",
+                    reply_markup=_seedance_prompt_collect_kb(mode_now),
+                )
                 for chunk_start in range(0, len(prompt), 3800):
-                    await tg_send_message(chat_id, prompt[chunk_start:chunk_start + 3800])
+                    await _seedance_send_for_provider(
+                        prompt_provider,
+                        chat_id,
+                        prompt[chunk_start:chunk_start + 3800],
+                    )
                 return {"ok": True}
 
             if action == "done":
@@ -8447,6 +9912,8 @@ async def process_telegram_update(update: Dict[str, Any]):
             st = _ensure_state(chat_id, user_id)
             action = data.split(":", 1)[1].strip()
             mode_now = str(st.get("mode") or "").strip()
+            refs_settings = st.get("seedance_settings") if isinstance(st.get("seedance_settings"), dict) else {}
+            refs_provider = str(refs_settings.get("provider_kind") or "").strip().lower()
 
             if action == "cancel":
                 _set_mode(chat_id, user_id, "chat")
@@ -8454,19 +9921,35 @@ async def process_telegram_update(update: Dict[str, Any]):
                 st.pop("seedance_i2v", None)
                 st.pop("seedance_omni", None)
                 st.pop("seedance_settings", None)
+                st.pop("seedance_last_submission", None)
+                st.pop("seedance_last_error", None)
+                st.pop("seedance25_confirmation", None)
                 st["ts"] = _now()
-                try:
-                    sb_clear_user_state(user_id)
-                except Exception:
-                    pass
-                await tg_send_message(chat_id, "Ок, Seedance отменил. Главное меню.", reply_markup=_main_menu_for(user_id))
+                await _seedance_send_for_provider(
+                    refs_provider,
+                    chat_id,
+                    "Ок, Seedance отменил. Главное меню.",
+                    reply_markup=_main_menu_for(user_id),
+                )
+                if refs_provider == "seedance25":
+                    _schedule_seedance25_persisted_state_clear(user_id)
+                else:
+                    try:
+                        sb_clear_user_state(user_id)
+                    except Exception:
+                        pass
                 return {"ok": True}
 
             if mode_now not in ("seedance_i2v", "seedance_omni"):
-                await tg_send_message(chat_id, "Сейчас я не собираю refs для Seedance. Открой настройки Seedance заново.", reply_markup=_main_menu_for(user_id))
+                await _seedance_send_for_provider(
+                    refs_provider,
+                    chat_id,
+                    "Сейчас я не собираю refs для Seedance. Открой настройки Seedance заново.",
+                    reply_markup=_main_menu_for(user_id),
+                )
                 return {"ok": True}
 
-            settings = st.get("seedance_settings") or {}
+            settings = refs_settings
 
             if action == "back":
                 if mode_now == "seedance_i2v":
@@ -8478,7 +9961,8 @@ async def process_telegram_update(update: Dict[str, Any]):
                     so["step"] = "collect_refs"
                     st["seedance_omni"] = so
                 st["ts"] = _now()
-                await tg_send_message(
+                await _seedance_send_for_provider(
+                    refs_provider,
                     chat_id,
                     "Ок, вернулся к загрузке refs. " + _seedance_collect_summary_text(mode_now, settings),
                     reply_markup=_seedance_refs_collect_kb(),
@@ -8490,7 +9974,8 @@ async def process_telegram_update(update: Dict[str, Any]):
                     si = st.get("seedance_i2v") or {}
                     imgs = [x for x in (si.get("image_file_ids") or []) if str(x or "").strip()]
                     if not imgs:
-                        await tg_send_message(
+                        await _seedance_send_for_provider(
+                            refs_provider,
                             chat_id,
                             "Сначала пришли хотя бы 1 фото.",
                             reply_markup=_seedance_refs_collect_kb(),
@@ -8499,7 +9984,8 @@ async def process_telegram_update(update: Dict[str, Any]):
                     si["step"] = "need_prompt"
                     st["seedance_i2v"] = si
                     st["ts"] = _now()
-                    await tg_send_message(
+                    await _seedance_send_for_provider(
+                        refs_provider,
                         chat_id,
                         f"Фото принял ✅ Всего фото: {len(imgs)}.\nПришли промпт одним или несколькими сообщениями. Когда всё отправишь — нажми «✅ Запустить».",
                         reply_markup=_seedance_prompt_collect_kb("seedance_i2v"),
@@ -8512,7 +9998,8 @@ async def process_telegram_update(update: Dict[str, Any]):
                 audio_ids = [x for x in (so.get("audio_file_ids") or []) if str(x or "").strip()]
                 total_refs = len(image_ids) + len(video_ids) + len(audio_ids)
                 if total_refs <= 0:
-                    await tg_send_message(
+                    await _seedance_send_for_provider(
+                        refs_provider,
                         chat_id,
                         "Сначала пришли хотя бы один image/video/audio reference.",
                         reply_markup=_seedance_refs_collect_kb(),
@@ -8529,7 +10016,8 @@ async def process_telegram_update(update: Dict[str, Any]):
                 so["step"] = "need_prompt"
                 st["seedance_omni"] = so
                 st["ts"] = _now()
-                await tg_send_message(
+                await _seedance_send_for_provider(
+                    refs_provider,
                     chat_id,
                     f"Референсы принял ✅ Фото: {len(image_ids)}, видео: {len(video_ids)}, аудио: {len(audio_ids)}.\nПришли промпт одним или несколькими сообщениями. Когда всё отправишь — нажми «✅ Запустить».",
                     reply_markup=_seedance_prompt_collect_kb("seedance_omni"),
@@ -9394,8 +10882,8 @@ async def process_telegram_update(update: Dict[str, Any]):
 
     from_user = message.get("from") or {}
     user_id = int(from_user.get("id") or 0)
-    # 📊 Supabase: user + DAU tracking (для любых сообщений/режимов)
-    track_user_activity(from_user)
+    # 📊 Supabase: user + DAU tracking outside the Telegram critical path.
+    _schedule_track_user_activity(from_user)
     
     # --- Queue test: /qtest ---
     incoming_text = (message.get("text") or "").strip()
@@ -9985,18 +11473,31 @@ async def process_telegram_update(update: Dict[str, Any]):
         return {"ok": True}
 
 
-    # ----- Supabase state resume (Music Future) -----
-    # Если бот перезапустился, режим "ожидаем текст для музыки" берём из Supabase.
-    if incoming_text and not (incoming_text.startswith("/") or incoming_text in ("⬅ Назад", "Назад")):
-        sb_state, sb_payload = sb_get_user_state(user_id)
-        if sb_state == "music_wait_text" and isinstance(sb_payload, dict) and sb_payload:
-            st["music_settings"] = sb_payload
-            _set_mode(chat_id, user_id, "suno_music")
+    # ----- Supabase state resume (Music/YooKassa) -----
+    # One bounded read replaces two synchronous requests. Seedance 2.5 has its
+    # own in-memory/Redis recovery and must never wait for unrelated FSM rows.
+    should_resume_sb = bool(
+        incoming_text
+        and not (incoming_text.startswith("/") or incoming_text in ("⬅ Назад", "Назад"))
+        and not _seedance25_is_active(st)
+    )
+    sb_state, sb_payload = "idle", None
+    if should_resume_sb:
+        try:
+            sb_state, sb_payload = await asyncio.wait_for(
+                asyncio.to_thread(sb_get_user_state, user_id),
+                timeout=SEEDANCE25_DB_READ_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            sb_state, sb_payload = "idle", None
 
-    # ----- Supabase state resume (YooKassa: wait for email) -----
+    # Если бот перезапустился, режим "ожидаем текст для музыки" берём из Supabase.
+    if sb_state == "music_wait_text" and isinstance(sb_payload, dict) and sb_payload:
+        st["music_settings"] = sb_payload
+        _set_mode(chat_id, user_id, "suno_music")
+
     # Если пользователь выбрал пакет и у нас нет email для чека — просим email и продолжаем оплату после ввода.
-    if incoming_text and not (incoming_text.startswith("/") or incoming_text in ("⬅ Назад", "Назад")):
-        sb_state, sb_payload = sb_get_user_state(user_id)
+    if should_resume_sb:
         if sb_state == "yk_wait_email" and isinstance(sb_payload, dict):
             email = (incoming_text or "").strip().lower()
             if sb_set_user_email(user_id, email):
@@ -11746,6 +13247,8 @@ async def process_telegram_update(update: Dict[str, Any]):
 
     # ---- SEEDANCE 2 Text/Image/Omni → Video: ждём промпт ----
     if st.get("mode") in ("seedance_t2v", "seedance_i2v", "seedance_omni") and incoming_text:
+        settings = st.get("seedance_settings") or {}
+        provider_kind = str(settings.get("provider_kind") or "seedance").strip().lower() or "seedance"
         # Навигация/кнопки меню не считаем промптом
         if _is_nav_or_menu_text(incoming_text):
             _set_mode(chat_id, user_id, "chat")
@@ -11754,33 +13257,45 @@ async def process_telegram_update(update: Dict[str, Any]):
             st.pop("seedance_omni", None)
             st.pop("seedance_settings", None)
             st["ts"] = _now()
-            sb_clear_user_state(user_id)
-            await tg_send_message(chat_id, "Ок. Вышел из Seedance. Главное меню.", reply_markup=_main_menu_for(user_id))
+            await _seedance_send_for_provider(
+                provider_kind,
+                chat_id,
+                "Ок. Вышел из Seedance. Главное меню.",
+                reply_markup=_main_menu_for(user_id),
+            )
+            if provider_kind == "seedance25":
+                _schedule_seedance25_persisted_state_clear(user_id)
+            else:
+                sb_clear_user_state(user_id)
             return {"ok": True}
 
         # Защита от двойного запуска
         if _busy_is_active(int(user_id)):
             kind = _busy_kind(int(user_id)) or "генерация"
-            await tg_send_message(
+            await _seedance_send_for_provider(
+                provider_kind,
                 chat_id,
                 f"⏳ Сейчас выполняется: {kind}. Дождись завершения (или /reset).",
                 reply_markup=_help_menu_for(user_id),
             )
             return {"ok": True}
 
-        settings = st.get("seedance_settings") or {}
-        provider_kind = str(settings.get("provider_kind") or "seedance").strip() or "seedance"
         seedance_model = str(settings.get("seedance_model") or ("seedance-kie-480p" if provider_kind == "seedance_kie" else "preview")).strip()
         task_type = str(settings.get("task_type") or ("seedance-2-fast" if seedance_model == "seedance-kie-480p" else ("seedance-2" if provider_kind == "seedance_kie" else "seedance-2-preview"))).strip()
         if seedance_model.lower() in {"seedance-kie-mini", "seedance-2-mini", "seedance-mini", "mini"} or task_type.lower() == "seedance-2-mini":
             seedance_model = "seedance-kie-mini"
             task_type = "seedance-2-mini"
-        duration = int(settings.get("duration") or 5)
+        duration = _seedance_setting_int(settings, "duration", 5, minimum=4, maximum=30)
         aspect_ratio = str(settings.get("aspect_ratio") or "16:9").strip()
-        max_images = int(settings.get("max_images") or (7 if _seedance_uses_kie_backend(settings) else 2))
-        max_videos = int(settings.get("max_videos") or 0)
-        max_audios = int(settings.get("max_audios") or 0)
-        max_total_refs = int(settings.get("max_total_refs") or max_images)
+        max_images = _seedance_setting_int(
+            settings,
+            "max_images",
+            7 if _seedance_uses_kie_backend(settings) else 2,
+            maximum=50,
+        )
+        max_videos = _seedance_setting_int(settings, "max_videos", 0, maximum=20)
+        max_audios = _seedance_setting_int(settings, "max_audios", 0, maximum=20)
+        max_total_refs = _seedance_setting_int(settings, "max_total_refs", max_images, maximum=50)
 
         # Если это i2v, но мы ещё собираем фото — обрабатываем «Готово»
         if st.get("mode") == "seedance_i2v":
@@ -11790,19 +13305,26 @@ async def process_telegram_update(update: Dict[str, Any]):
                 if incoming_text.lower() in ("готово", "готов", "done", "ok", "ок"):
                     imgs = si.get("image_file_ids") or []
                     if not imgs:
-                        await tg_send_message(chat_id, "Сначала пришли хотя бы 1 фото.", reply_markup=_seedance_refs_collect_kb())
+                        await _seedance_send_for_provider(
+                            provider_kind,
+                            chat_id,
+                            "Сначала пришли хотя бы 1 фото.",
+                            reply_markup=_seedance_refs_collect_kb(),
+                        )
                         return {"ok": True}
                     si["step"] = "need_prompt"
                     st["seedance_i2v"] = si
                     st["ts"] = _now()
-                    await tg_send_message(
+                    await _seedance_send_for_provider(
+                        provider_kind,
                         chat_id,
                         "Фото принял ✅ Пришли промпт одним или несколькими сообщениями. Когда всё отправишь — нажми «✅ Запустить».",
                         reply_markup=_seedance_prompt_collect_kb("seedance_i2v"),
                     )
                     return {"ok": True}
 
-                await tg_send_message(
+                await _seedance_send_for_provider(
+                    provider_kind,
                     chat_id,
                     f"Я сейчас жду фото (1–{max_images}).\nОтправь фото или нажми «✅ Готово», когда закончил.",
                     reply_markup=_seedance_refs_collect_kb(),
@@ -11820,7 +13342,12 @@ async def process_telegram_update(update: Dict[str, Any]):
                     audio_ids = list(so.get("audio_file_ids") or [])
                     total_refs = len(image_ids) + len(video_ids) + len(audio_ids)
                     if total_refs <= 0:
-                        await tg_send_message(chat_id, "Сначала пришли хотя бы один image/video/audio reference.", reply_markup=_seedance_refs_collect_kb())
+                        await _seedance_send_for_provider(
+                            provider_kind,
+                            chat_id,
+                            "Сначала пришли хотя бы один image/video/audio reference.",
+                            reply_markup=_seedance_refs_collect_kb(),
+                        )
                         return {"ok": True}
                     if audio_ids and not (image_ids or video_ids) and provider_kind not in {"seedance25", "wan3"}:
                         await tg_send_message(chat_id, "Для Omni Reference аудио нельзя отправлять отдельно. Добавь хотя бы фото или видео reference.", reply_markup=_seedance_refs_collect_kb())
@@ -11828,14 +13355,16 @@ async def process_telegram_update(update: Dict[str, Any]):
                     so["step"] = "need_prompt"
                     st["seedance_omni"] = so
                     st["ts"] = _now()
-                    await tg_send_message(
+                    await _seedance_send_for_provider(
+                        provider_kind,
                         chat_id,
                         "Референсы принял ✅ Пришли промпт одним или несколькими сообщениями. Когда всё отправишь — нажми «✅ Запустить».",
                         reply_markup=_seedance_prompt_collect_kb("seedance_omni"),
                     )
                     return {"ok": True}
 
-                await tg_send_message(
+                await _seedance_send_for_provider(
+                    provider_kind,
                     chat_id,
                     f"Я сейчас жду refs: фото до {max_images}, видео до {max_videos}, аудио до {max_audios}, всего до {max_total_refs}.\n"
                     "Отправь файлы или нажми «✅ Готово», когда закончил.",
@@ -11851,21 +13380,43 @@ async def process_telegram_update(update: Dict[str, Any]):
             prompt = _seedance_prompt_text_from_state(st)
             return await _seedance_start_generation_from_prompt(chat_id, user_id, st, prompt)
 
-        ok, err, parts_count, chars_count = _seedance_prompt_append_part(st, prompt_part, prompt_limit)
+        ok, err, parts_count, chars_count = _seedance_prompt_append_part(
+            st,
+            prompt_part,
+            prompt_limit,
+            message_id=message_id if provider_kind == "seedance25" else 0,
+        )
         if not ok:
-            await tg_send_message(
-                chat_id,
-                err or "Не смог добавить часть промпта. Пришли текст ещё раз.",
-                reply_markup=_seedance_prompt_collect_kb(st.get("mode")),
-            )
+            if provider_kind == "seedance25":
+                await _seedance25_send_required(
+                    chat_id,
+                    err or "Не смог добавить часть промпта. Пришли текст ещё раз.",
+                    reply_markup=_seedance_prompt_collect_kb(st.get("mode")),
+                )
+            else:
+                await tg_send_message(
+                    chat_id,
+                    err or "Не смог добавить часть промпта. Пришли текст ещё раз.",
+                    reply_markup=_seedance_prompt_collect_kb(st.get("mode")),
+                )
             return {"ok": True}
 
-        await tg_send_message(
-            chat_id,
+        prompt_ack = (
             f"✅ Часть промпта добавлена. Сейчас: {parts_count} част(и), {chars_count}/{prompt_limit} символов.\n"
-            "Можешь прислать следующую часть или нажать «✅ Запустить», когда промпт полностью готов.",
-            reply_markup=_seedance_prompt_collect_kb(st.get("mode")),
+            "Можешь прислать следующую часть или нажать «✅ Запустить», когда промпт полностью готов."
         )
+        if provider_kind == "seedance25":
+            await _seedance25_send_required(
+                chat_id,
+                prompt_ack,
+                reply_markup=_seedance_prompt_collect_kb(st.get("mode")),
+            )
+        else:
+            await tg_send_message(
+                chat_id,
+                prompt_ack,
+                reply_markup=_seedance_prompt_collect_kb(st.get("mode")),
+            )
         return {"ok": True}
 
     # ---- Sora 2 (OpenAI) Text→Video: ждём промпт ----
@@ -17436,6 +18987,99 @@ async def process_telegram_update(update: Dict[str, Any]):
         return {"ok": True}
 
     return {"ok": True}
+
+
+def _telegram_update_actor(update: Dict[str, Any]) -> Tuple[int, int]:
+    """Best-effort chat/user extraction for the top-level recovery guard."""
+    if not isinstance(update, dict):
+        return 0, 0
+    callback = update.get("callback_query")
+    if isinstance(callback, dict):
+        from_user = callback.get("from") if isinstance(callback.get("from"), dict) else {}
+        message = callback.get("message") if isinstance(callback.get("message"), dict) else {}
+    else:
+        message = update.get("message") or update.get("edited_message") or {}
+        message = message if isinstance(message, dict) else {}
+        from_user = message.get("from") if isinstance(message.get("from"), dict) else {}
+    chat = message.get("chat") if isinstance(message.get("chat"), dict) else {}
+    try:
+        chat_id = int(chat.get("id") or 0)
+    except Exception:
+        chat_id = 0
+    try:
+        user_id = int(from_user.get("id") or 0)
+    except Exception:
+        user_id = 0
+    return chat_id, user_id
+
+
+async def process_telegram_update(update: Dict[str, Any]):
+    """Process an update and keep a broken Seedance draft recoverable.
+
+    The legacy handler is intentionally large.  This narrow guard changes only
+    Seedance behaviour: an unexpected per-user exception releases the busy flag,
+    retains that user's prompt/references, and presents working recovery buttons.
+    Other modes preserve the existing exception/retry semantics.
+    """
+    try:
+        return await _process_telegram_update_impl(update)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        chat_id, user_id = _telegram_update_actor(update)
+        st = STATE.get(_get_user_key(chat_id, user_id)) if chat_id and user_id else None
+        mode_now = str((st or {}).get("mode") or "").strip()
+        if _seedance25_is_active(st):
+            _busy_end(user_id)
+            st["seedance_last_error"] = str(exc)[:1000]
+            st["ts"] = _now()
+            logging.exception(
+                "Recovered per-user Seedance 2.5 handler error chat_id=%s user_id=%s mode=%s",
+                chat_id,
+                user_id,
+                mode_now,
+            )
+            try:
+                await _seedance25_send_required(
+                    chat_id,
+                    "⚠️ Произошла временная ошибка Seedance 2.5. Промпт и референсы сохранены. "
+                    "Попробуй снова нажать «✅ Запустить» или используй «❌ Отмена».\n\n"
+                    f"Ошибка: {str(exc)[:700]}",
+                    reply_markup=_seedance_recovery_markup(st, user_id),
+                )
+            except Exception as notify_exc:
+                logging.error(
+                    "Seedance recovery notification failed chat_id=%s user_id=%s: %s",
+                    chat_id,
+                    user_id,
+                    notify_exc,
+                )
+                # A Telegram update must not be ACKed when every recovery notice
+                # failed. The prompt append is message_id-idempotent, so a queue
+                # or webhook retry can safely resend the same update.
+                message = (update or {}).get("message") or (update or {}).get("edited_message") or {}
+                if isinstance(message, dict):
+                    try:
+                        message_id = int(message.get("message_id") or 0)
+                    except Exception:
+                        message_id = 0
+                    if chat_id and message_id:
+                        PROCESSED_MESSAGES.pop((chat_id, message_id), None)
+                raise notify_exc from exc
+            return {"ok": True, "seedance_recovered": True}
+
+        # The message was marked as processed inside the legacy handler.  On an
+        # unrelated unhandled failure, remove only this update's marker so an
+        # existing Telegram/queue retry can really process it again.
+        message = (update or {}).get("message") or (update or {}).get("edited_message") or {}
+        if isinstance(message, dict):
+            try:
+                message_id = int(message.get("message_id") or 0)
+            except Exception:
+                message_id = 0
+            if chat_id and message_id:
+                PROCESSED_MESSAGES.pop((chat_id, message_id), None)
+        raise
 
 
 @app.post("/webhook/{secret}")
