@@ -1155,6 +1155,162 @@ def _is_nav_or_menu_text(t: str) -> bool:
     return s in nav_exact
 
 
+_TELEGRAM_RICH_TEXT_MAX_DEPTH = 64
+_TELEGRAM_RICH_TEXT_MAX_CHARS = 100_000
+
+
+def _telegram_rich_text_to_plain(value: Any, *, _depth: int = 0) -> str:
+    """Flatten a Bot API 10.1+ RichText value without losing visible text.
+
+    RichText is recursive: it can be a string, an array of RichText values or
+    an object that wraps another RichText value in ``text``.  Long messages
+    created by Telegram Premium's Rich Text Editor arrive in ``rich_message``
+    instead of the legacy ``text`` field.
+    """
+    if _depth > _TELEGRAM_RICH_TEXT_MAX_DEPTH:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "".join(
+            _telegram_rich_text_to_plain(item, _depth=_depth + 1)
+            for item in value
+        )
+    if not isinstance(value, dict):
+        return ""
+
+    # Nearly every formatting entity wraps its visible value in ``text``.
+    if "text" in value:
+        return _telegram_rich_text_to_plain(value.get("text"), _depth=_depth + 1)
+
+    rich_type = str(value.get("type") or "").strip().lower()
+    if rich_type == "custom_emoji":
+        return str(value.get("alternative_text") or "")
+    if rich_type == "mathematical_expression":
+        return str(value.get("expression") or "")
+    if rich_type == "button":
+        button = value.get("button")
+        if isinstance(button, dict):
+            return _telegram_rich_text_to_plain(button.get("text"), _depth=_depth + 1)
+    return ""
+
+
+def _telegram_rich_caption_to_plain(value: Any, *, _depth: int = 0) -> str:
+    if _depth > _TELEGRAM_RICH_TEXT_MAX_DEPTH or not isinstance(value, dict):
+        return ""
+    pieces = [
+        _telegram_rich_text_to_plain(value.get("text"), _depth=_depth + 1).strip(),
+        _telegram_rich_text_to_plain(value.get("credit"), _depth=_depth + 1).strip(),
+    ]
+    return "\n".join(piece for piece in pieces if piece)
+
+
+def _telegram_rich_block_to_plain(block: Any, *, _depth: int = 0) -> str:
+    """Convert one RichBlock to readable prompt text.
+
+    The normal Premium paste path consists of paragraph/heading blocks.  The
+    remaining branches keep lists, quotations, tables and captions readable so
+    future Telegram editor changes do not silently discard user input.
+    """
+    if _depth > _TELEGRAM_RICH_TEXT_MAX_DEPTH or not isinstance(block, dict):
+        return ""
+
+    block_type = str(block.get("type") or "").strip().lower()
+    pieces: List[str] = []
+
+    if "text" in block:
+        text_value = _telegram_rich_text_to_plain(block.get("text"), _depth=_depth + 1).strip()
+        if text_value:
+            pieces.append(text_value)
+    if block_type == "mathematical_expression":
+        expression = str(block.get("expression") or "").strip()
+        if expression:
+            pieces.append(expression)
+
+    if block_type == "list":
+        for item in block.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or "").strip()
+            body = _telegram_rich_blocks_to_plain(item.get("blocks"), _depth=_depth + 1)
+            line = " ".join(part for part in (label, body) if part).strip()
+            if line:
+                pieces.append(line)
+    elif block_type == "table":
+        for row in block.get("cells") or []:
+            if not isinstance(row, list):
+                continue
+            cells: List[str] = []
+            for cell in row:
+                if isinstance(cell, dict):
+                    cells.append(
+                        _telegram_rich_text_to_plain(cell.get("text"), _depth=_depth + 1).strip()
+                    )
+            row_text = "\t".join(cells).strip()
+            if row_text:
+                pieces.append(row_text)
+    else:
+        nested = _telegram_rich_blocks_to_plain(block.get("blocks"), _depth=_depth + 1)
+        if nested:
+            pieces.append(nested)
+
+    summary = _telegram_rich_text_to_plain(block.get("summary"), _depth=_depth + 1).strip()
+    if summary:
+        pieces.insert(0, summary)
+
+    caption = block.get("caption")
+    if isinstance(caption, dict):
+        caption_text = _telegram_rich_caption_to_plain(caption, _depth=_depth + 1)
+    else:
+        caption_text = _telegram_rich_text_to_plain(caption, _depth=_depth + 1).strip()
+    if caption_text:
+        pieces.append(caption_text)
+
+    credit = _telegram_rich_text_to_plain(block.get("credit"), _depth=_depth + 1).strip()
+    if credit:
+        pieces.append(credit)
+
+    if block_type == "buttons":
+        labels: List[str] = []
+        for button in block.get("buttons") or []:
+            if isinstance(button, dict):
+                label = _telegram_rich_text_to_plain(button.get("text"), _depth=_depth + 1).strip()
+                if label:
+                    labels.append(label)
+        if labels:
+            pieces.append(" ".join(labels))
+
+    return "\n".join(piece for piece in pieces if piece).strip()
+
+
+def _telegram_rich_blocks_to_plain(blocks: Any, *, _depth: int = 0) -> str:
+    if _depth > _TELEGRAM_RICH_TEXT_MAX_DEPTH or not isinstance(blocks, list):
+        return ""
+    flattened = [
+        _telegram_rich_block_to_plain(block, _depth=_depth + 1)
+        for block in blocks
+    ]
+    return "\n".join(part for part in flattened if part).strip()
+
+
+def _telegram_rich_message_to_plain(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    text = _telegram_rich_blocks_to_plain(value.get("blocks"))
+    return text[:_TELEGRAM_RICH_TEXT_MAX_CHARS].strip()
+
+
+def _telegram_message_text(message: Any) -> str:
+    """Return visible incoming Telegram text for legacy and rich messages."""
+    if not isinstance(message, dict):
+        return ""
+    for field in ("text", "caption"):
+        value = message.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return _telegram_rich_message_to_plain(message.get("rich_message"))
+
+
 # ---------------- SunoAPI callback (required by SunoAPI.org) ----------------
 
 def _deep_pick_str(val) -> str:
@@ -11134,7 +11290,7 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
     _schedule_track_user_activity(from_user)
     
     # --- Queue test: /qtest ---
-    incoming_text = (message.get("text") or "").strip()
+    incoming_text = _telegram_message_text(message)
     if incoming_text in ("/qtest", "qtest"):
         job_id = uuid4().hex
         await enqueue_job({"job_id": job_id, "type": "qtest", "chat_id": chat_id, "user_id": user_id}, queue_name="gen")
@@ -11302,8 +11458,18 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
 
     st = _ensure_state(chat_id, user_id)
 
-    # ✅ Telegram: текст может быть в caption
-    incoming_text = (message.get("text") or message.get("caption") or "").strip()
+    # Telegram Bot API 10.1+: Premium long messages arrive as rich_message.
+    incoming_text = _telegram_message_text(message)
+    if message.get("rich_message") is not None:
+        logging.info(
+            "Telegram rich_message flattened chat_id=%s user_id=%s chars=%s blocks=%s",
+            chat_id,
+            user_id,
+            len(incoming_text),
+            len((message.get("rich_message") or {}).get("blocks") or [])
+            if isinstance(message.get("rich_message"), dict)
+            else 0,
+        )
 
     # Красивая reply-кнопка должна вести себя как реальный /reset
     if incoming_text == "🔄 Сбросить генерацию":
@@ -19300,7 +19466,7 @@ def _seedance25_update_needs_shared_lookup(update: Dict[str, Any]) -> bool:
     message = update.get("message") or update.get("edited_message") or {}
     if not isinstance(message, dict):
         return False
-    text = str(message.get("text") or message.get("caption") or "").strip()
+    text = _telegram_message_text(message)
     if text:
         # /reset is handled explicitly and clears the shared key even when the
         # local process has never seen this user's draft.
@@ -19321,7 +19487,7 @@ def _seedance25_update_is_reset(update: Dict[str, Any]) -> bool:
     message = (update or {}).get("message") or (update or {}).get("edited_message") or {}
     if not isinstance(message, dict):
         return False
-    text = str(message.get("text") or message.get("caption") or "").strip()
+    text = _telegram_message_text(message)
     return bool(
         text.startswith("/reset")
         or text.startswith("/resetgen")
