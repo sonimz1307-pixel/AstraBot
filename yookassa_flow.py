@@ -1,12 +1,15 @@
 # yookassa_flow.py
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 import uuid
 from typing import Any, Dict, Optional, Tuple
 
 import httpx
+
+from yookassa_store import record_yookassa_payment_intent
 
 YOOKASSA_FLOW_VERSION = "2026-02-08_require_email_bot_storage"
 
@@ -164,5 +167,32 @@ async def create_yookassa_payment(
 
     if not payment_id or not confirmation_url:
         raise RuntimeError(f"YooKassa response missing id/url: {j}")
+
+    payment_type = str(metadata.get("payment_type") or "topup").strip().lower() or "topup"
+    plan_code = str(metadata.get("plan_code") or "").strip().lower()
+    try:
+        duration_days = int(float(metadata.get("duration_days") or 0))
+    except Exception:
+        duration_days = 0
+
+    # Durable recovery anchor. We intentionally persist this before exposing the
+    # confirmation URL to the client. If the DB is temporarily unavailable, the
+    # caller gets an error instead of a payment link that our system cannot later
+    # reconcile safely.
+    try:
+        await asyncio.to_thread(
+            record_yookassa_payment_intent,
+            payment_id=payment_id,
+            user_id=int(user_id),
+            tokens=int(tokens),
+            amount_rub=rub,
+            payment_type=payment_type,
+            plan_code=plan_code,
+            duration_days=duration_days,
+            provider_status=str(j.get("status") or "pending"),
+            metadata={"flow_version": YOOKASSA_FLOW_VERSION},
+        )
+    except Exception as exc:
+        raise RuntimeError(f"YooKassa payment created but recovery state was not saved: {exc}") from exc
 
     return payment_id, confirmation_url
