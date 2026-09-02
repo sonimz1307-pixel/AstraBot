@@ -19,7 +19,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import httpx
 
@@ -2008,6 +2008,47 @@ def _insert_workspace_generation(row: Dict[str, Any]) -> str:
         if saved_id:
             return str(saved_id)
     return generation_id
+
+
+_WORKSPACE_VIDEO_CLIENT_REQUEST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
+
+
+def _normalize_workspace_video_client_request_id(value: Any) -> str:
+    request_id = str(value or "").strip()
+    if not request_id:
+        return ""
+    if not _WORKSPACE_VIDEO_CLIENT_REQUEST_RE.fullmatch(request_id):
+        raise HTTPException(status_code=400, detail="Invalid client_request_id")
+    return request_id
+
+
+def _workspace_wan3_submission_ids(user_id: int, client_request_id: str) -> tuple[str, str, str]:
+    """Mirror Seedance's stable submission boundary for workspace Wan 3.0."""
+    identity = f"{int(user_id)}:{str(client_request_id or '').strip()}"
+    generation_id = str(uuid5(NAMESPACE_URL, f"nabex:workspace:wan3:generation:{identity}"))
+    job_id = uuid5(NAMESPACE_URL, f"nabex:workspace:wan3:job:{identity}").hex
+    charge_ref_id = str(uuid5(NAMESPACE_URL, f"nabex:workspace:wan3:charge:{identity}"))
+    return generation_id, job_id, charge_ref_id
+
+
+def _workspace_video_idempotent_replay(user_id: int, row: Dict[str, Any]) -> Dict[str, Any]:
+    generation_id = str((row or {}).get("id") or "").strip()
+    try:
+        balance_tokens: Optional[int] = int(get_balance(int(user_id)) or 0)
+    except Exception:
+        balance_tokens = None
+    return {
+        "ok": True,
+        "generation_id": generation_id,
+        "task_id": generation_id,
+        "status": str((row or {}).get("status") or "queued"),
+        "status_text": "Этот запуск Wan 3.0 уже принят. Повторная генерация не создана.",
+        "balance_tokens": balance_tokens,
+        "cost_tokens": 0,
+        "source_video_upload_id": None,
+        "reference_image_url": None,
+        "idempotent_replay": True,
+    }
 
 
 def _update_workspace_generation(generation_id: Optional[str], patch: Dict[str, Any]) -> None:
@@ -5844,6 +5885,7 @@ async def workspace_video_run(
     provider_mode = str(form.get("provider_mode") or form.get("grok_provider_mode") or "normal").strip().lower() or "normal"
     enable_audio = _parse_form_bool(form.get("enable_audio"))
     quality = str(form.get("quality") or "pro").strip().lower() or "pro"
+    client_request_id = _normalize_workspace_video_client_request_id(form.get("client_request_id"))
     kling3_kie_multi_shots = normalize_kling3_kie_shots(_parse_json_list_form(form.get("multi_shots_json") or form.get("multi_prompt") or form.get("multi_shots")))
     kling3_kie_elements = _parse_json_list_form(form.get("kling_elements_json") or form.get("kling_elements"))
 
@@ -5870,6 +5912,18 @@ async def workspace_video_run(
                     + ". Tokens were not charged."
                 ),
             )
+
+    requested_generation_id = ""
+    requested_wan3_job_id = ""
+    requested_charge_ref_id = ""
+    if provider == "wan3" and client_request_id:
+        requested_generation_id, requested_wan3_job_id, requested_charge_ref_id = _workspace_wan3_submission_ids(
+            uid,
+            client_request_id,
+        )
+        existing_generation = get_workspace_generation_row(uid, requested_generation_id)
+        if existing_generation:
+            return _workspace_video_idempotent_replay(uid, existing_generation)
 
     start_file = form.get("start_frame")
     end_file = form.get("end_frame")
@@ -6372,14 +6426,19 @@ async def workspace_video_run(
     charge_reason = str(charge.get("charge_reason") or "")
     refund_reason = str(charge.get("refund_reason") or "workspace_video_refund")
     charge_meta = dict(charge.get("meta") or {})
-    charge_ref_id = uuid4().hex if cost_tokens > 0 and charge_reason else ""
+    charge_ref_id = (
+        requested_charge_ref_id
+        if provider == "wan3" and requested_charge_ref_id and cost_tokens > 0 and charge_reason
+        else (uuid4().hex if cost_tokens > 0 and charge_reason else "")
+    )
 
     if cost_tokens > 0 and balance < cost_tokens:
         raise HTTPException(status_code=402, detail=f"Недостаточно токенов. Нужно: {cost_tokens} ток.")
 
     charged = False
-    generation_id: Optional[str] = None
-    wan3_job_id = uuid4().hex if provider == "wan3" else ""
+    generation_id: Optional[str] = requested_generation_id or None
+    generation_inserted = False
+    wan3_job_id = (requested_wan3_job_id or uuid4().hex) if provider == "wan3" else ""
     wan3_enqueue_started = False
     wan3_enqueue_confirmed = False
     try:
@@ -6400,21 +6459,34 @@ async def workspace_video_run(
                 add_tokens(uid, -int(cost_tokens), reason=charge_reason)
             charged = True
 
-        generation_id = _insert_workspace_generation(
-            {
-                "user_id": str(uid),
-                "provider": provider,
-                "model": model,
-                "mode": _history_mode_for_run(provider, mode),
-                "prompt": prompt,
-                "status": "queued",
-                "aspect_ratio": aspect_ratio,
-                "duration_sec": int(duration or 0),
-                "resolution": resolution,
-                "enable_audio": bool(enable_audio),
-                "origin": "workspace",
-            }
-        )
+        generation_row = {
+            "user_id": str(uid),
+            "provider": provider,
+            "model": model,
+            "mode": _history_mode_for_run(provider, mode),
+            "prompt": prompt,
+            "status": "queued",
+            "aspect_ratio": aspect_ratio,
+            "duration_sec": int(duration or 0),
+            "resolution": resolution,
+            "enable_audio": bool(enable_audio),
+            "origin": "workspace",
+        }
+        if generation_id:
+            generation_row["id"] = generation_id
+        try:
+            generation_id = _insert_workspace_generation(generation_row)
+            generation_inserted = True
+        except Exception:
+            # Two browser requests carrying the same stable client key can race
+            # before either response reaches the UI. The deterministic primary
+            # key lets the loser return the first generation instead of charging
+            # or enqueueing a second provider task.
+            if provider == "wan3" and requested_generation_id:
+                existing_generation = get_workspace_generation_row(uid, requested_generation_id)
+                if existing_generation:
+                    return _workspace_video_idempotent_replay(uid, existing_generation)
+            raise
 
         if provider == "wan3":
             start_frame_url = upload_wan3_reference_bytes(uid, "frame", 1, start_frame, filename=getattr(start_file, "filename", None) or "") if start_frame else None
@@ -6665,7 +6737,7 @@ async def workspace_video_run(
                         add_tokens(uid, int(cost_tokens), reason=refund_reason, ref_id=charge_ref_id or uuid4().hex, meta={"origin": "workspace_video", "stage": "route", "error": str(e)[:300]})
                 except Exception:
                     pass
-        if generation_id:
+        if generation_id and generation_inserted:
             if provider == "wan3" and charged and wan3_enqueue_started and not wan3_enqueue_confirmed:
                 # The request does not know whether Redis committed. Keep the DB
                 # record non-terminal: the reliable worker may already own it.
