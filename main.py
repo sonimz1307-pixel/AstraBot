@@ -5379,6 +5379,23 @@ def _seedance25_submission_ids(user_id: int, submission_nonce: str) -> Tuple[str
     return job_uuid.hex, str(charge_uuid)
 
 
+def _wan3_submission_ids(user_id: int, submission_nonce: str) -> Tuple[str, str]:
+    """Derive stable Wan identifiers from the confirmed Telegram draft.
+
+    This mirrors the proven Seedance 2.5 boundary: repeated confirmation
+    callbacks reuse both the billing reference and Redis job id, so the
+    existing atomic charge and reliable-queue dedupe cannot create a second
+    paid provider task.
+    """
+    nonce = str(submission_nonce or "").strip()
+    if not nonce:
+        raise ValueError("Wan 3.0 submission nonce is missing")
+    identity = f"{int(user_id)}:{nonce}"
+    job_uuid = uuid5(NAMESPACE_URL, f"nabex:wan3:job:{identity}")
+    charge_uuid = uuid5(NAMESPACE_URL, f"nabex:wan3:charge:{identity}")
+    return job_uuid.hex, str(charge_uuid)
+
+
 async def _seedance25_store_submission_status(
     st: Dict[str, Any],
     *,
@@ -6071,7 +6088,7 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
         cost_tokens = int(preview_price_map.get(int(duration), preview_price_map[5]))
 
     seedance25_submission_nonce = ""
-    if provider_kind == "seedance25":
+    if provider_kind in {"seedance25", "wan3"}:
         confirmation = _seedance25_confirmation_for_draft(
             st,
             mode=mode_now,
@@ -6080,37 +6097,44 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
             create=not confirmed,
         )
         if not isinstance(confirmation, dict):
-            await _seedance25_send_required(
+            stale_text = (
+                "⚠️ Подтверждение Wan 3.0 устарело. Нажми «Запустить», чтобы заново проверить цену."
+                if provider_kind == "wan3"
+                else "⚠️ Подтверждение Seedance 2.5 устарело. Нажми «Запустить», чтобы заново проверить цену."
+            )
+            await _seedance_send_for_provider(
+                provider_kind,
                 chat_id,
-                "⚠️ Подтверждение Seedance 2.5 устарело. Нажми «Запустить», чтобы заново проверить цену.",
+                stale_text,
                 reply_markup=_seedance_prompt_collect_kb(mode_now),
             )
             return {"ok": True}
         seedance25_submission_nonce = str(confirmation.get("nonce") or "").strip()
-        local_submit_status = str(confirmation.get("status") or "ready").strip().lower()
-        blocking_statuses = {
-            "claimed", "charged", "enqueued", "refunded", "refund_pending",
-            "review_required", "reconciling", "not_charged",
-        }
-        if local_submit_status in blocking_statuses or (not confirmed and local_submit_status != "ready"):
-            stable_job_id, stable_charge_ref_id = _seedance25_submission_ids(
-                user_id,
-                seedance25_submission_nonce,
-            )
-            if local_submit_status == "enqueued":
-                await _seedance_clear_session_after_enqueue(chat_id, user_id, st)
-                reply_markup = _help_menu_for(user_id)
-            else:
-                reply_markup = _seedance25_settlement_kb()
-            await _seedance25_send_required(
-                chat_id,
-                _seedance25_blocked_submission_text(
-                    local_submit_status,
-                    stable_charge_ref_id[-8:] or stable_job_id[-8:],
-                ),
-                reply_markup=reply_markup,
-            )
-            return {"ok": True}
+        if provider_kind == "seedance25":
+            local_submit_status = str(confirmation.get("status") or "ready").strip().lower()
+            blocking_statuses = {
+                "claimed", "charged", "enqueued", "refunded", "refund_pending",
+                "review_required", "reconciling", "not_charged",
+            }
+            if local_submit_status in blocking_statuses or (not confirmed and local_submit_status != "ready"):
+                stable_job_id, stable_charge_ref_id = _seedance25_submission_ids(
+                    user_id,
+                    seedance25_submission_nonce,
+                )
+                if local_submit_status == "enqueued":
+                    await _seedance_clear_session_after_enqueue(chat_id, user_id, st)
+                    reply_markup = _help_menu_for(user_id)
+                else:
+                    reply_markup = _seedance25_settlement_kb()
+                await _seedance25_send_required(
+                    chat_id,
+                    _seedance25_blocked_submission_text(
+                        local_submit_status,
+                        stable_charge_ref_id[-8:] or stable_job_id[-8:],
+                    ),
+                    reply_markup=reply_markup,
+                )
+                return {"ok": True}
 
     # Seedance 2.5 always gets a final price screen BEFORE any token charge.
     # Price is recomputed again when the user confirms, so stale buttons cannot
@@ -6160,6 +6184,9 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
     if provider_kind == "seedance25":
         job_id, charge_ref_id = _seedance25_submission_ids(user_id, seedance25_submission_nonce)
         seedance25_owner_token = uuid4().hex
+    elif provider_kind == "wan3":
+        job_id, charge_ref_id = _wan3_submission_ids(user_id, seedance25_submission_nonce)
+        seedance25_owner_token = ""
     else:
         charge_ref_id = ""
         job_id = ""
@@ -6455,7 +6482,7 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
             "charge_ref_id": charge_ref_id,
             "refund_reason": ("wan3_video_refund" if provider_kind == "wan3" else ("seedance25_video_refund" if provider_kind == "seedance25" else "seedance_video_refund")),
         }
-        if provider_kind == "seedance25":
+        if provider_kind in {"seedance25", "wan3"}:
             job["submission_nonce"] = seedance25_submission_nonce
 
         if mode_now == "seedance_i2v":
@@ -6490,12 +6517,14 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
             _set_mode(chat_id, user_id, "chat")
 
         if provider_kind == "wan3":
-            # Keep the existing Wan 3.0 charge/enqueue boundary unchanged.  The
-            # Seedance 2.5 recovery fix below deliberately does not alter Wan.
+            # Keep the proven Wan charge/enqueue boundary unchanged. Only the
+            # identifiers above are now stable, following Seedance 2.5.
             st.pop("seedance_t2v", None)
             st.pop("seedance_i2v", None)
             st.pop("seedance_omni", None)
             st.pop("seedance_settings", None)
+            st.pop("seedance25_confirmation", None)
+            st.pop("seedance_last_error", None)
             st["ts"] = _now()
             sb_clear_user_state(user_id)
             _set_mode(chat_id, user_id, "chat")
@@ -12123,12 +12152,13 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
             resolution = normalize_wan3_resolution(payload.get("resolution") or "720p")
             aspect_ratio = normalize_wan3_aspect_ratio(payload.get("aspect_ratio") or "adaptive")
             enable_audio = str(payload.get("enable_audio", "true")).lower() not in {"0","false","no","off"} if not isinstance(payload.get("enable_audio"), bool) else bool(payload.get("enable_audio"))
-            if provider_kind == "seedance25":
-                # A fresh WebApp selection is a new draft boundary.  Never
-                # carry an old confirmation nonce or recovery snapshot into it.
-                st.pop("seedance25_confirmation", None)
-                st.pop("seedance_last_submission", None)
-                st.pop("seedance_last_error", None)
+            # A fresh Wan WebApp selection is a new draft boundary, exactly as
+            # it is for Seedance 2.5.  This must not reference provider_kind:
+            # that local variable belongs to the later Seedance branch and was
+            # the reason Wan settings crashed with UnboundLocalError.
+            st.pop("seedance25_confirmation", None)
+            st.pop("seedance_last_submission", None)
+            st.pop("seedance_last_error", None)
             st["seedance_settings"] = {
                 "provider_kind": "wan3", "seedance_model": "wan3.0-video", "task_type": "wan3.0-video",
                 "flow": flow, "duration": duration, "resolution": resolution, "aspect_ratio": aspect_ratio, "enable_audio": enable_audio,
