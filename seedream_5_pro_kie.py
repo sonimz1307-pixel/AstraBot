@@ -4,7 +4,7 @@ import asyncio
 import json
 import os
 import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import httpx
 
@@ -42,6 +42,14 @@ _FAIL_STATES = {"fail", "failed", "failure", "error"}
 
 class Seedream5ProProviderError(RuntimeError):
     pass
+
+
+class Seedream5ProTaskFailedError(Seedream5ProProviderError):
+    """Provider explicitly confirmed terminal failure; safe for a refund."""
+
+
+class Seedream5ProTaskPendingError(Seedream5ProProviderError):
+    """A task exists; retry polling its id, never create another task."""
 
 
 def _reference_ext_from_bytes(payload: bytes) -> str:
@@ -277,7 +285,7 @@ async def _poll_task(client: httpx.AsyncClient, task_id: str) -> str:
                 data.get("failMsg") or data.get("message") or payload.get("msg") or "Seedream 5.0 Pro task failed"
             ).strip()
             fail_code = str(data.get("failCode") or "").strip()
-            raise Seedream5ProProviderError(f"{fail_msg} ({fail_code})" if fail_code else fail_msg)
+            raise Seedream5ProTaskFailedError(f"{fail_msg} ({fail_code})" if fail_code else fail_msg)
         if state not in _POLLING_STATES:
             last_detail = str(payload.get("msg") or data or payload).strip()
         if (time.monotonic() - start_ts) >= KIE_SEEDREAM_5_PRO_MAX_WAIT_SECONDS:
@@ -319,6 +327,8 @@ async def handle_seedream_5_pro_kie(
     telegram_file_ids: Optional[Sequence[str]] = None,
     resolution: Any = "2K",
     aspect_ratio: Any = "16:9",
+    on_task_id: Optional[Callable[[str], Any]] = None,
+    resume_task_id: str = "",
 ) -> Tuple[bytes, str]:
     clean_prompt = str(prompt or "").strip()
     if not clean_prompt:
@@ -355,11 +365,24 @@ async def handle_seedream_5_pro_kie(
 
     timeout = httpx.Timeout(KIE_SEEDREAM_5_PRO_CREATE_TIMEOUT_SECONDS, connect=30.0)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        created = await _kie_request_json(client, "POST", "/api/v1/jobs/createTask", payload=payload)
-        task_id = _extract_task_id(created)
+        task_id = str(resume_task_id or "").strip()
+        if not task_id:
+            created = await _kie_request_json(client, "POST", "/api/v1/jobs/createTask", payload=payload)
+            task_id = _extract_task_id(created)
         if not task_id:
             raise Seedream5ProProviderError(f"Seedream 5.0 Pro did not return taskId: {created}")
-        result_url = await _poll_task(client, task_id)
+        if on_task_id is not None:
+            maybe = on_task_id(task_id)
+            if hasattr(maybe, "__await__"):
+                await maybe
+        try:
+            result_url = await _poll_task(client, task_id)
+        except Seedream5ProTaskFailedError:
+            raise
+        except Exception as exc:
+            if on_task_id is not None or resume_task_id:
+                raise Seedream5ProTaskPendingError("Provider task requires reconciliation: " + task_id) from exc
+            raise
 
     out_bytes = await _download_bytes(result_url)
     return out_bytes, _detect_ext(out_bytes, fallback="png")
