@@ -247,6 +247,10 @@ app.include_router(partner_program_router)
 app.include_router(site_builder_router)
 app.include_router(video_editor_v2_router)
 app.include_router(video_editor_v2_page_router)
+# Workshop routes are isolated; feature flags default to OFF in SQL.
+from app.routers.trend_marketplace_api import router as trend_marketplace_router, page_router as trend_marketplace_pages
+app.include_router(trend_marketplace_router)
+app.include_router(trend_marketplace_pages)
 
 APP_VERSION = "v7-suno-callback-dedup-fix"
 try:
