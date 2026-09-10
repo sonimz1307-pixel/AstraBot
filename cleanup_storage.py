@@ -10,6 +10,7 @@ Safe behavior:
 - deletes only files older than CLEANUP_MAX_AGE_HOURS (default: 336 = 14 days)
 - never touches the prompts bucket by default
 - never touches site-builds by default
+- never touches trend-private/trend-public, including explicit extra rules
 - skips files whose Storage timestamp cannot be read
 - supports dry-run mode
 
@@ -36,6 +37,11 @@ from typing import Iterable, List, Optional, Tuple
 from supabase import create_client
 
 LOG = logging.getLogger("cleanup_storage")
+
+# Marketplace references/previews are retained for the lifetime of their immutable
+# versions, including hidden/deleted trends with paid in-flight work. No age rule,
+# even CLEANUP_EXTRA_RULES, can establish that deleting them is safe.
+PROTECTED_TREND_BUCKETS = frozenset({"trend-private", "trend-public"})
 
 
 @dataclass(frozen=True)
@@ -70,6 +76,9 @@ def _unique_rules(rules: Iterable[CleanupRule]) -> List[CleanupRule]:
         bucket = rule.bucket.strip()
         prefix = rule.prefix.strip().strip("/")
         if not bucket:
+            continue
+        if bucket in PROTECTED_TREND_BUCKETS:
+            LOG.warning("Skipping permanently retained marketplace bucket: %s", bucket)
             continue
         key = (bucket, prefix)
         if key in seen:
