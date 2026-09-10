@@ -18,7 +18,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import httpx
@@ -1836,7 +1836,7 @@ def _get_workspace_generation_by_task(user_id: int, task_id: Optional[str]) -> O
     try:
         resp = (
             supabase.table(_WORKSPACE_VIDEO_GENERATIONS_TABLE)
-            .select("id,user_id,task_id,status,provider_video_url,storage_path,file_size_bytes,mime_type")
+            .select("id,user_id,task_id,status,provider_video_url,storage_path,file_size_bytes,mime_type,error_code")
             .eq("user_id", str(user_id))
             .eq("task_id", task_id_text)
             .limit(1)
@@ -1879,44 +1879,133 @@ async def _download_video_to_tempfile(url: str) -> tuple[str, int, str]:
     return tmp_path, total_bytes, content_type
 
 
+class _WorkspaceStorageUploadError(RuntimeError):
+    def __init__(self, message: str, *, status_code: int = 0, file_size_bytes: int = 0) -> None:
+        super().__init__(message)
+        self.status_code = int(status_code or 0)
+        self.file_size_bytes = int(file_size_bytes or 0)
+
+
+class _WorkspaceStoragePayloadTooLargeError(_WorkspaceStorageUploadError):
+    pass
+
+
+def _workspace_storage_payload_too_large(status_code: int, response_text: str) -> bool:
+    text = str(response_text or "").strip().lower()
+    if int(status_code or 0) == 413:
+        return True
+    if int(status_code or 0) != 400:
+        return False
+    markers = (
+        "payload too large",
+        "exceeded the maximum allowed size",
+        "request entity too large",
+        "entity too large",
+        "file size limit",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _iter_workspace_file_chunks(fh: Any, *, chunk_size: int = 1024 * 1024):
+    while True:
+        chunk = fh.read(chunk_size)
+        if not chunk:
+            break
+        yield chunk
+
+
 def _upload_workspace_video_file(*, local_path: str, user_id: int, generation_id: str, content_type: str) -> Dict[str, Any]:
-    if supabase is None:
-        raise RuntimeError("Supabase client is not configured")
     source_path = str(local_path or "").strip()
     if not source_path:
         raise RuntimeError("local_path is empty")
 
-    ext = Path(source_path).suffix.lstrip(".").lower() or _storage_content_type_to_ext(content_type)
-    storage_path = _workspace_video_storage_path(user_id=user_id, generation_id=generation_id, ext=ext)
-
-    with open(source_path, "rb") as fh:
-        file_bytes = fh.read()
-
-    if not file_bytes:
+    file_size_bytes = int(os.path.getsize(source_path))
+    if file_size_bytes <= 0:
         raise RuntimeError("Local video file is empty")
 
-    supabase.storage.from_(_WORKSPACE_VIDEOS_BUCKET).upload(
-        path=storage_path,
-        file=file_bytes,
-        file_options={
-            "content-type": content_type or "video/mp4",
-            "upsert": "true",
-        },
+    supabase_url = (os.getenv("SUPABASE_URL", "") or "").strip().rstrip("/")
+    supabase_service_key = (
+        os.getenv("SUPABASE_SERVICE_KEY", "")
+        or os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+        or ""
+    ).strip()
+    if not supabase_url or not supabase_service_key:
+        raise RuntimeError("SUPABASE_URL / SUPABASE_SERVICE_KEY are not configured")
+
+    ext = Path(source_path).suffix.lstrip(".").lower() or _storage_content_type_to_ext(content_type)
+    storage_path = _workspace_video_storage_path(user_id=user_id, generation_id=generation_id, ext=ext)
+    bucket_path = quote(_WORKSPACE_VIDEOS_BUCKET, safe="")
+    object_path = quote(storage_path.lstrip("/"), safe="/")
+    upload_url = f"{supabase_url}/storage/v1/object/{bucket_path}/{object_path}"
+    mime_type = content_type or "video/mp4"
+    headers = {
+        "authorization": f"Bearer {supabase_service_key}",
+        "apikey": supabase_service_key,
+        "x-upsert": "true",
+        "content-type": mime_type,
+        "content-length": str(file_size_bytes),
+    }
+    timeout = httpx.Timeout(connect=20.0, read=180.0, write=900.0, pool=60.0)
+
+    print(
+        f"[workspace_storage] upload start generation={generation_id} "
+        f"size_bytes={file_size_bytes} size_mib={file_size_bytes / (1024 * 1024):.1f} "
+        f"bucket={_WORKSPACE_VIDEOS_BUCKET}",
+        flush=True,
+    )
+
+    try:
+        with open(source_path, "rb") as fh:
+            with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+                response = client.post(
+                    upload_url,
+                    headers=headers,
+                    content=_iter_workspace_file_chunks(fh),
+                )
+    except httpx.HTTPError as exc:
+        raise _WorkspaceStorageUploadError(
+            f"Supabase workspace video upload transport error: {exc}",
+            file_size_bytes=file_size_bytes,
+        ) from exc
+
+    if response.status_code >= 300:
+        response_text = str(response.text or "")[:2000]
+        message = (
+            f"Supabase workspace video upload failed: {response.status_code} "
+            f"{response_text[:1200]}"
+        )
+        if _workspace_storage_payload_too_large(response.status_code, response_text):
+            raise _WorkspaceStoragePayloadTooLargeError(
+                message,
+                status_code=response.status_code,
+                file_size_bytes=file_size_bytes,
+            )
+        raise _WorkspaceStorageUploadError(
+            message,
+            status_code=response.status_code,
+            file_size_bytes=file_size_bytes,
+        )
+
+    print(
+        f"[workspace_storage] upload completed generation={generation_id} "
+        f"size_bytes={file_size_bytes} bucket={_WORKSPACE_VIDEOS_BUCKET}",
+        flush=True,
     )
 
     public_url = None
-    try:
-        public_url = _extract_storage_public_url(
-            supabase.storage.from_(_WORKSPACE_VIDEOS_BUCKET).get_public_url(storage_path)
-        )
-    except Exception:
-        public_url = None
+    if supabase is not None:
+        try:
+            public_url = _extract_storage_public_url(
+                supabase.storage.from_(_WORKSPACE_VIDEOS_BUCKET).get_public_url(storage_path)
+            )
+        except Exception:
+            public_url = None
 
     return {
         "storage_path": storage_path,
         "public_url": public_url,
-        "file_size_bytes": len(file_bytes),
-        "mime_type": content_type or "video/mp4",
+        "file_size_bytes": file_size_bytes,
+        "mime_type": mime_type,
     }
 
 
@@ -1930,6 +2019,10 @@ async def _archive_workspace_video_if_needed(user_id: int, task_id: Optional[str
 
     existing_storage_path = _first_nonempty(row.get("storage_path"))
     if existing_storage_path:
+        return
+    if str(row.get("error_code") or "").strip().lower() == "archive_too_large":
+        # A deterministic Storage size rejection will not heal by polling the
+        # same provider result again. Keep serving the provider URL instead.
         return
 
     provider_video_url = _first_nonempty(
@@ -1948,7 +2041,8 @@ async def _archive_workspace_video_if_needed(user_id: int, task_id: Optional[str
     tmp_path = ""
     try:
         tmp_path, downloaded_bytes, content_type = await _download_video_to_tempfile(provider_video_url)
-        uploaded = _upload_workspace_video_file(
+        uploaded = await asyncio.to_thread(
+            _upload_workspace_video_file,
             local_path=tmp_path,
             user_id=user_id,
             generation_id=generation_id,
@@ -1965,6 +2059,21 @@ async def _archive_workspace_video_if_needed(user_id: int, task_id: Optional[str
         if uploaded.get("public_url"):
             patch["public_url"] = uploaded["public_url"]
         _update_workspace_generation(generation_id, patch)
+    except _WorkspaceStoragePayloadTooLargeError as e:
+        _update_workspace_generation(
+            generation_id,
+            {
+                "file_size_bytes": int(e.file_size_bytes or downloaded_bytes or 0),
+                "mime_type": content_type or "video/mp4",
+                "error_code": "archive_too_large",
+                "error_message": None,
+            },
+        )
+        print(
+            f"[workspace_storage] archive skipped generation={generation_id} "
+            f"reason=payload_too_large size_bytes={int(e.file_size_bytes or downloaded_bytes or 0)}",
+            flush=True,
+        )
     except Exception as e:
         _update_workspace_generation(
             generation_id,
@@ -2420,7 +2529,8 @@ async def _finalize_workspace_generation_from_bytes(
             tmp.write(video_bytes)
             tmp_path = tmp.name
 
-        uploaded = _upload_workspace_video_file(
+        uploaded = await asyncio.to_thread(
+            _upload_workspace_video_file,
             local_path=tmp_path,
             user_id=user_id,
             generation_id=generation_id,
@@ -2454,10 +2564,18 @@ async def _finalize_workspace_generation_from_url(
     provider_video_url: str,
 ) -> None:
     tmp_path = ""
+    downloaded_bytes = 0
+    content_type = "video/mp4"
     try:
         _update_workspace_generation(generation_id, {"provider_video_url": provider_video_url, "status": "processing"})
         tmp_path, downloaded_bytes, content_type = await _download_video_to_tempfile(provider_video_url)
-        uploaded = _upload_workspace_video_file(
+        print(
+            f"[workspace_storage] provider download completed generation={generation_id} "
+            f"size_bytes={downloaded_bytes} size_mib={downloaded_bytes / (1024 * 1024):.1f}",
+            flush=True,
+        )
+        uploaded = await asyncio.to_thread(
+            _upload_workspace_video_file,
             local_path=tmp_path,
             user_id=user_id,
             generation_id=generation_id,
@@ -2475,6 +2593,30 @@ async def _finalize_workspace_generation_from_url(
                 "error_code": None,
                 "error_message": None,
             },
+        )
+    except _WorkspaceStoragePayloadTooLargeError as e:
+        # Provider generation already succeeded. A Storage size limit is
+        # deterministic, so retrying the reliable Wan/Seedance job every few
+        # minutes only downloads the same large result again. Mark the
+        # generation completed and temporarily serve provider_video_url.
+        size_bytes = int(e.file_size_bytes or downloaded_bytes or 0)
+        _update_workspace_generation(
+            generation_id,
+            {
+                "status": "completed",
+                "provider_video_url": provider_video_url,
+                "storage_path": None,
+                "file_size_bytes": size_bytes,
+                "mime_type": content_type or "video/mp4",
+                "completed_at": _utc_now_iso(),
+                "error_code": "archive_too_large",
+                "error_message": None,
+            },
+        )
+        print(
+            f"[workspace_storage] provider result kept without archive generation={generation_id} "
+            f"reason=payload_too_large size_bytes={size_bytes}; reliable retry suppressed",
+            flush=True,
         )
     finally:
         if tmp_path:
