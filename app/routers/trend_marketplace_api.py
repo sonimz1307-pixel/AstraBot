@@ -103,8 +103,6 @@ def payload_object(payload):
 @router.get("/api/trends/config")
 def public_config():
     result = svc.public_config()
-    if result.get("marketplace_enabled"):
-        result["categories"] = svc.db().table("trend_categories").select("key,title").eq("enabled", True).order("position").execute().data or []
     return result
 
 
@@ -117,7 +115,7 @@ def model_registry(user: dict = Depends(get_current_workspace_user)):
 @router.get("/api/trends")
 def catalog(type: str = "", sort: str = "trending", q: str = "", category: str = "", offset: int = 0, cursor: int | None = None, limit: int = 24):
     sorts = {"all": "trending", "newest": "new", "most_liked": "loved", "favorites": "loved", "nabex": "featured"}
-    return svc.list_public(media_type=type, sort=sorts.get(sort, sort), q=q, category=category, offset=cursor if cursor is not None else offset, limit=limit)
+    return svc.list_public(media_type=type, sort=sorts.get(sort, sort), q=q, category="", offset=cursor if cursor is not None else offset, limit=limit)
 
 
 @router.post("/api/trends/assets", dependencies=[Depends(mutation_guard)])
@@ -147,7 +145,7 @@ async def upload_asset(file: UploadFile = File(...), trend_id: str = Form(...), 
 
 
 @router.get("/api/trends/media/{asset_id}")
-def published_media(asset_id: str):
+def published_media(asset_id: str, request: Request, display: str = ""):
     svc.config(required=True)
     row = svc.one("trend_assets", id=svc.entity_id(asset_id))
     if not row or row.get("deleted_at") or row.get("bucket") != assets.PUBLIC_BUCKET:
@@ -164,16 +162,23 @@ def published_media(asset_id: str):
         allowed = False
     if not allowed:
         raise svc.TrendError("Файл не найден.", 404)
+    if display and row.get("result_type") == "image":
+        from app.services.trend_media import response
+        return response(row, display, request)
     # Signed access to approved media expires in 60s; draft/private references
     # never reach this branch. Do not cache this authorization redirect.
     return RedirectResponse(assets.signed_preview_url(row), status_code=307, headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer"})
 
 
 @router.get("/api/trends/assets/{asset_id}")
-def creator_asset(asset_id: str, user: dict = Depends(get_current_workspace_user)):
+def creator_asset(asset_id: str, request: Request, display: str = "", user: dict = Depends(get_current_workspace_user)):
     owner = svc.uid(user)
     row = assets.get_owned_asset(asset_id, owner)
-    raw = assets.read_owned_asset_bytes(asset_id, owner)
+    if display and row.get("result_type") == "image":
+        from app.services.trend_media import response
+        return response(row, display, request)
+    bucket, key = assets._check_asset_location(row)
+    raw = bytes(assets._client().storage.from_(bucket).download(key))
     return Response(raw, media_type=row["content_type"], headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'"})
 
 
@@ -475,11 +480,15 @@ def admin_refund(run_id: str, payload: dict):
 
 
 @router.get("/api/admin/trends/assets/{asset_id}", dependencies=[Depends(admin)])
-def admin_asset(asset_id: str):
+def admin_asset(asset_id: str, request: Request, display: str = ""):
     row = svc.one("trend_assets", id=svc.entity_id(asset_id))
     if not row:
         raise svc.TrendError("Файл не найден.", 404)
-    raw = assets.read_owned_asset_bytes(asset_id, row["owner_id"])
+    if display and row.get("result_type") == "image":
+        from app.services.trend_media import response
+        return response(row, display, request)
+    bucket, key = assets._check_asset_location(row)
+    raw = bytes(assets._client().storage.from_(bucket).download(key))
     return Response(raw, media_type=row["content_type"], headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'"})
 
 
@@ -604,5 +613,6 @@ def sitemap():
 @page_router.get("/trends.js")
 @page_router.get("/trends-admin.js")
 @page_router.get("/trends-nav.js")
+@page_router.get("/trends-media.js")
 def trend_static(request: Request):
     return FileResponse(ROOT / request.url.path.rsplit('/', 1)[-1], headers={"Cache-Control": "public, max-age=300", "X-Content-Type-Options": "nosniff"})
