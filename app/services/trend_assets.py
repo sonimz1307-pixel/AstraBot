@@ -1,0 +1,424 @@
+"""Durable, version-bound Marketplace assets, separate from workspace retention.
+
+Only a server-verified completed test generation can create a ``preview``. Private
+assets never get a public URL. This module intentionally has no delete or external
+URL-import API: removing a trend is a database tombstone, not an object deletion.
+SDK operations are synchronous; call them with asyncio.to_thread from async routes.
+"""
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import logging
+import os
+import subprocess
+import tempfile
+import warnings
+from pathlib import PurePosixPath
+from typing import Any, Iterable
+from urllib.parse import urlparse
+from uuid import UUID, uuid4, uuid5, NAMESPACE_URL
+
+from PIL import Image, ImageOps, UnidentifiedImageError
+
+PRIVATE_BUCKET = "trend-private"
+PUBLIC_BUCKET = "trend-public"
+# Historical name retained for immutable V1 storage keys. Both buckets are private.
+PROTECTED_BUCKETS = frozenset({PRIVATE_BUCKET, PUBLIC_BUCKET})
+ASSETS_TABLE = "trend_assets"
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
+MAX_MEDIA_BYTES = 200 * 1024 * 1024
+# Provider-produced outputs have different bounds from user uploads. A genuine
+# 4K PNG can exceed 20 MB without being an unusually large generation.
+MAX_GENERATED_IMAGE_BYTES = 100 * 1024 * 1024
+MAX_GENERATED_VIDEO_BYTES = 512 * 1024 * 1024
+MAX_IMAGE_PIXELS = 40_000_000
+MAX_MEDIA_SECONDS = 600
+UPLOAD_KINDS = frozenset({"fixed", "input", "test_input", "cover"})
+LOG = logging.getLogger("nabex.trend_assets")
+
+
+class TrendAssetError(ValueError):
+    pass
+
+
+def _client():
+    from db_supabase import supabase
+    if supabase is None:
+        raise RuntimeError("Supabase is not configured")
+    return supabase
+
+
+def _uuid(value: Any, field: str) -> str:
+    try:
+        return str(UUID(str(value)))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise TrendAssetError(f"Invalid {field}") from exc
+
+
+def _key(value: Any) -> str:
+    text = str(value or "")
+    path = PurePosixPath(text)
+    if not text or text.startswith("/") or "\\" in text or "%" in text or any(p in {".", ".."} for p in text.split("/")):
+        raise TrendAssetError("Invalid storage key")
+    if any(ord(c) < 32 for c in text) or str(path) != text:
+        raise TrendAssetError("Invalid storage key")
+    return text
+
+
+def _rows(query) -> list[dict]:
+    return list(query.execute().data or [])
+
+
+def _asset(asset_id: str) -> dict:
+    rows = _rows(_client().table(ASSETS_TABLE).select("*").eq("id", _uuid(asset_id, "asset_id")).limit(1))
+    if not rows or rows[0].get("deleted_at"):
+        raise TrendAssetError("Asset is unavailable")
+    return rows[0]
+
+
+def _validate_scope(*, owner_id: int, trend_id: str, version_id: str | None, kind: str, result_type: str) -> tuple[str, str | None]:
+    trend_id = _uuid(trend_id, "trend_id")
+    version_id = _uuid(version_id, "version_id") if version_id else None
+    rows = _rows(_client().table("trends").select("*").eq("id", trend_id).limit(1))
+    if not rows or rows[0].get("deleted_at"):
+        raise TrendAssetError("Trend is unavailable")
+    trend = rows[0]
+    if kind != "input" and int(trend.get("creator_id") or 0) != int(owner_id):
+        raise TrendAssetError("Asset owner must own the trend")
+    if kind == "input" and trend.get("status") != "published":
+        raise TrendAssetError("Trend is unavailable")
+    if kind == "cover" and (str(trend.get("type") or "").lower() != "video" or result_type != "image"):
+        raise TrendAssetError("Only video trends can have an uploaded image cover")
+    if version_id:
+        versions = _rows(_client().table("trend_versions").select("id,trend_id").eq("id", version_id).eq("trend_id", trend_id).limit(1))
+        if not versions:
+            raise TrendAssetError("Version does not belong to trend")
+    return trend_id, version_id
+
+
+def _validated_image(raw: bytes, *, max_bytes: int = MAX_IMAGE_BYTES, preserve_original: bool = False) -> tuple[bytes, str, str, dict]:
+    if len(raw) > max_bytes:
+        raise TrendAssetError(f"Image exceeds {max_bytes // (1024 * 1024)} MB")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(raw)) as source:
+                if source.format not in {"JPEG", "PNG", "WEBP"}:
+                    raise TrendAssetError("Use JPEG, PNG or WebP images")
+                if getattr(source, "n_frames", 1) != 1:
+                    raise TrendAssetError("Animated images are not supported")
+                width, height = source.size
+                if width < 16 or height < 16 or width * height > MAX_IMAGE_PIXELS:
+                    raise TrendAssetError("Image dimensions are invalid or too large")
+                source.load()
+                if preserve_original:
+                    # Called exclusively for a server-verified completed test
+                    # output. Keep the exact generated bytes, avoiding lossy
+                    # transformations and oversized intermediate PNG encoding.
+                    mime, extension = {"JPEG": ("image/jpeg", "jpg"), "PNG": ("image/png", "png"), "WEBP": ("image/webp", "webp")}[source.format]
+                    if source.getexif().get(274) in {5, 6, 7, 8}:
+                        width, height = height, width
+                    return raw, mime, extension, {"width": width, "height": height}
+                # Decode and encode removes EXIF, HTML/polyglots and embedded metadata.
+                oriented = ImageOps.exif_transpose(source)
+                width, height = oriented.size
+                image = oriented.convert("RGBA" if oriented.mode in {"RGBA", "LA"} or "transparency" in oriented.info else "RGB")
+                image.info.clear()
+                output = io.BytesIO()
+                image.save(output, format="PNG")
+                encoded = output.getvalue()
+                if len(encoded) > max_bytes:
+                    raise TrendAssetError(f"Decoded image exceeds {max_bytes // (1024 * 1024)} MB")
+                return encoded, "image/png", "png", {"width": width, "height": height}
+    except TrendAssetError:
+        raise
+    except (OSError, ValueError, UnidentifiedImageError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise TrendAssetError("File is not a valid image") from exc
+
+
+def _validated_media(raw: bytes, result_type: str, *, max_bytes: int = MAX_MEDIA_BYTES) -> tuple[bytes, str, str, dict]:
+    if len(raw) > max_bytes:
+        raise TrendAssetError(f"Media exceeds {max_bytes // (1024 * 1024)} MB")
+    # Never accept a playlist or arbitrary ffmpeg-demuxer input. Do not rely on
+    # client filenames or MIME. Only self-contained MP4 video / MP3/WAV audio.
+    mp4 = len(raw) >= 12 and raw[4:8] == b"ftyp"
+    wav = len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WAVE"
+    mp3 = raw[:3] == b"ID3" or (len(raw) > 1 and raw[0] == 0xFF and raw[1] & 0xE0 == 0xE0)
+    if result_type == "video" and not mp4:
+        raise TrendAssetError("Video must be an MP4 file")
+    if result_type == "audio" and not (wav or mp3):
+        raise TrendAssetError("Audio must be an MP3 or WAV file")
+    demuxer, mime, ext = ("mov", "video/mp4", "mp4") if mp4 else (("wav", "audio/wav", "wav") if wav else ("mp3", "audio/mpeg", "mp3"))
+    try:
+        with tempfile.NamedTemporaryFile(suffix=f".{ext}") as temporary:
+            temporary.write(raw)
+            temporary.flush()
+            probe = subprocess.run(
+                ["ffprobe", "-v", "error", "-protocol_whitelist", "file,pipe", "-format_whitelist", demuxer,
+                 "-f", demuxer, "-show_entries", "format=duration:stream=codec_type,width,height", "-of", "json", temporary.name],
+                check=False, capture_output=True, timeout=20,
+            )
+        if probe.returncode != 0:
+            raise TrendAssetError("Media could not be decoded")
+        metadata = json.loads(probe.stdout)
+        streams = metadata.get("streams") or []
+        expected = [s for s in streams if s.get("codec_type") == result_type]
+        duration = float((metadata.get("format") or {}).get("duration") or 0)
+        if not expected or not (0 < duration <= MAX_MEDIA_SECONDS):
+            raise TrendAssetError("Media stream or duration is invalid")
+        if result_type == "audio" and any(s.get("codec_type") == "video" for s in streams):
+            raise TrendAssetError("Expected audio without video")
+        if result_type == "video" and any(int(s.get("width") or 0) * int(s.get("height") or 0) > MAX_IMAGE_PIXELS for s in expected):
+            raise TrendAssetError("Video dimensions exceed limits")
+        return raw, mime, ext, {"duration_seconds": duration}
+    except FileNotFoundError as exc:
+        raise RuntimeError("ffprobe is required for trend video/audio validation") from exc
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, ValueError) as exc:
+        raise TrendAssetError("Media validation failed") from exc
+
+
+def validate_media(raw: bytes, result_type: str) -> tuple[bytes, str, str, dict]:
+    if not isinstance(raw, bytes) or not raw:
+        raise TrendAssetError("Empty file")
+    if result_type == "image":
+        return _validated_image(raw)
+    if result_type in {"video", "audio"}:
+        return _validated_media(raw, result_type)
+    raise TrendAssetError("Unsupported asset type")
+
+
+def _assert_bucket_visibility(bucket: str) -> None:
+    info = _client().storage.get_bucket(bucket)
+    public = info.get("public") if isinstance(info, dict) else getattr(info, "public", None)
+    if bucket not in PROTECTED_BUCKETS or public is not False:
+        raise RuntimeError("Marketplace storage bucket visibility is misconfigured")
+
+
+def _upload_rpc(name: str, **params):
+    data = _client().rpc("nabex_trend_" + name, {"p_" + k: v for k, v in params.items()}).execute().data
+    return data
+
+
+def _store(*, raw: bytes, owner_id: int, trend_id: str, version_id: str | None, kind: str, result_type: str, generation_id: str | None = None, provenance: dict | None = None) -> dict:
+    if kind == "preview" and result_type == "image":
+        raw, content_type, extension, metadata = _validated_image(raw, max_bytes=MAX_GENERATED_IMAGE_BYTES, preserve_original=True)
+    elif kind == "preview" and result_type == "video":
+        raw, content_type, extension, metadata = _validated_media(raw, result_type, max_bytes=MAX_GENERATED_VIDEO_BYTES)
+    else:
+        raw, content_type, extension, metadata = validate_media(raw, result_type)
+    metadata.update(provenance or {})
+    bucket = PUBLIC_BUCKET if kind in {"preview", "cover"} else PRIVATE_BUCKET
+    _assert_bucket_visibility(bucket)
+    asset_id = str(uuid5(NAMESPACE_URL, f"nabex-trend-preview:{generation_id}")) if kind == "preview" else str(uuid4())
+    path = f"trends/{trend_id}/versions/{version_id or 'unbound'}/{kind}/{asset_id}.{extension}"
+    payload = {
+        "id": asset_id, "owner_id": int(owner_id), "trend_id": trend_id,
+        "trend_version_id": version_id, "kind": kind, "result_type": result_type,
+        "bucket": bucket, "storage_key": path, "content_type": content_type,
+        "size_bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+        "generation_id": generation_id, "metadata": metadata,
+    }
+    # Record the descriptor BEFORE Storage. Even an ambiguous DB/Storage timeout
+    # leaves a durable recovery record; never compensate by deleting a reference.
+    journal = _upload_rpc("begin_asset_upload", descriptor=payload)
+    if not isinstance(journal, dict) or journal.get("id") != asset_id:
+        raise RuntimeError("Upload intent could not be stored")
+    if journal.get("status") == "committed":
+        return _upload_rpc("commit_asset_upload", asset_id=asset_id)
+    # Never overwrite objects. A repeated preview archival is the same operation.
+    try:
+        _client().storage.from_(bucket).upload(path, raw, {"content-type": content_type, "upsert": "false", "cache-control": "0"})
+    except Exception:
+        # Upload may have committed before the response was lost, for any kind.
+        existing = _client().storage.from_(bucket).download(path)
+        if hashlib.sha256(bytes(existing)).hexdigest() != payload["sha256"]:
+            raise TrendAssetError("Stored bytes differ from upload descriptor")
+    result = _upload_rpc("commit_asset_upload", asset_id=asset_id)
+    if not isinstance(result, dict) or result.get("id") != asset_id:
+        raise RuntimeError("Asset record could not be stored")
+    return result
+
+
+def reconcile_uploads(limit: int = 2) -> int:
+    """Recover Storage→DB gaps. Missing/ambiguous objects remain journaled."""
+    records = _upload_rpc("claim_asset_uploads", limit=limit) or []
+    recovered = 0
+    for record in records:
+        try:
+            descriptor = record["descriptor"]
+            bucket, key = _check_asset_location(descriptor)
+            _assert_bucket_visibility(bucket)
+            raw = bytes(_client().storage.from_(bucket).download(key))
+            if len(raw) != descriptor["size_bytes"] or hashlib.sha256(raw).hexdigest() != descriptor["sha256"]:
+                raise TrendAssetError("Upload recovery integrity mismatch")
+            _upload_rpc("commit_asset_upload", asset_id=record["id"])
+            recovered += 1
+        except Exception as exc:
+            # No private key, signed URL, provider response or recipe in logs.
+            LOG.warning("Upload recovery deferred asset=%s error=%s", record.get("id"), type(exc).__name__)
+    return recovered
+
+
+def preflight_upload(*, owner_id: int, trend_id: str, version_id: str | None, kind: str, result_type: str) -> int:
+    """Reject unsupported types/scope BEFORE the route reads file contents."""
+    if kind not in UPLOAD_KINDS or result_type not in {"image", "video", "audio"}:
+        raise TrendAssetError("Unsupported upload kind/type")
+    if kind == "cover" and result_type != "image":
+        raise TrendAssetError("Cover must be an image")
+    trend_id, version_id = _validate_scope(owner_id=owner_id, trend_id=trend_id, version_id=version_id, kind=kind, result_type=result_type)
+    maximum = MAX_IMAGE_BYTES if result_type == "image" else MAX_MEDIA_BYTES
+    if kind != "cover":
+        # All admitted V2 adapters accept image references. A bound version may
+        # narrow the limit further; future types must be declared by its adapter.
+        supported = {"image"}
+        if version_id:
+            from app.services.trend_registry import get_model
+            row = _rows(_client().table("trend_versions").select("model_key").eq("id", version_id).limit(1))[0]
+            spec = get_model(row["model_key"])
+            supported = set(spec["input_types"])
+            maximum = min(maximum, spec["max_input_bytes"])
+        if result_type not in supported:
+            raise TrendAssetError("Reference type is not supported by this model")
+    return maximum
+
+
+def upload_asset(raw: bytes, *, owner_id: int, trend_id: str, version_id: str | None = None, kind: str, result_type: str) -> dict:
+    """Owned permanent upload. The public route must also apply model slot limits."""
+    if kind not in UPLOAD_KINDS:
+        raise TrendAssetError("Generated previews cannot be uploaded")
+    trend_id, version_id = _validate_scope(owner_id=owner_id, trend_id=trend_id, version_id=version_id, kind=kind, result_type=result_type)
+    return _store(raw=raw, owner_id=owner_id, trend_id=trend_id, version_id=version_id, kind=kind, result_type=result_type)
+
+
+def get_owned_asset(asset_id: str, owner_id: int, *, trend_id: str | None = None, version_id: str | None = None, kinds: Iterable[str] | None = None) -> dict:
+    row = _asset(asset_id)
+    if int(row.get("owner_id") or 0) != int(owner_id):
+        raise TrendAssetError("Asset is unavailable")
+    if trend_id and row.get("trend_id") != _uuid(trend_id, "trend_id"):
+        raise TrendAssetError("Asset belongs to another trend")
+    if version_id and row.get("trend_version_id") not in {None, _uuid(version_id, "version_id")}:
+        raise TrendAssetError("Asset belongs to another version")
+    if kinds is not None and row.get("kind") not in set(kinds):
+        raise TrendAssetError("Asset kind is not allowed here")
+    return row
+
+
+def bind_asset_to_version(asset_id: str, owner_id: int, *, trend_id: str, version_id: str) -> dict:
+    """Copy an immutable asset into a new version without modifying the old one."""
+    row = get_owned_asset(asset_id, owner_id, trend_id=trend_id, kinds={"fixed", "test_input"})
+    trend_id, version_id = _validate_scope(owner_id=owner_id, trend_id=trend_id, version_id=version_id, kind=row["kind"], result_type=row["result_type"])
+    if row.get("trend_version_id") == version_id:
+        return row
+    bucket, key = _check_asset_location(row, private_only=True)
+    raw = bytes(_client().storage.from_(bucket).download(key))
+    return _store(raw=raw, owner_id=owner_id, trend_id=trend_id, version_id=version_id,
+                  kind=row["kind"], result_type=row["result_type"],
+                  provenance={"copied_from_asset_id": row["id"]})
+
+
+def _check_asset_location(asset: dict, *, private_only: bool = False) -> tuple[str, str]:
+    bucket = str(asset.get("bucket") or "")
+    key = _key(asset.get("storage_key"))
+    if bucket not in PROTECTED_BUCKETS or (private_only and bucket != PRIVATE_BUCKET):
+        raise TrendAssetError("Invalid asset bucket")
+    if not key.startswith(f"trends/{_uuid(asset.get('trend_id'), 'trend_id')}/versions/"):
+        raise TrendAssetError("Invalid asset storage scope")
+    if asset.get("deleted_at"):
+        raise TrendAssetError("Asset is unavailable")
+    return bucket, key
+
+
+def read_owned_asset_bytes(asset_id: str, owner_id: int, **scope) -> bytes:
+    asset = get_owned_asset(asset_id, owner_id, **scope)
+    bucket, key = _check_asset_location(asset)
+    return bytes(_client().storage.from_(bucket).download(key))
+
+
+def signed_provider_url(asset: dict, *, expires_in: int = 3600) -> str:
+    """Backend/worker only; callers must never include this URL in public/history DTOs."""
+    _check_asset_location(asset, private_only=True)
+    return _signed_storage_url(asset, expires_in=expires_in)
+
+
+def signed_preview_url(asset: dict) -> str:
+    """Call only after verifying current publication or authenticated ownership."""
+    if asset.get("kind") not in {"preview", "cover"} or asset.get("bucket") != PUBLIC_BUCKET:
+        raise TrendAssetError("Private recipe assets cannot be public previews")
+    return _signed_storage_url(asset, expires_in=60)
+
+
+def _signed_storage_url(asset: dict, *, expires_in: int) -> str:
+    bucket, key = _check_asset_location(asset)
+    _assert_bucket_visibility(bucket)
+    response = _client().storage.from_(bucket).create_signed_url(key, max(60, min(int(expires_in), 7200)))
+    value = response if isinstance(response, str) else (response.get("signedURL") or response.get("signedUrl") or response.get("signed_url"))
+    if not value:
+        raise RuntimeError("Could not create private reference access")
+    base = str(os.getenv("SUPABASE_URL") or "").rstrip("/")
+    if str(value).startswith("/"):
+        value = base + ("" if str(value).startswith("/storage/v1/") else "/storage/v1") + str(value)
+    url = urlparse(str(value))
+    expected = urlparse(base)
+    if url.scheme not in {"https", "http"} or url.netloc != expected.netloc or "/object/sign/" not in url.path:
+        raise RuntimeError("Unexpected storage signing response")
+    public_base = str(os.getenv("SUPABASE_PUBLIC_URL") or "").rstrip("/")
+    if public_base:
+        public_origin = urlparse(public_base)
+        if public_origin.scheme not in {"https", "http"} or not public_origin.netloc or public_origin.query or public_origin.fragment:
+            raise RuntimeError("Invalid public Storage origin")
+        # An internal Kong hostname cannot be fetched by an external provider.
+        # The signed path/token stay unchanged; only trusted deployment config
+        # may replace the access origin. Never accept an origin from a request.
+        return public_base + url.path + ("?" + url.query if url.query else "")
+    return str(value)
+
+
+def public_asset_url(asset: dict) -> str:
+    bucket, key = _check_asset_location(asset)
+    if bucket != PUBLIC_BUCKET or asset.get("kind") not in {"preview", "cover"}:
+        raise TrendAssetError("Private recipe assets have no public URL")
+    base = str(os.getenv("TREND_PUBLIC_ORIGIN") or "https://nabex.ru").rstrip("/")
+    # Stable OG/share URL, with publication authorization on EVERY request.
+    return f"{base}/api/trends/media/{_uuid(asset.get('id'), 'asset_id')}"
+
+
+def persist_generated_preview(*, trend_id: str, version_id: str, generation_id: str, creator_id: int, result_type: str) -> dict:
+    """Copy only a completed, bound author test result into permanent private storage.
+
+    No source URL or uploaded file parameter exists. Storage service credentials
+    fetch a path from the existing server-owned generation row, preventing SSRF.
+    This works after trend tombstoning so paid in-flight tests can finish safely.
+    """
+    trend_id, version_id = _uuid(trend_id, "trend_id"), _uuid(version_id, "version_id")
+    if result_type not in {"image", "video"}:
+        raise TrendAssetError("Invalid preview type")
+    runs = _rows(_client().table("trend_runs").select("*").eq("trend_id", trend_id).eq("trend_version_id", version_id).eq("generation_id", str(generation_id)).limit(1))
+    if not runs or not runs[0].get("is_test") or int(runs[0].get("creator_id") or 0) != int(creator_id) or int(runs[0].get("buyer_user_id") or 0) != int(creator_id):
+        raise TrendAssetError("Preview must come from this version's paid author test")
+    if runs[0].get("status") in {"failed", "refunded", "cancelled"}:
+        raise TrendAssetError("A failed, cancelled or refunded test cannot create a preview")
+    existing = _rows(_client().table(ASSETS_TABLE).select("*").eq("generation_id", str(generation_id)).eq("kind", "preview").limit(1))
+    if existing:
+        row = existing[0]
+        if row.get("trend_id") != trend_id or row.get("trend_version_id") != version_id or int(row.get("owner_id") or 0) != int(creator_id) or row.get("deleted_at"):
+            raise TrendAssetError("Preview provenance mismatch")
+        return row
+    table = "workspace_image_generations" if result_type == "image" else "workspace_video_generations"
+    rows = _rows(_client().table(table).select("*").eq("id", str(generation_id)).eq("user_id", int(creator_id)).limit(1))
+    if not rows or rows[0].get("status") != "completed" or rows[0].get("deleted_at"):
+        raise TrendAssetError("Generated result has not completed or is unavailable")
+    source = rows[0]
+    key = _key(source.get("storage_path"))
+    expected_prefix = f"workspace_images/{int(creator_id)}/" if result_type == "image" else f"{int(creator_id)}/"
+    if not key.startswith(expected_prefix):
+        raise TrendAssetError("Generated result storage owner mismatch")
+    bucket = str(os.getenv("SUPABASE_BUCKET") or "").strip() if result_type == "image" else str(os.getenv("WORKSPACE_VIDEOS_BUCKET") or "workspace-videos").strip()
+    if not bucket or bucket in PROTECTED_BUCKETS:
+        raise TrendAssetError("Source generation bucket is invalid")
+    max_bytes = MAX_GENERATED_IMAGE_BYTES if result_type == "image" else MAX_GENERATED_VIDEO_BYTES
+    if int(source.get("file_size_bytes") or 0) > max_bytes:
+        raise TrendAssetError("Generated preview exceeds storage limit")
+    raw = bytes(_client().storage.from_(bucket).download(key))
+    return _store(raw=raw, owner_id=creator_id, trend_id=trend_id, version_id=version_id, kind="preview", result_type=result_type, generation_id=str(generation_id), provenance={"source_table": table, "source_generation_id": str(generation_id), "trend_run_id": runs[0]["id"]})
