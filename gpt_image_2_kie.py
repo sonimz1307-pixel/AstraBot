@@ -4,7 +4,7 @@ import asyncio
 import json
 import os
 import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import httpx
 
@@ -39,6 +39,14 @@ _FAIL_STATES = {"fail", "failed", "failure", "error"}
 
 class GptImage2ProviderError(RuntimeError):
     pass
+
+
+class GptImage2TaskFailedError(GptImage2ProviderError):
+    """Provider explicitly confirmed terminal failure; safe for a refund."""
+
+
+class GptImage2TaskPendingError(GptImage2ProviderError):
+    """A task exists; retry polling its id, never create another task."""
 
 
 def _reference_ext_from_bytes(payload: bytes) -> str:
@@ -277,7 +285,7 @@ async def _poll_task(client: httpx.AsyncClient, task_id: str) -> str:
             fail_msg = str(data.get("failMsg") or data.get("message") or payload.get("msg") or "Gpt Image 2 task failed").strip()
             fail_code = str(data.get("failCode") or "").strip()
             detail = f"{fail_msg} ({fail_code})" if fail_code else fail_msg
-            raise GptImage2ProviderError(detail or "Gpt Image 2 task failed")
+            raise GptImage2TaskFailedError(detail or "Gpt Image 2 task failed")
         if state not in _POLLING_STATES:
             last_detail = str(payload.get("msg") or data or payload).strip()
         if (time.monotonic() - start_ts) >= KIE_GPT_IMAGE_2_MAX_WAIT_SECONDS:
@@ -318,6 +326,8 @@ async def handle_gpt_image_2_kie(
     telegram_file_ids: Optional[Sequence[str]] = None,
     resolution: Any = "2K",
     aspect_ratio: Any = "16:9",
+    on_task_id: Optional[Callable[[str], Any]] = None,
+    resume_task_id: str = "",
 ) -> Tuple[bytes, str]:
     clean_prompt = str(prompt or "").strip()
     if not clean_prompt:
@@ -353,11 +363,24 @@ async def handle_gpt_image_2_kie(
 
     timeout = httpx.Timeout(KIE_GPT_IMAGE_2_CREATE_TIMEOUT_SECONDS, connect=30.0)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        created = await _kie_request_json(client, "POST", "/api/v1/jobs/createTask", payload=payload)
-        task_id = _extract_task_id(created)
+        task_id = str(resume_task_id or "").strip()
+        if not task_id:
+            created = await _kie_request_json(client, "POST", "/api/v1/jobs/createTask", payload=payload)
+            task_id = _extract_task_id(created)
         if not task_id:
             raise GptImage2ProviderError(f"Gpt Image 2 did not return taskId: {created}")
-        result_url = await _poll_task(client, task_id)
+        if on_task_id is not None:
+            maybe = on_task_id(task_id)
+            if hasattr(maybe, "__await__"):
+                await maybe
+        try:
+            result_url = await _poll_task(client, task_id)
+        except GptImage2TaskFailedError:
+            raise
+        except Exception as exc:
+            if on_task_id is not None or resume_task_id:
+                raise GptImage2TaskPendingError("Provider task requires reconciliation: " + task_id) from exc
+            raise
 
     out_bytes = await _download_bytes(result_url)
     ext = _detect_ext(out_bytes, fallback="jpg")
