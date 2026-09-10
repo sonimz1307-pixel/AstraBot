@@ -1056,8 +1056,18 @@ async def _process_midjourney_workspace_image_job(job: Dict[str, Any]) -> Dict[s
 
 
 
-async def process_workspace_image_job(job: Dict[str, Any]) -> None:
+async def process_workspace_image_job(job: Dict[str, Any], on_provider_task_id: Optional[Callable[[str], Any]] = None) -> None:
     generation_id = str(job.get("generation_id") or "").strip()
+    is_trend = job.get("origin") == "trend_marketplace"
+
+    async def _trend_image_task_id(task_id: str) -> None:
+        ww._update_workspace_image_generation(generation_id, {"provider_task_id": str(task_id), "status": "processing"})
+        if on_provider_task_id is not None:
+            maybe = on_provider_task_id(str(task_id))
+            if hasattr(maybe, "__await__"):
+                await maybe
+
+    trend_provider_options = ({"on_task_id": _trend_image_task_id, "resume_task_id": str(job.get("resume_task_id") or "")} if is_trend else {})
     user_id = int(job.get("user_id") or 0)
     provider = str(job.get("provider") or "").strip().lower()
     model = str(job.get("model") or "").strip()
@@ -1232,6 +1242,7 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
                 source_image_urls=source_image_urls[:16],
                 resolution=resolution,
                 aspect_ratio=aspect_ratio,
+                **trend_provider_options,
             )
         elif provider == "seedream_5_pro":
             seedream_mode = str(job.get("mode") or "text_to_image").strip().lower()
@@ -1243,6 +1254,7 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
                 source_image_urls=source_image_urls[:10],
                 resolution=resolution,
                 aspect_ratio=aspect_ratio,
+                **trend_provider_options,
             )
         elif provider == "topaz_photo":
             preset_settings = ww.get_photo_preset_settings(preset_slug)
@@ -1329,6 +1341,18 @@ async def process_workspace_image_job(job: Dict[str, Any]) -> None:
             },
         )
     except Exception as e:
+        if is_trend:
+            # The combined marketplace operation owns refunds. Keep raw provider
+            # errors and private URLs out of buyer-readable history.
+            from gpt_image_2_kie import GptImage2TaskFailedError
+            from seedream_5_pro_kie import Seedream5ProTaskFailedError
+            terminal = isinstance(e, (GptImage2TaskFailedError, Seedream5ProTaskFailedError))
+            ww._update_workspace_image_generation(generation_id, {
+                "status": "failed" if terminal else "processing",
+                "error_code": "provider_error" if terminal else "provider_pending",
+                "error_message": "Ошибка генерации" if terminal else "Проверяется статус генерации",
+            })
+            raise
         if charge_tokens > 0:
             try:
                 try:
