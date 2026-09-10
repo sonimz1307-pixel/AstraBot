@@ -1797,7 +1797,7 @@ def _serialize_workspace_generation(row: Dict[str, Any], *, signed_expires_in: i
         fallback_url=row.get("provider_video_url"),
         expires_in=signed_expires_in,
     )
-    return {
+    payload = {
         "id": row.get("id"),
         "user_id": row.get("user_id"),
         "provider": row.get("provider"),
@@ -1827,6 +1827,10 @@ def _serialize_workspace_generation(row: Dict[str, Any], *, signed_expires_in: i
         "signed_url": access.get("signed_url"),
         "has_storage_file": bool(str(row.get("storage_path") or "").strip()),
     }
+    if row.get("origin") == "trend_marketplace":
+        from app.services.trend_generation import redact_history_item
+        return redact_history_item(row, payload)
+    return payload
 
 
 def _get_workspace_generation_by_task(user_id: int, task_id: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -1836,7 +1840,7 @@ def _get_workspace_generation_by_task(user_id: int, task_id: Optional[str]) -> O
     try:
         resp = (
             supabase.table(_WORKSPACE_VIDEO_GENERATIONS_TABLE)
-            .select("id,user_id,task_id,status,provider_video_url,storage_path,file_size_bytes,mime_type,error_code")
+            .select("id,user_id,task_id,status,provider_video_url,storage_path,file_size_bytes,mime_type,error_code,origin")
             .eq("user_id", str(user_id))
             .eq("task_id", task_id_text)
             .limit(1)
@@ -1861,22 +1865,31 @@ async def _download_video_to_tempfile(url: str) -> tuple[str, int, str]:
     ext = "mp4"
     tmp_path = ""
 
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        async with client.stream("GET", target_url) as resp:
-            resp.raise_for_status()
-            content_type = (resp.headers.get("content-type") or "video/mp4").split(";", 1)[0].strip() or "video/mp4"
-            ext = _storage_content_type_to_ext(content_type, target_url)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
-                tmp_path = tmp.name
-                async for chunk in resp.aiter_bytes(chunk_size=1024 * 1024):
-                    if not chunk:
-                        continue
-                    tmp.write(chunk)
-                    total_bytes += len(chunk)
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            async with client.stream("GET", target_url) as resp:
+                resp.raise_for_status()
+                content_type = (resp.headers.get("content-type") or "video/mp4").split(";", 1)[0].strip() or "video/mp4"
+                ext = _storage_content_type_to_ext(content_type, target_url)
+                with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
+                    tmp_path = tmp.name
+                    async for chunk in resp.aiter_bytes(chunk_size=1024 * 1024):
+                        if not chunk:
+                            continue
+                        tmp.write(chunk)
+                        total_bytes += len(chunk)
 
-    if not tmp_path or total_bytes <= 0:
-        raise RuntimeError("Downloaded provider video is empty")
-    return tmp_path, total_bytes, content_type
+        if not tmp_path or total_bytes <= 0:
+            raise RuntimeError("Downloaded provider video is empty")
+        return tmp_path, total_bytes, content_type
+    except BaseException:
+        # A failed/cancelled stream must not leak partial files on every retry.
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        raise
 
 
 class _WorkspaceStorageUploadError(RuntimeError):
@@ -1888,6 +1901,26 @@ class _WorkspaceStorageUploadError(RuntimeError):
 
 class _WorkspaceStoragePayloadTooLargeError(_WorkspaceStorageUploadError):
     pass
+
+
+class _WorkspaceArchiveRecoveryError(RuntimeError):
+    """Provider result exists, but recovery could not yet be durably queued."""
+
+
+async def _defer_workspace_video_archive(generation_id: str, user_id: int, source_url: str, error_code: str) -> None:
+    from app.services.workspace_video_archive import enqueue
+    try:
+        await asyncio.to_thread(enqueue, generation_id, user_id, source_url, error_code)
+    except Exception as exc:
+        # Keep enough information for the recovery scanner after a DB outage.
+        try:
+            _update_workspace_generation(generation_id, {
+                "status": "processing", "provider_video_url": source_url,
+                "error_code": "archive_pending", "error_message": "Видео создано. Сохраняем результат.",
+            })
+        except Exception:
+            pass
+        raise _WorkspaceArchiveRecoveryError("Video archive recovery needs retry") from exc
 
 
 def _workspace_storage_payload_too_large(status_code: int, response_text: str) -> bool:
@@ -2012,82 +2045,16 @@ def _upload_workspace_video_file(*, local_path: str, user_id: int, generation_id
 async def _archive_workspace_video_if_needed(user_id: int, task_id: Optional[str], normalized: Dict[str, Any]) -> None:
     if supabase is None:
         return
-
     row = _get_workspace_generation_by_task(user_id, task_id)
-    if not row:
+    if not row or row.get("storage_path"):
         return
-
-    existing_storage_path = _first_nonempty(row.get("storage_path"))
-    if existing_storage_path:
-        return
-    if str(row.get("error_code") or "").strip().lower() == "archive_too_large":
-        # A deterministic Storage size rejection will not heal by polling the
-        # same provider result again. Keep serving the provider URL instead.
-        return
-
-    provider_video_url = _first_nonempty(
-        row.get("provider_video_url"),
-        normalized.get("video_url"),
-        normalized.get("download_url"),
-        normalized.get("output_url"),
-    )
-    if not provider_video_url:
-        return
-
-    generation_id = str(row.get("id") or "").strip()
-    if not generation_id:
-        return
-
-    tmp_path = ""
-    try:
-        tmp_path, downloaded_bytes, content_type = await _download_video_to_tempfile(provider_video_url)
-        uploaded = await asyncio.to_thread(
-            _upload_workspace_video_file,
-            local_path=tmp_path,
-            user_id=user_id,
-            generation_id=generation_id,
-            content_type=content_type,
-        )
-        patch: Dict[str, Any] = {
-            "storage_path": uploaded.get("storage_path"),
-            "file_size_bytes": int(uploaded.get("file_size_bytes") or downloaded_bytes or 0),
-            "mime_type": uploaded.get("mime_type") or content_type or "video/mp4",
-            "error_code": None,
-        }
-        # Keep public_url nullable because bucket is expected to be private.
-        # Save only when available so the column stays harmless for private buckets.
-        if uploaded.get("public_url"):
-            patch["public_url"] = uploaded["public_url"]
-        _update_workspace_generation(generation_id, patch)
-    except _WorkspaceStoragePayloadTooLargeError as e:
-        _update_workspace_generation(
-            generation_id,
-            {
-                "file_size_bytes": int(e.file_size_bytes or downloaded_bytes or 0),
-                "mime_type": content_type or "video/mp4",
-                "error_code": "archive_too_large",
-                "error_message": None,
-            },
-        )
-        print(
-            f"[workspace_storage] archive skipped generation={generation_id} "
-            f"reason=payload_too_large size_bytes={int(e.file_size_bytes or downloaded_bytes or 0)}",
-            flush=True,
-        )
-    except Exception as e:
-        _update_workspace_generation(
-            generation_id,
-            {
-                "error_code": "archive_error",
-                "error_message": f"Archive upload failed: {str(e)[:3800]}",
-            },
-        )
-    finally:
-        if tmp_path:
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
+    source_url = _first_nonempty(row.get("provider_video_url"), normalized.get("video_url"),
+                                 normalized.get("download_url"), normalized.get("output_url"))
+    if source_url and row.get("id"):
+        # Idempotent queueing preserves its backoff. Old archive_too_large rows
+        # now recover too, without re-downloading on every history request.
+        await _defer_workspace_video_archive(str(row["id"]), user_id, source_url,
+            "archive_too_large" if row.get("error_code") == "archive_too_large" else "archive_pending")
 
 
 
@@ -2567,7 +2534,7 @@ async def _finalize_workspace_generation_from_url(
     downloaded_bytes = 0
     content_type = "video/mp4"
     try:
-        _update_workspace_generation(generation_id, {"provider_video_url": provider_video_url, "status": "processing"})
+        _update_workspace_generation(generation_id, {"provider_video_url": provider_video_url, "status": "processing", "updated_at": _utc_now_iso()})
         tmp_path, downloaded_bytes, content_type = await _download_video_to_tempfile(provider_video_url)
         print(
             f"[workspace_storage] provider download completed generation={generation_id} "
@@ -2594,29 +2561,12 @@ async def _finalize_workspace_generation_from_url(
                 "error_message": None,
             },
         )
-    except _WorkspaceStoragePayloadTooLargeError as e:
-        # Provider generation already succeeded. A Storage size limit is
-        # deterministic, so retrying the reliable Wan/Seedance job every few
-        # minutes only downloads the same large result again. Mark the
-        # generation completed and temporarily serve provider_video_url.
-        size_bytes = int(e.file_size_bytes or downloaded_bytes or 0)
-        _update_workspace_generation(
-            generation_id,
-            {
-                "status": "completed",
-                "provider_video_url": provider_video_url,
-                "storage_path": None,
-                "file_size_bytes": size_bytes,
-                "mime_type": content_type or "video/mp4",
-                "completed_at": _utc_now_iso(),
-                "error_code": "archive_too_large",
-                "error_message": None,
-            },
-        )
-        print(
-            f"[workspace_storage] provider result kept without archive generation={generation_id} "
-            f"reason=payload_too_large size_bytes={size_bytes}; reliable retry suppressed",
-            flush=True,
+    except Exception as e:
+        # Provider execution is finished. The durable archive outbox, not a
+        # fresh generation or refund, owns retries from this point onwards.
+        await _defer_workspace_video_archive(
+            generation_id, user_id, provider_video_url,
+            "archive_too_large" if isinstance(e, _WorkspaceStoragePayloadTooLargeError) else "archive_error",
         )
     finally:
         if tmp_path:
@@ -2774,21 +2724,31 @@ async def _run_workspace_video_job(
     resume_task_id: str = "",
     provider_task_id_callback: Optional[Any] = None,
 ) -> bool:
-    if provider in {"seedance25", "wan3"} and not str(resume_task_id or "").strip() and supabase is not None:
+    if provider in {"seedance25", "wan3"} and supabase is not None:
+        row = {}
         try:
             existing = (
                 supabase.table(_WORKSPACE_VIDEO_GENERATIONS_TABLE)
-                .select("task_id")
-                .eq("id", str(generation_id))
-                .eq("user_id", str(user_id))
-                .limit(1)
-                .execute()
+                .select("task_id,status,storage_path,provider_video_url,error_code,deleted_at")
+                .eq("id", str(generation_id)).eq("user_id", str(user_id)).limit(1).execute()
             )
             rows = list(getattr(existing, "data", None) or [])
-            if rows:
-                resume_task_id = str((rows[0] or {}).get("task_id") or "").strip()
+            row = dict(rows[0]) if rows else {}
         except Exception:
             pass
+        if row.get("deleted_at"):
+            return True
+        if row.get("storage_path") and row.get("status") not in {"failed", "cancelled"}:
+            # The Redis wrapper sets processing before dispatch. Restore a
+            # proven completion when it redelivers an already archived job.
+            _update_workspace_generation(generation_id, {"status": "completed", "error_code": None, "error_message": None})
+            return True
+        if row.get("provider_video_url") and row.get("status") not in {"failed", "cancelled"} and not row.get("storage_path"):
+            await _defer_workspace_video_archive(generation_id, user_id, row["provider_video_url"],
+                "archive_too_large" if row.get("error_code") == "archive_too_large" else "archive_pending")
+            return True
+        if not str(resume_task_id or "").strip():
+            resume_task_id = str(row.get("task_id") or "").strip()
     seedance25_task_id = str(resume_task_id or "").strip() if provider in {"seedance25", "wan3"} else ""
     try:
         provider_mode = normalize_grok_provider_mode(provider_mode or "normal")
@@ -3376,6 +3336,10 @@ async def _run_workspace_video_job(
             provider_video_url=provider_video_url,
         )
         return True
+    except _WorkspaceArchiveRecoveryError:
+        # The result was generated, so refunding it would be incorrect. Reliable
+        # queues may retry; the DB scanner also recovers its persisted URL.
+        raise
     except Wan3TaskPendingError as e:
         if provider == "wan3":
             try:
@@ -3979,7 +3943,7 @@ def _serialize_workspace_image_generation(row: Dict[str, Any]) -> Dict[str, Any]
     style_ref_urls = _workspace_json_field(row.get("style_ref_urls_json"), [])
     storage_paths = _workspace_json_field(row.get("storage_paths_json"), [])
     speed_mode = _workspace_speed_mode(row.get("mj_speed_mode"), default="fast")
-    return {
+    payload = {
         "id": row.get("id"),
         "user_id": row.get("user_id"),
         "provider": row.get("provider"),
@@ -4027,6 +3991,10 @@ def _serialize_workspace_image_generation(row: Dict[str, Any]) -> Dict[str, Any]
         "style_ref_urls": style_ref_urls,
         "omni_ref_url": row.get("omni_ref_url"),
     }
+    if row.get("origin") == "trend_marketplace":
+        from app.services.trend_generation import redact_history_item
+        return redact_history_item(row, payload)
+    return payload
 
 
 def _workspace_voice_ext(output_format: Optional[str]) -> str:
@@ -5402,6 +5370,9 @@ async def workspace_kling3_create(payload: WorkspaceKlingCreateIn, user: Dict[st
 @router.get("/kling3/task/{task_id}")
 async def workspace_kling3_task(task_id: str, user: Dict[str, Any] = Depends(get_current_workspace_user)) -> Dict[str, Any]:
     uid = int(user["telegram_user_id"])
+    owned = _get_workspace_generation_by_task(uid, task_id)
+    if not owned or owned.get("origin") == "trend_marketplace":
+        raise HTTPException(status_code=404, detail="Task not found")
     try:
         task = await get_kling3_task(task_id)
         normalized = _normalize_kling3_task(task if isinstance(task, dict) else {"raw": task})
@@ -5637,7 +5608,7 @@ async def workspace_history_delete_item(
     try:
         resp = (
             supabase.table(_WORKSPACE_VIDEO_GENERATIONS_TABLE)
-            .select("id,user_id,storage_path,thumbnail_path,deleted_at")
+            .select("id,user_id,storage_path,thumbnail_path,deleted_at,origin")
             .eq("id", generation_id_text)
             .eq("user_id", str(uid))
             .is_("deleted_at", "null")
@@ -5648,6 +5619,9 @@ async def workspace_history_delete_item(
         if not rows or not isinstance(rows[0], dict):
             raise HTTPException(status_code=404, detail="Generation not found")
         row = rows[0]
+        if row.get("origin") == "trend_marketplace":
+            from app.services.trend_generation import assert_history_deletable
+            assert_history_deletable(row, generation_id_text, uid)
 
         storage_paths = []
         for key in ("storage_path", "thumbnail_path"):
@@ -8537,7 +8511,7 @@ async def workspace_image_history_delete_item(
     try:
         resp = (
             supabase.table(_WORKSPACE_IMAGE_GENERATIONS_TABLE)
-            .select("id,user_id,storage_path,deleted_at")
+            .select("id,user_id,storage_path,deleted_at,origin")
             .eq("id", generation_id_text)
             .eq("user_id", str(uid))
             .is_("deleted_at", "null")
@@ -8548,6 +8522,9 @@ async def workspace_image_history_delete_item(
         if not rows or not isinstance(rows[0], dict):
             raise HTTPException(status_code=404, detail="Image generation not found")
         row = rows[0]
+        if row.get("origin") == "trend_marketplace":
+            from app.services.trend_generation import assert_history_deletable
+            assert_history_deletable(row, generation_id_text, uid)
 
         bucket_name = (os.getenv("SUPABASE_BUCKET") or "").strip()
         storage_path = str(row.get("storage_path") or "").strip()
