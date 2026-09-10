@@ -174,6 +174,21 @@ def ledger_ref_exists(*, reason: str, ref_id: str) -> bool:
     )
     return bool(getattr(r, "data", None))
 
+def _public_balance_meta(reason: str, meta: Dict[str, Any]) -> Dict[str, Any]:
+    """User history never exposes a Marketplace recipe or settlement internals."""
+    if meta.get("source") != "trend_marketplace" and reason not in {"trend_generation", "trend_generation_refund"}:
+        return meta
+    safe = {key: meta[key] for key in ("source", "trend_id", "trend_version_id", "trend_run_id",
+            "base_tokens", "creator_markup_tokens", "total_tokens") if key in meta}
+    safe["source"] = "trend_marketplace"
+    snapshot = meta.get("settlement_snapshot")
+    if isinstance(snapshot, dict):
+        for key in ("base_tokens", "creator_markup_tokens", "total_tokens"):
+            if key in snapshot:
+                safe[key] = snapshot[key]
+    return safe
+
+
 def get_balance_history(telegram_user_id: int, *, limit: int = 30) -> List[Dict[str, Any]]:
     """Возвращает последние операции по балансу пользователя."""
     _require_client()
@@ -210,6 +225,7 @@ def get_balance_history(telegram_user_id: int, *, limit: int = 30) -> List[Dict[
         meta = row.get("meta")
         if not isinstance(meta, dict):
             meta = {}
+        meta = _public_balance_meta(str(row.get("reason") or ""), meta)
         try:
             delta = int(row.get("delta_tokens") or 0)
         except Exception:
@@ -250,41 +266,27 @@ def add_tokens(
     if delta == 0:
         raise ValueError("delta_tokens cannot be 0")
 
-    # получаем текущий
-    bal = get_balance(uid)
-    new_bal = bal + delta
-    if new_bal < 0:
-        raise RuntimeError(f"Insufficient balance: have {bal}, need {-delta}")
-
-    # обновляем баланс
-    supabase.table("bot_user_balance").update(
-        {"balance_tokens": new_bal, "updated_at": _now_iso()}
-    ).eq("telegram_user_id", uid).execute()
-
-    # пишем ledger
+    # The UUID is stable across a transport retry of this invocation. Legacy
+    # reason/ref semantics are preserved; only Marketplace uses unique op keys.
     ledger_id = str(uuid4())
-    # normalize ref_id for DB (column is UUID). If caller passes a non-UUID tag, keep it in meta.
     if ref_id:
         try:
-            _ = uuid.UUID(str(ref_id))
-            ref_id = str(ref_id)
+            ref_id = str(uuid.UUID(str(ref_id)))
         except Exception:
             meta = dict(meta or {})
-            meta.setdefault('ref_tag', str(ref_id))
+            meta.setdefault("ref_tag", str(ref_id))
             ref_id = str(uuid4())
-
-    supabase.table("bot_balance_ledger").insert(
-        {
-            "id": ledger_id,
-            "telegram_user_id": uid,
-            "delta_tokens": delta,
-            "reason": str(reason),
-            "ref_id": ref_id,
-            "meta": meta or {},
-        }
+    response = supabase.rpc(
+        "nabex_balance_change",
+        {"p_user_id": uid, "p_delta": delta, "p_reason": str(reason),
+         "p_ref_id": ref_id, "p_meta": meta or {}, "p_ledger_id": ledger_id},
     ).execute()
-
-    return ledger_id
+    data = getattr(response, "data", response)
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    if not isinstance(data, dict) or not data.get("ok"):
+        raise RuntimeError("Atomic billing RPC returned an invalid response")
+    return str(data.get("ledger_id") or ledger_id)
 
 
 
@@ -308,104 +310,17 @@ def merge_user_balance_records(*, source_user_id: int, target_user_id: int) -> D
         _ensure_user_row_raw(target)
         return {"ok": True, "merged": False, "reason": "same_user_id", "source_user_id": source, "target_user_id": target}
 
-    _ensure_user_row_raw(source)
-    _ensure_user_row_raw(target)
-
-    source_balance = _read_balance_raw(source)
-    target_before = _read_balance_raw(target)
-
-    if source_balance <= 0:
-        return {
-            "ok": True,
-            "merged": False,
-            "reason": "source_balance_not_positive",
-            "source_user_id": source,
-            "target_user_id": target,
-            "source_balance": source_balance,
-            "target_balance": target_before,
-        }
-
     merge_ref = str(uuid.uuid5(uuid.NAMESPACE_URL, f"astrabot:balance-merge:{source}->{target}"))
-    already_merged = ledger_ref_exists(reason="account_balance_merge", ref_id=merge_ref)
-
-    if already_merged:
-        # ВАЖНО: если перенос уже отмечен в ledger, НЕ зануляем source повторно.
-        # Иначе можно потерять токены, которые по ошибке/старым кодом попали на старый Telegram ID
-        # уже после первого переноса. Оставляем их на source для ручной проверки/отдельной миграции.
-        return {
-            "ok": True,
-            "merged": False,
-            "reason": "already_merged_source_kept",
-            "source_user_id": source,
-            "target_user_id": target,
-            "source_balance": source_balance,
-            "target_balance": target_before,
-            "moved_tokens": 0,
-        }
-
-    # Начисляем ровно один раз через стандартную функцию, чтобы появился ledger.
-    add_tokens(
-        target,
-        source_balance,
-        reason="account_balance_merge",
-        ref_id=merge_ref,
-        meta={
-            "source_user_id": source,
-            "target_user_id": target,
-            "source_balance_tokens": source_balance,
-            "target_balance_before": target_before,
-        },
-    )
-
-    target_after = _read_balance_raw(target)
-    if target_after < target_before + source_balance:
-        # Не зануляем source, если не можем подтвердить, что target получил перенос.
-        return {
-            "ok": False,
-            "merged": False,
-            "reason": "target_credit_not_verified_source_kept",
-            "source_user_id": source,
-            "target_user_id": target,
-            "source_balance": source_balance,
-            "target_balance_before": target_before,
-            "target_balance_after": target_after,
-            "moved_tokens": 0,
-        }
-
-    # После подтверждённого начисления на target зануляем старую TG-строку.
-    # Дополнительная защита: зануляем только если balance_tokens всё ещё равен той сумме,
-    # которую мы переносили. Если баланс source изменился параллельно — оставляем его как есть.
-    try:
-        supabase.table("bot_user_balance").update(
-            {"balance_tokens": 0, "updated_at": _now_iso()}
-        ).eq("telegram_user_id", source).eq("balance_tokens", source_balance).execute()
-    except Exception as exc:
-        return {
-            "ok": False,
-            "merged": True,
-            "reason": "source_zero_failed_after_target_credit",
-            "source_user_id": source,
-            "target_user_id": target,
-            "source_balance": source_balance,
-            "target_balance_before": target_before,
-            "target_balance_after": target_after,
-            "moved_tokens": source_balance,
-            "error": str(exc),
-        }
-
-    source_after = _read_balance_raw(source)
-    return {
-        "ok": True,
-        "merged": True,
-        "reason": "merged_source_zeroed" if source_after == 0 else "merged_source_changed_source_kept",
-        "source_user_id": source,
-        "target_user_id": target,
-        "source_balance_before": source_balance,
-        "source_balance_after": source_after,
-        "moved_tokens": source_balance,
-        "target_balance_before": target_before,
-        "target_balance_after": target_after,
-    }
+    response = supabase.rpc(
+        "nabex_balance_merge",
+        {"p_source": source, "p_target": target, "p_ref_id": merge_ref},
+    ).execute()
+    data = getattr(response, "data", response)
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    if not isinstance(data, dict) or not data.get("ok"):
+        raise RuntimeError("Atomic balance merge RPC returned an invalid response")
+    return {**data, "source_user_id": source, "target_user_id": target}
 
 
 def hold_tokens_for_kling(
