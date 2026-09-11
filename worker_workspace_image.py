@@ -1227,6 +1227,15 @@ async def main() -> None:
             )
         )
 
+    from app.services.trend_model_consumer import run_model_group
+    # Website GPT Image jobs use the common image pool. Respect Seedream's
+    # configured queue alias: one group per actual semaphore, not per label.
+    image_trend_models = ['gpt_image_2_kie']
+    if same_seedream5_queue:
+        image_trend_models.append('seedream_5_pro')
+    else:
+        consumers.append(run_model_group('seedream5', ['seedream_5_pro'], seedream5_sem, WORKSPACE_SEEDREAM5_CONCURRENCY))
+    consumers.append(run_model_group('image', image_trend_models, image_sem, WORKSPACE_IMAGE_CONCURRENCY))
     await asyncio.gather(*consumers)
 
 
