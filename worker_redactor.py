@@ -48,6 +48,7 @@ SITE_WORKER_CONCURRENCY = max(1, int(os.getenv("SITE_WORKER_CONCURRENCY", "1") o
 KLING3_KIE_WORKER_CONCURRENCY = max(1, int(os.getenv("KLING3_KIE_WORKER_CONCURRENCY", "3") or "3"))
 TG_STT_CONCURRENCY = max(1, int(os.getenv("TG_STT_CONCURRENCY", "2") or "2"))
 SEEDANCE25_CONCURRENCY = max(1, int(os.getenv("SEEDANCE25_CONCURRENCY", "4") or "4"))
+seedance25_sem = asyncio.Semaphore(SEEDANCE25_CONCURRENCY)
 SEEDANCE25_RELIABLE_STALE_SEC = max(120, int(os.getenv("SEEDANCE25_RELIABLE_STALE_SEC", "300") or "300"))
 SEEDANCE25_RELIABLE_TOUCH_SEC = max(30, min(SEEDANCE25_RELIABLE_STALE_SEC // 2, int(os.getenv("SEEDANCE25_RELIABLE_TOUCH_SEC", "60") or "60")))
 SEEDANCE25_DELIVERY_MAX_ATTEMPTS = max(1, int(os.getenv("SEEDANCE25_DELIVERY_MAX_ATTEMPTS", "6") or "6"))
@@ -1286,7 +1287,7 @@ async def _seedance25_worker_slot(slot: int) -> None:
             if not job:
                 continue
             heartbeat = asyncio.create_task(_seedance25_lease_heartbeat(job))
-            handler_task = asyncio.create_task(_handle_seedance25(job))
+            handler_task = asyncio.create_task(_handle_seedance25_with_slot(job))
             done, _pending = await asyncio.wait({handler_task, heartbeat}, return_when=asyncio.FIRST_COMPLETED)
 
             if heartbeat in done:
@@ -1358,6 +1359,12 @@ async def _seedance25_worker_slot(slot: int) -> None:
             await asyncio.sleep(1.0)
 
 
+async def _handle_seedance25_with_slot(job: Dict[str, Any]) -> None:
+    # The Redis lease heartbeat starts before waiting for this shared slot.
+    async with seedance25_sem:
+        await _handle_seedance25(job)
+
+
 async def _seedance25_loop() -> None:
     await asyncio.gather(*(
         _seedance25_worker_slot(slot) for slot in range(1, SEEDANCE25_CONCURRENCY + 1)
@@ -1395,7 +1402,9 @@ async def main() -> None:
         f"seedance25_queue={SEEDANCE25_QUEUE_NAME} seedance25_concurrency={SEEDANCE25_CONCURRENCY}",
         flush=True,
     )
-    await asyncio.gather(_site_loop(), _kling_loop(), _tg_stt_loop(), _seedance25_loop())
+    from app.services.trend_model_consumer import run_model_group
+    await asyncio.gather(_site_loop(), _kling_loop(), _tg_stt_loop(), _seedance25_loop(),
+                         run_model_group('seedance25', ['seedance25'], seedance25_sem, SEEDANCE25_CONCURRENCY))
 
 
 if __name__ == "__main__":
