@@ -464,6 +464,16 @@ def save_trend(user: dict, payload: dict, *, trend_id: str | None = None) -> dic
                 raise TrendError("Постоянный референс превышает ограничения модели.")
         semantic_slots = [{k: v for k, v in slot.items() if k != "id"} for slot in slots]
         recipe_hash = hashlib.sha256(json.dumps({"recipe": recipe, "slots": semantic_slots, "fixed": fixed}, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+        # New recipe versions must produce a personal result. Keep the registry
+        # and execution path compatible with already saved text-only versions.
+        text_mode = recipe["mode"].startswith("text_to_")
+        personal = any(slot.get("required") is True and slot["min_files"] >= 1 for slot in slots)
+        if text_mode or not personal:
+            previous = version_for(old, creator=True) if old else {}
+            if not previous.get("recipe_hash") or previous["recipe_hash"] != recipe_hash:
+                if text_mode:
+                    raise TrendError("Для нового рецепта выберите режим с изображениями или референсами и добавьте обязательный материал покупателя.")
+                raise TrendError("Добавьте хотя бы один обязательный слот для материала покупателя.")
     result = rpc("save", user_id=owner, trend_id=entity_id(trend_id) if trend_id else None,
                  media_type=media_type, metadata=metadata, recipe=recipe, slots=slots,
                  fixed=fixed, recipe_hash=recipe_hash, expected_revision=payload.get("revision"))
