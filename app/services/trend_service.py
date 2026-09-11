@@ -11,7 +11,6 @@ import hmac
 import json
 import os
 import re
-import time
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
@@ -491,7 +490,7 @@ def create_quote(trend_id: str, user_id: int, *, is_test: bool = False) -> dict:
     price = current_price(trend, version, buyer_id=user_id, is_test=is_test)
     body = {k: price[k] for k in ("base_tokens", "markup_tokens", "total_tokens")}
     body.update(trend_id=trend["id"], trend_version_id=version["id"], buyer_user_id=user_id,
-                is_test=is_test, expires_at=int(time.time()) + 180,
+                is_test=is_test, expires_at=None,
                 financial_hash=hashlib.sha256(json.dumps(price["financial_config"], sort_keys=True).encode()).hexdigest())
     token = _encode(json.dumps(body, sort_keys=True, separators=(",", ":")).encode())
     quote_id = token + "." + _encode(hmac.new(_quote_secret(), token.encode(), hashlib.sha256).digest())
@@ -541,8 +540,6 @@ def start_generation(trend_id: str, user_id: int, payload: dict, *, is_test: boo
         if existing.get("request_hash") != request_hash:
             raise TrendError("Этот ключ уже использован для другого запуска.", 409)
         return safe_run(existing)
-    if quote["expires_at"] < time.time():
-        raise TrendError("Цена могла измениться. Получите новый расчёт.", 409)
     if is_test:
         require_creation()
     else:
@@ -551,6 +548,8 @@ def start_generation(trend_id: str, user_id: int, payload: dict, *, is_test: boo
     version = version_for(trend, creator=is_test)
     if version.get("id") != quote["trend_version_id"]:
         raise TrendError("Рецепт изменился. Обновите страницу.", 409)
+    # Quotes have no wall-clock TTL. Revalidate all actual terms before debit,
+    # including legacy signed quotes containing a numeric expires_at.
     price = current_price(trend, version, buyer_id=user_id, is_test=is_test)
     if any(price[k] != quote[k] for k in ("base_tokens", "markup_tokens", "total_tokens")) or hashlib.sha256(json.dumps(price["financial_config"], sort_keys=True).encode()).hexdigest() != quote["financial_hash"]:
         raise TrendError("Цена или условия изменились. Подтвердите новый расчёт.", 409)
