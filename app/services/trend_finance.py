@@ -67,6 +67,19 @@ def claim_run(*, worker_id: str, lease_seconds: int = 180, run_id: str | None = 
                 run_id=_uuid(run_id) if run_id else None)
 
 
+def worker_state() -> dict:
+    return _rpc('worker_state')
+
+
+def touch_model_worker(worker_id: str, model_keys: list[str], capacity: int, trend_capacity: int) -> dict:
+    return _rpc('model_worker_touch', worker_id=worker_id, model_keys=model_keys,
+                capacity=capacity, trend_capacity=trend_capacity)
+
+
+def claim_model_run(*, worker_id: str, model_keys: list[str], lease_seconds: int = 180) -> dict:
+    return _rpc('claim_model_run', worker_id=worker_id, model_keys=model_keys, lease_seconds=lease_seconds)
+
+
 def mark_submitting(run_id: str, worker_id: str) -> dict:
     return _rpc('mark_submitting', run_id=_uuid(run_id), worker_id=str(worker_id))
 
