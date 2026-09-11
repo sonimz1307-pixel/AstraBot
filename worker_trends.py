@@ -1,7 +1,9 @@
 """Durable Trend Workshop outbox worker.
 
 Run as a separate supervised process: python worker_trends.py
-Reuses existing Workspace model workers; requires no Telegram queue changes.
+After V3.3 SQL activation, existing model worker processes execute generations;
+this process only settles results, releases rewards and recovers Storage uploads.
+Until activation it retains the V3.2.1 execution path for rolling deployment.
 The SQL lease prevents two processes from dispatching the same paid operation.
 """
 from __future__ import annotations
@@ -79,7 +81,22 @@ def _reference_urls(run: Dict[str, Any], version: Dict[str, Any]) -> list[str]:
     return [assets.signed_provider_url(asset, expires_in=3600) for asset in references]
 
 
+def _task_conflict(run: dict, history: dict) -> bool:
+    # Quarantine survives a late result and a switch back to legacy execution.
+    # Only explicit operator reconciliation may clear a recorded conflict.
+    if run.get('error') == 'provider_task_conflict':
+        return True
+    task_ids = {(str(value or '').strip()) for value in (
+        (run.get('generation_metadata') or {}).get('provider_task_id'),
+        history.get('provider_task_id'), history.get('task_id'),
+    )}
+    task_ids.discard('')
+    return len(task_ids) > 1
+
+
 async def _finish(run: dict, version: dict, history: dict) -> None:
+    if _task_conflict(run, history):
+        raise RuntimeError('TREND_PROVIDER_TASK_CONFLICT')
     spec = get_model(recipe_from_version(version)["model_key"])
     media_type = "image" if spec["type"] == "photo" else "video"
     result = {"type": media_type, "generation_id": generation_id_for_run(run),
@@ -101,11 +118,20 @@ async def _heartbeat(run_id: str, worker_id: str) -> None:
         await asyncio.to_thread(finance.heartbeat, run_id, worker_id, lease_seconds=LEASE_SECONDS)
 
 
-async def process_claimed(run: dict, worker_id: str) -> None:
+async def process_claimed(run: dict, worker_id: str, *, defer_settlement: bool = False) -> None:
+    async def completed(version: dict, history: dict) -> None:
+        if defer_settlement:
+            await asyncio.to_thread(finance.mark_reconciliation, run['id'], worker_id, reason='result_ready')
+        else:
+            await _finish(run, version, history)
+
     version = await asyncio.to_thread(_version, run)
     history = await asyncio.to_thread(ensure_history, run, version)
+    if _task_conflict(run, history):
+        await asyncio.to_thread(finance.mark_reconciliation, run['id'], worker_id, reason='provider_task_conflict')
+        return
     if history.get("status") == "completed" and history.get("storage_path"):
-        await _finish(run, version, history)
+        await completed(version, history)
         return
     if video_needs_archiving(history, version):
         await asyncio.to_thread(video_archive.enqueue, generation_id_for_run(run), int(run["buyer_user_id"]), history["provider_video_url"],
@@ -134,7 +160,7 @@ async def process_claimed(run: dict, worker_id: str) -> None:
 
     try:
         history = await execute_run(run, version, reference_urls, on_task_id=persist_task)
-        await _finish(run, version, history)
+        await completed(version, history)
     except TrendGenerationFailed:
         await asyncio.to_thread(finance.refund_run, run["id"], reason="provider_terminal_failure", worker_id=worker_id)
     except TrendGenerationArchiving:
@@ -153,8 +179,8 @@ async def process_claimed(run: dict, worker_id: str) -> None:
             await asyncio.to_thread(finance.mark_reconciliation, run["id"], worker_id, reason="result_settlement_reconciliation")
 
 
-async def _with_lease(run: dict, worker_id: str) -> None:
-    operation = asyncio.create_task(process_claimed(run, worker_id))
+async def _with_lease(run: dict, worker_id: str, *, defer_settlement: bool = False) -> None:
+    operation = asyncio.create_task(process_claimed(run, worker_id, defer_settlement=defer_settlement))
     heartbeat = asyncio.create_task(_heartbeat(run["id"], worker_id))
     try:
         done, _ = await asyncio.wait({operation, heartbeat}, return_when=asyncio.FIRST_COMPLETED)
@@ -168,7 +194,7 @@ async def _with_lease(run: dict, worker_id: str) -> None:
                 await task
 
 
-async def reconcile_completed(worker_id: str, limit: int = 25) -> None:
+async def reconcile_completed(worker_id: str, limit: int = 25, *, execute_recovered: bool = True) -> None:
     """Recover success proofs after a crash; never submit an unknown job again."""
     global _RECOVERY_CURSOR
     def batch():
@@ -182,14 +208,19 @@ async def reconcile_completed(worker_id: str, limit: int = 25) -> None:
     _RECOVERY_CURSOR = str(runs[-1]["id"]) if len(runs) == limit else ""
     for run in runs:
         try:
+            if run.get('error') == 'provider_task_conflict':
+                continue
             version = await asyncio.to_thread(_version, run)
             history = await asyncio.to_thread(get_history, run, version)
+            if _task_conflict(run, history):
+                LOG.warning('Provider task conflict requires review run=%s', run.get('id'))
+                continue
             if history.get("status") == "completed" and history.get("storage_path"):
                 await _finish(run, version, history)
             elif video_needs_archiving(history, version):
                 await asyncio.to_thread(video_archive.enqueue, generation_id_for_run(run), int(run["buyer_user_id"]), history["provider_video_url"],
                     "archive_too_large" if history.get("error_code") == "archive_too_large" else "archive_pending")
-            elif history.get("provider_task_id") or history.get("task_id"):
+            elif execute_recovered and (history.get("provider_task_id") or history.get("task_id")):
                 recovered = await asyncio.to_thread(finance.recover_run, run["id"], worker_id, lease_seconds=LEASE_SECONDS)
                 if recovered:
                     await _with_lease(recovered, worker_id)
@@ -199,15 +230,21 @@ async def reconcile_completed(worker_id: str, limit: int = 25) -> None:
 
 
 async def _trend_loop(worker_id: str, *, once: bool = False) -> None:
+    last_mode = None
     while True:
         try:
+            state = await asyncio.to_thread(finance.worker_state)
+            shared = state.get('shared_workers_enabled') is True
+            if shared != last_mode:
+                LOG.warning('Trend execution mode: %s', 'model_workers (maintenance only here)' if shared else 'legacy (awaiting SQL cutover)')
+                last_mode = shared
             try:
                 await asyncio.to_thread(assets.reconcile_uploads, limit=2)
             except Exception as exc:
                 LOG.warning("Upload recovery deferred: %s", type(exc).__name__)
-            await reconcile_completed(worker_id)
+            await reconcile_completed(worker_id, execute_recovered=not shared)
             await asyncio.to_thread(finance.release_rewards, limit=100)
-            run = await asyncio.to_thread(finance.claim_run, worker_id=worker_id, lease_seconds=LEASE_SECONDS)
+            run = None if shared else await asyncio.to_thread(finance.claim_run, worker_id=worker_id, lease_seconds=LEASE_SECONDS)
             if run:
                 await _with_lease(run, worker_id)
             elif not once:
