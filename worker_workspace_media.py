@@ -589,6 +589,8 @@ async def main() -> None:
     # while the Redis enqueue response was lost/unavailable. No extra worker is
     # created; this lightweight loop runs inside the existing media process.
     consumers.append(asyncio.create_task(_wan3_refund_reconciler_loop()))
+    from app.services.trend_model_consumer import run_model_group
+    consumers.append(asyncio.create_task(run_model_group('wan3', ['wan3'], wan3_sem, WAN3_CONCURRENCY)))
     await asyncio.gather(*consumers)
 
 
