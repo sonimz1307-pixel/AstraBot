@@ -5983,6 +5983,19 @@ def _workspace_video_charge_spec(
     return {"tokens": 0, "charge_reason": "", "refund_reason": "workspace_video_refund", "meta": {"origin": "workspace_video", "provider": provider, "model": model, "mode": mode}}
 
 
+def _workspace_seedance_price_limit(provider: str, raw_value: Any) -> Optional[int]:
+    """Require Seedance clients to authorize the total shown before launch."""
+    if provider not in {"seedance", "seedance_kie", "seedance25"}:
+        return None
+    value = str(raw_value or "").strip()
+    if not value.isascii() or not value.isdigit() or len(value) > 9 or int(value) <= 0:
+        raise HTTPException(
+            status_code=422,
+            detail="Обновите страницу перед запуском Seedance и проверьте стоимость. Токены не списаны.",
+        )
+    return int(value)
+
+
 @router.post("/video/run")
 async def workspace_video_run(
     request: Request,
@@ -6017,6 +6030,7 @@ async def workspace_video_run(
     supported = {"kling", "veo", "grok", "google", "seedance", "seedance_kie", "seedance25", "wan3", "sora", "switchx", "pixverse_c1"}
     if provider not in supported:
         raise HTTPException(status_code=400, detail=f"Provider {provider} is not supported in /video/run yet")
+    seedance_price_limit = _workspace_seedance_price_limit(provider, form.get("max_tokens"))
     if provider == "wan3":
         queue_conflicts = _wan3_queue_conflicts()
         if queue_conflicts:
@@ -6536,6 +6550,11 @@ async def workspace_video_run(
         kling3_kie_multi_shots=kling3_kie_multi_shots,
     )
     cost_tokens = int(charge.get("tokens") or 0)
+    if seedance_price_limit is not None and cost_tokens > seedance_price_limit:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Стоимость Seedance изменилась: {cost_tokens} ток. Обновите страницу и проверьте цену. Токены не списаны.",
+        )
     if provider == "veo" and model == "veo-3.1-fast-relax" and _workspace_has_veo31_fast_relax_included(uid):
         cost_tokens = 0
     veo_relax_delay_sec = _workspace_veo31_fast_relax_delay_sec(uid, cost_tokens) if provider == "veo" and model == "veo-3.1-fast-relax" else 0
