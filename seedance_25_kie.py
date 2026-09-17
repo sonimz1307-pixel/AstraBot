@@ -37,6 +37,8 @@ SEEDANCE25_MAX_TOTAL_AUDIO_SECONDS = float(os.getenv("SEEDANCE25_MAX_TOTAL_AUDIO
 
 # Business pricing approved for NABEX. User balances are integer tokens; all results are ceil()'d.
 # No-video means Text→Video or Omni without reference_video_urls.
+# Fixed retail increase per generation, applied once after rounding the full price.
+SEEDANCE25_RETAIL_EXTRA_TOKENS = 1
 SEEDANCE25_RETAIL_TOKENS_PER_SEC_NO_VIDEO = {
     "seedance25-480p": 2.0,
     "seedance25-720p": 4.5,
@@ -145,9 +147,9 @@ def seedance25_tokens_for_duration(model: Any, duration: Any, *, input_video_dur
     input_seconds = seedance25_billable_input_video_seconds(input_video_duration_sec)
     if input_seconds > 0:
         rate = SEEDANCE25_RETAIL_TOKENS_PER_BILLABLE_SEC_WITH_VIDEO[normalized_model]
-        return max(1, int(math.ceil(float(input_seconds + output_seconds) * float(rate))))
+        return max(1, int(math.ceil(float(input_seconds + output_seconds) * float(rate)))) + SEEDANCE25_RETAIL_EXTRA_TOKENS
     rate = SEEDANCE25_RETAIL_TOKENS_PER_SEC_NO_VIDEO[normalized_model]
-    return max(1, int(math.ceil(float(output_seconds) * float(rate))))
+    return max(1, int(math.ceil(float(output_seconds) * float(rate)))) + SEEDANCE25_RETAIL_EXTRA_TOKENS
 
 
 def seedance25_pricing_breakdown(model: Any, duration: Any, *, input_video_duration_sec: Any = 0) -> Dict[str, Any]:
