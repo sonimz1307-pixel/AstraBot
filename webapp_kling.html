@@ -1229,7 +1229,7 @@
             <input id="seed_mini" type="radio" name="seedance_model" value="mini" checked>
             <label for="seed_mini">
               <span class="name">Seedance 2.0 Mini 720p</span>
-              <span class="desc" id="seedanceMiniPriceDesc">🔥 до 5 сентября · 3 / 6 / 9 ток. (5/10/15 сек)</span>
+              <span class="desc" id="seedanceMiniPriceDesc">9 / 14 / 19 токенов (5/10/15 сек)</span>
             </label>
           </div>
           <div class="hint">720p, Text → Video, Image → Video или Omni Reference.</div>
@@ -1238,9 +1238,9 @@
         <div id="seedance25ModelWrap" style="display:none;">
           <div class="seg" role="radiogroup" aria-label="Модель Seedance 2.5">
             <input id="seed25_480p" type="radio" name="seedance25_model" value="seedance25-480p">
-            <label for="seed25_480p"><span class="name">Seedance 2.5 480p</span><span class="desc">2 ток./сек без video ref</span></label>
+            <label for="seed25_480p"><span class="name">Seedance 2.5 480p</span><span class="desc">2 ток./сек + 1 ток. за ролик без video ref</span></label>
             <input id="seed25_720p" type="radio" name="seedance25_model" value="seedance25-720p" checked>
-            <label for="seed25_720p"><span class="name">Seedance 2.5 720p</span><span class="desc">4,5 ток./сек без video ref</span></label>
+            <label for="seed25_720p"><span class="name">Seedance 2.5 720p</span><span class="desc">4,5 ток./сек + 1 ток. за ролик без video ref</span></label>
           </div>
           <div class="hint">Seedance 2.5: Text → Video и Omni Reference. Генерация аудио всегда включена.</div>
         </div>
@@ -1250,19 +1250,19 @@
             <input id="seed_kie_480p" type="radio" name="seedance_kie_model" value="seedance-kie-480p" checked>
             <label for="seed_kie_480p">
               <span class="name">Seedance 2.0 480p</span>
-              <span class="desc">6 / 12 / 18 токенов</span>
+              <span class="desc">7 / 13 / 19 токенов (5/10/15 сек)</span>
             </label>
 
             <input id="seed_kie_720p" type="radio" name="seedance_kie_model" value="seedance-kie-720p">
             <label for="seed_kie_720p">
               <span class="name">Seedance 2.0 720p</span>
-              <span class="desc">12 / 24 / 33 токенов</span>
+              <span class="desc">13 / 25 / 34 токенов (5/10/15 сек)</span>
             </label>
 
             <input id="seed_kie_1080p" type="radio" name="seedance_kie_model" value="seedance-kie-1080p">
             <label for="seed_kie_1080p">
               <span class="name">Seedance 2.0 1080p</span>
-              <span class="desc">28 / 55 / 80 токенов</span>
+              <span class="desc">37 / 73 / 109 токенов (5/10/15 сек)</span>
             </label>
           </div>
           <div class="hint">Обычный Seedance 2.0.</div>
@@ -1381,6 +1381,7 @@
 
     const DEBUG = new URLSearchParams(location.search).get('debug') === '1';
 
+    const SEEDANCE_RETAIL_EXTRA_TOKENS = 1;
     function getProvider(){ return qs('input[name="provider"]:checked')?.value || "seedance"; }
 
     // Kling getters
@@ -1947,9 +1948,11 @@
       const miniTypeDesc = qs('#seedanceMiniTypeDesc');
       const miniPriceDesc = qs('#seedanceMiniPriceDesc');
       if (miniTypeDesc) miniTypeDesc.textContent = miniPromoActive ? '720p · акция до 5 сентября' : '720p';
-      if (miniPriceDesc) miniPriceDesc.textContent = miniPromoActive
-        ? '🔥 до 5 сентября · 3 / 6 / 9 ток. (5/10/15 сек)'
-        : '8 / 13 / 18 токенов (5/10/15 сек)';
+      if (miniPriceDesc) {
+        const miniPrices = getSeedanceMiniRetailPriceMap();
+        const priceText = [5, 10, 15].map(seconds => miniPrices[seconds] + SEEDANCE_RETAIL_EXTRA_TOKENS).join(' / ');
+        miniPriceDesc.textContent = `${miniPromoActive ? '🔥 до 5 сентября · ' : ''}${priceText} токенов (5/10/15 сек)`;
+      }
       if (aspectHint) aspectHint.textContent = isMini
         ? `Seedance 2.0 Mini: 720p, Text → Video, Image → Video или Omni Reference.${miniPromoActive ? ' 🔥 Акция до 5 сентября включительно.' : ''}`
         : (is25 ? 'Seedance 2.5: 480p / 720p, 4–30 сек, Text → Video или Omni Reference.' : 'Для обычного Seedance 2.0 доступны форматы 16:9 / 21:9 — Кино / 9:16 / 1:1.');
@@ -2606,7 +2609,7 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
         if (variant === '25'){
           const model = getSeedance25Model();
           const rate = model === 'seedance25-480p' ? 2 : 4.5;
-          return { known:true, tokens: Math.ceil(seconds * rate), note:'Цена без входного video reference. Для Omni с video ref итог пересчитывается по длительности входных видео.' };
+          return { known:true, tokens: Math.ceil(seconds * rate) + SEEDANCE_RETAIL_EXTRA_TOKENS, note:'Цена без входного video reference. Для Omni с video ref итог пересчитывается по длительности входных видео.' };
         }
 
         if (variant === 'kie'){
@@ -2616,13 +2619,13 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
             : (model === 'seedance-kie-720p' || model === 'seedance-kie')
               ? {4: 10, 5: 12, 6: 15, 7: 17, 8: 20, 9: 22, 10: 24, 11: 26, 12: 28, 13: 30, 14: 32, 15: 33}
               : {4: 5, 5: 6, 6: 8, 7: 9, 8: 10, 9: 11, 10: 12, 11: 14, 12: 15, 13: 16, 14: 17, 15: 18};
-          const tokens = priceMap[seconds] || priceMap[5];
+          const tokens = (priceMap[seconds] || priceMap[5]) + SEEDANCE_RETAIL_EXTRA_TOKENS;
           return { known:true, tokens, note:'' };
         }
 
         const previewModel = getSeedancePreviewModel();
         const priceMap = getSeedanceMiniRetailPriceMap();
-        const tokens = priceMap[seconds] || priceMap[5];
+        const tokens = (priceMap[seconds] || priceMap[5]) + SEEDANCE_RETAIL_EXTRA_TOKENS;
         return { known:true, tokens, note: isSeedanceMiniPromoActive() ? '🔥 акция до 5 сентября' : '' };
       }
 
