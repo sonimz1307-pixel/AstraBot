@@ -42,6 +42,8 @@ SEEDANCE_KIE_MAX_TOTAL_OMNI_REFS = int(os.getenv("KIE_SEEDANCE_MAX_TOTAL_OMNI_RE
 
 # Final regular retail prices approved for every whole-second duration from 4 to 15 seconds.
 # Do not derive these base prices from provider rates: product pricing is fixed by business rules.
+# Add once after the full retail calculation, including any video-reference cost.
+SEEDANCE_KIE_RETAIL_EXTRA_TOKENS = 1
 SEEDANCE_KIE_TOKEN_MAP = {
     "seedance-kie-mini": {
         4: 7, 5: 8, 6: 9, 7: 10, 8: 11, 9: 12,
@@ -258,12 +260,12 @@ def seedance_kie_tokens_for_duration(model: Any, duration: Any, *, input_video_d
     base_tokens = _seedance_kie_base_tokens(model, duration)
     input_seconds = seedance_kie_billable_input_video_seconds(input_video_duration_sec)
     if input_seconds <= 0:
-        return int(base_tokens)
+        return int(base_tokens) + SEEDANCE_KIE_RETAIL_EXTRA_TOKENS
     provider_tokens = _seedance_kie_tokens_from_usd(
         _seedance_kie_cost_usd(model, duration, input_video_duration_sec=input_seconds),
         usd_rub=_seedance_kie_effective_usd_rub(model),
     )
-    return max(int(base_tokens), int(provider_tokens))
+    return max(int(base_tokens), int(provider_tokens)) + SEEDANCE_KIE_RETAIL_EXTRA_TOKENS
 
 
 def seedance_kie_pricing_breakdown(model: Any, duration: Any, *, input_video_duration_sec: Any = 0) -> Dict[str, Any]:
@@ -276,9 +278,9 @@ def seedance_kie_pricing_breakdown(model: Any, duration: Any, *, input_video_dur
     rate_key = "with_video" if has_video_input else "no_video"
     billable_seconds = normalized_duration + input_seconds if has_video_input else normalized_duration
     cost_usd = float(rates[rate_key]) * float(billable_seconds)
-    base_tokens = _seedance_kie_base_tokens(normalized_model, normalized_duration)
+    base_tokens = _seedance_kie_base_tokens(normalized_model, normalized_duration) + SEEDANCE_KIE_RETAIL_EXTRA_TOKENS
     provider_cost_tokens = _seedance_kie_tokens_from_usd(cost_usd, usd_rub=effective_usd_rub)
-    tokens = max(base_tokens, provider_cost_tokens) if has_video_input else base_tokens
+    tokens = seedance_kie_tokens_for_duration(normalized_model, normalized_duration, input_video_duration_sec=input_seconds)
     return {
         "model": normalized_model,
         "duration": normalized_duration,
