@@ -157,7 +157,7 @@ from veo31_fast_relax_kie import (
     upload_veo31_fast_relax_input_image,
     veo31_fast_relax_tokens_for_run,
 )
-from seedance_kie import seedance_kie_tokens_for_duration, seedance_mini_promo_text
+from seedance_kie import SEEDANCE_KIE_RETAIL_EXTRA_TOKENS, seedance_kie_tokens_for_duration, seedance_mini_promo_text
 from seedance_25_kie import seedance25_tokens_for_run, seedance25_resolution_from_model
 from seedance25_billing import (
     Seedance25InsufficientBalanceError,
@@ -4931,14 +4931,29 @@ def _seedance_prompt_collect_kb(mode: str = "") -> dict:
     return {"inline_keyboard": rows}
 
 
-def _seedance25_confirm_kb(cost_tokens: int) -> dict:
+def _seedance25_confirm_kb(cost_tokens: int, *, confirmation_nonce: str = "") -> dict:
+    callback_data = "seedance25_confirm:run"
+    if confirmation_nonce:
+        callback_data += f":{confirmation_nonce}:{int(cost_tokens)}"
     return {
         "inline_keyboard": [
-            [{"text": f"🚀 Создать — {int(cost_tokens)} ток.", "callback_data": "seedance25_confirm:run"}],
+            [{"text": f"🚀 Создать — {int(cost_tokens)} ток.", "callback_data": callback_data}],
             [{"text": "⬅️ Вернуться к промпту", "callback_data": "seedance25_confirm:back"}],
             [{"text": "❌ Отмена", "callback_data": "seedance_prompt:cancel"}],
         ]
     }
+
+
+def _seedance25_confirmation_matches_callback(st: dict, data: str) -> bool:
+    confirmation = st.get("seedance25_confirmation") or {}
+    parts = str(data or "").split(":")
+    return (
+        len(parts) == 4
+        and parts[:2] == ["seedance25_confirm", "run"]
+        and bool(confirmation.get("nonce"))
+        and parts[2] == str(confirmation["nonce"])
+        and parts[3] == str(confirmation.get("cost_tokens"))
+    )
 
 
 def _seedance25_settlement_kb() -> dict:
@@ -6089,7 +6104,7 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
     else:
         # Legacy fallback only. Seedance 2.0 Mini is normalized to KIE upstream.
         preview_price_map = {5: 9, 10: 18, 15: 27}
-        cost_tokens = int(preview_price_map.get(int(duration), preview_price_map[5]))
+        cost_tokens = int(preview_price_map.get(int(duration), preview_price_map[5])) + SEEDANCE_KIE_RETAIL_EXTRA_TOKENS
 
     seedance25_submission_nonce = ""
     if provider_kind in {"seedance25", "wan3"}:
@@ -6140,9 +6155,13 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
                 )
                 return {"ok": True}
 
+            # Confirmations predating a tariff change must show the new total
+            # before a debit, including sessions with no stored quoted amount.
+            if confirmed and confirmation.get("cost_tokens") != int(cost_tokens):
+                confirmed = False
+
     # Seedance 2.5 always gets a final price screen BEFORE any token charge.
-    # Price is recomputed again when the user confirms, so stale buttons cannot
-    # charge an old amount after references/settings change.
+    # Bind both the draft and the quoted total to the confirmation button.
     if provider_kind in {"seedance25", "wan3"} and not confirmed:
         image_count = video_count = audio_count = 0
         if mode_now == "seedance_omni":
@@ -6170,10 +6189,13 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
             "Токены будут списаны только после нажатия кнопки ниже."
         )
         if provider_kind == "seedance25":
+            confirmation["cost_tokens"] = int(cost_tokens)
             await _seedance25_send_required(
                 chat_id,
                 confirmation_text,
-                reply_markup=_seedance25_confirm_kb(cost_tokens),
+                reply_markup=_seedance25_confirm_kb(
+                    cost_tokens, confirmation_nonce=seedance25_submission_nonce,
+                ),
             )
         else:
             await tg_send_message(
@@ -6200,6 +6222,7 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
     seedance25_refund_ok: Optional[bool] = None
     seedance25_wait_message_id = 0
     seedance25_charge_attempted = False
+    seedance25_charge_amount_verified = False
     seedance25_charge_status_unknown = False
     seedance25_enqueue_started = False
     seedance25_enqueue_confirmed = False
@@ -6426,6 +6449,10 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
                             charge_meta=charge_meta,
                         )
                         seedance_charged = True
+                        seedance25_charge_amount_verified = (
+                            bool((_charge_result or {}).get("charged"))
+                            and not bool((_charge_result or {}).get("already_charged"))
+                        )
                         charged_stored = await _seedance25_store_submission_status(
                             st,
                             job_id=job_id,
@@ -6461,6 +6488,18 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
                     if seedance25_wait_message_id:
                         await tg_delete_message(chat_id, seedance25_wait_message_id)
                     return {"ok": True}
+                if not seedance25_charge_amount_verified:
+                    # A recovered/idempotently replayed debit may predate the
+                    # current tariff. Carry its actual amount into the job and
+                    # any refund instead of repricing an already-paid run.
+                    recorded_amount = await asyncio.to_thread(
+                        get_seedance25_charge_amount, user_id, ref_id=charge_ref_id,
+                    )
+                    if not recorded_amount:
+                        raise RuntimeError("Seedance 2.5: не удалось подтвердить сумму исходного списания")
+                    cost_tokens = int(recorded_amount)
+                    charge_meta["cost_tokens"] = cost_tokens
+                    seedance25_charge_amount_verified = True
             else:
                 try:
                     add_tokens(user_id, -cost_tokens, reason="seedance_video", ref_id=charge_ref_id, meta=charge_meta)
@@ -6670,14 +6709,17 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
                     notify_exc,
                 )
             return {"ok": True}
-        if provider_kind == "seedance25" and seedance25_charge_attempted and not seedance_charged and charge_ref_id:
+        if provider_kind == "seedance25" and seedance25_charge_attempted and not seedance25_charge_amount_verified and charge_ref_id:
             try:
-                seedance_charged = bool(await asyncio.to_thread(
-                    ledger_ref_exists,
-                    reason="seedance25_video",
-                    ref_id=charge_ref_id,
-                ))
+                recorded_amount = await asyncio.to_thread(
+                    get_seedance25_charge_amount, user_id, ref_id=charge_ref_id,
+                )
+                if seedance_charged and not recorded_amount:
+                    raise RuntimeError("Seedance 2.5: сумма исходного списания недоступна")
+                seedance_charged = bool(recorded_amount)
                 if seedance_charged:
+                    cost_tokens = int(recorded_amount)
+                    seedance25_charge_amount_verified = True
                     await _seedance25_store_submission_status(
                         st,
                         job_id=job_id,
@@ -6780,7 +6822,7 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
                 if seedance25_wait_message_id:
                     await tg_delete_message(chat_id, seedance25_wait_message_id)
                 return {"ok": True}
-        if seedance_charged:
+        if seedance_charged and not seedance25_charge_status_unknown:
             if provider_kind == "wan3":
                 refund_reason = "wan3_video_refund"
                 if wan3_enqueue_started and not wan3_enqueue_confirmed:
@@ -6841,19 +6883,19 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
                 if active_draft:
                     st["seedance_last_error"] = str(e)[:1000]
                     st["ts"] = _now()
-                if seedance_charged and seedance25_refund_ok:
+                if seedance25_charge_status_unknown:
+                    final_submit_status = "review_required"
+                    token_status = (
+                        "Статус или сумму списания временно не удалось проверить. "
+                        f"Не запускай задачу повторно и сообщи поддержке код {charge_ref_id[-8:] or job_id[-8:]}."
+                    )
+                elif seedance_charged and seedance25_refund_ok:
                     final_submit_status = "refunded"
                     token_status = "Токены возвращены."
                 elif seedance_charged:
                     final_submit_status = "refund_pending"
                     token_status = (
                         "Не удалось подтвердить автоматический возврат токенов. "
-                        f"Не запускай задачу повторно и сообщи поддержке код {charge_ref_id[-8:] or job_id[-8:]}."
-                    )
-                elif seedance25_charge_status_unknown:
-                    final_submit_status = "review_required"
-                    token_status = (
-                        "Статус списания временно не удалось проверить. "
                         f"Не запускай задачу повторно и сообщи поддержке код {charge_ref_id[-8:] or job_id[-8:]}."
                     )
                 else:
@@ -10206,7 +10248,7 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
 
         if chat_id and user_id and data.startswith("seedance25_confirm:"):
             st = _ensure_state(chat_id, user_id)
-            action = data.split(":", 1)[1].strip()
+            action = data.split(":")[1].strip()
             mode_now = str(st.get("mode") or "").strip()
             settings = st.get("seedance_settings") or {}
             confirm_provider = str(settings.get("provider_kind") or "").strip().lower()
@@ -10228,7 +10270,12 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
                 return {"ok": True}
             if action == "run":
                 prompt = _seedance_prompt_text_from_state(st)
-                return await _seedance_start_generation_from_prompt(chat_id, user_id, st, prompt, confirmed=True)
+                confirmed = (
+                    _seedance25_confirmation_matches_callback(st, data)
+                    if confirm_provider == "seedance25"
+                    else data == "seedance25_confirm:run"
+                )
+                return await _seedance_start_generation_from_prompt(chat_id, user_id, st, prompt, confirmed=confirmed)
             return {"ok": True}
 
         if chat_id and user_id and data.startswith("seedance_prompt:"):
@@ -11127,9 +11174,9 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
 
             # Legacy PiAPI continuation pricing.
             preview_price_map = {5: 6, 10: 12, 15: 18} if task_type == "seedance-2-fast-preview" else {5: 12, 10: 24, 15: 33}
-            cost_5 = int(preview_price_map[5])
-            cost_10 = int(preview_price_map[10])
-            cost_15 = int(preview_price_map[15])
+            cost_5 = int(preview_price_map[5]) + SEEDANCE_KIE_RETAIL_EXTRA_TOKENS
+            cost_10 = int(preview_price_map[10]) + SEEDANCE_KIE_RETAIL_EXTRA_TOKENS
+            cost_15 = int(preview_price_map[15]) + SEEDANCE_KIE_RETAIL_EXTRA_TOKENS
 
             await tg_send_message(
                 chat_id,
@@ -11164,7 +11211,7 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
 
             # Legacy PiAPI continuation pricing.
             preview_price_map = {5: 6, 10: 12, 15: 18} if task_type == "seedance-2-fast-preview" else {5: 12, 10: 24, 15: 33}
-            cost_tokens = int(preview_price_map.get(int(duration), preview_price_map[5]))
+            cost_tokens = int(preview_price_map.get(int(duration), preview_price_map[5])) + SEEDANCE_KIE_RETAIL_EXTRA_TOKENS
 
             se["cost_tokens"] = cost_tokens
             st["seedance_extend"] = se
