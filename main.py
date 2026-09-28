@@ -2337,6 +2337,8 @@ async def tg_topup_create(request: Request):
             "customer_email": stored_email,
         }
 
+    # Stars prices and their accounting RUB basis are independent of card/SBP prices.
+    amount_rub = int(pack.get("stars_rub") or pack.get("rub") or 0)
     # Fallback: Telegram Stars invoice is sent into the bot chat.
     try:
         payload_str = f"stars_topup:{tokens}:{user_id}"
@@ -2681,12 +2683,13 @@ def sb_set_user_email(user_id: int, email: str) -> bool:
 # ⭐ Stars — временный способ оплаты
 # ₽ — расчётная стоимость в рублях
 # Токены — внутренняя единица сервиса
+# RUB prices updated 2026-09-19. Stars prices and their accounting RUB basis stay unchanged.
 TOPUP_PACKS = [
-    {"tokens": 5, "rub": 60, "stars": 33, "badge": "💰"},
-    {"tokens": 20, "rub": 200, "stars": 110, "badge": "⭐"},
-    {"tokens": 60, "rub": 550, "stars": 302, "badge": "🚀"},
-    {"tokens": 100, "rub": 890, "stars": 489, "badge": "👑"},
-    {"tokens": 200, "rub": 1700, "stars": 934, "badge": "💎"},
+    {"tokens": 5, "rub": 65, "stars_rub": 60, "stars": 33, "badge": "💰"},
+    {"tokens": 20, "rub": 210, "stars_rub": 200, "stars": 110, "badge": "⭐"},
+    {"tokens": 60, "rub": 580, "stars_rub": 550, "stars": 302, "badge": "🚀"},
+    {"tokens": 100, "rub": 940, "stars_rub": 890, "stars": 489, "badge": "👑"},
+    {"tokens": 200, "rub": 1800, "stars_rub": 1700, "stars": 934, "badge": "💎"},
 ]
 
 # Admin-only Stars invoice.
@@ -2727,8 +2730,9 @@ def _topup_packs_kb() -> dict:
         title = str(p.get("title") or "").strip()
         prefix = f"{badge} " if badge else ""
         suffix = f" • {title}" if title else ""
+        price_label = f"{rub}₽" if _yookassa_enabled() else f"{int(p['stars'])}⭐"
         btns.append({
-            "text": f"{prefix}{rub}₽ • {tokens} токенов{suffix}",
+            "text": f"{prefix}{price_label} • {tokens} токенов{suffix}",
             "callback_data": f"topup:pack:{tokens}"
         })
 
@@ -11290,7 +11294,8 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
                         await tg_send_message(chat_id, f"Не смог создать платёж ЮKassa: {e}\nПопробуй ещё раз.", reply_markup=_topup_packs_kb())
                     return {"ok": True}
 
-                # fallback (Telegram Stars)
+                # fallback (Telegram Stars): retain the original RUB equivalent.
+                amount_rub = int(pack.get("stars_rub") or pack.get("rub") or 0)
                 payload = f"stars_topup:{tokens}:{user_id}"
                 await tg_send_stars_invoice(chat_id, title, f"{tokens} токенов • {stars}⭐ (≈{amount_rub}₽)", payload, stars)
                 return {"ok": True}
@@ -11472,7 +11477,7 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
             )
             try:
                 pack_for_partner = _find_pack_by_tokens(tokens) or {}
-                amount_rub_for_partner = float(pack_for_partner.get("rub") or 0)
+                amount_rub_for_partner = float(pack_for_partner.get("stars_rub") or pack_for_partner.get("rub") or 0)
             except Exception:
                 amount_rub_for_partner = 0.0
             await _enqueue_partner_topup_event(
