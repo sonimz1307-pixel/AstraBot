@@ -12,6 +12,9 @@ from typing import Any, Dict, Optional, Tuple
 from uuid import uuid4
 
 import httpx
+from safe_errors import redact_secrets, safe_print as print, install_secret_log_redaction
+
+install_secret_log_redaction()
 
 from billing_db import ensure_user_row, get_balance, hold_tokens_for_kling, confirm_kling_job, rollback_kling_job
 from kling3_kie_flow import (
@@ -139,11 +142,11 @@ async def upload_kie_file_stream_bytes(
         except Exception as exc:
             raise Kling3MotionKieError(f"KIE file upload request failed: {exc}")
     if not (200 <= resp.status_code < 300):
-        raise Kling3MotionKieError(f"KIE file upload error {resp.status_code}: {resp.text[:1000]}")
+        raise Kling3MotionKieError(f"KIE file upload error {resp.status_code}: {redact_secrets(resp.text)[:1000]}")
     try:
         payload = resp.json()
     except Exception:
-        raise Kling3MotionKieError(f"KIE file upload returned non-JSON response: {resp.text[:300]}")
+        raise Kling3MotionKieError(f"KIE file upload returned non-JSON response: {redact_secrets(resp.text)[:300]}")
     if isinstance(payload, dict):
         code = payload.get("code")
         success = payload.get("success")
@@ -156,7 +159,8 @@ async def upload_kie_file_stream_bytes(
     raise Kling3MotionKieError(f"KIE file upload did not return file URL: {payload}")
 
 class Kling3MotionKieError(RuntimeError):
-    pass
+    def __init__(self, message: object):
+        super().__init__(redact_secrets(message))
 
 
 def _headers() -> Dict[str, str]:
@@ -260,7 +264,7 @@ async def create_kling3_motion_kie_task(
         except Exception as exc:
             raise Kling3MotionKieError(f"KIE request failed: {exc}")
     if not (200 <= response.status_code < 300):
-        raise Kling3MotionKieError(f"KIE error {response.status_code}: {response.text[:2000]}")
+        raise Kling3MotionKieError(f"KIE error {response.status_code}: {redact_secrets(response.text)[:2000]}")
     try:
         data = response.json()
     except Exception:
@@ -411,7 +415,7 @@ async def run_kling3_motion_kie_from_bytes(
     except Exception as exc:
         if bill_user and job_id:
             try:
-                rollback_kling_job(job_id, error=str(exc))
+                rollback_kling_job(job_id, error=redact_secrets(exc))
             except Exception:
                 pass
         raise
