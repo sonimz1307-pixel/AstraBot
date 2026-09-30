@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
 from uuid import uuid4, uuid5, NAMESPACE_URL
 from typing import Any, Dict, Optional
 
 import httpx
+from safe_errors import redact_secrets, safe_print as print, install_secret_log_redaction
+
+install_secret_log_redaction()
 
 from app.services.site_builder_service import process_site_job
 from billing_db import add_tokens, ledger_ref_exists, supabase as billing_supabase
@@ -101,7 +105,7 @@ def _seedance25_recovery_keyboard(job_id: str) -> dict:
 async def tg_send_message(chat_id: int, text: str, *, reply_markup: Optional[dict] = None) -> Optional[int]:
     if not TG_API:
         raise RuntimeError("TELEGRAM_BOT_TOKEN not set")
-    payload: Dict[str, Any] = {"chat_id": int(chat_id), "text": text}
+    payload: Dict[str, Any] = {"chat_id": int(chat_id), "text": redact_secrets(text)}
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -132,7 +136,7 @@ async def tg_send_message(chat_id: int, text: str, *, reply_markup: Optional[dic
                 continue
             print(
                 f"[redactor/telegram] sendMessage failed chat_id={chat_id} "
-                f"code={error_code} detail={str(data or response.text)[:500]}",
+                f"code={error_code} detail={redact_secrets(data or response.text)[:500]}",
                 flush=True,
             )
             return None
@@ -162,11 +166,14 @@ async def tg_send_chat_action(chat_id: int, action: str = "typing") -> None:
 async def tg_get_file_path(file_id: str) -> str:
     if not TG_API:
         raise RuntimeError("TELEGRAM_BOT_TOKEN not set")
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        response = await client.get(f"{TG_API}/getFile", params={"file_id": file_id})
-    response.raise_for_status()
-    payload = response.json()
-    return str((payload.get("result") or {}).get("file_path") or "").strip()
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.get(f"{TG_API}/getFile", params={"file_id": file_id})
+        response.raise_for_status()
+        return str(response.json()["result"]["file_path"]).strip()
+    except Exception as exc:
+        logging.warning("Telegram worker getFile failed: %s", redact_secrets(exc))
+        raise RuntimeError("Не удалось получить файл из Telegram. Отправь файл заново.") from None
 
 
 async def tg_download_file_bytes(file_path: str) -> bytes:
@@ -175,10 +182,14 @@ async def tg_download_file_bytes(file_path: str) -> bytes:
     if not file_path:
         raise RuntimeError("Telegram не вернул file_path для голосового.")
     url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        response = await client.get(url)
-    response.raise_for_status()
-    return response.content
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.get(url)
+        response.raise_for_status()
+        return response.content
+    except Exception as exc:
+        logging.warning("Telegram worker file download failed: %s", redact_secrets(exc))
+        raise RuntimeError("Не удалось скачать файл из Telegram. Отправь файл заново.") from None
 
 
 async def _ffmpeg_convert_audio_to_mp3(audio_bytes: bytes) -> bytes:
@@ -501,7 +512,7 @@ async def tg_send_video_url(chat_id: int, video_url: str, *, caption: Optional[s
         raise RuntimeError("TELEGRAM_BOT_TOKEN not set")
     payload: Dict[str, Any] = {"chat_id": int(chat_id), "video": str(video_url)}
     if caption:
-        payload["caption"] = caption
+        payload["caption"] = redact_secrets(caption)
     async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(f"{TG_API}/sendVideo", json=payload)
     try:
@@ -541,7 +552,7 @@ async def tg_send_document_bytes(chat_id: int, doc_bytes: bytes, *, filename: st
         raise RuntimeError("TELEGRAM_BOT_TOKEN not set")
     data = {"chat_id": str(chat_id)}
     if caption:
-        data["caption"] = caption
+        data["caption"] = redact_secrets(caption)
     if reply_markup is not None:
         data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
     files = {"document": (filename, doc_bytes, "application/zip")}
