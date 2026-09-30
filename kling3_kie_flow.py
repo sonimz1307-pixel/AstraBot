@@ -11,6 +11,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 import httpx
+from safe_errors import redact_secrets, install_secret_log_redaction
+
+install_secret_log_redaction()
 
 from db_supabase import supabase as sb
 from kling3_kie_pricing import (
@@ -37,7 +40,8 @@ STATUS_PATH = "/api/v1/jobs/recordInfo"
 
 
 class Kling3KieError(Exception):
-    pass
+    def __init__(self, message: object):
+        super().__init__(redact_secrets(message))
 
 
 def _headers() -> Dict[str, str]:
@@ -255,7 +259,7 @@ def normalize_kling3_kie_task(task: Dict[str, Any]) -> Dict[str, Any]:
         "video_url": video_url,
         "download_url": video_url,
         "output_url": video_url,
-        "error_message": fail_msg,
+        "error_message": redact_secrets(fail_msg),
         "finished": bool(video_url or status == "failed"),
         "raw": task,
     }
@@ -372,7 +376,7 @@ async def create_kling3_kie_task(
         except Exception as exc:
             raise Kling3KieError(f"KIE request failed: {exc}")
     if not (200 <= response.status_code < 300):
-        raise Kling3KieError(f"KIE error {response.status_code}: {response.text[:2000]}")
+        raise Kling3KieError(f"KIE error {response.status_code}: {redact_secrets(response.text)[:2000]}")
     try:
         data = response.json()
     except Exception:
@@ -397,7 +401,7 @@ async def get_kling3_kie_task(task_id: str) -> Dict[str, Any]:
         except Exception as exc:
             raise Kling3KieError(f"KIE status request failed: {exc}")
     if not (200 <= response.status_code < 300):
-        raise Kling3KieError(f"KIE status error {response.status_code}: {response.text[:2000]}")
+        raise Kling3KieError(f"KIE status error {response.status_code}: {redact_secrets(response.text)[:2000]}")
     try:
         data = response.json()
     except Exception:
