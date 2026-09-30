@@ -1938,12 +1938,20 @@
       const durSel = qs('#seedance_duration');
       if (durSel) {
         const opts = []; const max = is25 ? 30 : 15;
+        const canEdit = is25 && getSeedance25Flow() === 'omni';
+        if (canEdit) opts.push(['-1', 'Как исходное видео (Video Editing)']);
+        if (!canEdit && durSel.value === '-1') durSel.value = '5';
         for (let i=4;i<=max;i++) opts.push([String(i), `${i} секунд`]);
         setSelectOptions(durSel, opts, durSel.value || '5');
       }
       if (aspectSelect && is25) setSelectOptions(aspectSelect, [['adaptive','Adaptive'],['16:9','16:9'],['9:16','9:16'],['1:1','1:1'],['4:3','4:3'],['3:4','3:4'],['21:9','21:9']], aspectSelect.value || 'adaptive');
       else if (aspectSelect && isMini) setSelectOptions(aspectSelect, [['16:9','16:9 (YouTube)'],['9:16','9:16 (Reels)'],['1:1','1:1']], aspectSelect.value || '16:9');
       else if (aspectSelect) setSelectOptions(aspectSelect, [['16:9','16:9 (YouTube)'],['21:9','21:9 — Кино'],['9:16','9:16 (Reels)'],['1:1','1:1']], aspectSelect.value || '16:9');
+      const editing = is25 && getSeedance25Flow() === 'omni' && durSel?.value === '-1';
+      if (aspectSelect) {
+        aspectSelect.disabled = editing;
+        if (editing) aspectSelect.value = 'adaptive';
+      }
       const miniPromoActive = isSeedanceMiniPromoActive();
       const miniTypeDesc = qs('#seedanceMiniTypeDesc');
       const miniPriceDesc = qs('#seedanceMiniPriceDesc');
@@ -1955,7 +1963,7 @@
       }
       if (aspectHint) aspectHint.textContent = isMini
         ? `Seedance 2.0 Mini: 720p, Text → Video, Image → Video или Omni Reference.${miniPromoActive ? ' 🔥 Акция до 5 сентября включительно.' : ''}`
-        : (is25 ? 'Seedance 2.5: 480p / 720p, 4–30 сек, Text → Video или Omni Reference.' : 'Для обычного Seedance 2.0 доступны форматы 16:9 / 21:9 — Кино / 9:16 / 1:1.');
+        : (is25 ? (editing ? 'Video Editing: одно исходное MP4 4–30 сек. Длина и формат результата — как у исходного видео. Можно добавить фото и аудио.' : 'Seedance 2.5: 480p / 720p, 4–30 сек. Для редактирования выбери Omni Reference → длительность «Как исходное видео».') : 'Для обычного Seedance 2.0 доступны форматы 16:9 / 21:9 — Кино / 9:16 / 1:1.');
     }
 
     function setFlowLabelText(labelEl, name, desc){
@@ -2257,7 +2265,8 @@
     qsa('input[name="seedance25_model"]').forEach(el => el.addEventListener('change', () => { updateCostUI(); }));
     qsa('input[name="seedance_flow"]').forEach(el => el.addEventListener('change', () => { updateCostUI(); }));
     qsa('input[name="seedance_kie_flow"]').forEach(el => el.addEventListener('change', () => { updateCostUI(); }));
-    qsa('input[name="seedance25_flow"]').forEach(el => el.addEventListener('change', () => { updateCostUI(); }));
+    qsa('input[name="seedance25_flow"]').forEach(el => el.addEventListener('change', () => { updateSeedanceUI(); updateCostUI(); }));
+    qs('#seedance_duration')?.addEventListener('change', () => { updateSeedanceUI(); updateCostUI(); });
 qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () => {
       updateVeoPriceHint();
       setVeoAdvancedEnabled();
@@ -2364,7 +2373,7 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
     function getCurrentRememberedModelKey(){
       const provider = getProvider();
       if (provider === 'kling') return `kling::${getKlingVersion()}`;
-      if (provider === 'seedance') return getSeedanceVariant() === 'kie' ? `seedance::${getSeedanceKieModel()}` : 'seedance::seedance-mini';
+      if (provider === 'seedance') return getSeedanceVariant() === '25' ? `seedance::${getSeedance25Model()}` : (getSeedanceVariant() === 'kie' ? `seedance::${getSeedanceKieModel()}` : 'seedance::seedance-mini');
       if (provider === 'veo') return `veo::${getVeoModel()}`;
       if (provider === 'grok') return `grok::${getGrokModel()}`;
       if (provider === 'google') return 'google::gemini-omni-video';
@@ -2409,6 +2418,9 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
         if (payload.variant === 'kie') {
           payload.model = getSeedanceKieModel();
           payload.flow = getSeedanceKieFlow();
+        } else if (payload.variant === '25') {
+          payload.model = getSeedance25Model();
+          payload.flow = getSeedance25Flow();
         } else {
           payload.model = 'seedance-mini';
           payload.flow = (qs('input[name="seedance_flow"]:checked')?.value || 'text');
@@ -2507,6 +2519,10 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
         if (payload.variant === 'kie') {
           if (payload.model) setRadioValue('seedance_kie_model', payload.model);
           if (payload.flow) setRadioValue('seedance_kie_flow', payload.flow);
+        } else if (payload.variant === '25') {
+          if (payload.model) setRadioValue('seedance25_model', payload.model);
+          if (payload.flow) setRadioValue('seedance25_flow', payload.flow);
+          updateSeedanceUI();
         } else {
           if (payload.flow) setRadioValue('seedance_flow', payload.flow);
         }
@@ -2607,6 +2623,7 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
         const seconds = parseInt((qs('#seedance_duration')?.value || "5"), 10);
 
         if (variant === '25'){
+          if (seconds === -1) return { known:false, tokens:null, note:'после загрузки видео и подтверждения цены' };
           const model = getSeedance25Model();
           const rate = model === 'seedance25-480p' ? 2 : 4.5;
           return { known:true, tokens: Math.ceil(seconds * rate) + SEEDANCE_RETAIL_EXTRA_TOKENS, note:'Цена без входного video reference. Для Omni с video ref итог пересчитывается по длительности входных видео.' };
@@ -2896,7 +2913,7 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
           if (variant === '25'){
             payload = {
               type: "seedance_settings", provider: "seedance25", seedance_variant: "25",
-              seedance_model: getSeedance25Model(), flow: getSeedance25Flow(), duration, aspect_ratio
+              seedance_model: getSeedance25Model(), flow: getSeedance25Flow(), duration, aspect_ratio: duration === -1 ? 'adaptive' : aspect_ratio
             };
           } else           if (variant === 'kie'){
             payload = {
