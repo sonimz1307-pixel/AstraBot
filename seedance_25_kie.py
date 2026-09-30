@@ -25,7 +25,7 @@ SEEDANCE25_POLL_SECONDS = float(os.getenv("SEEDANCE25_POLL_SECONDS", "6") or "6"
 
 SEEDANCE25_MODEL_ID = "bytedance/seedance-2-5"
 SEEDANCE25_ALLOWED_MODELS = {"seedance25-480p", "seedance25-720p"}
-SEEDANCE25_ALLOWED_DURATIONS = tuple(range(4, 31))
+SEEDANCE25_ALLOWED_DURATIONS = (-1, *range(4, 31))
 SEEDANCE25_ALLOWED_ASPECT_RATIOS = ("1:1", "4:3", "3:4", "16:9", "9:16", "21:9", "adaptive")
 SEEDANCE25_PROMPT_MAX_CHARS = max(1, int(os.getenv("SEEDANCE25_PROMPT_MAX_CHARS", "30000") or "30000"))
 SEEDANCE25_MAX_IMAGE_REFS = max(1, int(os.getenv("SEEDANCE25_MAX_IMAGE_REFS", "30") or "30"))
@@ -114,7 +114,32 @@ def normalize_seedance25_duration(value: Any, default: int = 5) -> int:
         out = int(value)
     except Exception:
         out = int(default)
-    return max(4, min(30, out))
+    return -1 if out == -1 else max(4, min(30, out))
+
+
+def validate_seedance25_video_edit(*, duration: Any, mode: Any,
+                                  video_count: int, input_video_duration_sec: Any) -> None:
+    """Nabex editing uses one measured source, so the price is known before debit."""
+    if normalize_seedance25_duration(duration) != -1:
+        return
+    if normalize_seedance25_mode(mode) != "omni_reference" or video_count != 1:
+        raise Seedance25KieError("Video Editing: добавь одно исходное видео в Omni Reference. Фото и аудио можно добавить отдельно.")
+    try:
+        seconds = float(input_video_duration_sec)
+    except (TypeError, ValueError):
+        seconds = 0.0
+    if not math.isfinite(seconds) or not 4.0 <= seconds <= 30.0:
+        raise Seedance25KieError("Video Editing: длительность исходного видео должна быть от 4 до 30 секунд.")
+
+
+def seedance25_output_seconds(duration: Any, *, input_video_duration_sec: Any = 0) -> int:
+    """Keep API duration=-1 separate from the positive duration used for pricing."""
+    seconds = normalize_seedance25_duration(duration)
+    if seconds != -1:
+        return seconds
+    validate_seedance25_video_edit(duration=-1, mode="omni_reference", video_count=1,
+                                  input_video_duration_sec=input_video_duration_sec)
+    return seedance25_billable_input_video_seconds(input_video_duration_sec)
 
 
 def normalize_seedance25_aspect_ratio(value: Any, default: str = "adaptive") -> str:
@@ -143,7 +168,7 @@ def seedance25_billable_input_video_seconds(value: Any) -> int:
 
 def seedance25_tokens_for_duration(model: Any, duration: Any, *, input_video_duration_sec: Any = 0) -> int:
     normalized_model = normalize_seedance25_model(model)
-    output_seconds = normalize_seedance25_duration(duration)
+    output_seconds = seedance25_output_seconds(duration, input_video_duration_sec=input_video_duration_sec)
     input_seconds = seedance25_billable_input_video_seconds(input_video_duration_sec)
     if input_seconds > 0:
         rate = SEEDANCE25_RETAIL_TOKENS_PER_BILLABLE_SEC_WITH_VIDEO[normalized_model]
@@ -154,7 +179,7 @@ def seedance25_tokens_for_duration(model: Any, duration: Any, *, input_video_dur
 
 def seedance25_pricing_breakdown(model: Any, duration: Any, *, input_video_duration_sec: Any = 0) -> Dict[str, Any]:
     normalized_model = normalize_seedance25_model(model)
-    output_seconds = normalize_seedance25_duration(duration)
+    output_seconds = seedance25_output_seconds(duration, input_video_duration_sec=input_video_duration_sec)
     input_seconds = seedance25_billable_input_video_seconds(input_video_duration_sec)
     has_video_input = input_seconds > 0
     billable_seconds = input_seconds + output_seconds if has_video_input else output_seconds
@@ -165,13 +190,15 @@ def seedance25_pricing_breakdown(model: Any, duration: Any, *, input_video_durat
     )
     provider_rate = SEEDANCE25_PROVIDER_USD_PER_SEC[normalized_model]["with_video" if has_video_input else "no_video"]
     provider_cost_usd = float(provider_rate) * float(billable_seconds)
-    tokens = seedance25_tokens_for_duration(normalized_model, output_seconds, input_video_duration_sec=input_seconds)
+    tokens = seedance25_tokens_for_duration(normalized_model, duration, input_video_duration_sec=input_video_duration_sec)
     retail_rub = float(tokens) * SEEDANCE25_TOKEN_RUB
     provider_rub = provider_cost_usd * SEEDANCE25_USD_RUB
     margin_pct = ((retail_rub - provider_rub) / retail_rub * 100.0) if retail_rub > 0 else 0.0
     return {
         "model": normalized_model,
         "duration": output_seconds,
+        "api_duration": normalize_seedance25_duration(duration),
+        "video_editing": normalize_seedance25_duration(duration) == -1,
         "input_video_seconds": input_seconds,
         "billable_seconds": billable_seconds,
         "has_video_input": has_video_input,
@@ -473,7 +500,7 @@ def _base_payload(*, prompt: Any, model: Any, duration: Any, aspect_ratio: Any) 
         "return_last_frame": False,
         "generate_audio": True,
         "resolution": seedance25_resolution(model),
-        "aspect_ratio": normalize_seedance25_aspect_ratio(aspect_ratio),
+        "aspect_ratio": "adaptive" if normalize_seedance25_duration(duration) == -1 else normalize_seedance25_aspect_ratio(aspect_ratio),
         "duration": normalize_seedance25_duration(duration),
         "output_format": "mp4",
         "web_search": False,
@@ -481,6 +508,8 @@ def _base_payload(*, prompt: Any, model: Any, duration: Any, aspect_ratio: Any) 
 
 
 async def run_seedance25_text_to_video(*, model: Any = None, resolution: Any = None, prompt: str, duration: Any, aspect_ratio: Any = "adaptive", on_task_id: Optional[Callable[[str], Any]] = None, resume_task_id: str = "") -> str:
+    if normalize_seedance25_duration(duration) == -1:
+        raise Seedance25KieError("Video Editing доступен в Omni Reference с одним исходным видео.")
     selected = model if model is not None else resolution
     normalized_model = normalize_seedance25_model(selected or "seedance25-720p")
     payload = _base_payload(prompt=prompt, model=normalized_model, duration=duration, aspect_ratio=aspect_ratio)
@@ -507,6 +536,8 @@ async def run_seedance25_omni_reference(
     video_refs = [bytes(x) for x in list(reference_videos or []) if x]
     audio_refs = [bytes(x) for x in list(reference_audios or []) if x]
     total = len(image_refs) + len(video_refs) + len(audio_refs)
+    if normalize_seedance25_duration(duration) == -1 and len(video_refs) != 1:
+        raise Seedance25KieError("Video Editing: требуется одно исходное видео.")
     if total <= 0:
         raise Seedance25KieError("Seedance 2.5 Omni Reference requires at least one reference")
     if len(image_refs) > SEEDANCE25_MAX_IMAGE_REFS:
@@ -557,6 +588,8 @@ async def run_seedance25_omni_reference_urls(
     video_urls = _clean_reference_urls(reference_video_urls, limit=SEEDANCE25_MAX_VIDEO_REFS)
     audio_urls = _clean_reference_urls(reference_audio_urls, limit=SEEDANCE25_MAX_AUDIO_REFS)
     total = len(image_urls) + len(video_urls) + len(audio_urls)
+    if normalize_seedance25_duration(duration) == -1 and len(video_urls) != 1:
+        raise Seedance25KieError("Video Editing: требуется одно исходное видео.")
     if total <= 0:
         raise Seedance25KieError("Seedance 2.5 Omni Reference requires at least one reference")
     if total > SEEDANCE25_MAX_TOTAL_REFS:
