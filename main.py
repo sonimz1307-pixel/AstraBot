@@ -15,6 +15,10 @@ from io import BytesIO
 from typing import Optional, Literal, Dict, Any, Tuple, List, Union
 
 import httpx
+from safe_errors import redact_secrets, public_error_text, safe_print as print, install_secret_log_redaction
+
+install_secret_log_redaction()
+
 from queue_redis import (
     acquire_generation_lock,
     claim_reliable_submission,
@@ -158,7 +162,10 @@ from veo31_fast_relax_kie import (
     veo31_fast_relax_tokens_for_run,
 )
 from seedance_kie import SEEDANCE_KIE_RETAIL_EXTRA_TOKENS, seedance_kie_tokens_for_duration, seedance_mini_promo_text
-from seedance_25_kie import seedance25_tokens_for_run, seedance25_resolution_from_model
+from seedance_25_kie import (
+    Seedance25KieError, normalize_seedance25_duration, validate_seedance25_video_edit,
+    seedance25_tokens_for_run, seedance25_resolution_from_model,
+)
 from seedance25_billing import (
     Seedance25InsufficientBalanceError,
     charge_seedance25_once,
@@ -5977,8 +5984,23 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
     if seedance_model.lower() in {"seedance-kie-mini", "seedance-2-mini", "seedance-mini", "mini"} or task_type.lower() == "seedance-2-mini":
         seedance_model = "seedance-kie-mini"
         task_type = "seedance-2-mini"
-    duration = _seedance_setting_int(settings, "duration", 5, minimum=4, maximum=30)
+    duration = (normalize_seedance25_duration(settings.get("duration", 5)) if provider_kind == "seedance25"
+                else _seedance_setting_int(settings, "duration", 5, minimum=4, maximum=30))
     aspect_ratio = str(settings.get("aspect_ratio") or "16:9").strip()
+    if provider_kind == "seedance25" and duration == -1:
+        aspect_ratio = "adaptive"
+        edit_refs = st.get("seedance_omni") or {}
+        edit_videos = [x for x in (edit_refs.get("video_file_ids") or []) if str(x or "").strip()]
+        edit_durations = list(edit_refs.get("video_durations_sec") or [])
+        try:
+            validate_seedance25_video_edit(
+                duration=duration, mode="omni_reference" if mode_now == "seedance_omni" else "text_to_video",
+                video_count=len(edit_videos),
+                input_video_duration_sec=edit_durations[0] if len(edit_durations) == 1 else 0,
+            )
+        except Seedance25KieError as exc:
+            await _seedance25_send_required(chat_id, str(exc), reply_markup=_seedance_refs_collect_kb())
+            return {"ok": True}
     max_images = _seedance_setting_int(
         settings,
         "max_images",
@@ -6175,6 +6197,10 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
             audio_count = len([x for x in (so_preview.get("audio_file_ids") or []) if str(x or "").strip()])
         resolution_label = normalize_wan3_resolution(settings.get("resolution") or "720p") if provider_kind == "wan3" else seedance25_resolution_from_model(seedance_model)
         mode_label = "Omni Reference" if mode_now == "seedance_omni" else ("First / Last Frame" if mode_now == "seedance_i2v" else "Text → Video")
+        duration_label = f"{int(duration)} сек"
+        if provider_kind == "seedance25" and duration == -1:
+            mode_label = "Video Editing"
+            duration_label = f"как исходное видео ({seedance_input_video_sec:g} сек)"
         refs_line = ""
         if mode_now == "seedance_omni":
             refs_line = (
@@ -6185,7 +6211,7 @@ async def _seedance_start_generation_from_prompt(chat_id: int, user_id: int, st:
             ("🎬 Wan 3.0 — подтверждение\n\n" if provider_kind == "wan3" else "🎬 Seedance 2.5 — подтверждение\n\n")
             + f"Режим: {mode_label}\n"
             f"Качество: {resolution_label}\n"
-            f"Длительность результата: {int(duration)} сек\n"
+            f"Длительность результата: {duration_label}\n"
             f"Формат: {aspect_ratio}"
             f"{refs_line}\n"
             f"Промпт: {len(prompt)} символов\n\n"
@@ -7584,7 +7610,7 @@ async def tg_send_document_bytes(
     files = {"document": (filename, file_bytes, mime)}
     data = {"chat_id": str(chat_id)}
     if caption:
-        data["caption"] = caption
+        data["caption"] = redact_secrets(caption)
     if reply_markup is not None:
         data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
 
@@ -7616,7 +7642,7 @@ async def tg_send_audio_bytes(
     files = {"audio": (filename, audio_bytes, "audio/mpeg")}
     data = {"chat_id": str(chat_id)}
     if caption:
-        data["caption"] = caption
+        data["caption"] = redact_secrets(caption)
     if reply_markup is not None:
         data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
 
@@ -7666,7 +7692,7 @@ async def tg_send_message(chat_id: int, text: str, reply_markup: Optional[dict] 
     if not TELEGRAM_BOT_TOKEN:
         return None
 
-    payload: Dict[str, Any] = {"chat_id": int(chat_id), "text": str(text)}
+    payload: Dict[str, Any] = {"chat_id": int(chat_id), "text": redact_secrets(text)}
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
 
@@ -7738,7 +7764,7 @@ async def tg_send_message(chat_id: int, text: str, reply_markup: Optional[dict] 
 
             logging.error(
                 "Telegram sendMessage failed chat_id=%s code=%s attempt=%s/%s description=%s",
-                chat_id, error_code, attempt, max_attempts, description[:600],
+                chat_id, error_code, attempt, max_attempts, redact_secrets(description)[:600],
             )
             return None
 
@@ -7830,7 +7856,7 @@ async def tg_send_photo_bytes(
     files = {"photo": (f"image.{ext}", image_bytes, mime)}
     data = {"chat_id": str(chat_id)}
     if caption:
-        data["caption"] = caption
+        data["caption"] = redact_secrets(caption)
     if reply_markup is not None:
         data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
 
@@ -7858,7 +7884,7 @@ async def tg_send_audio_bytes(
     files = {"audio": (filename, audio_bytes, "audio/mpeg")}
     data = {"chat_id": str(chat_id)}
     if caption:
-        data["caption"] = caption
+        data["caption"] = redact_secrets(caption)
     if reply_markup is not None:
         data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
     async with httpx.AsyncClient(timeout=180) as client:
@@ -7879,7 +7905,7 @@ async def tg_send_document_bytes(
     files = {"document": (filename, file_bytes, mime)}
     data = {"chat_id": str(chat_id)}
     if caption:
-        data["caption"] = caption
+        data["caption"] = redact_secrets(caption)
     if reply_markup is not None:
         data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
     async with httpx.AsyncClient(timeout=180) as client:
@@ -7934,7 +7960,7 @@ async def tg_send_photo_bytes_return_message_id(
     files = {"photo": ("image.png", image_bytes, "image/png")}
     data = {"chat_id": str(chat_id)}
     if caption:
-        data["caption"] = caption
+        data["caption"] = redact_secrets(caption)
     if reply_markup is not None:
         data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
 
@@ -7954,7 +7980,7 @@ async def tg_send_photo_bytes_return_message_id(
 async def tg_edit_message_caption(chat_id: int, message_id: int, caption: str):
     if not TELEGRAM_BOT_TOKEN:
         return
-    payload = {"chat_id": str(chat_id), "message_id": int(message_id), "caption": caption}
+    payload = {"chat_id": str(chat_id), "message_id": int(message_id), "caption": redact_secrets(caption)}
     async with httpx.AsyncClient(timeout=20) as client:
         await client.post(f"{TELEGRAM_API_BASE}/editMessageCaption", json=payload)
 
@@ -7966,8 +7992,8 @@ def _telegram_api_assert_ok(response: httpx.Response, method: str) -> dict:
         payload = {}
     if response.status_code >= 400 or not (isinstance(payload, dict) and payload.get("ok")):
         detail = payload.get("description") if isinstance(payload, dict) else None
-        detail = detail or response.text[:600] or f"Telegram {method} failed with HTTP {response.status_code}"
-        raise RuntimeError(detail)
+        detail = detail or redact_secrets(response.text)[:600] or f"Telegram {method} failed with HTTP {response.status_code}"
+        raise RuntimeError(public_error_text(detail))
     return payload
 
 
@@ -7982,7 +8008,7 @@ async def tg_edit_message_media_photo(chat_id: int, message_id: int, image_bytes
         raise RuntimeError("Empty image bytes for editMessageMedia")
     media = {"type": "photo", "media": "attach://photo"}
     if caption:
-        media["caption"] = caption
+        media["caption"] = redact_secrets(caption)
 
     try:
         ext, mime = _detect_image_type(image_bytes)
@@ -8007,7 +8033,7 @@ async def tg_edit_message_media_photo_url(chat_id: int, message_id: int, image_u
         raise RuntimeError("Empty image URL for editMessageMedia")
     media = {"type": "photo", "media": url}
     if caption:
-        media["caption"] = caption
+        media["caption"] = redact_secrets(caption)
     payload = {"chat_id": int(chat_id), "message_id": int(message_id), "media": media}
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
@@ -8021,7 +8047,7 @@ async def tg_send_photo_url(chat_id: int, image_url: str, caption: Optional[str]
         return None
     payload: Dict[str, Any] = {"chat_id": int(chat_id), "photo": str(image_url or "").strip()}
     if caption:
-        payload["caption"] = caption
+        payload["caption"] = redact_secrets(caption)
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
     async with httpx.AsyncClient(timeout=60) as client:
@@ -8100,19 +8126,26 @@ async def _progress_caption_updater(chat_id: int, message_id: int, base_text: st
         await asyncio.sleep(PROGRESS_UPDATE_EVERY)
 
 async def tg_get_file_path(file_id: str) -> str:
-    async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.get(f"{TELEGRAM_API_BASE}/getFile", params={"file_id": file_id})
-    r.raise_for_status()
-    data = r.json()
-    return data["result"]["file_path"]
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(f"{TELEGRAM_API_BASE}/getFile", params={"file_id": file_id})
+        r.raise_for_status()
+        return r.json()["result"]["file_path"]
+    except Exception as exc:
+        logging.warning("Telegram getFile failed: %s", redact_secrets(exc))
+        raise RuntimeError("Не удалось получить файл из Telegram. Отправь файл заново.") from None
 
 
 async def tg_download_file_bytes(file_path: str) -> bytes:
     url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
-    async with httpx.AsyncClient(timeout=120) as client:
-        r = await client.get(url)
-    r.raise_for_status()
-    return r.content
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            r = await client.get(url)
+        r.raise_for_status()
+        return r.content
+    except Exception as exc:
+        logging.warning("Telegram file download failed: %s", redact_secrets(exc))
+        raise RuntimeError("Не удалось скачать файл из Telegram. Отправь файл заново.") from None
 
 
 # STT / распознавание Telegram voice вынесено в worker_redactor.py.
@@ -8128,7 +8161,7 @@ async def tg_send_video_url(chat_id: int, video_url: str, caption: str | None = 
         return
     payload = {"chat_id": chat_id, "video": video_url}
     if caption:
-        payload["caption"] = caption
+        payload["caption"] = redact_secrets(caption)
     if reply_markup:
         payload["reply_markup"] = reply_markup
     async with httpx.AsyncClient(timeout=60) as client:
@@ -12282,17 +12315,20 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
             except Exception:
                 duration = 5
             max_duration = 30 if provider_kind == "seedance25" else 15
-            if duration < 4 or duration > max_duration:
+            video_editing = provider_kind == "seedance25" and flow == "omni" and duration == -1
+            if not video_editing and (duration < 4 or duration > max_duration):
                 duration = 5
 
             aspect_ratio = str(payload.get("aspect_ratio") or ("adaptive" if provider_kind == "seedance25" else "16:9")).strip()
             if provider_kind == "seedance25":
+                if video_editing:
+                    aspect_ratio = "adaptive"
                 if aspect_ratio not in ("1:1", "4:3", "3:4", "16:9", "9:16", "21:9", "adaptive"):
                     aspect_ratio = "adaptive"
                 seedance_model = "seedance25-480p" if "480" in seedance_model_raw else "seedance25-720p"
                 task_type = "seedance-2-5"
                 max_images = 30 if flow == "omni" else 0
-                max_videos = 10 if flow == "omni" else 0
+                max_videos = (1 if video_editing else 10) if flow == "omni" else 0
                 max_audios = 10 if flow == "omni" else 0
                 max_total_refs = 50 if flow == "omni" else 0
             elif provider_kind == "seedance_kie":
@@ -12378,7 +12414,7 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
                      ("✅ Настройки Seedance 2.0 Omni сохранены.\n\n"
                       if provider_kind == "seedance_kie" else
                       "✅ Настройки Seedance 2.0 Mini Omni сохранены." + _seedance_mini_promo_notice() + "\n\n"))
-                    + ("Теперь пришли refs: до 30 фото, до 10 MP4-видео (до 20 МБ каждое, суммарно до 30 сек) и до 10 аудио. Используй @image1 / @video1 / @audio1 в промпте. Когда закончишь — нажми «✅ Готово»."
+                    + (("Video Editing: пришли одно исходное MP4-видео длительностью 4–30 сек (до 20 МБ). Можно добавить до 30 фото и до 10 аудио. Длина и формат результата — как у исходного видео. Используй @image1 / @video1 / @audio1 в промпте. Когда закончишь — нажми «✅ Готово»." if video_editing else "Теперь пришли refs: до 30 фото, до 10 MP4-видео (до 20 МБ каждое, суммарно до 30 сек) и до 10 аудио. Используй @image1 / @video1 / @audio1 в промпте. Когда закончишь — нажми «✅ Готово».")
                        if provider_kind == "seedance25" else
                        "Теперь пришли референсы: можно только фото, либо фото/видео/аудио вместе.\nАудио можно файлом или голосовым сообщением — я конвертирую в MP3. Audio-only нельзя. Когда закончишь — нажми «✅ Готово»."),
                     reply_markup=_seedance_refs_collect_kb(),
@@ -13768,8 +13804,11 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
         if seedance_model.lower() in {"seedance-kie-mini", "seedance-2-mini", "seedance-mini", "mini"} or task_type.lower() == "seedance-2-mini":
             seedance_model = "seedance-kie-mini"
             task_type = "seedance-2-mini"
-        duration = _seedance_setting_int(settings, "duration", 5, minimum=4, maximum=30)
+        duration = (normalize_seedance25_duration(settings.get("duration", 5)) if provider_kind == "seedance25"
+                    else _seedance_setting_int(settings, "duration", 5, minimum=4, maximum=30))
         aspect_ratio = str(settings.get("aspect_ratio") or "16:9").strip()
+        if provider_kind == "seedance25" and duration == -1:
+            aspect_ratio = "adaptive"
         max_images = _seedance_setting_int(
             settings,
             "max_images",
@@ -16270,8 +16309,9 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
                         reply_markup=_seedance_refs_collect_kb(),
                     )
                     return {"ok": True}
-                if duration_sec < 2.0:
-                    await tg_send_message(chat_id, "Для Seedance 2.5 video reference должен быть не короче 2 секунд.", reply_markup=_seedance_refs_collect_kb())
+                min_video_seconds = 4 if normalize_seedance25_duration(settings.get("duration", 5)) == -1 else 2
+                if duration_sec < min_video_seconds:
+                    await tg_send_message(chat_id, f"Для этого режима Seedance 2.5 video reference должен быть не короче {min_video_seconds} секунд.", reply_markup=_seedance_refs_collect_kb())
                     return {"ok": True}
             if duration_sec and duration_sec > max_single_video:
                 await tg_send_message(chat_id, f"Видео reference слишком длинное. Максимум {int(max_single_video)} секунд.", reply_markup=_seedance_refs_collect_kb())
@@ -16627,9 +16667,11 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
                         reply_markup=_seedance_refs_collect_kb(),
                     )
                     return {"ok": True}
-                if provider_kind == "seedance25" and duration_sec < 2.0:
-                    await tg_send_message(chat_id, "Для Seedance 2.5 video reference должен быть не короче 2 секунд.", reply_markup=_seedance_refs_collect_kb())
-                    return {"ok": True}
+                if provider_kind == "seedance25":
+                    min_video_seconds = 4 if normalize_seedance25_duration(settings.get("duration", 5)) == -1 else 2
+                    if duration_sec < min_video_seconds:
+                        await tg_send_message(chat_id, f"Для этого режима Seedance 2.5 video reference должен быть не короче {min_video_seconds} секунд.", reply_markup=_seedance_refs_collect_kb())
+                        return {"ok": True}
                 if duration_sec and duration_sec > max_single_video:
                     await tg_send_message(chat_id, f"Видео reference слишком длинное. Максимум {int(max_single_video)} секунд.", reply_markup=_seedance_refs_collect_kb())
                     return {"ok": True}
@@ -18431,7 +18473,8 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
                     )
                 await tg_send_message(chat_id, f"✅ Готово!\n{out_url}", reply_markup=_main_menu_for(user_id))
             except Exception as e:
-                await tg_send_message(chat_id, f"❌ Ошибка Kling Motion Control: {e}", reply_markup=_main_menu_for(user_id))
+                logging.exception("Kling Motion Control failed")
+                await tg_send_message(chat_id, "❌ Ошибка Kling Motion Control: " + public_error_text(e), reply_markup=_main_menu_for(user_id))
             finally:
                 st["kling_mc"] = {"step": "need_avatar", "avatar_bytes": None, "video_bytes": None, "video_duration": None}
                 _set_mode(chat_id, user_id, "chat")
