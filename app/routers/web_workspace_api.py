@@ -401,6 +401,7 @@ from gemini_omni_video import (
     run_gemini_omni_video,
 )
 from seedance_25_kie import (
+    Seedance25KieError, validate_seedance25_video_edit,
     Seedance25TaskFailedError, Seedance25TaskPendingError,
     normalize_seedance25_aspect_ratio, normalize_seedance25_duration, normalize_seedance25_mode, normalize_seedance25_resolution,
     run_seedance25_omni_reference, run_seedance25_omni_reference_urls, run_seedance25_text_to_video, seedance25_pricing_breakdown,
@@ -5663,7 +5664,8 @@ def _workspace_video_charge_spec(
     seedance_video_reference_duration_sec: float = 0.0,
     kling3_kie_multi_shots: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    duration = max(1, int(duration or 0))
+    duration = (normalize_seedance25_duration(duration) if provider == "seedance25"
+                else max(1, int(duration or 0)))
 
     if provider == "kling":
         if model == "kling-3.0-turbo":
@@ -5886,6 +5888,8 @@ def _workspace_video_charge_spec(
                      "duration":normalized_duration, "resolution":normalized_resolution, "generate_audio":True,
                      "has_video_reference":bool(has_seedance_video_reference),
                      "input_video_seconds":int(breakdown.get("input_video_seconds") or 0),
+                     "output_seconds":int(breakdown["duration"]),
+                     "video_editing":bool(breakdown["video_editing"]),
                      "billable_seconds":int(breakdown.get("billable_seconds") or normalized_duration),
                      "provider_rate_usd_per_sec":breakdown.get("provider_rate_usd_per_sec"),
                      "provider_cost_usd":breakdown.get("provider_cost_usd"), "margin_pct":breakdown.get("margin_pct")},
@@ -6355,6 +6359,15 @@ async def workspace_video_run(
         resolution = normalize_seedance25_resolution(resolution or ("480p" if "480" in str(model or "").lower() else "720p"))
         model = "seedance25-480p" if resolution == "480p" else "seedance25-720p"
         aspect_ratio = normalize_seedance25_aspect_ratio(aspect_ratio or "adaptive")
+        try:
+            validate_seedance25_video_edit(
+                duration=duration, mode=mode, video_count=len(reference_videos),
+                input_video_duration_sec=reference_video_total_duration_sec,
+            )
+        except Seedance25KieError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        if duration == -1:
+            aspect_ratio = "adaptive"
         enable_audio = True
         if len(prompt) > int(os.getenv("SEEDANCE25_PROMPT_UI_MAX", "30000") or "30000"):
             raise HTTPException(status_code=400, detail="Seedance 2.5: prompt максимум 30 000 символов.")
@@ -6603,7 +6616,7 @@ async def workspace_video_run(
             "prompt": prompt,
             "status": "queued",
             "aspect_ratio": aspect_ratio,
-            "duration_sec": int(duration or 0),
+            "duration_sec": (int(charge_meta["output_seconds"]) if provider == "seedance25" and duration == -1 else int(duration or 0)),
             "resolution": resolution,
             "enable_audio": bool(enable_audio),
             "origin": "workspace",
