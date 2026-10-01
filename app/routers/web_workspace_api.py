@@ -1925,6 +1925,96 @@ async def _defer_workspace_video_archive(generation_id: str, user_id: int, sourc
         raise _WorkspaceArchiveRecoveryError("Video archive recovery needs retry") from exc
 
 
+async def _archive_workspace_video_via_downloader(
+    *,
+    source_url: str,
+    user_id: int,
+    generation_id: str,
+    content_type: str = "video/mp4",
+) -> Optional[Dict[str, Any]]:
+    """Archive a provider video through the external Timeweb downloader.
+
+    Returns None when the external downloader is not configured. Any configured
+    downloader failure raises so the caller can fall back to the legacy Render
+    download/upload path without losing a completed generation.
+    """
+    base_url = (os.getenv("MEDIA_DOWNLOADER_URL", "") or "").strip().rstrip("/")
+    secret = (os.getenv("MEDIA_DOWNLOADER_SECRET", "") or "").strip()
+    enabled = (os.getenv("MEDIA_DOWNLOADER_ENABLED", "false") or "false").strip().lower()
+    if enabled in {"0", "false", "no", "off"} or not base_url or not secret:
+        return None
+    if not base_url.lower().startswith("https://"):
+        raise RuntimeError("MEDIA_DOWNLOADER_URL must use https")
+
+    source_url_text = str(source_url or "").strip()
+    if not source_url_text:
+        raise RuntimeError("Missing provider video url")
+
+    mime_type = str(content_type or "video/mp4").split(";", 1)[0].strip() or "video/mp4"
+    ext = _storage_content_type_to_ext(mime_type, source_url_text)
+    storage_path = _workspace_video_storage_path(
+        user_id=int(user_id), generation_id=str(generation_id), ext=ext
+    )
+    payload = {
+        "source_url": source_url_text,
+        "generation_id": str(generation_id),
+        "target_bucket": _WORKSPACE_VIDEOS_BUCKET,
+        "storage_path": storage_path,
+        "content_type": mime_type,
+    }
+    timeout = httpx.Timeout(connect=20.0, read=1800.0, write=60.0, pool=60.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+        response = await client.post(
+            f"{base_url}/archive",
+            headers={"X-API-Key": secret, "Content-Type": "application/json"},
+            json=payload,
+        )
+    if response.status_code >= 300:
+        raise RuntimeError(
+            f"Media downloader archive failed: {response.status_code} {response.text[:800]}"
+        )
+    try:
+        data = response.json()
+    except Exception as exc:
+        raise RuntimeError("Media downloader returned invalid JSON") from exc
+    if not isinstance(data, dict) or not data.get("ok"):
+        raise RuntimeError(f"Media downloader returned unsuccessful result: {str(data)[:800]}")
+
+    returned_generation_id = str(data.get("generation_id") or generation_id).strip() or generation_id
+    if returned_generation_id != str(generation_id):
+        raise RuntimeError("Media downloader returned mismatched generation_id")
+    returned_bucket = str(data.get("bucket") or _WORKSPACE_VIDEOS_BUCKET).strip() or _WORKSPACE_VIDEOS_BUCKET
+    if returned_bucket != _WORKSPACE_VIDEOS_BUCKET:
+        raise RuntimeError("Media downloader returned mismatched bucket")
+    returned_path = str(data.get("storage_path") or storage_path).strip() or storage_path
+    file_size = int(data.get("size_bytes") or 0)
+    if file_size <= 0:
+        raise RuntimeError("Media downloader returned an empty file size")
+    returned_mime = (
+        str(data.get("mime_type") or mime_type).split(";", 1)[0].strip() or mime_type
+    )
+    public_url = None
+    if supabase is not None:
+        try:
+            public_url = _extract_storage_public_url(
+                supabase.storage.from_(_WORKSPACE_VIDEOS_BUCKET).get_public_url(returned_path)
+            )
+        except Exception:
+            public_url = None
+
+    print(
+        f"[workspace_storage] external archive completed generation={generation_id} "
+        f"size_bytes={file_size} bucket={_WORKSPACE_VIDEOS_BUCKET}",
+        flush=True,
+    )
+    return {
+        "storage_path": returned_path,
+        "public_url": public_url,
+        "file_size_bytes": file_size,
+        "mime_type": returned_mime,
+    }
+
+
 def _workspace_storage_payload_too_large(status_code: int, response_text: str) -> bool:
     text = str(response_text or "").strip().lower()
     if int(status_code or 0) == 413:
@@ -2537,19 +2627,37 @@ async def _finalize_workspace_generation_from_url(
     content_type = "video/mp4"
     try:
         _update_workspace_generation(generation_id, {"provider_video_url": provider_video_url, "status": "processing", "updated_at": _utc_now_iso()})
-        tmp_path, downloaded_bytes, content_type = await _download_video_to_tempfile(provider_video_url)
-        print(
-            f"[workspace_storage] provider download completed generation={generation_id} "
-            f"size_bytes={downloaded_bytes} size_mib={downloaded_bytes / (1024 * 1024):.1f}",
-            flush=True,
-        )
-        uploaded = await asyncio.to_thread(
-            _upload_workspace_video_file,
-            local_path=tmp_path,
-            user_id=user_id,
-            generation_id=generation_id,
-            content_type=content_type,
-        )
+
+        uploaded = None
+        try:
+            uploaded = await _archive_workspace_video_via_downloader(
+                source_url=provider_video_url,
+                user_id=user_id,
+                generation_id=generation_id,
+                content_type=content_type,
+            )
+        except Exception as downloader_exc:
+            print(
+                f"[workspace_storage] external archive failed generation={generation_id} "
+                f"kind={type(downloader_exc).__name__}; falling back to Render",
+                flush=True,
+            )
+
+        if uploaded is None:
+            tmp_path, downloaded_bytes, content_type = await _download_video_to_tempfile(provider_video_url)
+            print(
+                f"[workspace_storage] provider download completed generation={generation_id} "
+                f"size_bytes={downloaded_bytes} size_mib={downloaded_bytes / (1024 * 1024):.1f}",
+                flush=True,
+            )
+            uploaded = await asyncio.to_thread(
+                _upload_workspace_video_file,
+                local_path=tmp_path,
+                user_id=user_id,
+                generation_id=generation_id,
+                content_type=content_type,
+            )
+
         _update_workspace_generation(
             generation_id,
             {
