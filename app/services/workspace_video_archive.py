@@ -48,16 +48,34 @@ async def process(job: dict, worker_id: str) -> None:
         return
     temporary = ''
     try:
-        temporary, size, mime = await ww._download_video_to_tempfile(job['source_url'])
-        upload_task = asyncio.create_task(asyncio.to_thread(ww._upload_workspace_video_file,
-            local_path=temporary, user_id=int(job['user_id']), generation_id=generation_id, content_type=mime))
-        # Do not remove a file while a cancelled to_thread upload still reads it.
+        size = 0
+        mime = 'video/mp4'
+        result = None
         try:
-            result = await asyncio.shield(upload_task)
-        except asyncio.CancelledError:
-            with suppress(Exception):
-                await upload_task
-            raise
+            result = await ww._archive_workspace_video_via_downloader(
+                source_url=job['source_url'],
+                user_id=int(job['user_id']),
+                generation_id=generation_id,
+                content_type=mime,
+            )
+        except Exception as downloader_exc:
+            LOG.warning(
+                'External archive failed generation=%s kind=%s; falling back to Render',
+                generation_id, type(downloader_exc).__name__,
+            )
+
+        if result is None:
+            temporary, size, mime = await ww._download_video_to_tempfile(job['source_url'])
+            upload_task = asyncio.create_task(asyncio.to_thread(ww._upload_workspace_video_file,
+                local_path=temporary, user_id=int(job['user_id']), generation_id=generation_id, content_type=mime))
+            # Do not remove a file while a cancelled to_thread upload still reads it.
+            try:
+                result = await asyncio.shield(upload_task)
+            except asyncio.CancelledError:
+                with suppress(Exception):
+                    await upload_task
+                raise
+
         await asyncio.to_thread(rpc, 'finish', generation_id=generation_id, worker_id=worker_id,
             storage_path=result['storage_path'], file_size=int(result.get('file_size_bytes') or size), mime_type=result.get('mime_type') or mime)
     except asyncio.CancelledError:
