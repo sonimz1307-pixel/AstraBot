@@ -498,6 +498,7 @@
 
   </style>
   <script src="/static/nabex-payments.js?v=20261006-r2"></script>
+  <script src="/static/nabex-telegram-auth.js?v=20261006-r3"></script>
 </head>
 <body>
   <main class="app">
@@ -770,6 +771,7 @@
     }
 
     async function createTopup(tokens, emailOverride) {
+      if (!window.NabexTelegramAuth.ensureSession(tg)) return { ok: false, canceled: true };
       const uid = query.get("uid") || query.get("tg_user_id") || query.get("user_id") || "";
       const payload = {
         tokens: Number(tokens || 0),
