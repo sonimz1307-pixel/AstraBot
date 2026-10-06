@@ -9,6 +9,7 @@ from uuid import NAMESPACE_URL, uuid5
 from billing_db import resolve_billing_user_id
 from subscriptions_db import get_subscription_plan
 from yookassa_flow import fetch_yookassa_payment
+from yookassa_accounts import account_name, get_shop, intent_account, validate_provider_shop
 from yookassa_store import (
     claim_yookassa_payment,
     claim_yookassa_subscription_user_lock,
@@ -89,6 +90,7 @@ async def reconcile_yookassa_payment(
     *,
     expected_user_id: Optional[int] = None,
     source: str = "reconcile",
+    expected_account: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Verify YooKassa directly and apply a successful payment exactly once.
 
@@ -100,6 +102,9 @@ async def reconcile_yookassa_payment(
         raise ValueError("payment_id is required")
 
     intent = await asyncio.to_thread(get_yookassa_payment_intent, pid)
+    account = intent_account(intent) if intent else account_name(expected_account)
+    if expected_account is not None and account != account_name(expected_account):
+        raise RuntimeError("YooKassa notification shop mismatch")
     if intent and expected_user_id and not _same_user(_safe_int(intent.get("user_id")), int(expected_user_id)):
         raise PermissionError("payment does not belong to this user")
     if intent and str(intent.get("state") or "").lower() == "applied":
@@ -116,7 +121,13 @@ async def reconcile_yookassa_payment(
             "plan_code": str(intent.get("plan_code") or ""),
         }
 
-    verified = await fetch_yookassa_payment(pid)
+    shop = get_shop(account)
+    stored_meta = (intent or {}).get("metadata") or {}
+    stored_shop = str(stored_meta.get("yookassa_shop_id") or "")
+    if stored_shop and stored_shop != shop.shop_id:
+        raise RuntimeError("Stored YooKassa shop configuration mismatch")
+    verified = await fetch_yookassa_payment(pid, account=account)
+    validate_provider_shop(verified, shop)
     verified_id = str(verified.get("id") or "").strip()
     if verified_id != pid:
         raise RuntimeError("YooKassa payment id mismatch")
@@ -138,6 +149,8 @@ async def reconcile_yookassa_payment(
     md_duration = _safe_int(md.get("duration_days"))
 
     if not intent:
+        if expected_user_id and not _same_user(md_uid, int(expected_user_id)):
+            raise PermissionError("payment does not belong to this user")
         if md_uid <= 0 or md_tokens <= 0 or amount_rub <= 0:
             raise RuntimeError("YooKassa payment has no durable intent and missing recovery metadata")
         payment_type = "subscription" if (md_type == "subscription" or md_plan in PUBLIC_SUBSCRIPTION_PLAN_CODES) else "topup"
@@ -151,7 +164,7 @@ async def reconcile_yookassa_payment(
             plan_code=md_plan,
             duration_days=md_duration,
             provider_status=provider_status or "pending",
-            metadata={"recovered_from": source},
+            metadata={"recovered_from": source, **shop.metadata()},
         )
 
     uid = _safe_int(intent.get("user_id"))
@@ -160,6 +173,14 @@ async def reconcile_yookassa_payment(
     payment_type = str(intent.get("payment_type") or "topup").strip().lower() or "topup"
     plan_code = str(intent.get("plan_code") or "").strip().lower()
     duration_days = _safe_int(intent.get("duration_days"))
+
+    if intent_account(intent) != account:
+        raise RuntimeError("Stored YooKassa payment account mismatch")
+    if account == "new":
+        if md_tokens != tokens or md_type != payment_type or not _same_user(uid, md_uid):
+            raise RuntimeError("YooKassa sale metadata mismatch")
+        if payment_type == "subscription" and (md_plan != plan_code or md_duration != duration_days):
+            raise RuntimeError("YooKassa subscription metadata mismatch")
 
     if expected_user_id and not _same_user(uid, int(expected_user_id)):
         raise PermissionError("payment does not belong to this user")
@@ -294,6 +315,7 @@ async def reconcile_yookassa_payment(
                 "status": provider_status,
                 "amount_rub": expected_amount,
                 "provider": "yookassa",
+                **shop.metadata(),
                 "payment_type": payment_type,
                 "plan_code": plan_code if payment_type == "subscription" else "",
                 "reconcile_source": source,
