@@ -114,6 +114,8 @@ from topaz_pricing import (
     get_video_preset_settings,
 )
 from yookassa_flow import create_yookassa_payment
+from yookassa_accounts import any_shop_configured, checkout_shop, payment_methods
+from fastapi.responses import JSONResponse
 from yookassa_recovery import reconcile_yookassa_payment
 from yookassa_store import list_recoverable_yookassa_payments
 from subscriptions_db import get_current_subscription, get_subscription_plan, set_user_subscription, extend_user_subscription
@@ -2126,6 +2128,27 @@ async def tg_balance_history(request: Request, limit: int = 50):
         }
 
 
+def _tg_payment_authenticated(request: Request, user_id: int) -> bool:
+    # A browser-supplied uid must never grant access to the new shop/tester list.
+    raw = request.headers.get("X-Telegram-Init-Data", "")
+    user = _verify_telegram_webapp_init_data(raw)
+    try:
+        auth_date = int(dict(urllib.parse.parse_qsl(raw)).get("auth_date") or 0)
+        age = time.time() - auth_date
+        return bool(user and int(user.get("id") or 0) == int(user_id) and -60 <= age <= 86400)
+    except Exception:
+        return False
+
+
+@app.get("/api/tg/payment/methods")
+async def tg_payment_methods(request: Request):
+    uid = _tg_user_id_from_request(request)
+    return JSONResponse(
+        payment_methods(uid, authenticated=_tg_payment_authenticated(request, uid)),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.post("/api/tg/subscription/create")
 async def tg_subscription_create(request: Request):
     try:
@@ -2161,6 +2184,12 @@ async def tg_subscription_create(request: Request):
     if not _yookassa_enabled():
         return {"ok": False, "error": "yookassa_disabled", "message": "Оплата тарифов через ЮKassa сейчас не настроена."}
 
+    authenticated = _tg_payment_authenticated(request, user_id)
+    try:
+        selected_account = checkout_shop(payload.get("payment_account"), user_id, authenticated=authenticated).account
+    except (ValueError, RuntimeError) as exc:
+        return {"ok": False, "error": "payment_create_failed", "message": str(exc)}
+
     email = str(payload.get("email") or "").strip().lower()
     stored_email = ""
     try:
@@ -2192,6 +2221,8 @@ async def tg_subscription_create(request: Request):
 
     try:
         payment_id, url = await create_yookassa_payment(
+            payment_account=selected_account,
+            authenticated_user=authenticated,
             amount_rub=price_rub,
             description=f"Тариф {plan_name}: {tokens} токенов на {duration_days} дней",
             user_id=user_id,
@@ -2286,6 +2317,14 @@ async def tg_topup_create(request: Request):
 
     # Main path: YooKassa card/SBP payment. It requires receipt email.
     if _yookassa_enabled():
+        # Check access before reading/writing customer details, including for a
+        # stale tester selection or an unsigned browser-supplied user id.
+        authenticated = _tg_payment_authenticated(request, user_id)
+        try:
+            selected_account = checkout_shop(payload.get("payment_account"), user_id, authenticated=authenticated).account
+        except (ValueError, RuntimeError) as exc:
+            return {"ok": False, "error": "payment_create_failed", "message": str(exc)}
+
         email = str(payload.get("email") or "").strip().lower()
         stored_email = ""
         try:
@@ -2320,6 +2359,8 @@ async def tg_topup_create(request: Request):
 
         try:
             payment_id, url = await create_yookassa_payment(
+                payment_account=selected_account,
+                authenticated_user=authenticated,
                 amount_rub=amount_rub,
                 description=title,
                 user_id=user_id,
@@ -2412,7 +2453,7 @@ YOOKASSA_WEBHOOK_SECRET = (
 YOOKASSA_WEBHOOK_REQUIRE_SECRET = os.getenv("YOOKASSA_WEBHOOK_REQUIRE_SECRET", "").strip().lower() in ("1", "true", "yes", "y", "on")
 
 def _yookassa_enabled() -> bool:
-    return bool(YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY)
+    return any_shop_configured()
 PIAPI_API_KEY = os.getenv("PIAPI_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
@@ -9579,15 +9620,25 @@ async def sunoapi_callback(req: Request):
     print("SunoAPI callback received:", payload if isinstance(payload, dict) else str(type(payload)))
     return {"ok": True}
 
+@app.get("/api/yookassa/new/health")
+async def yookassa_new_health():
+    return JSONResponse({"ok": True, "handler": "nabex-yookassa-new", "version": "2026-10-06-r2"}, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/yookassa/new/webhook")
+@app.post("/yookassa/new/webhook")
 @app.post("/api/yookassa/webhook")
 @app.post("/yookassa/webhook")
 async def yookassa_webhook(request: Request):
     """YooKassa notification entrypoint with durable recovery and atomic credit."""
-    if YOOKASSA_WEBHOOK_REQUIRE_SECRET:
+    account = "new" if request.url.path.endswith("/new/webhook") else "legacy"
+    new_secret = os.getenv("YOOKASSA_NEW_WEBHOOK_SECRET", "").strip()
+    require_secret = bool(new_secret) if account == "new" else YOOKASSA_WEBHOOK_REQUIRE_SECRET
+    if require_secret:
         auth = (request.headers.get("authorization") or "").strip()
         header_token = (request.headers.get("x-webhook-token") or "").strip()
         query_token = (request.query_params.get("token") or request.query_params.get("secret") or "").strip()
-        expected = str(YOOKASSA_WEBHOOK_SECRET or "").strip()
+        expected = new_secret if account == "new" else str(YOOKASSA_WEBHOOK_SECRET or "").strip()
         ok = False
         if expected:
             if auth.lower().startswith("bearer "):
@@ -9613,12 +9664,11 @@ async def yookassa_webhook(request: Request):
     if not payment_id:
         return {"ok": True}
 
-    webhook_status = str(obj.get("status") or "").strip().lower()
-    if webhook_status != "succeeded" and event != "payment.succeeded":
+    if event not in {"payment.succeeded", "payment.canceled"}:
         return {"ok": True}
 
     try:
-        result = await reconcile_yookassa_payment(payment_id, source="webhook")
+        result = await reconcile_yookassa_payment(payment_id, source="webhook", expected_account=account)
     except Exception as exc:
         if ADMIN_IDS:
             try:
@@ -11295,11 +11345,24 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
 
                 if _yookassa_enabled():
                     try:
+                        available = payment_methods(user_id, authenticated=True)
+                        selected_account = parts[3] if len(parts) >= 4 else None
+                        if not selected_account and len(available["methods"]) > 1:
+                            await tg_send_message(
+                                chat_id,
+                                f"Выберите способ оплаты: {tokens} токенов, {amount_rub}₽",
+                                reply_markup={"inline_keyboard": [
+                                    [{"text": method["label"], "callback_data": f"topup:pack:{tokens}:{method['id']}"}]
+                                    for method in available["methods"]
+                                ]},
+                            )
+                            return {"ok": True}
+                        selected_account = checkout_shop(selected_account, user_id, authenticated=True).account
                         # Для сервиса «Чеки от ЮKassa» часто обязателен email покупателя.
                         email = sb_get_user_email(user_id)
                         if not email:
                             # Запоминаем выбранный пакет и просим email (переживает рестарт Render)
-                            sb_set_user_state(user_id, "yk_wait_email", {"tokens": int(tokens), "amount_rub": int(amount_rub), "title": title})
+                            sb_set_user_state(user_id, "yk_wait_email", {"tokens": int(tokens), "amount_rub": int(amount_rub), "title": title, "payment_account": selected_account})
                             await tg_send_message(
                                 chat_id,
                                 "📧 Для оплаты мне нужен email для чека.\n"
@@ -11310,6 +11373,8 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
                             return {"ok": True}
 
                         payment_id, url = await create_yookassa_payment(
+                            payment_account=selected_account,
+                            authenticated_user=True,
                             amount_rub=amount_rub,
                             description=title,
                             user_id=user_id,
@@ -12014,6 +12079,8 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
                     sb_clear_user_state(user_id)
 
                     payment_id, url = await create_yookassa_payment(
+                        payment_account=sb_payload.get("payment_account"),
+                        authenticated_user=True,
                         amount_rub=amount_rub,
                         description=title,
                         user_id=user_id,
