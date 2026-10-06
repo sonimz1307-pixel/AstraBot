@@ -10,8 +10,9 @@ from typing import Any, Dict, Optional, Tuple
 import httpx
 
 from yookassa_store import record_yookassa_payment_intent
+from yookassa_accounts import checkout_shop, get_shop, validate_provider_shop
 
-YOOKASSA_FLOW_VERSION = "2026-02-08_require_email_bot_storage"
+YOOKASSA_FLOW_VERSION = "2026-10-06_dual_shop"
 
 YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "").strip()
 YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "").strip()
@@ -25,33 +26,15 @@ def _basic_auth_header(shop_id: str, secret_key: str) -> str:
     return f"Basic {token}"
 
 
-def _require_creds() -> None:
-    if not YOOKASSA_SHOP_ID or not YOOKASSA_SECRET_KEY:
-        raise RuntimeError("YOOKASSA_SHOP_ID / YOOKASSA_SECRET_KEY not set")
-
-
-def _tax_system_code() -> int:
-    """
-    У тебя патент => 6.
-    Можно переопределить в Render ENV: YOOKASSA_TAX_SYSTEM_CODE=6
-    """
-    raw = (os.getenv("YOOKASSA_TAX_SYSTEM_CODE") or "").strip()
-    if not raw:
-        return 6
-    code = int(raw)
-    if code < 1 or code > 6:
-        raise RuntimeError("YOOKASSA_TAX_SYSTEM_CODE must be in range 1..6")
-    return code
-
-
-async def fetch_yookassa_payment(payment_id: str) -> Dict[str, Any]:
+async def fetch_yookassa_payment(payment_id: str, *, account: str = "legacy") -> Dict[str, Any]:
     """Fetch current payment object directly from YooKassa API. Used by webhook handler before any financial action."""
-    _require_creds()
+    shop = get_shop(account)
+    shop.require_credentials()
     pid = str(payment_id or "").strip()
     if not pid:
         raise ValueError("payment_id is required")
 
-    headers = {"Authorization": _basic_auth_header(YOOKASSA_SHOP_ID, YOOKASSA_SECRET_KEY)}
+    headers = {"Authorization": _basic_auth_header(shop.shop_id, shop.secret_key)}
     async with httpx.AsyncClient(timeout=20) as client:
         r = await client.get(f"{YOOKASSA_API_BASE}/payments/{pid}", headers=headers)
         try:
@@ -62,6 +45,7 @@ async def fetch_yookassa_payment(payment_id: str) -> Dict[str, Any]:
             raise RuntimeError(f"YooKassa fetch payment failed: {r.status_code} {str(j)[:300]}")
         if not isinstance(j, dict):
             raise RuntimeError("YooKassa fetch payment: bad JSON")
+        validate_provider_shop(j, shop)
         return j
 
 
@@ -76,6 +60,8 @@ async def create_yookassa_payment(
     return_url: Optional[str] = None,
     payment_metadata: Optional[Dict[str, Any]] = None,
     receipt_item_description: Optional[str] = None,
+    payment_account: Optional[str] = None,
+    authenticated_user: bool = False,
 ) -> Tuple[str, str]:
     """
     Создаёт платёж в ЮKassa (redirect).
@@ -85,14 +71,14 @@ async def create_yookassa_payment(
     - Передаём receipt + receipt.customer.email (берём из Supabase),
       чтобы сервис «Чеки от ЮKassa» мог сформировать и отправить чек.
     """
-    _require_creds()
+    shop = checkout_shop(payment_account, user_id, authenticated=authenticated_user)
 
     rub = int(amount_rub)
     if rub <= 0:
         raise ValueError("amount_rub must be > 0")
 
     idem = (idempotence_key or str(uuid.uuid4())).strip()
-    tax_code = _tax_system_code()
+    tax_code = shop.tax_system_code()
 
     email = (customer_email or "").strip().lower()
     if not email:
@@ -109,7 +95,12 @@ async def create_yookassa_payment(
                 continue
             metadata[key_text] = value
 
-    receipt_description = (receipt_item_description or f"{int(tokens)} токенов NeiroAstra").strip()
+    # Server-controlled routing cannot be overridden by caller metadata.
+    metadata.setdefault("payment_type", "topup")
+    metadata.update(shop.metadata())
+
+    brand = "Nabex" if shop.account == "new" else "NeiroAstra"
+    receipt_description = (receipt_item_description or f"{int(tokens)} токенов {brand}").strip()
 
     body: Dict[str, Any] = {
         "amount": {"value": f"{rub:.2f}", "currency": "RUB"},
@@ -121,14 +112,14 @@ async def create_yookassa_payment(
         "description": description[:128],
         "metadata": metadata,
         "receipt": {
-            "tax_system_code": tax_code,  # патент = 6
+            "tax_system_code": tax_code,
             "customer": {"email": email},
             "items": [
                 {
                     "description": receipt_description[:128],
                     "quantity": 1.0,
                     "amount": {"value": f"{rub:.2f}", "currency": "RUB"},
-                    "vat_code": 1,  # без НДС
+                    "vat_code": shop.vat_code(),
                     "payment_mode": "full_payment",
                     "payment_subject": "service",
                 }
@@ -137,7 +128,7 @@ async def create_yookassa_payment(
     }
 
     headers = {
-        "Authorization": _basic_auth_header(YOOKASSA_SHOP_ID, YOOKASSA_SECRET_KEY),
+        "Authorization": _basic_auth_header(shop.shop_id, shop.secret_key),
         "Idempotence-Key": idem,
         "Content-Type": "application/json",
     }
@@ -156,10 +147,11 @@ async def create_yookassa_payment(
         r = await client.post(f"{YOOKASSA_API_BASE}/payments", json=body, headers=headers)
 
         if r.status_code >= 300:
-            print("YOOKASSA ERROR FULL =", r.text)
-            raise RuntimeError(f"YooKassa create payment failed: {r.status_code} {r.text}")
+            raise RuntimeError(f"YooKassa create payment failed: HTTP {r.status_code}")
 
         j = r.json()
+
+    validate_provider_shop(j, shop)
 
     payment_id = (j.get("id") or "").strip()
     conf = j.get("confirmation") or {}
@@ -190,7 +182,7 @@ async def create_yookassa_payment(
             plan_code=plan_code,
             duration_days=duration_days,
             provider_status=str(j.get("status") or "pending"),
-            metadata={"flow_version": YOOKASSA_FLOW_VERSION},
+            metadata={"flow_version": YOOKASSA_FLOW_VERSION, **shop.metadata()},
         )
     except Exception as exc:
         raise RuntimeError(f"YooKassa payment created but recovery state was not saved: {exc}") from exc
