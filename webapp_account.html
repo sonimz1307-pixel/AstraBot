@@ -2238,6 +2238,7 @@
 
   </style>
   <script src="/static/nabex-payments.js?v=20261006-r2"></script>
+  <script src="/static/nabex-telegram-auth.js?v=20261006-r3"></script>
 </head>
 <body>
   <main class="app">
@@ -2802,7 +2803,7 @@
       // When the cabinet was opened by the bot's reply-keyboard WebApp button,
       // sendData cleanly closes the WebApp and delivers a service message to the bot.
       const inTelegramClient = !!(tg && String(tg.platform || "").toLowerCase() !== "unknown");
-      if (inTelegramClient && typeof tg.sendData === "function") {
+      if (inTelegramClient && !tg.initData && typeof tg.sendData === "function") {
         try {
           tg.sendData(JSON.stringify({ action: "partner_payout" }));
           return;
@@ -3067,12 +3068,13 @@
     }
 
     async function createTopupPayment(tokens, button) {
+      if (!window.NabexTelegramAuth.ensureSession(tg)) return;
       const emailValue = topupEmailInput ? String(topupEmailInput.value || "").trim().toLowerCase() : "";
       const uid = query.get("uid") || query.get("tg_user_id") || query.get("user_id") || "";
       const payload = {
         tokens: Number(tokens),
         email: emailValue,
-        return_url: window.location.href
+        return_url: window.location.href.split("#")[0]
       };
       if (uid) payload.uid = uid;
 
@@ -3144,12 +3146,13 @@
     }
 
     async function createSubscriptionPayment(planCode, button, emailOverride) {
+      if (!window.NabexTelegramAuth.ensureSession(tg)) return;
       const emailValue = String(emailOverride || (topupEmailInput ? topupEmailInput.value || "" : "")).trim().toLowerCase();
       const uid = query.get("uid") || query.get("tg_user_id") || query.get("user_id") || "";
       const payload = {
         plan_code: String(planCode || "").toLowerCase(),
         email: emailValue,
-        return_url: window.location.href
+        return_url: window.location.href.split("#")[0]
       };
       if (uid) payload.uid = uid;
 
