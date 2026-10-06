@@ -482,6 +482,8 @@ from switchx_service import SwitchXClient, SwitchXError
 from topaz_image_replicate import TopazImageParams, run_topaz_image_upscale
 from topaz_pricing import get_photo_preset_settings, get_photo_preset_tokens
 from yookassa_flow import create_yookassa_payment
+from yookassa_accounts import payment_methods
+from fastapi.responses import JSONResponse
 from yookassa_recovery import reconcile_yookassa_payment
 from app.services.partner_program import apply_topup_event
 from app.services.legnext_midjourney import (
@@ -4935,11 +4937,20 @@ async def workspace_balance_history(limit: int = 30, user: Dict[str, Any] = Depe
 class WorkspaceTopupCreatePayload(BaseModel):
     tokens: int = Field(..., ge=1, le=100000)
     return_url: Optional[str] = None
+    payment_account: Optional[str] = Field(default=None, max_length=16)
 
 
 class WorkspaceSubscriptionCreatePayload(BaseModel):
     plan_code: str = Field(..., min_length=1, max_length=32)
     return_url: Optional[str] = None
+    payment_account: Optional[str] = Field(default=None, max_length=16)
+
+
+@router.get("/payment/methods")
+async def workspace_payment_methods(user: Dict[str, Any] = Depends(get_current_workspace_user)):
+    account = ensure_workspace_account_from_claims(user)
+    uid = int(account.get("id") or user.get("workspace_user_id") or user.get("telegram_user_id") or 0)
+    return JSONResponse(payment_methods(uid, authenticated=uid > 0), headers={"Cache-Control": "no-store"})
 
 
 @router.get("/topup/packs")
@@ -4964,6 +4975,8 @@ async def workspace_topup_create(payload: WorkspaceTopupCreatePayload, user: Dic
 
     try:
         payment_id, confirmation_url = await create_yookassa_payment(
+            payment_account=payload.payment_account,
+            authenticated_user=True,
             amount_rub=int(pack["rub"]),
             description=f'Пополнение баланса: {int(pack["tokens"])} токенов',
             user_id=uid,
@@ -5074,6 +5087,8 @@ async def workspace_subscription_create(payload: WorkspaceSubscriptionCreatePayl
 
     try:
         payment_id, confirmation_url = await create_yookassa_payment(
+            payment_account=payload.payment_account,
+            authenticated_user=True,
             amount_rub=price_rub,
             description=f"Тариф {plan_name}: {tokens} токенов на {duration_days} дней",
             user_id=uid,
