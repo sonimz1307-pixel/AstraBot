@@ -1735,7 +1735,10 @@ async def webapp_account():
 @app.get("/webapp/topup", response_class=HTMLResponse)
 async def webapp_topup():
     with open(os.path.join(BASE_DIR, "webapp_topup.html"), "r", encoding="utf-8") as f:
-        return f.read()
+        return HTMLResponse(
+            content=f.read(),
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+        )
         
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 WEBAPP_KLING_URL = os.getenv("WEBAPP_KLING_URL", "https://astrabot-tchj.onrender.com/webapp/kling")
@@ -2188,7 +2191,12 @@ async def tg_subscription_create(request: Request):
     try:
         selected_account = checkout_shop(payload.get("payment_account"), user_id, authenticated=authenticated).account
     except (ValueError, RuntimeError) as exc:
-        return {"ok": False, "error": "payment_create_failed", "message": str(exc)}
+        return {
+            "ok": False,
+            "error": "payment_create_failed" if authenticated else "telegram_auth_required",
+            "message": str(exc) if authenticated else
+                "Для оплаты отправьте /cabinet в личный чат с ботом и нажмите «Открыть кабинет».",
+        }
 
     email = str(payload.get("email") or "").strip().lower()
     stored_email = ""
@@ -2323,7 +2331,12 @@ async def tg_topup_create(request: Request):
         try:
             selected_account = checkout_shop(payload.get("payment_account"), user_id, authenticated=authenticated).account
         except (ValueError, RuntimeError) as exc:
-            return {"ok": False, "error": "payment_create_failed", "message": str(exc)}
+            return {
+                "ok": False,
+                "error": "payment_create_failed" if authenticated else "telegram_auth_required",
+                "message": str(exc) if authenticated else
+                    "Для оплаты отправьте /cabinet в личный чат с ботом и нажмите «Открыть кабинет».",
+            }
 
         email = str(payload.get("email") or "").strip().lower()
         stored_email = ""
@@ -4733,7 +4746,6 @@ def _clear_music_ctx(st: dict, chat_id: int, user_id: int) -> None:
         pass
 
 def _main_menu_keyboard(is_admin: bool = False, user_id: Optional[int] = None) -> dict:
-    account_url = _with_uid(WEBAPP_ACCOUNT_URL, int(user_id)) if user_id else WEBAPP_ACCOUNT_URL
     rows = [
         [{"text": "ИИ (чат)"}, {"text": "Фото будущего"}],
         [
@@ -4744,7 +4756,9 @@ def _main_menu_keyboard(is_admin: bool = False, user_id: Optional[int] = None) -
             {"text": "🔊 Озвучить текст"},
             {"text": "📚 Промпты", "web_app": {"url": _with_uid(WEBAPP_PROMPTS_URL, int(user_id)) if user_id else WEBAPP_PROMPTS_URL}},
         ],
-        [{"text": "💰 Баланс"}, {"text": "👤 Кабинет", "web_app": {"url": account_url}}],
+        # Reply-keyboard WebApps have no signed initData. Send an inline
+        # WebApp launch button when this ordinary text button is pressed.
+        [{"text": "💰 Баланс"}, {"text": "👤 Кабинет"}],
     ]
     if is_admin:
         rows.append([{"text": "📊 Статистика"}, {"text": "📣 Рассылка"}])
@@ -4760,6 +4774,47 @@ def _main_menu_keyboard(is_admin: bool = False, user_id: Optional[int] = None) -
 
 def _main_menu_for(user_id: int) -> dict:
     return _main_menu_keyboard(_is_admin(user_id), user_id=user_id)
+
+
+async def _handle_account_entry_message(message: Dict[str, Any]) -> bool:
+    """Launch the cabinet with signed Telegram initData, including old keyboards.
+
+    The web_app_data body may be supplied by a client. It only requests a launch;
+    identity always comes from the Telegram message sender, never from that body.
+    """
+    text = _telegram_message_text(message).strip().lower()
+    parts = text.split(maxsplit=1)
+    command = parts[0].split("@", 1)[0] if parts else ""
+    requested = text in {"👤 кабинет", "👤кабинет", "кабинет"} or command in {"/cabinet", "/account"}
+    requested = requested or (command == "/start" and len(parts) == 2 and parts[1] == "cabinet")
+    web_data = message.get("web_app_data")
+    if isinstance(web_data, dict):
+        try:
+            payload = json.loads(str(web_data.get("data") or ""))
+            requested = requested or (isinstance(payload, dict) and payload.get("action") == "open_account")
+        except (TypeError, ValueError):
+            pass
+    if not requested:
+        return False
+
+    chat = message.get("chat") or {}
+    sender = message.get("from") or {}
+    chat_id = int(chat.get("id") or 0)
+    user_id = int(sender.get("id") or 0)
+    if str(chat.get("type") or "").lower() != "private" or user_id <= 0 or chat_id != user_id:
+        if chat_id:
+            await tg_send_message(chat_id, "Откройте кабинет в личном чате с ботом: /cabinet")
+        return True
+
+    await tg_send_message(
+        chat_id,
+        "Личный кабинет — баланс, пополнение и тарифы.\nНажмите кнопку ниже:",
+        reply_markup={"inline_keyboard": [[{
+            "text": "👤 Открыть кабинет",
+            "web_app": {"url": _with_uid(WEBAPP_ACCOUNT_URL, user_id)},
+        }]]},
+    )
+    return True
 
 
 
@@ -9622,7 +9677,7 @@ async def sunoapi_callback(req: Request):
 
 @app.get("/api/yookassa/new/health")
 async def yookassa_new_health():
-    return JSONResponse({"ok": True, "handler": "nabex-yookassa-new", "version": "2026-10-06-r2"}, headers={"Cache-Control": "no-store"})
+    return JSONResponse({"ok": True, "handler": "nabex-yookassa-new", "version": "2026-10-06-r3"}, headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/yookassa/new/webhook")
@@ -11648,6 +11703,10 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
         # V6: reset must also remove a draft created by another Render process.
         await _seedance25_clear_shared_draft(chat_id, user_id)
         await tg_send_message(chat_id, "✅ Сброс выполнен. Возвращаю в главное меню.", reply_markup=_main_menu_for(user_id))
+        return {"ok": True}
+
+    # Handle cabinet entry before generation/email/payout states consume it.
+    if await _handle_account_entry_message(message):
         return {"ok": True}
 
     # --- Direct Telegram payout commands / deep link ---
