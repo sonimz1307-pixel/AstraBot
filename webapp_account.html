@@ -2237,6 +2237,7 @@
     }
 
   </style>
+  <script src="/static/nabex-payments.js?v=20261006-r2"></script>
 </head>
 <body>
   <main class="app">
@@ -3077,6 +3078,11 @@
 
       setTopupLoading(button, true);
       try {
+        const paymentAccount = await window.NabexPayments.choose(() => fetch("/api/tg/payment/methods", {
+          headers: { "X-Telegram-Init-Data": tg && tg.initData ? tg.initData : "" }
+        }));
+        if (paymentAccount === null) return;
+        payload.payment_account = paymentAccount || null;
         const response = await fetch("/api/tg/topup/create", {
           method: "POST",
           headers: {
@@ -3149,6 +3155,11 @@
 
       setTopupLoading(button, true);
       try {
+        const paymentAccount = await window.NabexPayments.choose(() => fetch("/api/tg/payment/methods", {
+          headers: { "X-Telegram-Init-Data": tg && tg.initData ? tg.initData : "" }
+        }));
+        if (paymentAccount === null) return;
+        payload.payment_account = paymentAccount || null;
         const response = await fetch("/api/tg/subscription/create", {
           method: "POST",
           headers: {
