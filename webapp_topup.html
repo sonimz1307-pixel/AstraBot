@@ -497,6 +497,7 @@
     }
 
   </style>
+  <script src="/static/nabex-payments.js?v=20261006-r2"></script>
 </head>
 <body>
   <main class="app">
@@ -780,6 +781,11 @@
       const email = String(emailOverride || state.customerEmail || "").trim();
       if (email) payload.email = email;
 
+      const paymentAccount = await window.NabexPayments.choose(() => fetch("/api/tg/payment/methods", {
+        headers: { "X-Telegram-Init-Data": tg && tg.initData ? tg.initData : "" }
+      }));
+      if (paymentAccount === null) return { ok: false, canceled: true };
+      payload.payment_account = paymentAccount || null;
       const response = await fetch("/api/tg/topup/create", {
         method: "POST",
         headers: {
@@ -795,6 +801,7 @@
       try {
         setLoading(Number(tokens));
         const data = await createTopup(tokens, emailOverride);
+        if (data && data.canceled) return;
         if (!data || !data.ok) {
           if (data && data.need_email) {
             closeEmailModal();
