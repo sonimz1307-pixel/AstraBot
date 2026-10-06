@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from billing_db import resolve_billing_user_id, supabase
+from yookassa_accounts import intent_account
 
 YOOKASSA_INTENTS_TABLE = "yookassa_payment_intents"
 YOOKASSA_CLAIM_RPC = "nabex_claim_yookassa_payment"
@@ -116,6 +117,15 @@ def record_yookassa_payment_intent(
             raise RuntimeError("existing YooKassa intent token mismatch") from insert_exc
         if abs(_safe_float(existing.get("amount_rub")) - amount) > 0.009:
             raise RuntimeError("existing YooKassa intent amount mismatch") from insert_exc
+        if intent_account(existing) != intent_account(row):
+            raise RuntimeError("existing YooKassa intent account mismatch") from insert_exc
+        old_meta = existing.get("metadata") or {}
+        for key in ("yookassa_shop_id",):
+            if old_meta.get(key) and str(old_meta[key]) != str(row["metadata"].get(key) or ""):
+                raise RuntimeError("existing YooKassa intent shop mismatch") from insert_exc
+        for key in ("payment_type", "plan_code", "duration_days"):
+            if str(existing.get(key) or "") != str(row.get(key) or ""):
+                raise RuntimeError("existing YooKassa sale mismatch") from insert_exc
         return existing
 
 
