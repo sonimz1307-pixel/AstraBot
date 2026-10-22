@@ -637,6 +637,9 @@
     <div id="klingBlock" style="display:none;">
       <div class="card">
         <h3>Kling — версия</h3>
+        <button type="button" id="openKling4" style="width:100%;margin:0 0 14px;padding:15px;border:1px solid #d6ba86;border-radius:14px;background:#252018;color:#f4dfb8;text-align:left;font:inherit;cursor:pointer;">
+          <strong>Kling 4.0</strong><br><small>Текст, референсы и ключевые кадры · 3–30 сек · 720p / 1080p →</small>
+        </button>
         <div class="seg cols4" role="radiogroup" aria-label="Версия Kling">
           <input id="kling_v16" type="radio" name="kling_version" value="1_6" checked>
           <label for="kling_v16">
@@ -2308,6 +2311,19 @@ qsa('input[name="veo_model"]').forEach(el => el.addEventListener('change', () =>
 
     // Telegram init (safe)
     const tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
+    document.getElementById('openKling4').addEventListener('click', () => {
+      if (tg && tg.initData) {
+        // Signed inline context can navigate directly on the same backend.
+        window.location.href = '/api/kling4/studio' + window.location.hash;
+      } else if (tg && tg.platform && tg.platform !== 'unknown') {
+        // Reply keyboard Mini Apps do not carry signed initData. Ask the bot
+        // for an inline launcher; never authenticate with query-string IDs.
+        tg.sendData(JSON.stringify({ action: 'open_kling4' }));
+        tg.close();
+      } else {
+        window.location.href = '/api/kling4/studio';
+      }
+    });
     // Mark desktop environments (Telegram Desktop often has a narrow viewport, so we can't rely on min-width media queries)
     try{
       const p = (tg && tg.platform) ? String(tg.platform).toLowerCase() : "";
