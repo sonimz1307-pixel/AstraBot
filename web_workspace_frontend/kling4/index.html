@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex"><title>Kling 4.0 — NABEX</title>
+<link rel="stylesheet" href="/api/kling4/ui/style.css?v=20261022">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script defer src="/api/kling4/ui/app.js?v=20261022-v2"></script></head>
+<body><main class="studio">
+  <header><a class="back" href="/#workspace" id="back">← Видеостудия</a><span id="balance">Баланс…</span></header>
+  <div class="hero"><span class="eyebrow">NABEX / VIDEO STUDIO</span><h1>Kling <span>4.0</span></h1><p>Ваша история. До 30 секунд.</p></div>
+  <div id="notice" role="status" aria-live="polite" hidden></div>
+  <form id="form"><fieldset id="controls">
+    <div class="tabs" role="group" aria-label="Режим генерации">
+      <button type="button" data-mode="reference" class="active">Текст и референсы</button><button type="button" data-mode="keyframe">Ключевые кадры</button>
+    </div>
+    <div class="settings">
+      <label>Качество<select id="resolution"><option value="720p">720p</option><option value="1080p">1080p</option></select></label>
+      <label>Длительность, сек<input id="duration" type="number" min="3" max="30" step="1" value="5" required></label>
+      <label>Формат<select id="aspect"><option>16:9</option><option>9:16</option><option>1:1</option><option>21:9</option><option value="auto">Автоматически</option></select></label>
+    </div>
+    <label class="prompt-label" for="prompt">Опишите видео <span id="count">0 / 8000</span></label>
+    <textarea id="prompt" maxlength="8000" rows="5" required placeholder="Опишите сцену, движение камеры и звук. Для референсов используйте @image_1, @video_1…"></textarea>
+    <section id="referenceFields" class="materials">
+      <div class="uploads"><label class="drop">+ Фотографии<span>JPEG, PNG, WEBP · до 10 файлов</span><input id="images" type="file" accept="image/jpeg,image/png,image/webp" multiple></label><label class="drop">+ Видеореференсы<span>MP4 · до 5 файлов, 30 сек суммарно</span><input id="videos" type="file" accept="video/mp4" multiple></label></div>
+      <div id="imageList" class="file-list"></div><div id="videoList" class="file-list"></div>
+      <label class="check"><input type="checkbox" id="keepSound"> Сохранить звук исходного видео</label>
+      <p class="hint">Без файлов — генерация по тексту. Каждый файл до 10 МБ. Длительность видео: 2–30 секунд. Оригинальный звук выбирается только для видеореференсов.</p>
+      <details><summary>Персонажи, объекты и голоса</summary><p class="hint">Дайте референсу имя латиницей, например Hero, и используйте @Hero в описании. До 15 референсов всего.</p>
+        <div id="elements"></div><button type="button" id="addElement" class="secondary">+ Объект из 2–4 фото</button>
+        <div id="voices"></div><button type="button" id="addVoice" class="secondary">+ Голос из MP3 / WAV</button>
+      </details>
+    </section>
+    <section id="keyframeFields" class="materials" hidden>
+      <div class="uploads"><label class="drop">+ Первый кадр<span>Обязательный</span><input id="first" type="file" accept="image/jpeg,image/png,image/webp"></label><label class="drop">+ Последний кадр<span>Необязательный</span><input id="last" type="file" accept="image/jpeg,image/png,image/webp"></label></div>
+      <div id="firstList" class="file-list"></div><div id="lastList" class="file-list"></div>
+      <label class="drop">+ Промежуточные кадры<span>До 8 изображений, в порядке загрузки</span><input id="keyframes" type="file" accept="image/jpeg,image/png,image/webp" multiple></label><div id="keyframeList" class="file-list"></div>
+      <p class="hint">В описании используйте @first_frame, @keyframe_1 и @last_frame. Каждый файл до 10 МБ.</p>
+    </section>
+    <button type="submit" id="quoteBtn" class="primary full">Рассчитать стоимость</button>
+  </fieldset></form>
+  <section id="quote" class="quote" hidden><div><span class="eyebrow">СТОИМОСТЬ ГЕНЕРАЦИИ</span><strong id="price"></strong><p id="priceDetail"></p></div><button type="button" id="runBtn" class="primary">Запустить</button></section>
+  <section class="history"><div class="section-head"><h2>Мои видео Kling 4.0</h2><button type="button" id="refresh" class="secondary">Обновить</button></div><p class="hint">Сохраните готовый файл на устройство: ссылки Kie доступны 14 дней. При запуске из Telegram результат также придёт в бот.</p><div id="jobs"><p class="hint">Загружаю историю…</p></div></section>
+  <footer>720p / 1080p · 3–30 секунд · звук создаётся моделью</footer>
+</main></body></html>
