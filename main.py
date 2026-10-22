@@ -217,6 +217,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 from app.routers.leads import router as leads_router
 from app.routers.kling3 import router as kling3_router
 from app.routers.kling3_kie import router as kling3_kie_router
+from app.routers.kling4 import router as kling4_router
 from app.routers.admin_auth import router as admin_auth_router
 from app.routers.admin_top import router as admin_top_router
 from app.routers.provider_balances_admin import router as provider_balances_admin_router
@@ -244,6 +245,7 @@ from app.services.legnext_midjourney import (
 app.include_router(leads_router, prefix="/api/leads", tags=["leads"])
 app.include_router(kling3_router, prefix="/api/kling3", tags=["kling3"])
 app.include_router(kling3_kie_router, prefix="/api/kling3-kie", tags=["kling3-kie"])
+app.include_router(kling4_router)
 app.include_router(admin_auth_router)
 app.include_router(admin_top_router, prefix="/api/admin", tags=["admin"])
 app.include_router(provider_balances_admin_router, prefix="/api/admin", tags=["admin-balances"])
@@ -4814,6 +4816,38 @@ async def _handle_account_entry_message(message: Dict[str, Any]) -> bool:
             "web_app": {"url": _with_uid(WEBAPP_ACCOUNT_URL, user_id)},
         }]]},
     )
+    return True
+
+
+async def _handle_kling4_entry_message(message: Dict[str, Any]) -> bool:
+    """An ordinary message requests an inline WebApp with signed initData."""
+    text = _telegram_message_text(message).strip().lower()
+    parts = text.split(maxsplit=1)
+    command = parts[0].split("@", 1)[0] if parts else ""
+    requested = command == "/kling4" or text in {"kling 4.0", "🎬 kling 4.0"}
+    requested = requested or (command == "/start" and len(parts) == 2 and parts[1] == "kling4")
+    web_data = message.get("web_app_data")
+    if isinstance(web_data, dict):
+        try:
+            payload = json.loads(str(web_data.get("data") or ""))
+            requested = requested or (isinstance(payload, dict) and payload.get("action") == "open_kling4")
+        except (TypeError, ValueError):
+            pass
+    if not requested:
+        return False
+    chat, sender = message.get("chat") or {}, message.get("from") or {}
+    chat_id, user_id = int(chat.get("id") or 0), int(sender.get("id") or 0)
+    if chat.get("type") != "private" or user_id <= 0 or chat_id != user_id:
+        if chat_id:
+            await tg_send_message(chat_id, "Откройте Kling 4.0 в личном чате с ботом: /kling4")
+        return True
+    from app.services.kling4_service import enabled
+    if not enabled():
+        await tg_send_message(chat_id, "Kling 4.0 пока не включён.")
+        return True
+    base = (os.getenv("KLING4_PUBLIC_BASE_URL") or os.getenv("PUBLIC_BASE_URL") or "https://nabex.ru").rstrip("/")
+    await tg_send_message(chat_id, "Kling 4.0 — видео по тексту, референсам и ключевым кадрам.\nОткройте форму: стоимость появится до запуска.",
+        reply_markup={"inline_keyboard": [[{"text": "🎬 Открыть Kling 4.0", "web_app": {"url": base + "/api/kling4/studio"}}]]})
     return True
 
 
@@ -11703,6 +11737,9 @@ async def _process_telegram_update_impl(update: Dict[str, Any]):
         # V6: reset must also remove a draft created by another Render process.
         await _seedance25_clear_shared_draft(chat_id, user_id)
         await tg_send_message(chat_id, "✅ Сброс выполнен. Возвращаю в главное меню.", reply_markup=_main_menu_for(user_id))
+        return {"ok": True}
+
+    if await _handle_kling4_entry_message(message):
         return {"ok": True}
 
     # Handle cabinet entry before generation/email/payout states consume it.
