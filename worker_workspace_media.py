@@ -591,6 +591,9 @@ async def main() -> None:
     consumers.append(asyncio.create_task(_wan3_refund_reconciler_loop()))
     from app.services.trend_model_consumer import run_model_group
     consumers.append(asyncio.create_task(run_model_group('wan3', ['wan3'], wan3_sem, WAN3_CONCURRENCY)))
+    # Same existing Render worker; separate durable DB queue and global KIE cap.
+    from app.services.kling4_service import run_worker as run_kling4_worker
+    consumers.append(asyncio.create_task(run_kling4_worker()))
     await asyncio.gather(*consumers)
 
 
