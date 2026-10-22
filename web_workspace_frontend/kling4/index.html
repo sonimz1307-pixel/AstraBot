@@ -1,43 +1,105 @@
 <!doctype html>
-<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="robots" content="noindex"><title>Kling 4.0 — NABEX</title>
-<link rel="stylesheet" href="/api/kling4/ui/style.css?v=20261022">
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
-<script defer src="/api/kling4/ui/app.js?v=20261022-v2"></script></head>
-<body><main class="studio">
-  <header><a class="back" href="/#workspace" id="back">← Видеостудия</a><span id="balance">Баланс…</span></header>
-  <div class="hero"><span class="eyebrow">NABEX / VIDEO STUDIO</span><h1>Kling <span>4.0</span></h1><p>Ваша история. До 30 секунд.</p></div>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="robots" content="noindex">
+  <meta name="theme-color" content="#050505">
+  <title>Kling 4.0 — NABEX</title>
+  <link rel="stylesheet" href="/api/kling4/ui/style.css?v=20261023-ui1">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script defer src="/api/kling4/ui/app.js?v=20261022-v2"></script>
+</head>
+<body>
+<main class="studio">
+  <header class="topbar">
+    <a class="back" href="/#workspace" id="back">← Видеостудия</a>
+    <span class="balance" id="balance">Баланс…</span>
+  </header>
+
+  <div class="hero">
+    <div class="model-icon" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="4"/><path d="m10 8 6 4-6 4Z"/></svg>
+    </div>
+    <div class="model-info"><p class="model-section">Видео будущего</p><h1>Kling 4.0</h1></div>
+    <span class="badge">3–30 сек</span>
+  </div>
+
   <div id="notice" role="status" aria-live="polite" hidden></div>
-  <form id="form"><fieldset id="controls">
-    <div class="tabs" role="group" aria-label="Режим генерации">
-      <button type="button" data-mode="reference" class="active">Текст и референсы</button><button type="button" data-mode="keyframe">Ключевые кадры</button>
-    </div>
-    <div class="settings">
-      <label>Качество<select id="resolution"><option value="720p">720p</option><option value="1080p">1080p</option></select></label>
-      <label>Длительность, сек<input id="duration" type="number" min="3" max="30" step="1" value="5" required></label>
-      <label>Формат<select id="aspect"><option>16:9</option><option>9:16</option><option>1:1</option><option>21:9</option><option value="auto">Автоматически</option></select></label>
-    </div>
-    <label class="prompt-label" for="prompt">Опишите видео <span id="count">0 / 8000</span></label>
-    <textarea id="prompt" maxlength="8000" rows="5" required placeholder="Опишите сцену, движение камеры и звук. Для референсов используйте @image_1, @video_1…"></textarea>
-    <section id="referenceFields" class="materials">
-      <div class="uploads"><label class="drop">+ Фотографии<span>JPEG, PNG, WEBP · до 10 файлов</span><input id="images" type="file" accept="image/jpeg,image/png,image/webp" multiple></label><label class="drop">+ Видеореференсы<span>MP4 · до 5 файлов, 30 сек суммарно</span><input id="videos" type="file" accept="video/mp4" multiple></label></div>
-      <div id="imageList" class="file-list"></div><div id="videoList" class="file-list"></div>
-      <label class="check"><input type="checkbox" id="keepSound"> Сохранить звук исходного видео</label>
-      <p class="hint">Без файлов — генерация по тексту. Каждый файл до 10 МБ. Длительность видео: 2–30 секунд. Оригинальный звук выбирается только для видеореференсов.</p>
-      <details><summary>Персонажи, объекты и голоса</summary><p class="hint">Дайте референсу имя латиницей, например Hero, и используйте @Hero в описании. До 15 референсов всего.</p>
-        <div id="elements"></div><button type="button" id="addElement" class="secondary">+ Объект из 2–4 фото</button>
-        <div id="voices"></div><button type="button" id="addVoice" class="secondary">+ Голос из MP3 / WAV</button>
-      </details>
-    </section>
-    <section id="keyframeFields" class="materials" hidden>
-      <div class="uploads"><label class="drop">+ Первый кадр<span>Обязательный</span><input id="first" type="file" accept="image/jpeg,image/png,image/webp"></label><label class="drop">+ Последний кадр<span>Необязательный</span><input id="last" type="file" accept="image/jpeg,image/png,image/webp"></label></div>
-      <div id="firstList" class="file-list"></div><div id="lastList" class="file-list"></div>
-      <label class="drop">+ Промежуточные кадры<span>До 8 изображений, в порядке загрузки</span><input id="keyframes" type="file" accept="image/jpeg,image/png,image/webp" multiple></label><div id="keyframeList" class="file-list"></div>
-      <p class="hint">В описании используйте @first_frame, @keyframe_1 и @last_frame. Каждый файл до 10 МБ.</p>
-    </section>
-    <button type="submit" id="quoteBtn" class="primary full">Рассчитать стоимость</button>
-  </fieldset></form>
-  <section id="quote" class="quote" hidden><div><span class="eyebrow">СТОИМОСТЬ ГЕНЕРАЦИИ</span><strong id="price"></strong><p id="priceDetail"></p></div><button type="button" id="runBtn" class="primary">Запустить</button></section>
-  <section class="history"><div class="section-head"><h2>Мои видео Kling 4.0</h2><button type="button" id="refresh" class="secondary">Обновить</button></div><p class="hint">Сохраните готовый файл на устройство: ссылки Kie доступны 14 дней. При запуске из Telegram результат также придёт в бот.</p><div id="jobs"><p class="hint">Загружаю историю…</p></div></section>
+
+  <form id="form">
+    <fieldset id="controls">
+      <section class="card parameters" aria-labelledby="parametersTitle">
+        <h2 class="card-title" id="parametersTitle">Параметры видео</h2>
+        <div class="tabs" role="group" aria-label="Режим генерации">
+          <button type="button" data-mode="reference" class="active"><span class="mode-name">Текст и референсы</span><span class="mode-hint">Описание, фото и видео</span></button>
+          <button type="button" data-mode="keyframe"><span class="mode-name">Ключевые кадры</span><span class="mode-hint">Начало и конец сцены</span></button>
+        </div>
+        <div class="settings">
+          <label for="resolution">Качество<select id="resolution"><option value="720p">720p</option><option value="1080p">1080p</option></select></label>
+          <label for="duration">Длительность<span class="number-field"><input id="duration" type="number" min="3" max="30" step="1" value="5" required aria-label="Длительность видео в секундах"><span aria-hidden="true">сек</span></span></label>
+          <label for="aspect">Формат<select id="aspect"><option>16:9</option><option>9:16</option><option>1:1</option><option>21:9</option><option value="auto">Автоматически</option></select></label>
+        </div>
+      </section>
+
+      <section class="card prompt-card">
+        <label class="prompt-label" for="prompt">Опишите видео <span id="count">0 / 8000</span></label>
+        <textarea id="prompt" maxlength="8000" rows="4" required placeholder="Что происходит в кадре? Опишите сцену, движение камеры и звук."></textarea>
+        <p class="hint prompt-hint">Добавленные фото, видео и кадры можно указать в описании по их меткам.</p>
+      </section>
+
+      <section id="referenceFields" class="card materials" aria-labelledby="referencesTitle">
+        <h2 class="card-title" id="referencesTitle">Референсы <span class="optional">необязательно</span></h2>
+        <div class="uploads">
+          <label class="drop">
+            <svg class="upload-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="4"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5-7 8-3-3-3 3"/></svg>
+            <span class="drop-title">Фотографии</span><span class="drop-hint">JPEG, PNG, WEBP<br>До 10 файлов</span><span class="drop-action" aria-hidden="true">+ Добавить</span>
+            <input id="images" type="file" accept="image/jpeg,image/png,image/webp" multiple aria-label="Добавить фотографии">
+          </label>
+          <label class="drop">
+            <svg class="upload-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="12" height="14" rx="3"/><path d="m15 9 6-3v12l-6-3"/></svg>
+            <span class="drop-title">Видео</span><span class="drop-hint">MP4 · до 5 файлов<br>До 30 сек суммарно</span><span class="drop-action" aria-hidden="true">+ Добавить</span>
+            <input id="videos" type="file" accept="video/mp4" multiple aria-label="Добавить видеореференсы">
+          </label>
+        </div>
+        <div id="imageList" class="file-list"></div><div id="videoList" class="file-list"></div>
+        <label class="check"><input type="checkbox" id="keepSound"><span>Сохранить звук исходного видео</span></label>
+        <p class="hint">Без файлов — генерация по тексту. Каждый файл до 10 МБ, каждое видео — 2–30 секунд. Сохранение звука доступно для видеореференсов.</p>
+        <details>
+          <summary>Персонажи, объекты и голоса</summary>
+          <p class="hint">Дайте референсу имя латиницей, например Hero, и используйте @Hero в описании. До 15 референсов всего.</p>
+          <div id="elements"></div><button type="button" id="addElement" class="secondary">+ Объект из 2–4 фото</button>
+          <div id="voices"></div><button type="button" id="addVoice" class="secondary">+ Голос из MP3 / WAV</button>
+        </details>
+      </section>
+
+      <section id="keyframeFields" class="card materials" aria-labelledby="keyframesTitle" hidden>
+        <h2 class="card-title" id="keyframesTitle">Кадры сцены</h2>
+        <div class="uploads">
+          <label class="drop"><span class="frame-marker" aria-hidden="true">01</span><span class="drop-title">Первый кадр</span><span class="drop-hint">Обязательный</span><span class="drop-action" aria-hidden="true">+ Добавить</span><input id="first" type="file" accept="image/jpeg,image/png,image/webp" aria-label="Добавить первый кадр"></label>
+          <label class="drop"><span class="frame-marker" aria-hidden="true">↗</span><span class="drop-title">Последний кадр</span><span class="drop-hint">Необязательный</span><span class="drop-action" aria-hidden="true">+ Добавить</span><input id="last" type="file" accept="image/jpeg,image/png,image/webp" aria-label="Добавить последний кадр"></label>
+        </div>
+        <div id="firstList" class="file-list"></div><div id="lastList" class="file-list"></div>
+        <label class="drop drop-wide"><span class="drop-title">Промежуточные кадры</span><span class="drop-hint">До 8 изображений, в порядке загрузки</span><span class="drop-action" aria-hidden="true">+ Добавить кадры</span><input id="keyframes" type="file" accept="image/jpeg,image/png,image/webp" multiple aria-label="Добавить промежуточные кадры"></label>
+        <div id="keyframeList" class="file-list"></div>
+        <p class="hint">В описании используйте @first_frame, @keyframe_1 и @last_frame. Каждый файл до 10 МБ.</p>
+      </section>
+
+      <button type="submit" id="quoteBtn" class="primary full">Рассчитать стоимость</button>
+    </fieldset>
+  </form>
+
+  <section id="quote" class="quote" hidden>
+    <div><span class="eyebrow">Стоимость генерации</span><strong id="price"></strong><p id="priceDetail"></p></div>
+    <button type="button" id="runBtn" class="primary">Запустить</button>
+  </section>
+
+  <section class="card history">
+    <div class="section-head"><h2 class="card-title">Мои видео Kling 4.0</h2><button type="button" id="refresh" class="secondary">Обновить</button></div>
+    <p class="hint">Сохраните готовый файл на устройство: ссылки доступны 14 дней. При запуске из Telegram результат также придёт в бот.</p>
+    <div id="jobs"><p class="hint">Загружаю историю…</p></div>
+  </section>
   <footer>720p / 1080p · 3–30 секунд · звук создаётся моделью</footer>
-</main></body></html>
+</main>
+</body>
+</html>
