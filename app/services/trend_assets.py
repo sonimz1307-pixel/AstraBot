@@ -180,7 +180,10 @@ def _validated_media(raw: bytes, result_type: str, *, max_bytes: int = MAX_MEDIA
             raise TrendAssetError("Expected audio without video")
         if result_type == "video" and any(int(s.get("width") or 0) * int(s.get("height") or 0) > MAX_IMAGE_PIXELS for s in expected):
             raise TrendAssetError("Video dimensions exceed limits")
-        return raw, mime, ext, {"duration_seconds": duration}
+        details = {"duration_seconds": duration}
+        if result_type == "video":
+            details.update(width=int(expected[0].get("width") or 0), height=int(expected[0].get("height") or 0))
+        return raw, mime, ext, details
     except FileNotFoundError as exc:
         raise RuntimeError("ffprobe is required for trend video/audio validation") from exc
     except (subprocess.TimeoutExpired, json.JSONDecodeError, ValueError) as exc:
