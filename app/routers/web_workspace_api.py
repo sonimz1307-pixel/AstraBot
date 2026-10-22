@@ -5526,6 +5526,12 @@ async def workspace_history(
         return {"ok": True, "items": [], "limit": safe_limit, "offset": safe_offset}
 
     try:
+        from app.services import kling4_service
+        combined = await asyncio.to_thread(kling4_service.workspace_history_page, uid, safe_limit, safe_offset)
+        if combined is not None:
+            items = [kling4_service.workspace_history_item(row) if row.get("_kling4")
+                     else _serialize_workspace_generation(row) for row in combined]
+            return {"ok": True, "items": items, "limit": safe_limit, "offset": safe_offset, "count": len(items)}
         resp = (
             supabase.table(_WORKSPACE_VIDEO_GENERATIONS_TABLE)
             .select(
@@ -5564,6 +5570,10 @@ async def workspace_history_item(
         raise HTTPException(status_code=404, detail="Generation not found")
 
     try:
+        from app.services import kling4_service
+        kling4 = await asyncio.to_thread(kling4_service.workspace_job, generation_id_text, uid)
+        if kling4:
+            return {"ok": True, "item": kling4_service.workspace_history_item(kling4)}
         resp = (
             supabase.table(_WORKSPACE_VIDEO_GENERATIONS_TABLE)
             .select(
@@ -5683,6 +5693,13 @@ async def workspace_history_download_item(
         raise HTTPException(status_code=404, detail="Generation not found")
 
     try:
+        from app.services import kling4_service
+        kling4 = await asyncio.to_thread(kling4_service.workspace_job, generation_id_text, uid)
+        if kling4:
+            if kling4["status"] != "completed" or not kling4.get("result_url"):
+                raise HTTPException(status_code=404, detail="Video file is unavailable")
+            return await _proxy_workspace_video_download(source_url=kling4["result_url"],
+                filename=_workspace_video_download_filename(kling4), media_type="video/mp4")
         resp = (
             supabase.table(_WORKSPACE_VIDEO_GENERATIONS_TABLE)
             .select("id,user_id,provider_video_url,storage_path,mime_type,status,deleted_at")
@@ -5731,6 +5748,14 @@ async def workspace_history_delete_item(
         raise HTTPException(status_code=404, detail="Generation not found")
 
     try:
+        from app.services import kling4_service
+        kling4 = await asyncio.to_thread(kling4_service.workspace_job, generation_id_text, uid)
+        if kling4:
+            try:
+                await asyncio.to_thread(kling4_service.hide_workspace_job, kling4)
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc))
+            return {"ok": True, "generation_id": generation_id_text}
         resp = (
             supabase.table(_WORKSPACE_VIDEO_GENERATIONS_TABLE)
             .select("id,user_id,storage_path,thumbnail_path,deleted_at,origin")
