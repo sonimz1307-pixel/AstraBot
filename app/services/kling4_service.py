@@ -303,14 +303,104 @@ async def process_claimed(job: dict) -> None:
         await asyncio.to_thread(release_lease, job)
 
 
+def start_notice_candidates() -> list[dict]:
+    now = datetime.now(timezone.utc).isoformat()
+    return db().table(JOBS).select("*").in_("status", ["queued", "submitting", "processing", "needs_review"]) \
+        .is_("start_notified_at", "null").not_.is_("telegram_chat_id", "null") \
+        .lte("start_notice_next_at", now).or_(f"start_notice_lease_until.is.null,start_notice_lease_until.lte.{now}") \
+        .order("start_notice_next_at").order("created_at").limit(5).execute().data or []
+
+
+def claim_start_notice(job_id: str) -> dict | None:
+    now = datetime.now(timezone.utc)
+    # Conditional UPDATE is atomic across workers. Recheck the status because a
+    # queued candidate might already have finished while we sent another notice.
+    rows = db().table(JOBS).update({"start_notice_lease_until": (now + timedelta(minutes=2)).isoformat()}) \
+        .eq("id", job_id).in_("status", ["queued", "submitting", "processing", "needs_review"]) \
+        .is_("start_notified_at", "null").not_.is_("telegram_chat_id", "null") \
+        .lte("start_notice_next_at", now.isoformat()) \
+        .or_(f"start_notice_lease_until.is.null,start_notice_lease_until.lte.{now.isoformat()}").execute().data or []
+    return rows[0] if rows else None
+
+
+def record_start_notice(row: dict, delivered: bool, delay: int) -> None:
+    now = datetime.now(timezone.utc)
+    update = {"start_notice_lease_until": None}
+    if delivered:
+        update["start_notified_at"] = now.isoformat()
+    else:
+        update["start_notice_next_at"] = (now + timedelta(seconds=delay)).isoformat()
+    # An old sender cannot overwrite a later claim after a worker restart.
+    db().table(JOBS).update(update).eq("id", row["id"]) \
+        .eq("start_notice_lease_until", row["start_notice_lease_until"]).execute()
+
+
+async def notify_started() -> None:
+    import httpx
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    if not token:
+        return
+    rows = await asyncio.to_thread(start_notice_candidates)
+    for candidate in rows:
+        row = None
+        try:
+            row = await asyncio.to_thread(claim_start_notice, candidate["id"])
+            if not row:
+                continue
+            text = (f"🎬 Задача Kling 4.0 принята.\n"
+                    f"{row['resolution']} · {row['duration']} сек.\n"
+                    f"Списано: {row['tokens']} токенов.\n\n"
+                    "Ожидайте — готовое видео пришлю в этот чат. Форму можно закрыть.")
+            if row["status"] == "needs_review":
+                text = (f"🎬 Задача Kling 4.0 оплачена: {row['tokens']} токенов.\n"
+                        "Проверяем подтверждение запуска. Повторно запускать задачу не нужно.\n"
+                        "Результат или сообщение об ошибке пришлю в этот чат. Форму можно закрыть.")
+            delivered, delay = False, 300
+            try:
+                # Total deadline is below the database lease, including all HTTP
+                # phases; this notification never holds a generation worker slot.
+                async with httpx.AsyncClient(timeout=10) as client:
+                    response = await asyncio.wait_for(client.post(f"https://api.telegram.org/bot{token}/sendMessage", json={
+                        "chat_id": row["telegram_chat_id"], "text": text}), timeout=15)
+                    data = response.json()
+                delivered = data.get("ok") is True
+                if not delivered:
+                    code = int(data.get("error_code") or response.status_code)
+                    delay = 3600 if code in {401, 403} else 300
+                    delay = max(delay, int((data.get("parameters") or {}).get("retry_after") or 0))
+                    LOG.warning("Kling4 Telegram start notice retry job=%s code=%s", row["id"], code)
+            except Exception as exc:
+                LOG.warning("Kling4 Telegram start notice retry job=%s (%s)", row["id"], type(exc).__name__)
+            await asyncio.to_thread(record_start_notice, row, delivered, delay)
+        except asyncio.CancelledError:
+            raise  # Keep the lease; another worker can recover it after expiry.
+        except Exception as exc:
+            LOG.warning("Kling4 Telegram start notice pending job=%s (%s)", candidate["id"], type(exc).__name__)
+
+
+def finished_notice_candidates() -> list[dict]:
+    now = datetime.now(timezone.utc).isoformat()
+    def query():
+        return db().table(JOBS).select("*").in_("status", ["completed", "failed"]) \
+            .is_("notified_at", "null").not_.is_("telegram_chat_id", "null") \
+            .lte("next_check_at", now).order("next_check_at").order("created_at").limit(5)
+    try:
+        # Do not send the result ahead of an in-flight acknowledgement. A crashed
+        # acknowledgement sender can delay a ready result for at most two minutes.
+        return query().or_(f"start_notice_lease_until.is.null,start_notice_lease_until.lte.{now}").execute().data or []
+    except Exception as exc:
+        if getattr(exc, "code", "") != "42703":
+            raise
+        # A rolling deployment before the new columns must retain final delivery.
+        return query().execute().data or []
+
+
 async def notify_finished() -> None:
     import httpx
     token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     if not token:
         return
-    rows = await asyncio.to_thread(lambda: db().table(JOBS).select("*").in_("status", ["completed", "failed"])
-        .is_("notified_at", "null").not_.is_("telegram_chat_id", "null")
-        .lte("next_check_at", datetime.now(timezone.utc).isoformat()).order("next_check_at").order("created_at").limit(5).execute().data or [])
+    rows = await asyncio.to_thread(finished_notice_candidates)
     for row in rows:
         delivered, delay = False, 300
         try:
@@ -373,15 +463,16 @@ async def run_worker() -> None:
                         pass
             await asyncio.sleep(1 if job else 5)
 
-    async def notification_loop():
+    async def notification_loop(notify, interval):
         while True:
             try:
-                await notify_finished()
+                await notify()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 # HTTP exception strings may contain Telegram's bot-token URL.
-                LOG.warning("Kling4 Telegram notification pending (%s)", type(exc).__name__)
-            await asyncio.sleep(15)
+                LOG.warning("Kling4 Telegram %s pending (%s)", notify.__name__, type(exc).__name__)
+            await asyncio.sleep(interval)
 
-    await asyncio.gather(*(slot(i) for i in range(cap)), notification_loop())
+    await asyncio.gather(*(slot(i) for i in range(cap)),
+                         notification_loop(notify_started, 5), notification_loop(notify_finished, 15))
